@@ -5803,17 +5803,22 @@ exports.listTemplates = async (req, res) => {
     );
     const hiddenManagedRows = rows.length - visibleRows.length;
     const mobileLifecycleCache = new Map();
+    const directions = require('../services/automationDirectionsReadiness.service');
+    const directionsStates = await directions.forTemplates(visibleRows).catch(() => {
+      console.warn('[automations] Directions configuration check unavailable');
+      return new Map();
+    });
 
     return res.json({
       success: true,
       data: await Promise.all(visibleRows.map((row) =>
-        withMobileLifecycle(mapTemplateWithLifecycle(row, {
+        withMobileLifecycle(directions.decorate(mapTemplateWithLifecycle(row, {
           includeNodes,
           access,
           clinicNameMap,
           catalogBindingMap,
           latestActivePublishedVersionMap,
-        }), mobileLifecycleCache)
+        }), row, directionsStates), mobileLifecycleCache)
       )),
       pagination: {
         total: Math.max(visibleRows.length, count - hiddenManagedRows),
@@ -5835,17 +5840,21 @@ exports.createTemplateDraft = async (req, res) => {
     }
 
     const body = req.body || {};
+    if (body.single_notice_source_id != null && body.message_copy_source_id != null) return res.status(400).json({success:false,error:'publication_operation_ambiguous'});
+    const sourceField = body.message_copy_source_id != null ? 'message_copy_source_id' : 'single_notice_source_id';
+    const preservedPublication = require(sourceField === 'message_copy_source_id'
+      ? '../lib/appointment-copy-publication' : '../lib/appointment-single-notice-publication');
     let singleNoticeSource = null;
-    if (body.single_notice_source_id != null) {
-      if (!Number.isSafeInteger(body.single_notice_source_id) || body.single_notice_source_id <= 0) return res.status(400).json({ success:false,error:'single_notice_source_invalid' });
-      singleNoticeSource = await AutomationFlowTemplateV2.findByPk(body.single_notice_source_id);
+    if (body[sourceField] != null) {
+      if (!Number.isSafeInteger(body[sourceField]) || body[sourceField] <= 0) return res.status(400).json({ success:false,error:'publication_source_invalid' });
+      singleNoticeSource = await AutomationFlowTemplateV2.findByPk(body[sourceField]);
       if (!singleNoticeSource || !hasScopeAccess(access,singleNoticeSource)) return res.status(404).json({success:false,error:'template_version_not_found'});
     }
     const name = cleanString(body.name);
     const triggerType = cleanString(body.trigger_type);
     const entryNodeId = cleanString(body.entry_node_id);
     const nodes = singleNoticeSource
-      ? require('../lib/appointment-single-notice-publication').preservedNodes(singleNoticeSource.toJSON(),body)
+      ? preservedPublication.preservedNodes(singleNoticeSource.toJSON(),body)
       : Array.isArray(body.nodes) ? normalizeNodesInput(body.nodes) : null;
 
     if (!name || !entryNodeId || !nodes) {
@@ -6402,9 +6411,13 @@ exports.publishTemplateVersion = async (req, res) => {
   try {
     const access = await resolveAccess(req);
     let familyWhere = await resolveTemplateFamilyWhere(req.params?.template_ref || req.params?.template_key);
+    if (req.body?.single_notice_source_id != null && req.body?.message_copy_source_id != null) return res.status(400).json({success:false,error:'publication_operation_ambiguous'});
+    const sourceField = req.body?.message_copy_source_id != null ? 'message_copy_source_id' : 'single_notice_source_id';
+    const preservedPublication = require(sourceField === 'message_copy_source_id'
+      ? '../lib/appointment-copy-publication' : '../lib/appointment-single-notice-publication');
     let singleNoticeSource = null;
-    if (req.body?.single_notice_source_id != null) {
-      const id=req.body.single_notice_source_id;
+    if (req.body?.[sourceField] != null) {
+      const id=req.body[sourceField];
       if (!Number.isSafeInteger(id)||id<=0) return res.status(400).json({success:false,error:'single_notice_source_invalid'});
       singleNoticeSource=await AutomationFlowTemplateV2.findByPk(id);
       if (!singleNoticeSource||!hasScopeAccess(access,singleNoticeSource)
@@ -6433,14 +6446,14 @@ exports.publishTemplateVersion = async (req, res) => {
     }
 
     const normalizedNodes = singleNoticeSource
-      ? require('../lib/appointment-single-notice-publication').preservedNodes(singleNoticeSource.toJSON(),row.toJSON())
+      ? preservedPublication.preservedNodes(singleNoticeSource.toJSON(),row.toJSON())
       : normalizeNodesInput(Array.isArray(row.nodes) ? row.nodes : []);
     const graphValidation = validateFlowGraph({
       entry_node_id: row.entry_node_id,
       nodes: normalizedNodes,
     });
     const nodeConfigValidation = singleNoticeSource
-      ? await require('../lib/appointment-single-notice-publication').validatePreservedNodeConfigs(
+      ? await preservedPublication.validatePreservedNodeConfigs(
         singleNoticeSource.toJSON(),normalizedNodes,validateNodeConfigs)
       : await validateNodeConfigs(normalizedNodes);
     const triggerResolution = resolveTriggerTypeForTemplate({
@@ -6556,7 +6569,7 @@ exports.publishTemplateVersion = async (req, res) => {
           ||Number(require('../lib/automation-runtime-stop').latestPublished(rows)?.id)!==Number(source.id)) {
           throw Object.assign(Error('single_notice_source_changed'),{code:'single_notice_source_changed',statusCode:409});
         }
-        const publication=require('../lib/appointment-single-notice-publication');
+        const publication=preservedPublication;
         const checked=publication.preservedNodes(source.toJSON(),current.toJSON());
         if (publication.hash(checked)!==publication.hash(normalizedNodes)) throw Object.assign(Error('single_notice_candidate_changed'),{code:'single_notice_candidate_changed',statusCode:409});
       }
@@ -6613,7 +6626,9 @@ exports.publishTemplateVersion = async (req, res) => {
       }, { transaction });
     });
 
-    const scheduledBackfill = await runScheduledTemplateBackfill(row, req, access);
+    const scheduledBackfill = singleNoticeSource && sourceField === 'message_copy_source_id'
+      ? { success: true, skipped: true, reason: 'copy_only_publication' }
+      : await runScheduledTemplateBackfill(row, req, access);
 
     const clinicNameMap = await loadClinicNameMapFromRows([row]);
     const catalogBindingMap = await loadCatalogBindingMapForRows([row]);

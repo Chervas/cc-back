@@ -124,6 +124,7 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     runScheduledTemplateBackfill:async row=>({skipped:!row.is_active}),
     require:name=>{if(name==='../lib/automation-runtime-stop')return stop;
       if(name==='../lib/appointment-single-notice-publication')return require('../../lib/appointment-single-notice-publication');
+      if(name==='../lib/appointment-copy-publication')return require('../../lib/appointment-copy-publication');
       if(name==='../lib/patient-mobile-verification')return require('../../lib/patient-mobile-verification');
       assert.fail('Unexpected native publication dependency '+name);},
   };
@@ -149,10 +150,11 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   }
   let writes=0;
   async function request(method,url,body){
-    if(method==='GET')return {data:await db.AutomationFlowTemplateV2.findAll({where:{public_id:source.public_id}}).then(rows=>rows.map(row=>displayProjection(row.toJSON())))};
+    const ref=decodeURIComponent(url.split('/')[5]||'');
+    if(method==='GET')return {data:await db.AutomationFlowTemplateV2.findAll({where:{public_id:ref}}).then(rows=>rows.map(row=>displayProjection(row.toJSON())))};
     writes++;let result,status=200;
     const res={status(code){status=code;return this;},json(value){result=value;return this;}};
-    if(url.endsWith('/publish'))await native.publishTemplateVersion({params:{template_ref:source.public_id,version:url.split('/').at(-2)},body},res);
+    if(url.endsWith('/publish'))await native.publishTemplateVersion({params:{template_ref:ref,version:url.split('/').at(-2)},body},res);
     else await native.createTemplateDraft({body},res);
     assert.equal(status,url.endsWith('/publish')?200:201,JSON.stringify(result));return result;
   }
@@ -176,4 +178,60 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   assert.equal(status,409);assert.equal(conflictResponse.error,'appointment_treatment_trigger_conflict');
   report.checks.push('Inactive versioning skips activation conflicts without enabling the family; an active candidate still fails its native conflict guard');
   report.checks.push('Native draft/publish controllers on owned SQL preserve exact scoped family, original trigger, inactive switch, all AI/decision configs and another clinic sharing the public ref; inherited scope omissions on unchanged published nodes are allowed without defaults, rerun no-ops and altered prompt is rejected before publication');
+  activationConflict=false;
+  const copyPublication=require('../../lib/appointment-copy-publication');
+  const {RESPONSES}=require('../../lib/appointment-message-copy');
+  for(const is_active of [false,true]){
+    const copyNodes=structuredClone(validNodes);
+    const send=copyNodes.find(n=>n.type==='action/send_whatsapp');
+    Object.assign(send.config,{message_mode:'manual',manual_message_text:RESPONSES[0].es[0]});
+    const copySource=await db.AutomationFlowTemplateV2.create({...source.toJSON(),id:undefined,
+      public_id:'TESTONLY_copy_'+is_active,template_key:'TESTONLY_copy_'+is_active,version:1,nodes:copyNodes,is_active});
+    const plan=copyPublication.planEntry(copySource.toJSON());
+    const result=await copyPublication.publishEntry(plan,request);
+    assert.equal(result.is_active,is_active);
+    const installed=await db.AutomationFlowTemplateV2.findOne({where:{public_id:copySource.public_id,version:result.version}});
+    assert.equal(installed.nodes.find(n=>n.id===send.id).config.manual_message_text,RESPONSES[0].es[1]);
+    assert.equal(copyPublication.hash(installed.nodes),copyPublication.hash(plan.body.nodes));
+    assert.deepEqual(installed.trigger_config,copySource.trigger_config);
+    assert.equal((await copyPublication.publishEntry(plan,request)).skipped,true);
+  }
+  report.checks.push('Copy-only native SQL publication preserves both manual switches and legacy node defaults, updates only allowlisted text, leaves trigger/config unchanged and repeated publication no-ops');
+  db.Notification=require('../../../models/notification')(sql,D);
+  db.Clinica=sql.define('Clinica',{id_clinica:{type:D.INTEGER,primaryKey:true},configuracion:D.JSON},{tableName:'Clinicas'});
+  db.ClinicaHorario=require('../../../models/clinicahorario')(sql,D);
+  await db.Notification.sync();await db.Clinica.sync();await db.ClinicaHorario.sync();
+  await db.Clinica.create({id_clinica:1,configuracion:{timezone:'Europe/Madrid'}});
+  await db.ClinicaHorario.create({clinica_id:1,dia_semana:2,hora_inicio:'09:00',hora_fin:'19:00',activo:true});
+  let emitted=0;
+  const human=require('../../services/appointmentHumanFollowup.service').createService({models:db,
+    openingHours:require('../../services/clinicOpeningHours.service'),now:()=>new Date('2026-10-20T10:00:00Z'),
+    findHumanReply:async()=>null,emitUpdated:()=>emitted++,enrichDirection:async rows=>rows,findAssignment:async()=>null});
+  const n=await db.Notification.create({userId:1,category:'general',event:'automation.persistent_alert',clinicaId:1,
+    data:{appointment_human_followup:true,human_followup_due_at:'2026-10-20T09:00:00.000Z',
+      quickChatConversationId:1,quickChatResponseMessageId:1}});
+  await Promise.all([human.run(),human.run()]);await n.reload();
+  assert.equal(emitted,1);assert.equal(n.level,'error');assert.equal(n.isRead,false);
+  const controllerModule={exports:{}};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../../controllers/notifications.controller'),'utf8'),{
+    module:controllerModule,exports:controllerModule.exports,console,require:name=>{
+      if(name==='../../models')return db;if(name==='sequelize')return D;
+      if(name==='../services/notifications.service')return {getEventDefinition:()=>({})};
+      if(name==='../services/notificationsRealtime.service')return {emitNotificationCreated(){}};
+      if(name==='../lib/notification-dto')return {mapNotificationToDto:row=>row.toJSON()};
+      assert.fail('Unexpected notifications test dependency '+name);
+    }});
+  const nc=controllerModule.exports;let notificationResult;
+  const responseStub={status(){return this;},json(value){notificationResult=value;return this;}};
+  await nc.update({userData:{userId:1},body:{id:n.id,notification:{read:true}}},responseStub);
+  await n.reload();assert.equal(n.isRead,false);assert(n.data.human_followup_seen_at);
+  const ordinary=await db.Notification.create({userId:1,category:'general',event:'custom'});
+  await nc.markAllAsRead({userData:{userId:1}},responseStub);
+  await n.reload();await ordinary.reload();assert.equal(n.isRead,false);assert.equal(ordinary.isRead,true);
+  await nc.removeAll({userData:{userId:1}},responseStub);
+  assert.equal(notificationResult.deleted,1);assert(await db.Notification.findByPk(n.id));
+  await n.update({isRead:true});
+  await nc.remove({userData:{userId:1},query:{id:n.id}},responseStub);
+  assert.equal(notificationResult,true);
+  report.checks.push('Owned MySQL: concurrent follow-up scans highlight one card once; opening/all-read/all-delete cannot resolve it, normal notifications remain readable/removable and an explicitly resolved card can be removed');
 }).catch(error=>{console.error(error);process.exitCode=1;});

@@ -303,6 +303,7 @@ function mergeClinicLinksIntoContext(clinicPatch, links) {
 }
 
 module.exports = {
+  buildLinksFromBusinessLocation,
   buildGoogleMapsDirectionsUrl,
   buildGoogleMapsProfileUrl,
   mergeClinicLinksIntoContext,

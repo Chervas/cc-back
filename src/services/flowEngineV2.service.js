@@ -5693,6 +5693,13 @@ async function handleSendSystemNotification(node, context, runtime) {
     };
   }
 
+  const humanFollowup = !mobileScope && displayMode === 'persistent_alert' && config.human_response_followup_minutes === 30
+    ? await require('./appointmentHumanFollowup.service').current().prepare({ clinicId,
+      conversationId: quickChatConversationId, minutes: 30, userIds }).catch(() => {
+      console.warn('[automations] Human response follow-up unavailable; persistent alert preserved');
+      return { data: {}, userIds };
+    }) : { data: {}, userIds };
+  userIds = humanFollowup.userIds;
   for (const userId of userIds) {
     const dedupeKey = mobileScope ? `patient-mobile-verification:${mobileScope.request.id}:${userId}` : runtime?.execution?.id
       ? `automation:${runtime.execution.id}:${cleanString(node?.id)}:${userId}`
@@ -5760,6 +5767,7 @@ async function handleSendSystemNotification(node, context, runtime) {
         presentationPreferenceKey,
         conversationAction,
         requiresAcknowledgement: displayMode === 'persistent_alert',
+        ...humanFollowup.data,
         ...(mobileScope ? { request_event_id: Number(mobileScope.request.id), patientId: Number(mobileScope.request.patient_id),
           reason: mobileScope.snapshot.reason, resolved: false } : {}),
       },

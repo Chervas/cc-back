@@ -2991,12 +2991,9 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
 
 function buildReviewTeamMentionFollowUpLine(teamMembersText) {
   const clean = normalizeText(teamMembersText || '').replace(/\s+/g, ' ');
-  const isPlural = clean.includes('|')
-    ? clean.split('|').map((item) => normalizeText(item)).filter(Boolean).length > 1
-    : /\s+o\s+/i.test(clean);
   return clean
-    ? `*Si mencionas a alguien del equipo en la reseña,* como a ${clean}, ${isPlural ? 'les' : 'le'} haremos llegar el detalle que has tenido acordándote de ${isPlural ? 'ellos' : 'él'} ¡Gracias!`
-    : '*Si mencionas a alguien del equipo en la reseña* le haremos llegar el detalle ¡Gracias!';
+    ? `*Si mencionas a alguien del equipo en la reseña,* como a ${clean}, se lo haremos saber ¡Gracias!`
+    : '*Si mencionas a alguien del equipo en la reseña* se lo haremos saber ¡Gracias!';
 }
 
 async function sendReviewRatingFollowUpOrStoreInlineFeedback({ list, item, conversation, rating, clinicId, triggerMessage, inboundMessage, occurredAt, inlineFeedbackReason }) {
@@ -3116,7 +3113,8 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
     ? (googleReviewUrl
       ? (rewardEnabled
         ? `😊 Queremos obsequiarte con "${rewardDescription || 'un detalle'}" si la compartes en Google. Pincha aquí y se publicará, esto nos ayudará muchísimo porque todo el mundo podrá verla 👉 ${googleReviewUrl}. Tras hacerlo, escríbenos para que te indiquemos cómo tramitar tu regalo.\n\n${buildReviewTeamMentionFollowUpLine(reviewTeamMembersText)}`
-        : `😊 Pincha aquí y se publicará en Google, esto nos ayudará muchísimo porque todo el mundo podrá verla. *¡Y por favor! 🙏🙏 déjanos unas breves palabras en la reseña que puedan ayudar a pacientes como tú* 👉 ${googleReviewUrl}\n\n${buildReviewTeamMentionFollowUpLine(reviewTeamMembersText)}`)
+        : require('../lib/review-google-link-copy').buildReviewGoogleLinkCopy({ url: googleReviewUrl,
+          team: reviewTeamMembersText, locale: triggerMetadata.patient_language || triggerMetadata.selected_language || triggerMetadata.template_language || 'es' }))
       : 'Gracias por tu valoración. Hemos registrado tu opinión.')
     : 'Gracias por responder. ¿Nos ayudarías contándonos el motivo de esta valoración? Puedes escribirlo aquí mismo y lo revisaremos con el equipo.';
   if (!isWithinWhatsappSessionWindow(occurredAt)) {

@@ -176,6 +176,27 @@ function computeClinicOpenState({ now = new Date(), timeZone = DEFAULT_TIME_ZONE
   };
 }
 
+function addClinicWorkingMinutes({ now = new Date(), minutes, timeZone = DEFAULT_TIME_ZONE, rows = [] }) {
+  if (!Number.isFinite(now.getTime()) || !Number.isFinite(minutes) || minutes <= 0 || !isValidTimeZone(timeZone)) return null;
+  const schedule = normalizeScheduleRows(rows);
+  let remaining = minutes * 60000;
+  let cursor = now;
+  const firstDate = localDate(now, timeZone);
+  for (let day = 0; day < 21; day++) {
+    const date = addLocalDays(firstDate, day);
+    for (const interval of schedule.filter(row => row.weekday === weekdayIndex(date))) {
+      const start = localDateTimeToUtc(date, interval.start, timeZone);
+      const end = localDateTimeToUtc(date, interval.end, timeZone);
+      const from = new Date(Math.max(cursor.getTime(), start.getTime()));
+      if (from >= end) continue;
+      if (end - from >= remaining) return new Date(from.getTime() + remaining);
+      remaining -= end - from;
+      cursor = end;
+    }
+  }
+  return null;
+}
+
 async function resolveClinicOpenState({ clinicId, now = new Date(), models = db }) {
   const normalizedClinicId = Number(clinicId);
   if (!Number.isInteger(normalizedClinicId) || normalizedClinicId <= 0 || !models?.ClinicaHorario) {
@@ -223,6 +244,7 @@ async function resolveLeadAutoReplyWait({ clinicId, scheduleScope, timing, now =
 }
 
 module.exports = {
+  addClinicWorkingMinutes,
   DEFAULT_NEXT_DAY_TIME,
   DEFAULT_TIME_ZONE,
   addLocalDays,

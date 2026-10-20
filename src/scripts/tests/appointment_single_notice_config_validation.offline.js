@@ -5,7 +5,8 @@
 // This phase cannot connect to SQL, Redis, providers or application workers.
 const assert=require('node:assert/strict'),fs=require('node:fs'),Module=require('node:module'),path=require('node:path');
 require('./fixtures/security_offline_runtime.cjs');process.env.DB_HOST='127.0.0.1';
-const {hash,preservedNodes,validatePreservedNodeConfigs}=require('../../lib/appointment-single-notice-publication');
+const {hash,preservedNodes,validatePreservedNodeConfigs}=require(process.env.APPOINTMENT_MESSAGE_COPY_QA==='1'
+  ? '../../lib/appointment-copy-publication' : '../../lib/appointment-single-notice-publication');
 const files=['SINGLE_NOTICE_PLAN','SINGLE_NOTICE_LOOKUP','SINGLE_NOTICE_VALIDATION_REPORT'];
 for(const key of files)assert(process.env[key]?.startsWith('/home/ubuntu/secure-imports/'),'PRIVATE_VALIDATION_FILES_REQUIRED');
 assert(!fs.existsSync(process.env.SINGLE_NOTICE_VALIDATION_REPORT),'NEW_VALIDATION_REPORT_REQUIRED');

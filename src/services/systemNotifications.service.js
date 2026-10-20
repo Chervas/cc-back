@@ -1456,6 +1456,9 @@ async function runDispatchJob(payload = {}) {
 }
 
 async function runActiveChecks({ force = false } = {}) {
+  await require('./appointmentHumanFollowup.service').current().run().catch(() => {
+    console.warn('[automations] Human response follow-up scan unavailable');
+  });
   await require('./securityMonitoring.service').scan().catch(() => {
     console.warn('[security-monitoring] Scan unavailable; other operational checks continue');
   });

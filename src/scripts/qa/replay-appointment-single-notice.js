@@ -13,6 +13,8 @@ const notice = require('../../lib/appointment-single-notice-flow');
 const args = process.argv.slice(2);
 const arg = key => args.includes(key) ? args[args.indexOf(key) + 1] : null;
 const fresh = args.includes('--fresh-ai');
+const messageCopy = args.includes('--message-copy');
+const copyPublication = require('../../lib/appointment-copy-publication');
 const fail = code => { throw Object.assign(Error(code), { code }); };
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const read = file => JSON.parse(fs.readFileSync(file));
@@ -43,6 +45,7 @@ async function main() {
   const labels = new Map(expectations.expectations.map(item => [item.id, item]));
   const selected = [], excluded = [];
   for (const item of corpus.cases) {
+    if (arg('--case-id') && String(item.id) !== arg('--case-id')) continue;
     let matches = plan.entries.filter(entry => entry.source.public_id === item.currentPathEvidence?.publicId
       && Number(entry.source.clinic_id || 0) === Number(item.clinic_id || 0));
     // A public reference can be shared by a central and scoped family. Prefer
@@ -54,11 +57,16 @@ async function main() {
     assert(node?.type === 'condition/ai_analysis', 'historical_ai_node_missing');
     assert.equal(node.config.preset_key, item.preset, 'historical_ai_preset_changed');
     assert(labels.has(item.id), 'historical_expectation_missing');
+    if (!fresh && args.includes('--stored-cases-only') && !storedInferences.has(item.id)) {
+      excluded.push({ id: item.id, reason: 'raw_inference_not_recorded' }); continue;
+    }
     selected.push({ item, entry, node, expected: labels.get(item.id) });
   }
   const limit = arg('--limit') ? Number(arg('--limit')) : selected.length;
   assert(Number.isSafeInteger(limit) && limit > 0 && limit <= selected.length);
-  const sample = selected.slice(0, limit);
+  const repeat = arg('--repeat') ? Number(arg('--repeat')) : 1;
+  assert(Number.isSafeInteger(repeat) && repeat > 0 && repeat <= 40);
+  const sample = Array.from({ length: repeat }, () => selected.slice(0, limit)).flat();
   let connection, provider, orchestrator, current, cached, inferenceRequest, phase;
   let deliveries = 0, clinicalWrites = 0, forbiddenNetwork = 0, guardReads = 0;
   const telemetry = [], providerTrace = [], failures = [], results = [];
@@ -208,6 +216,16 @@ async function main() {
   try {
     // Check every current scoped graph, not just families with a historic sample.
     for (const entry of plan.entries) {
+      if (messageCopy) {
+        const nodes = copyPublication.preservedNodes(entry.source, entry.body);
+        assert.equal(hash(nodes.map(n => [n.id,n.type,n.outputs])), hash(entry.source.nodes.map(n => [n.id,n.type,n.outputs])));
+        for (const node of entry.source.nodes.filter(n => ['condition/ai_analysis','condition/field_check'].includes(n.type))) {
+          assert.equal(hash(nodes.find(n => n.id === node.id)),hash(node));
+          report.graphChecks[node.type === 'condition/ai_analysis' ? 'unchangedAiNodes' : 'unchangedComparators']++;
+        }
+        report.graphChecks.graphs++;
+        continue;
+      }
       const transformed = notice.buildSingleNoticeFlow(entry.source);
       assert.equal(hash(transformed.nodes), hash(entry.body.nodes), 'candidate_graph_changed');
       assert.equal(hash({ entry_node_id: entry.source.entry_node_id, trigger_type: entry.source.trigger_type,
@@ -251,12 +269,16 @@ async function main() {
     }
     for (const [index, entry] of sample.entries()) {
       current = entry; cached = undefined; inferenceRequest = undefined;
-      const { item, expected } = entry, before = hash(item.context);
-      const modified = notice.buildSingleNoticeFlow(entry.entry.source);
+      const rewritten = messageCopy && !args.includes('--original-copy')
+        ? require('./historical-appointment-copy-context').rewrite(entry.item, plan) : { item: entry.item, changed: 0 };
+      current = { ...entry, item: rewritten.item };
+      const { item, expected } = current, before = hash(item.context);
+      const modified = messageCopy ? entry.entry.body : notice.buildSingleNoticeFlow(entry.entry.source);
       const traceStart = providerTrace.length;
       const result = { ordinal: index + 1, id: item.id, clinicId: item.clinic_id,
         sourceTemplateId: entry.entry.source.id, preset: item.preset, kind: expected.kind,
-        responseAnchor: notice.policyFor(modified).retired_nodes[item.context.last_response_context?.listens_to_node_id]
+        updatedOutgoingMessages: rewritten.changed,
+        responseAnchor: messageCopy ? 'current_copy_with_historical_response' : notice.policyFor(modified).retired_nodes[item.context.last_response_context?.listens_to_node_id]
           ? 'historical_followup_already_sent' : 'historical_original_message',
         graphHash: hash(modified.nodes) };
       try {
@@ -270,7 +292,11 @@ async function main() {
         assert.equal(hash(after), hash(original), 'analysis_result_changed_by_flow_reduction');
         const afterRoute = await route(modified.nodes, entry.node, contexts[0], after);
         const beforeRoute = await route(entry.entry.source.nodes, entry.node, contexts[1], original);
-        assert.equal(hash(afterRoute), hash(beforeRoute), 'response_actions_changed_by_flow_reduction');
+        if (messageCopy) {
+          const topology = route => ({ visits: route.visits, actions: route.actions.map(action => ({ id: action.id, type: action.type,
+            ...(action.type === 'action/change_status' ? { config: action.config } : {}) })) });
+          assert.equal(hash(topology(afterRoute)),hash(topology(beforeRoute)),'copy_update_changed_decisions');
+        } else assert.equal(hash(afterRoute), hash(beforeRoute), 'response_actions_changed_by_flow_reduction');
         assert.equal(hash(contexts[0].appointment), hash(item.context.appointment), 'appointment_mutated_in_simulation');
         const states = afterRoute.actions.filter(action => action.type === 'action/change_status')
           .map(action => action.config?.new_status).filter(Boolean);
@@ -296,7 +322,7 @@ async function main() {
           route: afterRoute.visits, providerCalls: trace.length, providerTrace: trace,
           output: after.output, sameAnalysisRequest: true, sameResponseActions: true });
       } catch (error) {
-        const code = error.code || (error.name === 'AssertionError' ? String(error.message).split('\n')[0] : error.message);
+        const code = error.name === 'AssertionError' ? String(error.message).split('\n')[0] : error.code || error.message;
         const expectedHold = expected.expectedError === code && providerTrace.length === traceStart;
         Object.assign(result, { passed: expectedHold, expectedSafetyHold: expectedHold, error: code,
           providerCalls: providerTrace.length - traceStart });

@@ -6,6 +6,12 @@ const {
 } = require('../services/notifications.service');
 const { mapNotificationToDto } = require('../lib/notification-dto');
 const { emitNotificationCreated } = require('../services/notificationsRealtime.service');
+const { Op } = require('sequelize');
+const db = require('../../models');
+
+function withoutPendingAppointmentFollowup() {
+  return db.sequelize.literal("(is_read = 1 OR COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, '$.appointment_human_followup')), 'false') <> 'true')");
+}
 
 exports.list = async (req, res) => {
   try {
@@ -59,8 +65,12 @@ exports.update = async (req, res) => {
     }
     const updates = {};
     if (notification && typeof notification.read === 'boolean') {
-      updates.isRead = notification.read;
-      updates.readAt = notification.read ? new Date() : null;
+      if (notification.read && existing.data?.appointment_human_followup === true && !existing.isRead) {
+        updates.data = { ...existing.data, human_followup_seen_at: new Date().toISOString() };
+      } else {
+        updates.isRead = notification.read;
+        updates.readAt = notification.read ? new Date() : null;
+      }
     }
     if (notification?.title !== undefined) {
       updates.title = notification.title;
@@ -83,7 +93,7 @@ exports.remove = async (req, res) => {
   try {
     const userId = req.userData.userId;
     const id = req.query.id || req.params.id;
-    const deleted = await Notification.destroy({ where: { id, userId } });
+    const deleted = await Notification.destroy({ where: { id, userId, [Op.and]: withoutPendingAppointmentFollowup() } });
     res.json(deleted > 0);
   } catch (error) {
     console.error('Error deleting notification:', error);
@@ -94,7 +104,7 @@ exports.remove = async (req, res) => {
 exports.removeAll = async (req, res) => {
   try {
     const userId = req.userData.userId;
-    const deleted = await Notification.destroy({ where: { userId } });
+    const deleted = await Notification.destroy({ where: { userId, [Op.and]: withoutPendingAppointmentFollowup() } });
     res.json({ deleted });
   } catch (error) {
     console.error('Error deleting all notifications:', error);
@@ -111,7 +121,8 @@ exports.markAllAsRead = async (req, res) => {
     }, {
       where: {
         userId,
-        isRead: false
+        isRead: false,
+        [Op.and]: withoutPendingAppointmentFollowup()
       }
     });
     res.json(true);
