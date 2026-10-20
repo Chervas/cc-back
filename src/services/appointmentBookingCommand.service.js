@@ -513,11 +513,20 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const lockedReplay = await replay(); if (lockedReplay) return lockedReplay;
     let solution = null;
     if (values.estado !== 'cancelada') {
-      const context = ((!extraStaff.length || preparedSeries || patientLinkContexts.has(preparedContext)) && preparedContext) || await loadBookingContext({ db, clinic, profile: readProfile, start, end, transaction: tx,
+      let context = ((!extraStaff.length || preparedSeries || patientLinkContexts.has(preparedContext)) && preparedContext) || await loadBookingContext({ db, clinic, profile: readProfile, start, end, transaction: tx,
         ignoreAppointmentId: existing?.id_cita, occupancyEnabled: true, installationMapping: mapping, patientId: values.paciente_id,
         additionalStaffIds: extraStaff, equipmentEnabled: capabilities.equipment,
         inheritEquipmentAttention: !snapshot || Number(previous.tratamiento_id) !== Number(values.tratamiento_id) || configuredProfile?.version >= 3,
         includeDiagnosticLabels: !!manualRestrictions });
+      // This receipt is available only through the transaction-bound WeakMap
+      // owned by program preflight. An HTTP force/acknowledgement cannot create
+      // it, and it changes clinician windows only, never occupancy or access.
+      const programScheduleException = preparedSeries?.scheduleException;
+      if (programScheduleException) {
+        if (programScheduleException.actorId !== Number(values.updated_by || values.created_by)) throw new Error('program_series_context_invalid');
+        context = require('../lib/program-schedule-confirmation').programScheduleContext(context,
+          programScheduleException.doctorIds, start, end);
+      }
       const supportFree = extraStaff.every(id => isFree(context.doctors.get(id), start, end));
       const permitsProfileForce = !extraStaff.length && ((!session && !trustedProgramSession && !preparedSeries)
         || context.doctors.get(Number(values.doctor_id))?.agenda_flexible === true);
@@ -601,6 +610,13 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
         importMetadata.patient_overlap_confirmation = { version: 1, confirmed_by: reschedulePatientOverlap.actorId,
           confirmed_at: new Date().toISOString(), acknowledgement: decision.patient_overlap_acknowledgement,
           start_at: start.toISOString(), end_at: end.toISOString(), conflicts: decision.patient_conflicts };
+        values.import_metadata = importMetadata;
+      }
+      if (programScheduleException) {
+        importMetadata.program_schedule_confirmation = { version: 1, scope: 'program_staff_schedule',
+          confirmed_by: programScheduleException.actorId, confirmed_at: new Date().toISOString(),
+          acknowledgement: programScheduleException.acknowledgement, start_at: start.toISOString(), end_at: end.toISOString(),
+          restrictions: programScheduleException.restrictions };
         values.import_metadata = importMetadata;
       }
       const acknowledged = priorityAcknowledged || (supportOnly && previousMetadata.booking?.priority_acknowledged === true);

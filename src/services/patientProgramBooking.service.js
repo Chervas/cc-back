@@ -16,6 +16,8 @@ const { additionalStaffSnapshot } = require('../lib/appointment-additional-staff
 const { installationAllowsStaff } = require('../lib/installation-professionals');
 const { isFree } = require('../lib/booking-profile-solver');
 const { attentionVisitOrigin } = require('../lib/booking-attention-origin');
+const { cloneProgramContext, programScheduleContext, programScheduleAssessment, programScheduleBatchReceipt,
+  programScheduleReceiptMatches } = require('../lib/program-schedule-confirmation');
 const json = value => typeof value === 'string' ? JSON.parse(value) : value;
 const fail = (code, message, details, status = 409) => { throw domainError(status, code, message, details); };
 
@@ -107,7 +109,22 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
         start_at: scheduled ? new Date(appointment.inicio).toISOString() : null,
         end_at: scheduled ? new Date(appointment.fin).toISOString() : null };
     });
-    return { voucher, budget, accepted, clinic, snapshot, sessions, timeZone: resolveClinicTimezone(clinic) };
+    // Names are scoped catalog metadata, never a declaration of availability.
+    // A clinician with no open hours must still be selectable explicitly, but
+    // inactive/out-of-clinic resources cannot be added by a client selector.
+    const roomIds = [...new Set(sessions.flatMap(row => row.booking_profile.phases.flatMap(phase => phase.installation_ids)))];
+    const doctorIds = [...new Set(sessions.flatMap(row => row.booking_profile.phases.flatMap(phase => phase.professionals.ids)))];
+    const [rooms, doctors] = await Promise.all([
+      roomIds.length && db.Instalacion ? db.Instalacion.findAll({ where: { clinica_id: clinicId, activo: true,
+        id: { [db.Sequelize.Op.in]: roomIds } }, attributes: ['id', 'nombre'], transaction }) : [],
+      doctorIds.length && db.DoctorClinica ? db.DoctorClinica.findAll({ where: { clinica_id: clinicId, activo: true,
+        recibe_citas: true, doctor_id: { [db.Sequelize.Op.in]: doctorIds } }, attributes: ['doctor_id'], transaction,
+        ...(db.Usuario ? { include: [{ model: db.Usuario, as: 'doctor', attributes: ['id_usuario', 'nombre', 'apellidos'] }] } : {}) }) : [],
+    ]);
+    const resourceOptions = { installations: rooms.filter(row => roomIds.includes(Number(row.id))).map(row => ({ id: Number(row.id), name: row.nombre || `Instalación ${row.id}` })),
+      professionals: doctors.filter(row => doctorIds.includes(Number(row.doctor_id))).map(row => ({ id: Number(row.doctor_id),
+        name: [row.doctor?.nombre, row.doctor?.apellidos].filter(Boolean).join(' ') || `Profesional ${row.doctor_id}` })) };
+    return { voucher, budget, accepted, clinic, snapshot, sessions, resourceOptions, timeZone: resolveClinicTimezone(clinic) };
   }
   function assertSchedulable(plan) {
     if (!plan.accepted || plan.voucher.status !== 'active'
@@ -133,6 +150,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     }
     return { voucher_id: plan.voucher.public_id, clinic_id: Number(plan.voucher.clinic_id), name: plan.snapshot.name, kind: plan.snapshot.kind,
       snapshot_sha256: plan.snapshot.sha256, timezone: plan.timeZone, cadence: plan.snapshot.cadence,
+      resource_options: plan.resourceOptions,
       plan_revision: planRevision(plan), scheduling_mode: mode,
       automatic_scheduling_available: !bookingRestriction && mode !== 'manual' && plan.sessions.every(session => session.duration_minutes != null),
       resume, resume_options: resumeChoices, can_resume: !bookingRestriction && resumeChoices.some(option => !option.blocked_reason) && active,
@@ -167,7 +185,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     // One bounded bulk context per proposal/confirmation, never queries inside
     // the candidate loop. Only calendar intervals leave the availability layer.
     return loadBookingContext({ db, clinic: plan.clinic, profile, start, end, transaction, occupancyEnabled: true,
-      installationMapping: mapping, patientId: plan.voucher.patient_id, ignoreAppointmentIds });
+      installationMapping: mapping, patientId: plan.voucher.patient_id, ignoreAppointmentIds, includeDiagnosticLabels: true });
   }
   async function read(options) { return dto(await load(options)); }
 
@@ -199,11 +217,20 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     return plan.sessions.map(row => replacements.find(item => item.key === row.key)
       || (resume && pending.some(item => item.key === row.key) ? { ...row, start_at: null, end_at: null } : row));
   }
-  function checkFixedSessions(context, sessions) {
+  function scheduleAssessment(plan, session, context, actorId) {
+    return programScheduleAssessment({ profile: session.booking_profile, context,
+      start: session.start_at, end: session.end_at, selections: session.choice.selections,
+      additionalStaffIds: supportIds(session), actorId, clinicId: Number(plan.voucher.clinic_id),
+      clinicName: plan.clinic.nombre_clinica || '', treatmentId: session.treatment_ids[0], treatmentName: session.label,
+      patientId: Number(plan.voucher.patient_id), appointmentId: session.appointment?.id_cita || null,
+      previous: session.appointment?.toJSON ? session.appointment.toJSON() : session.appointment || null });
+  }
+  function checkFixedSessions(context, sessions, plan, actorId) {
     for (const session of sessions) {
       const staff = supportIds(session);
       const solution = solveBookingProfile({ profile: session.booking_profile, ...context,
-        start: new Date(session.start_at), selections: session.choice.selections });
+        start: new Date(session.start_at), selections: session.choice.selections })
+        || scheduleAssessment(plan, session, context, actorId)?.solution;
       if (!solution || new Date(solution.end_at).getTime() !== new Date(session.end_at).getTime() || !supportAvailable(context, solution, staff)
         || context.patientBusy.some(busy => new Date(busy.start) < new Date(session.end_at) && new Date(busy.end) > new Date(session.start_at))) {
         fail('program_fixed_session_unavailable', 'Una fecha conservada ya no está disponible. Revisa esa sesión antes de continuar.', { key: session.key });
@@ -256,7 +283,10 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
         if (instant < start || instant >= end || instant <= now() || instant - now() > 366 * 86400000) fail('program_booking_date_invalid', 'Elige una cita futura dentro de los días consultados y del próximo año.', null, 400);
         const resolved = materializeSession(session, durationChoice(choice));
         const finish = new Date(instant.getTime() + resolved.duration_minutes * 60000);
-        explicit.push({ ...resolved, choice, start_at: instant.toISOString(), end_at: finish.toISOString() });
+        const normalizedChoice = bookingRequest({ request_key: 'program-manual-preview', snapshot_sha256: plan.snapshot.sha256,
+          sessions: [{ ...choice, start_at: instant.toISOString() }] }).sessions[0];
+        if (Object.keys(normalizedChoice.selections).some(key => !resolved.booking_profile.phases.some(phase => phase.key === key))) fail('program_selection_invalid', 'La fase elegida no pertenece a esta cita.');
+        explicit.push({ ...resolved, choice: normalizedChoice, start_at: instant.toISOString(), end_at: finish.toISOString() });
       }
       if (explicit.length || fixedRows.length) {
         const searchStart = new Date(Math.min(start.getTime(), ...fixedRows.map(row => new Date(row.start_at).getTime())));
@@ -264,18 +294,21 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
         const context = await contextFor(plan, [...fixedRows, ...explicit], searchStart, searchEnd, null, false, ignored);
         const series = proposalSeries(plan, pending, resume, [...explicit, ...fixedRows]);
         const orderIssues = seriesIssues(series, plan.snapshot.cadence, plan.timeZone);
-        checkFixedSessions(context, fixedRows);
+        checkFixedSessions(context, fixedRows, plan, options.actorId);
         for (const session of explicit) {
           const staff = supportIds(session);
-          const solution = orderIssues.length ? null : solveBookingProfile({ profile: session.booking_profile, ...context,
+          let solution = orderIssues.length ? null : solveBookingProfile({ profile: session.booking_profile, ...context,
             start: new Date(session.start_at), selections: session.choice.selections || {} });
+          const exception = !orderIssues.length && !solution ? scheduleAssessment(plan, session, context, options.actorId) : null;
+          if (exception) solution = exception.solution;
           const available = solution && supportAvailable(context, solution, staff)
             && !context.patientBusy.some(busy => new Date(busy.start) < new Date(session.end_at) && new Date(busy.end) > new Date(session.start_at));
           if (available) addVirtualBusy(context, solution, staff, session.booking_profile);
           proposals.push({ key: session.key, label: session.label, solution: available ? solution : null,
             ...(session.duration_selection || {}), previous_appointment: previousAppointment(session),
             reason_code: available ? null : orderIssues.length ? 'program_cadence_conflict' : 'program_booking_unavailable',
-            reason: available ? null : orderIssues.length ? 'La fecha elegida no respeta el orden o la pauta del programa.' : 'No hay disponibilidad en la fecha y hora elegidas.' });
+            reason: available ? null : orderIssues.length ? 'La fecha elegida no respeta el orden o la pauta del programa.' : 'No hay disponibilidad en la fecha y hora elegidas.',
+            ...(available && exception ? { requires_schedule_confirmation: true, schedule_restrictions: exception.restrictions } : {}) });
         }
       }
       return { ...dto(plan, projectionOptions), proposals: selected.map(session => proposals.find(row => row.key === session.key)),
@@ -288,7 +321,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const proposals = [];
     // Optional fixed proposals are rechecked, never trusted as reservations. This
     // lets the dialog ask for another day for one unit while retaining the rest.
-    checkFixedSessions(context, fixedRows);
+    checkFixedSessions(context, fixedRows, plan, options.actorId);
     const first = series.find(row => row.start_at);
     const anchor = first ? formatDateLocal(new Date(first.start_at), plan.timeZone) : date;
     const anchorOffset = first?.offset_days ?? 0;
@@ -361,6 +394,34 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
       const start = new Date(selected[0].start_at), end = new Date(selected.at(-1).end_at);
       const ignored = selected.filter(row => row.scheduling_status === 'reserved').map(row => Number(row.appointment.id_cita));
       const context = await contextFor(plan, selected, start, end, transaction, true, ignored);
+      // Preflight the WHOLE batch under the same canonical resource locks.
+      // A closed clinician schedule can only be accepted for exact selected
+      // staff/rooms; other conflicts abort without creating even session rows.
+      const checkingContext = cloneProgramContext(context), exceptions = new Map();
+      for (const session of selected) {
+        const staff = supportIds(session);
+        let solution = solveBookingProfile({ profile: session.booking_profile, ...checkingContext,
+          start: new Date(session.start_at), selections: session.choice.selections });
+        const exception = !solution ? scheduleAssessment(plan, session, checkingContext, options.actorId) : null;
+        if (exception) { solution = exception.solution; exceptions.set(session.key, exception); }
+        if (!solution || !supportAvailable(checkingContext, solution, staff)
+          || checkingContext.patientBusy.some(busy => new Date(busy.start) < new Date(session.end_at) && new Date(busy.end) > new Date(session.start_at))) {
+          fail('program_booking_unavailable', 'Un hueco acaba de ocuparse o tiene restricciones que no se pueden confirmar. No se ha reservado ni movido ninguna cita de esta solicitud.', { key: session.key });
+        }
+        assertPriorityAcknowledgement(solution, session.choice.priority_acknowledged);
+        addVirtualBusy(checkingContext, solution, staff, session.booking_profile);
+      }
+      const scheduleExceptions = new Map();
+      if (exceptions.size) {
+        const acknowledgement = programScheduleBatchReceipt({ plan, request, actorId: options.actorId, exceptions });
+        if (!programScheduleReceiptMatches(acknowledgement, request.schedule_acknowledgement)) fail('program_schedule_confirmation_required',
+          'Hay profesionales sin horario de atención en las fechas elegidas. Revisa todos los avisos y confirma si quieres reservar igualmente.',
+          { can_confirm_schedule: true, schedule_acknowledgement: acknowledgement,
+            batch_restrictions: selected.filter(row => exceptions.has(row.key)).map(row => ({ key: row.key, label: row.label,
+              restrictions: exceptions.get(row.key).restrictions })) });
+        for (const [key, exception] of exceptions) scheduleExceptions.set(key, { doctorIds: exception.doctorIds,
+          restrictions: exception.restrictions, acknowledgement, actorId: Number(options.actorId) });
+      }
       for (const session of selected) {
         const definition = plan.snapshot.appointments[session.position];
         const sessionSnapshot = { ...definition, booking_profile: session.booking_profile, duration_minutes: session.duration_minutes,
@@ -369,11 +430,14 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
           position: session.position, snapshot_sha256: plan.snapshot.sha256, snapshot: sessionSnapshot }, { transaction });
         if (definition.duration_minutes == null && !json(session.record.snapshot).duration_selection) await session.record.update({ snapshot: sessionSnapshot }, { transaction });
       }
-      const trustedProgramSeries = createSeriesContext({ transaction, plan, selected, series });
+      const trustedProgramSeries = createSeriesContext({ transaction, plan, selected, series, scheduleExceptions });
       const created = [];
       for (const session of selected) {
         const staff = supportIds(session);
-        const solution = solveBookingProfile({ profile: session.booking_profile, ...context, start: new Date(session.start_at), selections: session.choice.selections });
+        const exception = scheduleExceptions.get(session.key);
+        const solvingContext = exception ? programScheduleContext(context, exception.doctorIds,
+          new Date(session.start_at), new Date(session.end_at)) : context;
+        const solution = solveBookingProfile({ profile: session.booking_profile, ...solvingContext, start: new Date(session.start_at), selections: session.choice.selections });
         if (!solution || !supportAvailable(context, solution, staff) || context.patientBusy.some(busy => new Date(busy.start) < new Date(session.end_at) && new Date(busy.end) > new Date(session.start_at))) fail('program_booking_unavailable', 'Un hueco acaba de ocuparse. No se ha reservado ni movido ninguna cita de esta solicitud.', { key: session.key });
         assertPriorityAcknowledgement(solution, session.choice.priority_acknowledged);
         const record = session.record;
@@ -402,7 +466,8 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
         created.push({ key: session.key, appointment_id: appointment.id_cita, action: moving ? 'rescheduled' : 'created', previous_appointment: previous,
           start_at: solution.start_at, end_at: solution.end_at, phases: solution.phases });
       }
-      const result = { voucher_id: plan.voucher.public_id, sessions: created, reminders_enabled: false, replayed: false };
+      const result = { voucher_id: plan.voucher.public_id, sessions: created, reminders_enabled: false, replayed: false,
+        ...(scheduleExceptions.size ? { schedule_exception_confirmed: true } : {}) };
       await db.PatientProgramBookingRequest.create({ voucher_id: plan.voucher.id, request_key: request.request_key,
         request_sha256: request.request_sha256, result, created_by: options.actorId }, { transaction });
       return result;

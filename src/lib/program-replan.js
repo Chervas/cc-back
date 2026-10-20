@@ -85,7 +85,7 @@ function assertRevision(plan, expected) {
 // An in-process capability, never a JSON-shaped flag accepted from HTTP. It
 // binds the already checked series to its transaction and individual writes.
 const contexts = new WeakMap();
-function createSeriesContext({ transaction, plan, selected, series }) {
+function createSeriesContext({ transaction, plan, selected, series, scheduleExceptions = new Map() }) {
   if (!transaction || !Array.isArray(selected) || !selected.length) throw Error('program_series_context_invalid');
   const token=Object.freeze({});
   contexts.set(token,{transaction,voucherId:Number(plan.voucher.id),clinicId:Number(plan.voucher.clinic_id),
@@ -94,6 +94,7 @@ function createSeriesContext({ transaction, plan, selected, series }) {
       sessionId:row.record?.id == null ? null : String(row.record.id),
       appointmentId:row.scheduling_status==='reserved'?Number(row.appointment.id_cita):null,
       start:new Date(row.start_at).getTime(),end:new Date(row.end_at).getTime(),
+      ...(scheduleExceptions.has(row.key) ? { scheduleException: structuredClone(scheduleExceptions.get(row.key)) } : {}),
     }]))});
   return token;
 }
@@ -106,6 +107,7 @@ function assertSeriesContext(token, { transaction, session, existing, values }) 
     || new Date(values.inicio).getTime()!==target.start || new Date(values.fin).getTime()!==target.end) {
     throw Error('program_series_context_invalid');
   }
-  return {series:structuredClone(context.series),timeZone:context.timeZone};
+  return {series:structuredClone(context.series),timeZone:context.timeZone,
+    ...(target.scheduleException ? { scheduleException: structuredClone(target.scheduleException) } : {})};
 }
 module.exports={schedulingState,planRevision,resumeInfo,resumeSelectionInfo,resumeOptions,resumeSessions,resumeInput,assertRevision,createSeriesContext,assertSeriesContext};

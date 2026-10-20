@@ -150,6 +150,8 @@ function seriesIssues(appointments, cadence, timeZone) {
 
 function bookingRequest(payload) {
   if (!payload || !/^[a-zA-Z0-9_-]{8,80}$/.test(payload.request_key || '') || !/^[a-f0-9]{64}$/.test(payload.snapshot_sha256 || '')) error('program_booking_request_invalid', 'Actualiza el plan antes de reservar.');
+  if (payload.schedule_acknowledgement != null && (typeof payload.schedule_acknowledgement !== 'string'
+    || !/^[a-f0-9]{64}$/.test(payload.schedule_acknowledgement))) error('program_schedule_acknowledgement_invalid', 'Revisa y confirma de nuevo la excepción de horario.');
   if (!Array.isArray(payload.sessions) || !payload.sessions.length || payload.sessions.length > 30) error('program_booking_batch_invalid', 'Selecciona entre una y treinta sesiones.');
   const keys = new Set();
   const sessions = payload.sessions.map(row => {
@@ -176,7 +178,8 @@ function bookingRequest(payload) {
   }).sort((a, b) => a.key.localeCompare(b.key));
   const resume = require('./program-replan').resumeInput(payload);
   const contents = { snapshot_sha256: payload.snapshot_sha256, sessions, ...(resume || {}) };
-  return { request_key: payload.request_key, ...contents, request_sha256: hash(contents) };
+  return { request_key: payload.request_key, ...contents, request_sha256: hash(contents),
+    ...(payload.schedule_acknowledgement != null ? { schedule_acknowledgement: payload.schedule_acknowledgement } : {}) };
 }
 
 module.exports = { normalizeCadence, composeAppointmentProfile, normalizeProgramProfile, schedulingMode, durationChoice,
