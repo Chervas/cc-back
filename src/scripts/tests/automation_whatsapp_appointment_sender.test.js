@@ -82,6 +82,30 @@ test('an appointment originating from a lead can use its approved template befor
   assert.equal(selectTemplate([local, template], { ...options, targetWabaId: 'group-waba' }), null);
 });
 
+test('an appointment keeps its approved sender template while revised copy awaits approval', () => {
+  const { selectTemplate } = fixture();
+  const catalog = { name: 'appointment_notice', locale: 'es', body_text: 'New copy {{1}}.' };
+  const approved = { id: 50, clinic_id: null, waba_id: 'clinic-waba', language: 'es',
+    status: 'APPROVED', components: [{ type: 'BODY', text: 'Previous copy {{1}}.' }], catalog };
+  const pending = { ...approved, id: 60, status: 'PENDING', components: [{ type: 'BODY', text: catalog.body_text }] };
+  const options = { clinicId: 10, targetWabaId: 'clinic-waba', expectedLocale: 'es' };
+  assert.equal(selectTemplate([pending, approved], options), approved);
+  assert.equal(selectTemplate([pending, approved], { ...options, targetWabaId: 'another-waba' }), null);
+});
+
+test('an appointment adopts newly approved copy without bypassing emitter or strict catalog checks', () => {
+  const { selectTemplate } = fixture();
+  const catalog = { name: 'appointment_notice', locale: 'es', body_text: 'New copy {{1}}.' };
+  const previous = { id: 50, clinic_id: null, waba_id: 'clinic-waba', language: 'es',
+    status: 'APPROVED', components: [{ type: 'BODY', text: 'Previous copy {{1}}.' }], catalog };
+  const current = { ...previous, id: 60, components: [{ type: 'BODY', text: catalog.body_text }] };
+  const foreign = { ...current, id: 100, waba_id: 'another-waba' };
+  const options = { clinicId: 10, targetWabaId: 'clinic-waba', expectedLocale: 'es' };
+  assert.equal(selectTemplate([previous, foreign, current], options), current);
+  assert.equal(selectTemplate([previous], { ...options, requireCurrentCatalogBody: true }), null);
+  assert.equal(selectTemplate([previous, current], { ...options, requireCurrentCatalogBody: true }), current);
+});
+
 test('a failed secondary cannot block an appointment reminder', async () => {
   const { send } = fixture({ secondaryAvailable: false });
   assert.equal((await send({ appointment: { id_cita: 100 }, lead: { id: 200 } })).clinic_config.originId, 1);
