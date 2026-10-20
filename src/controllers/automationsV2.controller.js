@@ -6429,7 +6429,10 @@ exports.publishTemplateVersion = async (req, res) => {
       entry_node_id: row.entry_node_id,
       nodes: normalizedNodes,
     });
-    const nodeConfigValidation = await validateNodeConfigs(normalizedNodes);
+    const nodeConfigValidation = singleNoticeSource
+      ? await require('../lib/appointment-single-notice-publication').validatePreservedNodeConfigs(
+        singleNoticeSource.toJSON(),normalizedNodes,validateNodeConfigs)
+      : await validateNodeConfigs(normalizedNodes);
     const triggerResolution = resolveTriggerTypeForTemplate({
       explicitTriggerType: row.trigger_type,
       entryNodeId: row.entry_node_id,

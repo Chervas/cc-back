@@ -112,7 +112,10 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     normalizeTriggerConfigForTemplate:()=>({ok:true,trigger_config:{TESTONLY_do_not_install:true}}),
     applyTriggerConfigToNodes:()=>assert.fail('Single-notice publication must keep original trigger node'),
     resolveTriggerNode:({nodes,entryNodeId})=>nodes.find(n=>n.id===entryNodeId),isTriggerSelectionPendingConfig:()=>false,
-    validateNodeConfigs:async()=>({errors:[]}),buildValidationError:(code,message,details)=>({code,message,details}),
+    validateNodeConfigs:async nodes=>({errors:nodes.filter(n=>n.type==='action/send_whatsapp'&&!n.config?.communication_scope)
+      .map(n=>({code:'node_config_required',message:'TESTONLY legacy communication scope',
+        details:{node_id:n.id,node_type:n.type,key:'communication_scope'}}))}),
+    buildValidationError:(code,message,details)=>({code,message,details}),
     findAppointmentCreatedTreatmentConflict:async()=>null,findMessageReceivedTriggerConflict:async()=>null,findAppointmentReminderTriggerConflict:async()=>null,
     loadClinicNameMapFromRows:async()=>new Map(),loadCatalogBindingMapForRows:async()=>new Map(),loadLatestActivePublishedVersionMap:async()=>new Map(),
     mapTemplateWithLifecycle:row=>row.toJSON(),resolveTemplateFamilyWhere:async ref=>({public_id:ref}),
@@ -153,5 +156,5 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   assert.equal((await publication.publishEntry(entry,request)).skipped,true);assert.equal(writes,2);
   const tampered=structuredClone(entry.body);tampered.nodes.find(node=>node.type==='condition/ai_analysis').config.instruction='TESTONLY forbidden change';
   assert.throws(()=>publication.preservedNodes(source.toJSON(),tampered),{code:'single_notice_candidate_changed'});
-  report.checks.push('Native draft/publish controllers on owned SQL preserve exact scoped family, original trigger, inactive switch, all AI/decision configs and another clinic sharing the public ref; rerun no-ops and altered prompt is rejected before publication');
+  report.checks.push('Native draft/publish controllers on owned SQL preserve exact scoped family, original trigger, inactive switch, all AI/decision configs and another clinic sharing the public ref; inherited scope omissions on unchanged published nodes are allowed without defaults, rerun no-ops and altered prompt is rejected before publication');
 }).catch(error=>{console.error(error);process.exitCode=1;});

@@ -27,6 +27,35 @@ function preservedNodes(source,candidate){
   return structuredClone(plan.body.nodes);
 }
 
+async function validatePreservedNodeConfigs(source,nodes,validate){
+  const plan=planEntry(source);
+  if(!plan||hash(nodes)!==hash(plan.body.nodes))throw Object.assign(Error('single_notice_candidate_changed'),{
+    code:'single_notice_candidate_changed',statusCode:409,
+  });
+  const result=await validate(nodes);
+  if(!result.errors?.length)return result;
+  const baseline=await validate(source.nodes);
+  const previousErrors=new Set((baseline.errors||[]).map(hash));
+  const originalNodes=new Map(source.nodes.map(node=>[node.id,node]));
+  const candidateNodes=new Map(nodes.map(node=>[node.id,node]));
+  let inherited=0;
+  const errors=result.errors.filter(error=>{
+    const node=candidateNodes.get(error.details?.node_id),original=originalNodes.get(node?.id);
+    if(error.code!=='node_config_required'||!node||!original||hash(node)!==hash(original)
+      ||!previousErrors.has(hash(error)))return true;
+    // Immutable published nodes may predate generic schema defaults. Their
+    // mode-specific and template-contract validations must still pass normally.
+    const key=error.details?.key;
+    const compatible=node.type==='action/send_whatsapp'&&key==='communication_scope'
+      ||node.type==='condition/field_check'&&['multi_branch','appointment_booking_timing','lead_contact_state'].includes(node.config?.mode)
+        &&['left_ref','operator'].includes(key)
+      ||node.type==='action/send_system_notification'&&['display_mode','alert_level'].includes(key);
+    if(!compatible)return true;
+    inherited++;return false;
+  });
+  return {...result,ok:errors.length===0,errors,inherited_required_errors:inherited};
+}
+
 // Uses only the native draft/version/publish API. The caller supplies its own
 // authenticated transport; this module has no DB, provider or startup side effects.
 async function publishEntry(entry,request){
@@ -54,4 +83,4 @@ async function publishEntry(entry,request){
   if(!sameFamily(published,source)||hash(graph(published))!==entry.graph_hash||!!published.is_active!==!!source.is_active)throw Error('single_notice_publication_requires_review');
   return {skipped:false,version:published.version,is_active:published.is_active};
 }
-module.exports={hash,planEntry,publishEntry,preservedNodes};
+module.exports={hash,planEntry,publishEntry,preservedNodes,validatePreservedNodeConfigs};
