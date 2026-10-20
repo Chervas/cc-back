@@ -10,7 +10,7 @@ function fixture() {
   const snapshot = { target: 'crm', group_id: 29, captured_at: '2026-10-20T15:00:00.000Z',
     clinics: [{ id_clinica: 66, grupoClinicaId: 29 }, { id_clinica: 72, grupoClinicaId: 29 }],
     configuration: { protected: ['rooms', 'treatments', 'equipment', 'professionals'] }, revisions: [],
-    programs: planner.SPECS.map(spec => ({ id: spec.id, public_id: spec.public_id, clinic_id: spec.clinic_id,
+    programs: planner.SPECS.filter(spec => spec.id !== 11).map(spec => ({ id: spec.id, public_id: spec.public_id, clinic_id: spec.clinic_id,
       name: spec.reference, kind: 'program', status: 'draft', total_price: spec.id === 22 ? '250.00' : spec.id === 25 ? '430.00' : '670.00',
       price_profile: null, cadence: null, notes: 'Clinical conditions, indication and source preserved.', version_number: 2,
       created_by: 1, updated_by: 1, created_at: '2026-09-27 00:00:00', updated_at: '2026-09-27 00:00:00',
@@ -119,7 +119,8 @@ test('SQL guard admits only selects in preparation and only canonical programme/
   }
   assert.equal(operator.sqlAllowed('UPDATE TreatmentPrograms SET status=1', { writable: false, operation, casVerified: true }), false);
   assert.equal(operator.sqlAllowed('UPDATE TreatmentPrograms SET status=1', { writable: true, operation }), false);
-  assert.equal(operator.sqlAllowed('UPDATE TreatmentPrograms SET status=1', { ...write, operation: { program_id: 11 } }), false);
+  assert.equal(operator.sqlAllowed('UPDATE TreatmentPrograms SET status=1', { ...write, operation: { program_id: 11 } }), true);
+  assert.equal(operator.sqlAllowed('UPDATE TreatmentPrograms SET status=1', { ...write, operation: { program_id: 12 } }), false);
 });
 test('operator explicitly uses the published service and minimum model factories, never application bootstrap or jobs', () => {
   const source = fs.readFileSync(require.resolve('../bs-program-catalog-closure'), 'utf8');

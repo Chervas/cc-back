@@ -117,6 +117,15 @@ exports.getAppointmentPurchaseOptions = asyncHandler(async (req, res) => {
   }));
 });
 
+exports.assignProgramEnrollment = asyncHandler(async (req, res) => {
+  const clinicId = await requireClinicFeature(req, 'patients.edit', req.body?.clinic_id);
+  await requireClinicFeature(req, 'patients.sensitive.view', clinicId);
+  await requireClinicFeature(req, 'appointments.manage', clinicId);
+  const result = await require('../services/patientProgramEnrollment.service').assign({ patientIdentifier: req.params.patientId,
+    clinicId, actorId: actorId(req), payload: req.body });
+  res.status(result.replayed ? 200 : 201).json(result);
+});
+
 async function programContext(req, write = false) {
   const clinicId = await requireVoucherFeature(req, write ? 'patients.edit' : 'patients.view');
   await requireClinicFeature(req, 'patients.sensitive.view', clinicId);

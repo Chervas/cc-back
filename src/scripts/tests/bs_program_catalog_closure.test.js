@@ -13,7 +13,7 @@ function fixture() {
     authority_reference: 'Carlos, respuesta explícita sobre programas del 20/10/2026',
     authority_text: 'Aplicar IVA 21 % a los programas corporales; mantener las pautas escritas y usar 15 días sólo si no hay pauta. Activar Ligereza y Transición si la validación canónica lo permite.',
     corporate_program_tax_percent: 21, default_interval_days: 15, activation_ids: [25, 26] };
-  const programs = planner.SPECS.filter(spec => spec.id !== 22).map(spec => ({ id: spec.id, public_id: spec.public_id, clinic_id: spec.clinic_id,
+  const programs = planner.SPECS.filter(spec => [25, 26].includes(spec.id)).map(spec => ({ id: spec.id, public_id: spec.public_id, clinic_id: spec.clinic_id,
     name: `Oferta ${spec.reference}`, kind: 'program', status: 'draft', version_number: 2,
     total_price: spec.id === 25 ? '430.00' : '670.00', price_profile: null, cadence: null,
     notes: 'Condiciones clínicas y procedencia documental conservadas sin reescritura.',
@@ -187,6 +187,43 @@ test('does not rewrite unrelated capillary, medical, individual or other program
   const plan = planner.buildPlan(input);
   assert.equal(plan.operations.length, 2);
   assert.equal(plan.assessments.filter(assessment => assessment.action === 'preserve').length, 18);
+});
+
+function contornoFixture() {
+  const input = fixture(), spec = planner.SPECS.find(value => value.id === 11), base = input.snapshot.programs[0];
+  input.decision.contorno_standard_8_visits_1040_vat21 = true; input.decision.activation_ids = [11];
+  input.snapshot.programs = [{ ...copy(base), id: 11, public_id: spec.public_id, name: 'BS Contorno',
+    total_price: '1040.00', version_number: 3, appointments: spec.treatment_sets.map((ids, index) => ({
+      key: `cor_05_${index + 1}`, label: `${index + 1}/8 · Cyclone + EXION${ids.length > 1 ? ' + mesoterapia' : ''}`,
+      offset_days: index * 7, treatment_ids: copy(ids),
+    })) }];
+  return input;
+}
+
+test('explicit standard Contorno closure retains 1040 EUR, weekly eight visits and extra mesotherapy only in 2/5/8', () => {
+  const input = contornoFixture(), before = hash(input), draft = planner.buildPlan(input), op = draft.operations[0];
+  assert.equal(hash(input), before); assert.deepEqual(draft.operations.map(value => value.program_id), [11]);
+  assert.equal(op.after.total_price, 1040); assert.deepEqual(op.after.price_profile, planner.PROFILE_21);
+  assert.deepEqual(op.after.appointments.map(value => value.offset_days), [0, 7, 14, 21, 28, 35, 42, 49]);
+  assert.deepEqual(op.after.appointments.map(value => value.treatment_ids), [[2122], [2122, 1974], [2122], [2122], [2122, 1974], [2122], [2122], [2122, 1974]]);
+  assert.equal(op.after.status, 'draft'); assert.equal(op.after.notes, input.snapshot.programs[0].notes);
+  const active = planner.buildPlan({ ...input, previews: [preview(op)] });
+  assert.equal(active.operations[0].after.status, 'active'); assert.equal(active.operations[0].activation, true);
+  assert.equal(active.operations[0].expected_version, 3); planner.assertPlan(active);
+});
+
+test('Contorno standard requires explicit authority and cannot absorb Arranque/10/Continuidad timing or price changes', () => {
+  for (const mutate of [value => value.snapshot.programs[0].total_price = '1041.00',
+    value => value.snapshot.programs[0].name = 'Contorno 10', value => value.snapshot.programs[0].appointments[0].treatment_ids = [2122, 1974],
+    value => value.snapshot.programs[0].appointments[1].treatment_ids = [1974, 2122],
+    value => value.snapshot.programs[0].appointments[1].offset_days = 15,
+    value => value.snapshot.programs[0].appointments[1].offset_days = null]) {
+    const input = contornoFixture(); mutate(input); assert.throws(() => planner.buildPlan(input), /BS_CLOSURE_/);
+  }
+  const input = contornoFixture(); delete input.decision.contorno_standard_8_visits_1040_vat21;
+  assert.throws(() => planner.buildPlan(input), /CONTORNO_EXPLICIT_AUTHORITY_REQUIRED/);
+  input.decision.activation_ids = [];
+  assert.equal(planner.buildPlan(input).operations.length, 0);
 });
 
 test('rejects scope leaks, duplicate snapshots and a changed stable identity or composition', () => {

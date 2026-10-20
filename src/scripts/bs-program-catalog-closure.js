@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-// Closed operator: three existing programme definitions, never patient data or
+// Closed operator: four expressly reviewed definitions, never patient data or
 // bookings. Persistence is exclusively the published service's update method.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -10,7 +10,7 @@ const planner = require('../lib/cliniccloud-import/bs-program-catalog-closure');
 const { hash } = require('../lib/cliniccloud-import/adapter');
 const { parseArgs, writePrivateJson, syncDirectory } = require('../lib/cliniccloud-import/io');
 const PUBLISHED_ROOT = '/home/ubuntu/wt/back-staging';
-const IDS = Object.freeze([22, 25, 26]);
+const IDS = Object.freeze([11, 22, 25, 26]);
 const GATES = Object.freeze(['BOOKING_PROFILES_ENABLED', 'BOOKING_MULTI_RESOURCE_ENABLED', 'BOOKING_PHASE_OFFSETS_ENABLED',
   'BOOKING_EQUIPMENT_ENABLED', 'TREATMENT_PROGRAM_BOOKING_ENABLED', 'TREATMENT_PROGRAM_ECONOMICS_ENABLED']);
 const fail = code => { throw Error(code); };

@@ -76,21 +76,31 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const voucher = await db.PatientVoucher.findOne({ where: { public_id: publicId, clinic_id: clinicId, source_system: 'treatment_program' },
       transaction, ...(lock ? { lock: transaction.LOCK.UPDATE } : {}) });
     if (!voucher) fail('program_purchase_not_found', 'Programa comprado no encontrado.', null, 404);
-    const [budget, clinic, records] = await Promise.all([
-      db.EconomicBudget.findOne({ where: { id: voucher.budget_id, clinic_id: clinicId, patient_id: voucher.patient_id }, transaction }),
+    const [clinic, records] = await Promise.all([
       db.Clinica.findByPk(clinicId, { transaction, ...(lock ? { lock: transaction.LOCK.SHARE } : {}) }),
       db.PatientProgramSession.findAll({ where: { voucher_id: voucher.id }, order: [['position', 'ASC']], transaction,
         ...(lock ? { lock: transaction.LOCK.UPDATE } : {}) }),
     ]);
-    if (!budget || !clinic) fail('program_purchase_invalid', 'No se encuentra el presupuesto de este programa.');
-    const version = await db.EconomicBudgetVersion.findOne({ where: { budget_id: budget.id, version_number: budget.current_version }, transaction });
-    const line = json(version?.lines || []).find(item => item.key === voucher.budget_line_key);
-    let accepted = budget.status === 'accepted';
-    if (budget.status === 'partially_accepted') {
-      const event = await db.EconomicBudgetEvent.findOne({ where: { budget_id: budget.id, version_number: budget.current_version, event_type: 'partially_accepted' }, order: [['id', 'DESC']], transaction });
-      accepted = (json(event?.metadata || {})?.accepted_line_keys || []).includes(voucher.budget_line_key);
+    if (!clinic) fail('program_purchase_invalid', 'No se encuentra la clínica de este programa.');
+    let budget = null, operationallyAuthorized = false, snapshot, origin = 'budget';
+    if (voucher.budget_id != null) {
+      // Budget purchases NEVER fall back to clinical enrollment evidence. A
+      // pending/missing budget cannot be made accepted by supplying this JSON.
+      if (voucher.program_snapshot != null) fail('program_enrollment_origin_conflict', 'La compra y la asignación clínica no pueden sustituirse entre sí.');
+      budget = await db.EconomicBudget.findOne({ where: { id: voucher.budget_id, clinic_id: clinicId, patient_id: voucher.patient_id }, transaction });
+      if (!budget) fail('program_purchase_invalid', 'No se encuentra el presupuesto de este programa.');
+      const version = await db.EconomicBudgetVersion.findOne({ where: { budget_id: budget.id, version_number: budget.current_version }, transaction });
+      const line = json(version?.lines || []).find(item => item.key === voucher.budget_line_key);
+      operationallyAuthorized = budget.status === 'accepted';
+      if (budget.status === 'partially_accepted') {
+        const event = await db.EconomicBudgetEvent.findOne({ where: { budget_id: budget.id, version_number: budget.current_version, event_type: 'partially_accepted' }, order: [['id', 'DESC']], transaction });
+        operationallyAuthorized = (json(event?.metadata || {})?.accepted_line_keys || []).includes(voucher.budget_line_key);
+      }
+      snapshot = operationalSnapshot(line?.program_snapshot);
+    } else {
+      snapshot = require('../lib/patient-program-enrollment').readProgramEnrollment(voucher, { required: true });
+      operationallyAuthorized = true; origin = 'program_enrollment';
     }
-    const snapshot = operationalSnapshot(line?.program_snapshot);
     if (Number(voucher.total_units) !== snapshot.appointments.length || records.some(row => row.snapshot_sha256 !== snapshot.sha256)) fail('program_purchase_changed', 'La composición comprada no coincide con sus sesiones. Revisa el presupuesto.');
     const ids = records.map(row => row.appointment_id).filter(Boolean);
     const appointments = ids.length ? await db.CitaPaciente.findAll({ where: { id_cita: { [db.Sequelize.Op.in]: ids },
@@ -124,11 +134,12 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const resourceOptions = { installations: rooms.filter(row => roomIds.includes(Number(row.id))).map(row => ({ id: Number(row.id), name: row.nombre || `Instalación ${row.id}` })),
       professionals: doctors.filter(row => doctorIds.includes(Number(row.doctor_id))).map(row => ({ id: Number(row.doctor_id),
         name: [row.doctor?.nombre, row.doctor?.apellidos].filter(Boolean).join(' ') || `Profesional ${row.doctor_id}` })) };
-    return { voucher, budget, accepted, clinic, snapshot, sessions, resourceOptions, timeZone: resolveClinicTimezone(clinic) };
+    return { voucher, budget, operationallyAuthorized, origin, clinic, snapshot, sessions, resourceOptions, timeZone: resolveClinicTimezone(clinic) };
   }
   function assertSchedulable(plan) {
-    if (!plan.accepted || plan.voucher.status !== 'active'
-      || (plan.voucher.expires_at && new Date(plan.voucher.expires_at) <= now())) fail('program_purchase_not_schedulable', 'El programa debe estar aceptado, activo y sin caducar.');
+    if (!plan.operationallyAuthorized || plan.voucher.status !== 'active'
+      || (plan.voucher.expires_at && new Date(plan.voucher.expires_at) <= now())) fail('program_purchase_not_schedulable', plan.origin === 'program_enrollment'
+        ? 'La asignación clínica debe estar activa y sin caducar.' : 'El programa debe estar aceptado, activo y sin caducar.');
     // Partial acceptance activates only accepted lines in the canonical voucher
     // writer. No client checkbox or payment inference can activate this unit.
     const reserved = plan.sessions.filter(row => row.scheduling_status === 'reserved').length;
@@ -140,7 +151,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const legacyResume = mode === 'manual' ? null : resumeInfo(plan, now());
     const resume = resumeFromKey == null ? legacyResume : resumeSelectionInfo(plan, resumeFromKey, now());
     const resumeChoices = resumeOptions(plan, now());
-    const active = plan.voucher.status === 'active' && plan.accepted && (!plan.voucher.expires_at || new Date(plan.voucher.expires_at) > now());
+    const active = plan.voucher.status === 'active' && plan.operationallyAuthorized && (!plan.voucher.expires_at || new Date(plan.voucher.expires_at) > now());
     // Purchased history stays readable while the relative-step writer is off.
     // This marker cannot turn an incomplete attention plan into a bookable one.
     let bookingRestriction = null;
@@ -149,6 +160,9 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
       bookingRestriction = { code: error.code, message: error.message };
     }
     return { voucher_id: plan.voucher.public_id, clinic_id: Number(plan.voucher.clinic_id), name: plan.snapshot.name, kind: plan.snapshot.kind,
+      program_id: plan.snapshot.program_id, program_version: plan.snapshot.program_version, origin: plan.origin,
+      commercial_status: plan.origin === 'program_enrollment' ? 'not_contracted' : plan.operationallyAuthorized ? 'budget_accepted' : 'budget_pending',
+      catalog_reference_amount: plan.snapshot.catalog_total_price,
       snapshot_sha256: plan.snapshot.sha256, timezone: plan.timeZone, cadence: plan.snapshot.cadence,
       resource_options: plan.resourceOptions,
       plan_revision: planRevision(plan), scheduling_mode: mode,

@@ -23,6 +23,8 @@ function createAppointmentPurchaseOptions({ db = require('../../models'), econom
         try {
           const plan = await programs.read({ publicId: voucher.public_id, clinicId, actorId });
           items.push({ id: voucher.public_id, name: plan.name, kind: plan.kind === 'voucher' ? 'voucher' : 'program', scheduler: 'program', pending_count: plan.pending_count,
+            source_system: 'treatment_program', program_id: plan.program_id, program_version: plan.program_version,
+            commercial_status: plan.commercial_status, catalog_reference_amount: plan.catalog_reference_amount,
             available_units: Number(voucher.available_units), unit_label: voucher.unit_label,
             can_schedule: plan.can_schedule || plan.can_resume, next_session: plan.sessions.find(row => ['pending', 'missed'].includes(row.scheduling_status))?.label || null,
             reason: plan.can_schedule || plan.can_resume ? null : plan.resume?.blocked_reason || 'No hay sesiones disponibles para citar.' });

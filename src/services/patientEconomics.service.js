@@ -2783,6 +2783,7 @@ async function createVoucher({ patientIdentifier, clinicId, actorId, payload }) 
     throw domainError(400, 'voucher_status_units_mismatch', 'Un bono consumido no puede conservar unidades disponibles.');
   }
   const sourceSystem = cleanString(payload.source_system, 40) || 'clinicaclick';
+  if (sourceSystem === 'treatment_program') throw domainError(400, 'program_enrollment_endpoint_required', 'Asigna los programas desde su catálogo; un bono manual no acredita su composición.');
   const sourceReference = cleanString(payload.source_reference, 120) || null;
   return sequelize.transaction(async (transaction) => {
     await Paciente.findByPk(patient.id_paciente, {
@@ -3618,6 +3619,7 @@ function serializeWalletEntry(entry, budgetPublicId = null) {
 }
 
 function serializeVoucher(voucher, movements) {
+  const enrollment = require('../lib/patient-program-enrollment').readProgramEnrollment(voucher);
   return {
     id: voucher.public_id,
     budget_id: voucher.budget_public_id || null,
@@ -3627,7 +3629,9 @@ function serializeVoucher(voucher, movements) {
     unit_label: voucher.unit_label,
     total_units: numberValue(voucher.total_units),
     available_units: numberValue(voucher.available_units),
-    sold_amount: numberValue(voucher.sold_amount),
+    sold_amount: enrollment ? null : numberValue(voucher.sold_amount),
+    ...(enrollment ? { commercial_status: 'not_contracted', origin: 'program_enrollment',
+      catalog_reference_amount: enrollment.catalog_total_price, program_id: enrollment.program_id, program_version: enrollment.program_version } : {}),
     activation_rule: voucher.activation_rule,
     status: voucher.status,
     expires_at: voucher.expires_at,

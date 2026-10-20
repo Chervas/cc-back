@@ -32,7 +32,10 @@ function compare(actual, contract) {
   for (const [name, expected] of Object.entries(contract.tables)) {
     const table = actual.tables.find(t => t.TABLE_NAME === name);
     if (!table) { issues.push({ table: name, reason: 'missing_table' }); continue; }
-    for (const key of ['ENGINE', 'TABLE_COLLATION']) if (table[key] !== expected[key]) issues.push({ table: name, reason: 'table_definition', field: key });
+    // A legacy table can require one new column without pretending its
+    // historical collation/engine were changed by an additive migration.
+    // Existing explicit requirements remain just as strict as before.
+    for (const key of ['ENGINE', 'TABLE_COLLATION']) if (Object.hasOwn(expected, key) && table[key] !== expected[key]) issues.push({ table: name, reason: 'table_definition', field: key });
     for (const col of expected.columns) {
       const found = actual.columns.find(c => c.TABLE_NAME === name && c.COLUMN_NAME === col.COLUMN_NAME);
       if (!found) { issues.push({ table: name, column: col.COLUMN_NAME, reason: 'missing_column' }); continue; }

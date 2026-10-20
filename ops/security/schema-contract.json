@@ -4330,6 +4330,10 @@
       "checks": [],
       "foreignKeys": []
     },
+    "PatientVouchers": {
+      "columns": [{"COLUMN_NAME":"program_snapshot","COLUMN_TYPE":"json","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}],
+      "indexes": []
+    },
     "TreatmentPrograms": {
       "ENGINE": "InnoDB",
       "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
@@ -4338,6 +4342,7 @@
     }
   },
   "migrations": [
+    {"name":"20261020170000-add-patient-program-enrollment-snapshot.js","sha256":"e0a2b86deacc6d896f1c69f16dfae61acb1da45505a13d2fd56dbd69b2e6a208"},
     {"name":"20261006120000-whatsapp-inbox-routing-reviews.js","sha256":"c6d27ade24eb4f8f3dd076ac281893b50ee5df289ef47c3f78a553ea56c3c546"},
     {"name": "20260912230000-index-platform-audit-view.js","sha256": "dbbcad72b966056df5ca098c00cee3bf620dc46516d1bd43819b8de56ea30ae2"},
     {"name": "20260912210000-create-platform-audit-events.js", "sha256": "f70ed09874aba16b29e052e59508cd1febdf6e885d62dbf5288da08775f7b132"},

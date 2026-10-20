@@ -36,6 +36,15 @@ test('prepare requires exact opt-in before opening a database or loading product
   for (const gateValue of ['', '82', 'bs-startup-isolated-20260920', 'true']) {
     await assert.rejects(fixture.prepare({ gateValue }), /EXPLICIT_SYNTHETIC_DEV_WRITE_AUTHORIZATION_REQUIRED/);
   }
+  await assert.rejects(fixture.prepare({ gateValue: fixture.MARKER, direct: 'true' }), /EXPLICIT_DIRECT_PROGRAM_MODE_REQUIRED/);
+});
+test('direct fixture branch returns a separate catalog only before any budget/enrollment/booking operation', () => {
+  const code = fs.readFileSync(require.resolve('../qa/program-closure-dev-fixture'), 'utf8');
+  const branch = code.slice(code.indexOf('    if (direct) {'), code.indexOf("    const economics = require('../../services/patientEconomics.service');"));
+  assert(branch.includes('budget_created: false, voucher_created: false'));
+  assert(branch.includes('EXISTING_BUDGETS_CHANGED'));
+  assert.doesNotMatch(branch, /\.create\(|\.assign\(|\.book\(|transitionBudget|createBudget/);
+  assert(code.includes("idempotency_key: direct ? MARKER + '-direct' : MARKER"));
 });
 test('operator inherits only validated live DEV runtime gates, never hardcodes enablement or copies credentials', () => {
   const flags = { ...valid().runtime_gates, BOOKING_PHASE_OFFSETS_ENABLED: 'false', DB_PASSWORD: 'must-not-copy', DELIVERY_ENABLED: 'true' };

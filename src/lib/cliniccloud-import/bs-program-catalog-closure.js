@@ -31,6 +31,14 @@ const SPECS = Object.freeze([
       literal: '3 sesiones de 30 min; seguimiento médico, incluida la receta de cada entrega.',
       cadence_authority: '15 October default interval retained; 20 October explicitly preserves the three-review offer without a pen.' }),
     treatments: Object.freeze([2123, 2123, 2123]) }),
+  Object.freeze({ id: 11, public_id: 'e69d21d5-02bd-40c6-a90e-c1739cf9b48f', clinic_id: 72, reference: 'COR-05',
+    name: 'BS Contorno', total_price: 1040, price_profile: PROFILE_21, authority_flag: 'contorno_standard_8_visits_1040_vat21',
+    source_cadence: Object.freeze({ provenance: 'literal_clinic_protocol', interval_days: 7,
+      file: 'BS-Medical-Protocolos-V1-Corporal (2) - copia.pdf',
+      file_sha256: '5361917f6de9b68d52c18befcde09789fbeb674b7bbb2ec78c2aed27aa7000fc', pdf_pages: Object.freeze([10, 11, 32]),
+      literal: '8 citas, una por semana. En las citas 2, 5 y 8 se añaden 10 minutos de mesoterapia después de COR-43.' }),
+    treatments: Object.freeze([2122, 2122, 2122, 2122, 2122, 2122, 2122, 2122]),
+    treatment_sets: Object.freeze([[2122], [2122, 1974], [2122], [2122], [2122, 1974], [2122], [2122], [2122, 1974]].map(Object.freeze)) }),
 ]);
 const BLOCKED = Object.freeze([
   ...[19, 20, 21].map(program_id => Object.freeze({ program_id, reason: 'CONTORNO_CARBOXYTHERAPY_HIFU_TIMING_UNRESOLVED',
@@ -47,9 +55,11 @@ function assertDecision(decision) {
       || typeof decision.authority_reference !== 'string' || decision.authority_reference.trim().length < 15
       || typeof decision.authority_text !== 'string' || decision.authority_text.trim().length < 30
       || (decision.glp1_three_medical_reviews_no_vat != null && decision.glp1_three_medical_reviews_no_vat !== true)
+      || (decision.contorno_standard_8_visits_1040_vat21 != null && decision.contorno_standard_8_visits_1040_vat21 !== true)
       || !Array.isArray(decision.activation_ids) || new Set(decision.activation_ids).size !== decision.activation_ids.length
       || decision.activation_ids.some(id => !SPECS.some(spec => spec.id === id))) fail('BS_CLOSURE_DECISION_INVALID');
   if (decision.activation_ids.includes(22) && decision.glp1_three_medical_reviews_no_vat !== true) fail('BS_CLOSURE_GLP1_EXPLICIT_AUTHORITY_REQUIRED');
+  if (decision.activation_ids.includes(11) && decision.contorno_standard_8_visits_1040_vat21 !== true) fail('BS_CLOSURE_CONTORNO_EXPLICIT_AUTHORITY_REQUIRED');
   // The authority is this dated decision, not an older generic import approval.
   if (instant(decision.authorized_at) < Date.parse('2026-10-19T22:00:00Z')) fail('BS_CLOSURE_AUTHORITY_PREDATES_DECISION');
 }
@@ -67,17 +77,18 @@ function assertSnapshot(snapshot, createdAt, authorizedAt) {
 }
 
 function assertReviewedRow(row, spec, normalized) {
+  const treatmentSets = spec.treatment_sets || spec.treatments.map(id => [id]);
   if (row.public_id !== spec.public_id || Number(row.clinic_id) !== spec.clinic_id || row.kind !== 'program'
       || !Number.isSafeInteger(Number(row.version_number)) || Number(row.version_number) < 1
-      || normalized.total_price == null || normalized.appointments.length !== spec.treatments.length
-      || normalized.appointments.some((appointment, index) => appointment.treatment_ids.length !== 1
-        || appointment.treatment_ids[0] !== spec.treatments[index])) fail('BS_CLOSURE_REVIEWED_IDENTITY_OR_COMPOSITION_CHANGED');
+      || normalized.total_price == null || normalized.appointments.length !== treatmentSets.length
+      || spec.name && normalized.name !== spec.name || spec.total_price != null && normalized.total_price !== spec.total_price
+      || normalized.appointments.some((appointment, index) => hash(appointment.treatment_ids) !== hash(treatmentSets[index]))) fail('BS_CLOSURE_REVIEWED_IDENTITY_OR_COMPOSITION_CHANGED');
   if (normalized.price_profile && hash(normalized.price_profile) !== hash(spec.price_profile)) fail('BS_CLOSURE_EXISTING_FISCAL_PROFILE_REQUIRES_REVIEW');
   // Existing offset values or a generated note saying "weekly proposal" are not
   // proof of a clinical cadence. Here the exact PDF itself proves one per week;
   // an existing conflicting schedule needs review rather than being preserved
   // merely because the previous importer happened to populate it.
-  if (normalized.appointments.some((appointment, index) => appointment.offset_days != null
+  if (normalized.appointments.some((appointment, index) => (appointment.offset_days != null || spec.id === 11)
         && appointment.offset_days !== index * spec.source_cadence.interval_days)
       || (normalized.cadence && (spec.id === 22 || normalized.cadence.sessions_per_week !== 1 || normalized.cadence.min_days_between !== 7))) {
     fail('BS_CLOSURE_EXISTING_CADENCE_CONFLICTS_WITH_LITERAL_SOURCE');
@@ -118,7 +129,8 @@ function buildPlan({ snapshot, decision, previews = [], createdAt = new Date().t
       reason: blocked?.reason || 'OUTSIDE_EXACT_REVIEWED_CLOSURE' };
     assessments.push(assessment);
     if (!spec) continue;
-    if (spec.authority_flag && decision[spec.authority_flag] !== true) { assessment.reason = 'GLP1_EXPLICIT_AUTHORITY_NOT_RECORDED'; continue; }
+    if (spec.authority_flag && decision[spec.authority_flag] !== true) { assessment.reason = spec.id === 11
+      ? 'CONTORNO_STANDARD_EXPLICIT_AUTHORITY_NOT_RECORDED' : 'GLP1_EXPLICIT_AUTHORITY_NOT_RECORDED'; continue; }
     const before = copy(row), normalized = previousReplies.values(row);
     assertReviewedRow(row, spec, normalized);
     if (row.status === 'archived') { assessment.reason = 'ARCHIVED_PROGRAM_PRESERVED'; continue; }
@@ -146,12 +158,12 @@ function buildPlan({ snapshot, decision, previews = [], createdAt = new Date().t
   const body = { version: VERSION, target: 'crm', group_id: 29, created_at: createdAt, snapshot_captured_at: snapshot.captured_at,
     snapshot_sha256: hash(snapshot), decision: copy(decision), authority_sha256: hash(decision.authority_text), operations, assessments,
     decisions: { resolved: [
-      { key: 'PROGRAM_TOTAL_TAX_PERCENT', program_ids: [25, 26], value: 21 },
+      { key: 'PROGRAM_TOTAL_TAX_PERCENT', program_ids: [25, 26, ...(decision.contorno_standard_8_visits_1040_vat21 === true ? [11] : [])], value: 21 },
       ...(decision.glp1_three_medical_reviews_no_vat === true ? [{ key: 'GLP1_EXISTING_THREE_MEDICAL_REVIEWS_NO_VAT', program_ids: [22],
         value: copy(PROFILE_GLP1), pen_included: false, composition_changed: false }] : []),
       { key: 'DEFAULT_INTERVAL_DAYS', value: 15, applied: false,
-        reason: 'The exact clinic protocol literally specifies one visit per week for both reviewed programmes, independently of importer proposals or stored offsets.',
-        source_cadences: SPECS.filter(spec => spec.id !== 22).map(spec => ({ program_id: spec.id, ...copy(spec.source_cadence) })) },
+        reason: 'The exact clinic protocols literally specify one visit per week for the reviewed corporal programmes, independently of importer proposals or stored offsets.',
+        source_cadences: SPECS.filter(spec => spec.id !== 22 && (!spec.authority_flag || decision[spec.authority_flag] === true)).map(spec => ({ program_id: spec.id, ...copy(spec.source_cadence) })) },
     ], blocked: copy(BLOCKED) },
     policy: { offline_plan_only: true, application_bootstrapped: false, default_interval_applied: false,
       new_programs_created: false, treatments_changed: false, purchases_changed: false, appointments_changed: false,
@@ -176,7 +188,8 @@ function assertPlan(plan) {
         || hash(record.payload) !== record.payload_sha256 || record.payload.expected_version !== record.expected_version
         || hash(normalizeValues(record.payload)) !== hash(record.after)) fail('BS_CLOSURE_OPERATION_CHANGED');
     const before = previousReplies.values(record.before);
-    if (spec.authority_flag && body.decision[spec.authority_flag] !== true) fail('BS_CLOSURE_GLP1_EXPLICIT_AUTHORITY_REQUIRED');
+    if (spec.authority_flag && body.decision[spec.authority_flag] !== true) fail(spec.id === 11
+      ? 'BS_CLOSURE_CONTORNO_EXPLICIT_AUTHORITY_REQUIRED' : 'BS_CLOSURE_GLP1_EXPLICIT_AUTHORITY_REQUIRED');
     assertReviewedRow(record.before, spec, before); assertProtectedFields(before, record.after, spec);
     if (record.activation && (!body.decision.activation_ids.includes(record.program_id) || record.before.status !== 'draft'
         || record.after.status !== 'active' || !activePreviewMatches(record.canonical_preview, record.before,

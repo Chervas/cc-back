@@ -13,6 +13,7 @@ router.use(authMiddleware);
 
 router.get('/patients/:patientId/workspace', controller.getWorkspace);
 router.get('/patients/:patientId/appointment-options', controller.getAppointmentPurchaseOptions);
+router.post('/patients/:patientId/program-enrollments', controller.assignProgramEnrollment);
 router.get('/catalog', controller.listCatalog);
 router.post('/patients/:patientId/budgets', controller.createBudget);
 router.patch('/budgets/:budgetId', controller.updateBudget);
