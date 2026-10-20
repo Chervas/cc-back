@@ -11,6 +11,9 @@ test('both appointment reminders expose location requirements, including catalog
   assert.equal(usesClinicDirections({ nodes: [{ type: 'action/send_whatsapp', config: { variables: { 4: '{{clinica.url_como_llegar}}' } } }] }), true);
   assert.equal(usesClinicDirections({ nodes: [{ type: 'condition/ai', config: { prompt: 'clinica.url_como_llegar' } }] }), false);
   assert.equal(usesClinicDirections({ nodes: [] }), false);
+  for (const nodes of [null, {}, 'legacy malformed graph', [null]]) {
+    assert.equal(usesClinicDirections({ nodes }), false);
+  }
 });
 
 test('only an identified connected location is ready; warnings never imply a WhatsApp block', () => {

@@ -1,7 +1,7 @@
 'use strict';
 
 function usesClinicDirections(template) {
-  return (template?.nodes || []).some(node => node.type === 'action/send_whatsapp'
+  return (Array.isArray(template?.nodes) ? template.nodes : []).some(node => node?.type === 'action/send_whatsapp'
     && (/clinica\.(?:url_como_llegar|url_perfil_google)/.test(JSON.stringify(node.config || {}))
       || /clinicaclick_recordatorio_(?:mismo_dia|dia_antes)/.test(JSON.stringify(node.config || {}))));
 }
