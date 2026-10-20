@@ -118,7 +118,7 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     buildValidationError:(code,message,details)=>({code,message,details}),
     findAppointmentCreatedTreatmentConflict:async()=>null,findMessageReceivedTriggerConflict:async()=>null,findAppointmentReminderTriggerConflict:async()=>null,
     loadClinicNameMapFromRows:async()=>new Map(),loadCatalogBindingMapForRows:async()=>new Map(),loadLatestActivePublishedVersionMap:async()=>new Map(),
-    mapTemplateWithLifecycle:row=>row.toJSON(),resolveTemplateFamilyWhere:async ref=>({public_id:ref}),
+    mapTemplateWithLifecycle:row=>displayProjection(row.toJSON()),resolveTemplateFamilyWhere:async ref=>({public_id:ref}),
     runScheduledTemplateBackfill:async row=>({skipped:!row.is_active}),
     require:name=>{if(name==='../lib/automation-runtime-stop')return stop;
       if(name==='../lib/appointment-single-notice-publication')return require('../../lib/appointment-single-notice-publication');
@@ -139,9 +139,13 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   const foreign=await db.AutomationFlowTemplateV2.create({...values,public_id:source.public_id,clinic_id:8,
     template_key:'env_o_de_datos_de_la_cita_tras_agendar__clinic_8',entry_node_id:'N1',nodes:validNodes,is_active:true});
   const publication=require('../../lib/appointment-single-notice-publication'),entry=publication.planEntry(source.toJSON());
+  function displayProjection(row){
+    const stored_graph_hash=publication.hash({entry_node_id:row.entry_node_id,trigger_type:row.trigger_type,nodes:row.nodes});
+    return {...row,stored_graph_hash,nodes:row.nodes.map(n=>({...n,config:{...n.config,TESTONLY_display_default:true}}))};
+  }
   let writes=0;
   async function request(method,url,body){
-    if(method==='GET')return {data:await db.AutomationFlowTemplateV2.findAll({where:{public_id:source.public_id}}).then(rows=>rows.map(row=>row.toJSON()))};
+    if(method==='GET')return {data:await db.AutomationFlowTemplateV2.findAll({where:{public_id:source.public_id}}).then(rows=>rows.map(row=>displayProjection(row.toJSON())))};
     writes++;let result,status=200;
     const res={status(code){status=code;return this;},json(value){result=value;return this;}};
     if(url.endsWith('/publish'))await native.publishTemplateVersion({params:{template_ref:source.public_id,version:url.split('/').at(-2)},body},res);

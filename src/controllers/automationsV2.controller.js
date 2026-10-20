@@ -2888,6 +2888,11 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
   };
 
   if (includeNodes) {
+    // The editor DTO normalizes legacy defaults; operators must fingerprint
+    // the stored graph rather than silently persisting its display projection.
+    base.stored_graph_hash = require('../lib/appointment-single-notice-publication').hash({
+      entry_node_id: item.entry_node_id, trigger_type: item.trigger_type, nodes: item.nodes,
+    });
     const rawNodes = normalizeNodesInput(Array.isArray(item.nodes) ? item.nodes : []);
     base.nodes = applyTriggerConfigToNodes({
       triggerType: item.trigger_type,

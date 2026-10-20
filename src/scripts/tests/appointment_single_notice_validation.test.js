@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
-const {planEntry,validatePreservedNodeConfigs}=require('../../lib/appointment-single-notice-publication');
+const {hash,planEntry,publishEntry,validatePreservedNodeConfigs}=require('../../lib/appointment-single-notice-publication');
 
 function source(){
   return {id:1,public_id:'TESTONLY_notice',template_key:'env_o_de_datos_de_la_cita_tras_agendar__clinic_7',
@@ -76,4 +76,27 @@ test('already-valid nodes retain ordinary validation results without a second lo
   const before=source(),nodes=planEntry(before).body.nodes;let calls=0;const valid={ok:true,errors:[]};
   assert.equal(await validatePreservedNodeConfigs(before,nodes,async()=>{calls++;return valid}),valid);
   assert.equal(calls,1);
+});
+
+test('publication verifies stored fingerprints rather than normalized editor projections',async()=>{
+  const before={...source(),is_active:false,is_system:false},plan=planEntry(before);
+  const project=row=>({...row,stored_graph_hash:hash({entry_node_id:row.entry_node_id,trigger_type:row.trigger_type,nodes:row.nodes}),
+    nodes:row.nodes.map(node=>({...node,config:{...node.config,TESTONLY_display_default:true}}))});
+  let writes=0;
+  const result=await publishEntry(plan,async(method,url,body)=>{
+    if(method==='GET')return {data:[project(before)]};
+    writes++;
+    if(url.endsWith('/publish'))return {data:project({...before,...plan.body,version:2,published_at:'2030-01-02T00:00:00Z'})};
+    assert.equal(hash(body.nodes),hash(plan.body.nodes));
+    return {data:project({...before,...body,version:2,published_at:null})};
+  });
+  assert.equal(result.version,2);assert.equal(result.is_active,false);assert.equal(writes,2);
+});
+
+test('a different stored fingerprint blocks publication even if the editor projection looks unchanged',async()=>{
+  const before={...source(),is_active:false,is_system:false},plan=planEntry(before);
+  await assert.rejects(publishEntry(plan,async method=>{
+    assert.equal(method,'GET');
+    return {data:[{...before,stored_graph_hash:'0'.repeat(64)}]};
+  }),/single_notice_source_changed/);
 });

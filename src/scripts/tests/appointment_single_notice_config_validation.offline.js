@@ -25,7 +25,7 @@ try{
   }
   const filename=require.resolve('../../controllers/automationsV2.controller');
   const m=new Module(filename,module);m.filename=filename;m.paths=Module._nodeModulePaths(path.dirname(filename));
-  m._compile(fs.readFileSync(filename,'utf8')+'\nexports.__qaConfig=validateNodeConfigs;exports.__qaGraph=validateFlowGraph;',filename);
+  m._compile(fs.readFileSync(filename,'utf8')+'\nexports.__qaConfig=validateNodeConfigs;exports.__qaGraph=validateFlowGraph;exports.__qaMap=mapTemplate;',filename);
   native=m.exports;
 }finally{console.log=log;}
 
@@ -37,6 +37,11 @@ try{
       const originalHash=hash(entry.source),candidateHash=hash(entry.body.nodes);
       const nodes=preservedNodes(entry.source,entry.body),graph=native.__qaGraph(entry.body);
       const result=await validatePreservedNodeConfigs(entry.source,nodes,native.__qaConfig);
+      for(const row of [entry.source,{...entry.source,...entry.body}]){
+        const mapped=native.__qaMap(row,{access:{is_admin:true,user_id:1}});
+        assert.equal(mapped.stored_graph_hash,hash({entry_node_id:row.entry_node_id,trigger_type:row.trigger_type,nodes:row.nodes}),
+          'DTO_FINGERPRINT_MUST_IDENTIFY_STORED_GRAPH');
+      }
       assert.equal(hash(entry.source),originalHash,'CONFIG_VALIDATION_CHANGED_SOURCE');
       assert.equal(hash(nodes),candidateHash,'CONFIG_VALIDATION_CHANGED_CANDIDATE');
       report.unchangedGraphs++;
