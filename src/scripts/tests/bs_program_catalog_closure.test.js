@@ -13,7 +13,7 @@ function fixture() {
     authority_reference: 'Carlos, respuesta explícita sobre programas del 20/10/2026',
     authority_text: 'Aplicar IVA 21 % a los programas corporales; mantener las pautas escritas y usar 15 días sólo si no hay pauta. Activar Ligereza y Transición si la validación canónica lo permite.',
     corporate_program_tax_percent: 21, default_interval_days: 15, activation_ids: [25, 26] };
-  const programs = planner.SPECS.map(spec => ({ id: spec.id, public_id: spec.public_id, clinic_id: spec.clinic_id,
+  const programs = planner.SPECS.filter(spec => spec.id !== 22).map(spec => ({ id: spec.id, public_id: spec.public_id, clinic_id: spec.clinic_id,
     name: `Oferta ${spec.reference}`, kind: 'program', status: 'draft', version_number: 2,
     total_price: spec.id === 25 ? '430.00' : '670.00', price_profile: null, cadence: null,
     notes: 'Condiciones clínicas y procedencia documental conservadas sin reescritura.',
@@ -135,7 +135,7 @@ test('does not preserve an invented 15-day proposal that conflicts with the lite
   }
 });
 
-test('GLP1 and Contorno remain explicitly blocked, without guessing pen, carboxytherapy or HIFU', () => {
+test('GLP1 without its new explicit tax authority and Contorno remain blocked, without guessing techniques or a pen', () => {
   const input = fixture();
   for (const id of [19, 20, 21, 22]) input.snapshot.programs.push(otherProgram(input, id));
   const before = hash(input.snapshot.programs.slice(2)), plan = planner.buildPlan(input);
@@ -144,8 +144,39 @@ test('GLP1 and Contorno remain explicitly blocked, without guessing pen, carboxy
   for (const id of [19, 20, 21]) {
     assert.match(plan.assessments.find(assessment => assessment.program_id === id).reason, /CARBOXYTHERAPY_HIFU/);
   }
-  assert.match(plan.assessments.find(assessment => assessment.program_id === 22).reason, /GLP1_CONTENT/);
-  assert.deepEqual(plan.decisions.blocked.map(decision => decision.program_id), [22, 19, 20, 21]);
+  assert.match(plan.assessments.find(assessment => assessment.program_id === 22).reason, /GLP1_EXPLICIT_AUTHORITY/);
+  assert.deepEqual(plan.decisions.blocked.map(decision => decision.program_id), [19, 20, 21]);
+});
+
+function addGlp(input) {
+  const spec = planner.SPECS.find(spec => spec.id === 22), template = input.snapshot.programs[0];
+  input.snapshot.programs.push({ ...copy(template), id: 22, public_id: spec.public_id, name: 'Programa GLP-1', total_price: '250.00',
+    appointments: spec.treatments.map((id, index) => ({ key: `obe_22_${index + 1}`, label: `Revisión médica ${index + 1}`,
+      treatment_ids: [id], offset_days: index * 15 })) });
+  return input;
+}
+test('new explicit reply prepares GLP1 exemption while preserving three reviews, 250 EUR and 0/15/30, without a pen', () => {
+  const input = addGlp(fixture()); input.decision.glp1_three_medical_reviews_no_vat = true; input.decision.activation_ids.push(22);
+  const initial = planner.buildPlan(input), proposed = initial.operations.find(operation => operation.program_id === 22);
+  assert.deepEqual(proposed.after.price_profile, planner.PROFILE_GLP1); assert.equal(proposed.after.total_price, 250);
+  assert.equal(proposed.after.appointments.length, 3);
+  assert.deepEqual(proposed.after.appointments.map(appointment => appointment.treatment_ids), [[2123], [2123], [2123]]);
+  assert.deepEqual(proposed.after.appointments.map(appointment => appointment.offset_days), [0, 15, 30]);
+  assert.equal(proposed.after.notes, input.snapshot.programs[2].notes); assert.equal(proposed.after.status, 'draft');
+  const active = planner.buildPlan({ ...input, previews: [preview(proposed)] });
+  assert.equal(active.operations.find(operation => operation.program_id === 22).after.status, 'active');
+  assert.equal(active.decisions.resolved.find(decision => decision.key === 'GLP1_EXISTING_THREE_MEDICAL_REVIEWS_NO_VAT').pen_included, false);
+  planner.assertPlan(initial); planner.assertPlan(active);
+});
+test('GLP1 cannot be widened to a pen, other techniques, a fourth review or generic corporate VAT', () => {
+  for (const mutate of [input => input.snapshot.programs[2].appointments.push({ ...copy(input.snapshot.programs[2].appointments[0]), key: 'fourth_review' }),
+    input => { input.snapshot.programs[2].appointments[0].treatment_ids.push(2111); },
+    input => { input.snapshot.programs[2].price_profile = copy(planner.PROFILE_21); }]) {
+    const input = addGlp(fixture()); input.decision.glp1_three_medical_reviews_no_vat = true; mutate(input);
+    assert.throws(() => planner.buildPlan(input), /BS_CLOSURE_/);
+  }
+  const input = fixture(); input.decision.activation_ids.push(22);
+  assert.throws(() => planner.buildPlan(input), /GLP1_EXPLICIT_AUTHORITY_REQUIRED/);
 });
 
 test('does not rewrite unrelated capillary, medical, individual or other programme definitions', () => {
