@@ -2386,7 +2386,6 @@ async function getAdminScopedClinicIdsForUser(userId) {
 async function canEditBloqueos(actorId, targetUserId, clinicaId, dependencies = {}) {
     const globalAdminCheck = dependencies.globalAdminCheck || isAdmin;
     const staffPivotCheck = dependencies.staffPivotCheck || hasStaffPivot;
-    const ownerPivotCheck = dependencies.ownerPivotCheck || isOwnerPivot;
     const teamManageCheck = dependencies.teamManageCheck || canManageTeamInClinic;
     const selfScheduleCheck = dependencies.selfScheduleCheck || canManageOwnScheduleInClinic;
     const adminClinicIdsLoader = dependencies.adminClinicIdsLoader || getAdminScopedClinicIdsForUser;
@@ -2424,14 +2423,9 @@ async function canEditBloqueos(actorId, targetUserId, clinicaId, dependencies = 
     const cid = Number(clinicaId);
     if (!Number.isFinite(cid)) return false;
 
-    // Ausencias de terceros: team.manage habilita la operativa exclusivamente
-    // dentro de la clínica concedida. Los propietarios permanecen protegidos
-    // frente a administración/recepción; solo otro propietario (o admin global)
-    // puede gestionar su ausencia.
+    // Blocking a local agenda is scheduling, not ownership administration.
+    // team.manage also covers a proprietor's agenda in this clinic only.
     if (!await teamManageCheck(actorId, cid)) return false;
-    if (await ownerPivotCheck(targetUserId, cid) && !await ownerPivotCheck(actorId, cid)) {
-        return false;
-    }
 
     // Evitar bloqueos huérfanos: el usuario objetivo debe pertenecer a la clínica.
     return staffPivotCheck(targetUserId, cid);

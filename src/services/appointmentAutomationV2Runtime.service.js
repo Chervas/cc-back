@@ -1880,6 +1880,8 @@ module.exports = {
   APPOINTMENT_TRIGGER_TYPES,
   SCHEDULED_APPOINTMENT_TRIGGER_TYPES,
   buildIdempotencyKey,
+  buildRescheduledWindowIdentifier,
+  resolveTemplateForCitaEvent,
   buildScheduledWindowIdentifier,
   computeScheduledRunAt,
   resolveScheduledTemplatesForCita,

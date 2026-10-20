@@ -174,7 +174,7 @@ async function main() {
   assert.equal(await canEditBloqueos(901, 200, 56, {
     ...scopedAbsenceDependencies,
     ownerPivotCheck: async (userId, clinicId) => userId === 200 && clinicId === 56,
-  }), false, 'admin_staff/reception cannot manage an owner absence');
+  }), true, 'team.manage permits local agenda blocks for owners, not ownership administration');
 
   console.log('agency marketing/privacy contract: ok');
 }

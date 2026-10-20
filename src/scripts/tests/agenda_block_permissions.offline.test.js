@@ -41,7 +41,47 @@ test('administrative staff retains local appointment/team/room-block permissions
   assert.equal(await canEdit(142, 200, 73, dependencies), false);
 });
 
-test('owner absences remain protected; ordinary reception permissions are not promoted to owner', async () => {
-  assert.equal(await canEdit(142, 201, 72, dependencies), false);
+test('local team managers can block a proprietor agenda without gaining global or other-clinic authority', async () => {
+  assert.equal(await canEdit(142, 201, 72, dependencies), true);
+  assert.equal(await canEdit(142, 201, null, dependencies), false);
+  assert.equal(await canEdit(142, 201, 73, dependencies), false);
+  assert.equal(await canEdit(142, 201, 72, { ...dependencies, teamManageCheck: async () => false }), false);
+  assert.equal(await canEdit(142, 201, 72, { ...dependencies, staffPivotCheck: async () => false }), false);
   assert.equal(await canEdit(1, 201, 72, dependencies), true);
+});
+
+test('native permission DTO and creation handler allow local owner agenda blocks but keep conflicts and scope denials', async () => {
+  const native = {}; let created = [], conflict = null;
+  const context = { exports: native, console, DEFAULT_TIMEZONE: 'Europe/Madrid',
+    canEditBloqueos: (actor, target, clinic) => canEdit(actor, target, clinic, dependencies),
+    canAccessTargetPersonal: async () => true, getAccessibleClinicIdsForUser: async () => [72], isAdmin: () => false,
+    parseIntOrNull: value => Number(value) || null, getClinicTimezoneById: async () => 'Europe/Madrid',
+    buildPersonalBlockRange: () => ({ start: new Date('2030-01-01T09:00:00Z'), end: new Date('2030-01-01T10:00:00Z') }),
+    normalizeBloqueoTipo: () => 'ausencia', normalizePersonalBlockRecurrence: () => ({ recurrente: 'none', recurrente_hasta: null }),
+    findPersonalBlockAppointmentConflict: async () => conflict,
+    withPersonalAvailabilityMutation: async (_req, _target, work) => work({}),
+    DoctorBloqueo: { create: async values => { created.push(values); return { id: 900001, ...values }; } },
+    serializeBloqueo: value => value, availabilityResponse: (_req, value) => value,
+  };
+  for (const name of ['getPersonalBloqueosPermissions', 'createPersonalBloqueo']) {
+    const from = source.indexOf('exports.' + name + ' ='), to = source.indexOf('\nexports.', from + 10);
+    vm.runInNewContext(source.slice(from, to), context);
+  }
+  const call = async (handler, req) => { let status = 200, body;
+    await handler(req, { status(code) { status = code; return this; }, json(value) { body = value; } });
+    return { status, body };
+  };
+  const req = { userData: { userId: 142 }, params: { id: '201' }, body: { clinica_id: 72, tipo: 'ausencia' } };
+  const permissions = await call(native.getPersonalBloqueosPermissions, req);
+  assert.equal(permissions.body.can_write_bloqueos, true);
+  assert.equal(permissions.body.can_create_global_bloqueo, false);
+  assert.deepEqual(Array.from(permissions.body.allowed_clinic_ids_for_bloqueos), [72]);
+  assert.equal((await call(native.createPersonalBloqueo, req)).status, 201);
+  assert.equal(created.length, 1); assert.equal(created[0].doctor_id, 201); assert.equal(created[0].clinica_id, 72);
+  assert.equal(created[0].creado_por, 142); assert.equal(created[0].aplica_a_todas_clinicas, false);
+  conflict = { id_cita: 900099 };
+  assert.equal((await call(native.createPersonalBloqueo, req)).status, 409);
+  assert.equal((await call(native.createPersonalBloqueo, { ...req, body: { clinica_id: 73 } })).status, 403);
+  assert.equal((await call(native.createPersonalBloqueo, { ...req, body: {} })).status, 403);
+  assert.equal(created.length, 1);
 });
