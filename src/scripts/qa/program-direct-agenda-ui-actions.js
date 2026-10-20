@@ -14,12 +14,24 @@ const selectors = Object.freeze({
   searchDate: 'input[aria-label="Primer día de búsqueda"]', confirmBooking: '[data-qa="program-booking-confirm"]',
   chooseDate: '[data-qa="program-choose-date"]', viewAppointment: '[data-qa="program-view-appointment"]',
 });
-function createActions(page) {
+function createActions(page, { beforeClick } = {}) {
+  assert(beforeClick == null || typeof beforeClick === 'function', 'BEFORE_CLICK_MUST_BE_A_FUNCTION');
   const visible = selector => page.$eval(selector, node => !!node.getClientRects().length).catch(() => false);
   const click = async (selector, text) => {
     const handle = await page.evaluateHandle(({ selector, text }) => [...document.querySelectorAll(selector)]
       .find(node => node.getClientRects().length && !node.disabled && (!text || node.textContent.includes(text))), { selector, text });
     const element = handle.asElement(); assert(element, `VISIBLE_NATIVE_CONTROL_REQUIRED:${selector}:${text || ''}`);
+    if (beforeClick) {
+      const center = await element.evaluate(node => {
+        node.scrollIntoView({ block: 'center' });
+        const control = node.matches('mat-checkbox') ? node.querySelector('input[type="checkbox"]') : node;
+        const bounds = control.getBoundingClientRect();
+        return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+      });
+      // Recording feedback only. The callback must not activate the app; the
+      // single native DOM click below remains the sole control activation.
+      await beforeClick({ ...center, selector, text });
+    }
     // DOM activation of the visible native control avoids Chromium's hidden
     // tab IntersectionObserver wait. This is still the real Angular handler,
     // not a component method/debug hook or a substituted HTTP response.
