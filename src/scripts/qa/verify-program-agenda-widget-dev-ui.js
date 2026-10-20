@@ -182,7 +182,8 @@ async function runWidgetScenario({ page, connection, programId, programName = id
   // and not the ghost's click-to-accept handler. Coordinates retain its real
   // room/doctor subcolumn and move the first phase exactly 15 minutes later.
   report.manual_pointer = await page.evaluate(() => {
-    const ghost = document.querySelector('[data-qa="program-agenda-provisional"][data-program-session="qa_3"][data-program-active="true"]');
+    const ghost = [...document.querySelectorAll('[data-qa="program-agenda-provisional"][data-program-session="qa_3"][data-program-active="true"]')]
+      .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0];
     if (!ghost) throw Error('ACTIVE_QA3_GHOST_REQUIRED');
     ghost.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
     const surface = ghost.closest('ol')?.querySelector('[data-qa="agenda-slot-surface"]');
