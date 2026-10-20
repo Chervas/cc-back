@@ -101,7 +101,7 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   // Real create/publish controllers and InnoDB, with provider/configuration
   // validators isolated. Graph validation is the actual native implementation.
   const controller=fs.readFileSync(require.resolve('../../controllers/automationsV2.controller'),'utf8');
-  const native={};const cleanString=v=>String(v??'').trim()||null;
+  const native={};let activationConflict=false;const cleanString=v=>String(v??'').trim()||null;
   const sanitizeTemplateKey=v=>String(v||'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');
   const context={exports:native,console:{error(){}},structuredClone,db,Op:D.Op,AutomationFlowTemplateV2:db.AutomationFlowTemplateV2,
     Clinica:{findOne:async()=>({grupoClinicaId:99})},cleanString,sanitizeTemplateKey,buildTemplateKey:({templateKey})=>sanitizeTemplateKey(templateKey),
@@ -116,7 +116,9 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
       .map(n=>({code:'node_config_required',message:'TESTONLY legacy communication scope',
         details:{node_id:n.id,node_type:n.type,key:'communication_scope'}}))}),
     buildValidationError:(code,message,details)=>({code,message,details}),
-    findAppointmentCreatedTreatmentConflict:async()=>null,findMessageReceivedTriggerConflict:async()=>null,findAppointmentReminderTriggerConflict:async()=>null,
+    findAppointmentCreatedTreatmentConflict:async()=>activationConflict?{id:999}:null,
+    findMessageReceivedTriggerConflict:async()=>activationConflict?{id:999}:null,
+    findAppointmentReminderTriggerConflict:async()=>activationConflict?{id:999}:null,
     loadClinicNameMapFromRows:async()=>new Map(),loadCatalogBindingMapForRows:async()=>new Map(),loadLatestActivePublishedVersionMap:async()=>new Map(),
     mapTemplateWithLifecycle:row=>displayProjection(row.toJSON()),resolveTemplateFamilyWhere:async ref=>({public_id:ref}),
     runScheduledTemplateBackfill:async row=>({skipped:!row.is_active}),
@@ -152,6 +154,7 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     else await native.createTemplateDraft({body},res);
     assert.equal(status,url.endsWith('/publish')?200:201,JSON.stringify(result));return result;
   }
+  activationConflict=true;
   const published=await publication.publishEntry(entry,request);assert.equal(published.is_active,false);assert.equal(published.version,2);
   await foreign.reload();assert.equal(foreign.is_active,true);
   const installed=await db.AutomationFlowTemplateV2.findOne({where:{template_key:source.template_key,version:2}});
@@ -160,5 +163,14 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   assert.equal((await publication.publishEntry(entry,request)).skipped,true);assert.equal(writes,2);
   const tampered=structuredClone(entry.body);tampered.nodes.find(node=>node.type==='condition/ai_analysis').config.instruction='TESTONLY forbidden change';
   assert.throws(()=>publication.preservedNodes(source.toJSON(),tampered),{code:'single_notice_candidate_changed'});
+  const activeSource=await db.AutomationFlowTemplateV2.create({...source.toJSON(),id:undefined,public_id:'TESTONLY_conflict',
+    template_key:'env_o_de_datos_de_la_cita_tras_agendar__clinic_9',clinic_id:9,is_active:true});
+  const activeEntry=publication.planEntry(activeSource.toJSON());let conflictResponse,status;
+  const res={status(code){status=code;return this;},json(value){conflictResponse=value;return this;}};
+  await native.createTemplateDraft({body:activeEntry.body},res);assert.equal(status,201);
+  await native.publishTemplateVersion({params:{template_ref:activeSource.public_id,version:conflictResponse.data.version},body:{
+    single_notice_source_id:activeSource.id,preserve_activation:true,expected_published_version:1}},res);
+  assert.equal(status,409);assert.equal(conflictResponse.error,'appointment_treatment_trigger_conflict');
+  report.checks.push('Inactive versioning skips activation conflicts without enabling the family; an active candidate still fails its native conflict guard');
   report.checks.push('Native draft/publish controllers on owned SQL preserve exact scoped family, original trigger, inactive switch, all AI/decision configs and another clinic sharing the public ref; inherited scope omissions on unchanged published nodes are allowed without defaults, rerun no-ops and altered prompt is rejected before publication');
 }).catch(error=>{console.error(error);process.exitCode=1;});

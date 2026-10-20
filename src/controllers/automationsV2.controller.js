@@ -6491,7 +6491,9 @@ exports.publishTemplateVersion = async (req, res) => {
       });
     }
 
-    const treatmentConflict = await findAppointmentCreatedTreatmentConflict(row, triggerConfigResolution.trigger_config);
+    const preservedInactive = singleNoticeSource && !singleNoticeSource.is_active;
+    const treatmentConflict = preservedInactive ? null
+      : await findAppointmentCreatedTreatmentConflict(row, triggerConfigResolution.trigger_config);
     if (treatmentConflict) {
       return res.status(409).json({
         success: false,
@@ -6505,7 +6507,7 @@ exports.publishTemplateVersion = async (req, res) => {
       });
     }
 
-    const messageConflict = await findMessageReceivedTriggerConflict({
+    const messageConflict = preservedInactive ? null : await findMessageReceivedTriggerConflict({
       ...(row.get ? row.get({ plain: true }) : row),
       trigger_type: triggerResolution.trigger_type,
     }, triggerConfigResolution.trigger_config);
@@ -6522,7 +6524,7 @@ exports.publishTemplateVersion = async (req, res) => {
       });
     }
 
-    const reminderConflict = await findAppointmentReminderTriggerConflict({
+    const reminderConflict = preservedInactive ? null : await findAppointmentReminderTriggerConflict({
       ...(row.get ? row.get({ plain: true }) : row),
       trigger_type: triggerResolution.trigger_type,
     }, triggerConfigResolution.trigger_config);
@@ -6545,7 +6547,8 @@ exports.publishTemplateVersion = async (req, res) => {
         const rows=await AutomationFlowTemplateV2.findAll({where:familyWhere,order:[['id','ASC']],transaction,lock:transaction.LOCK.UPDATE});
         const source=rows.find(value=>Number(value.id)===Number(singleNoticeSource.id));
         const current=rows.find(value=>Number(value.id)===Number(row.id));
-        if (!source||!current||current.published_at||Number(require('../lib/automation-runtime-stop').latestPublished(rows)?.id)!==Number(source.id)) {
+        if (!source||!current||current.published_at||!!source.is_active!==!!singleNoticeSource.is_active
+          ||Number(require('../lib/automation-runtime-stop').latestPublished(rows)?.id)!==Number(source.id)) {
           throw Object.assign(Error('single_notice_source_changed'),{code:'single_notice_source_changed',statusCode:409});
         }
         const publication=require('../lib/appointment-single-notice-publication');
