@@ -35,7 +35,8 @@ test('native V2 program summary: owned SQL receipt/outbox, whole graph, replay, 
   engine = module.exports;
   const emitted = [], deps = { db, engine, stop: t.dependencies['../lib/automation-runtime-stop'], now: () => t.clock,
     enabled: () => t.enabled, enqueueJob: requests.enqueueUniqueJobRequest, deliveryReady: async () => !t.blocked,
-    authorizeActor: async () => { if (t.blocked) throw Error('TESTONLY_ACCESS_BLOCKED'); }, communicationAllowed: async () => { if (t.blocked) throw Error('TESTONLY_CHANNEL_BLOCKED'); },
+    authorizeActor: async () => { if (t.blocked || t.accessDenied) throw Error('TESTONLY_ACCESS_BLOCKED'); },
+    communicationAllowed: async () => { if (t.blocked || t.preferenceDenied) throw Error('TESTONLY_CHANNEL_BLOCKED'); },
     emitAppointments: rows => emitted.push(...rows.map(row => row.id_cita)), wake: async (execution, transaction, dueAt) => sql.query(
       "UPDATE JobRequests SET next_run_at=:dueAt WHERE type='automations_v2_execute' AND status IN ('pending','waiting') AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.execution_id'))=:id",
       { replacements: { dueAt, id: String(execution.id) }, transaction }) };
@@ -224,5 +225,35 @@ test('native V2 program summary: owned SQL receipt/outbox, whole graph, replay, 
   assert.equal(await runtime.current(gated.request), null);
   assert.equal((await reply(gated.message, 'yes')).outcome.ignored, true);
   report.checks.push('A booking receipt created while the gate is OFF creates zero events/jobs, yet permanently supersedes the previous token when the gate later reopens.');
+
+  // A pre-existing denial must reach the standard failure/reception branches,
+  // not strand an initially queued receipt before a V2 execution exists.
+  for (const [flag, expectedError] of [['preferenceDenied', 'TESTONLY_CHANNEL_BLOCKED'], ['accessDenied', 'TESTONLY_ACCESS_BLOCKED']]) {
+    await db.CitaPaciente.update({ estado: 'pendiente' }, { where: { voucher_id: voucher.id } });
+    for (const appointment of appointments) await appointment.reload();
+    t[flag] = true;
+    const before = { messages: await db.Message.count(), transport: t.queued.size, notifications: await db.Notification.count() };
+    const denied = await produce(); assert.equal(denied.metadata.delivery_enabled, true);
+    const attempts = await Promise.all(Array.from({ length: 5 }, () => runtime.dispatch({ request_event_id: denied.id, clinic_id: 72 })));
+    assert.equal(new Set(attempts.map(row => row.result.execution_id)).size, 1);
+    const deniedExecutionId = attempts[0].result.execution_id;
+    const finished = await run(deniedExecutionId); assert.equal(finished.status, 'completed');
+    const failure = await db.FlowExecutionLogV2.findOne({ where: { flow_execution_id: deniedExecutionId, node_id: 'N2', status: 'error' } });
+    assert.equal(failure.error_message, expectedError);
+    const reviewed = await resolution(denied); assert.equal(reviewed.metadata.state, 'review_required');
+    assert.equal(reviewed.metadata.reason, 'delivery_failed'); assert.deepEqual(reviewed.metadata.updated_appointment_ids, []);
+    assert.equal(await db.Message.count(), before.messages); assert.equal(t.queued.size, before.transport);
+    assert.equal(await db.Notification.count(), before.notifications + 2); await unchanged();
+    const live = await runtime.view({ voucherId: voucher.id });
+    assert.equal(live.status, 'review_required'); assert.equal(live.sent, false); assert.equal(live.accepted, false);
+    await run(deniedExecutionId);
+    await runtime.dispatch({ request_event_id: denied.id, clinic_id: 72 });
+    assert.equal(await db.Message.count(), before.messages); assert.equal(t.queued.size, before.transport);
+    assert.equal(await db.Notification.count(), before.notifications + 2);
+    assert.equal(await db.PatientOperationalEvent.count({ where: { event_type: C.TRANSITION,
+      [S.Op.and]: S.where(S.literal("JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.request_event_id'))"), String(denied.id)) } }), 1);
+    t[flag] = false;
+  }
+  report.checks.push('WhatsApp preference denial and revoked actor access already present at booking both survive five concurrent dispatches into one native N2 failure, audited N11 review and two deduplicated reception alerts; zero Message/transport/appointment changes, truthful review_required projection, and restart/replay never repeat alerts.');
   assert.equal(approved.status, 'APPROVED'); // Synthetic SQL only, never a Meta approval.
 }));

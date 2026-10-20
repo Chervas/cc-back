@@ -152,7 +152,9 @@ function createRuntime(deps) {
   async function dispatch({ request_event_id: eventId, clinic_id: clinicId }) {
     const request = await db.PatientOperationalEvent.findByPk(C.id(eventId));
     if (!request || Number(request.clinic_id) !== Number(clinicId) || !await current(request)) return { status: 'completed', result: { skipped: true, reason: 'disabled_or_superseded' } };
-    await communicationAllowed(request);
+    // Channel/actor vetoes belong to the existing send node's preflight. Let
+    // that node fail into the audited review/notification branches, rather
+    // than leaving a queued receipt with no execution or reception follow-up.
     const template = await db.AutomationFlowTemplateV2.findByPk(request.metadata.template_version_id);
     let execution = await db.FlowExecutionV2.findOne({ where: { idempotency_key: key(request) } });
     if (!execution) {
