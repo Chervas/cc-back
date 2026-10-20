@@ -129,3 +129,17 @@ test('the draft window is bounded to thirty original identities and never accept
   assert.equal(initial.rows.length,30);assert.equal(initial.rows[29].key,'s29');
   assert.throws(()=>normalize(p,{from_date:'2030-01-07',days:1,draft_strategy:{action:'reset',sessions:p.sessions.slice(0,31).map(row=>({key:row.key,placed:false}))}},now),{code:'program_draft_invalid'});
 });
+test('an invalidated placed draft clears only its own placement and keeps valid prefix/following proposals coherent with placed_keys',async()=>{
+  for(const action of ['reset','cascade','excluded_day']){
+    const f=fixture(),supplied=rows(undefined,[0,1,2]);
+    const newDate=action==='cascade'?'2030-01-23T10:00':null;
+    if(action!=='excluded_day')f.context.installations.get(9).busy.push({start:action==='cascade'?'2030-01-23T09:00Z':'2030-01-22T09:00Z',end:action==='cascade'?'2030-01-23T09:30Z':'2030-01-22T09:30Z'});
+    const response=await f.run(input(supplied,action==='cascade'?'cascade':'reset',{
+      ...(newDate?{pivot_key:'s1',start_local:newDate}:{}),...(action==='excluded_day'?{preferences:{exclude_weekdays:[2]}}:{})}));
+    assert.deepEqual(response.proposals.map(row=>[row.key,row.placed,!!row.solution]),[['s0',true,true],['s1',false,false],['s2',true,true]],action);
+    assert.deepEqual(response.draft_strategy.placed_keys,['s0','s2'],action);
+    assert.equal(response.proposals[1].requested_start_local,newDate || '2030-01-22T10:00');
+    assert.equal(response.proposals[2].solution.start_local,action==='cascade'?'2030-02-07T10:00':'2030-02-06T10:00');
+    assert.equal(f.context.installations.get(9).busy.length,action==='excluded_day'?0:1);
+  }
+});

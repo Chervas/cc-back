@@ -224,6 +224,10 @@ test('owned SQL + HTTP: clinical enrollment without economic/outbound writes, im
           draft_strategy: { action: 'cascade', pivot_key: 's1', start_local: '2030-02-11T09:00', sessions: draftRows } });
         assert.equal(occupiedDraft.status, 200, JSON.stringify(occupiedDraft.body));
         assert.equal(occupiedDraft.body.proposals[0].solution, null);
+        assert.equal(occupiedDraft.body.proposals[0].placed, false);
+        assert.equal(occupiedDraft.body.proposals[1].placed, true);
+        assert(occupiedDraft.body.proposals[1].solution);
+        assert.deepEqual(occupiedDraft.body.draft_strategy.placed_keys,['s2']);
         assert.equal(occupiedDraft.body.proposals[0].requires_schedule_confirmation, undefined);
         const badResource = clone(draftRows); badResource[0].selections[Object.keys(badResource[0].selections)[0]].doctor_id = 999;
         assert.equal((await send('POST', externalUrl + '/program-proposals', { from_date: '2030-03-01', days: 45,

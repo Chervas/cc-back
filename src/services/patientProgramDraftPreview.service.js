@@ -91,7 +91,6 @@ async function preview({ plan, payload, actorId, now, contextFor, dto, solve, sl
   const base = operational.length ? await contextFor(plan, operational, lower, upper) : null;
   const originPosition = pivot?.position ?? rows[0].position;
   const affected = draft.action === 'reset' ? rows.filter(row => !row.placed) : draft.action === 'initial' ? rows : rows.filter(row => row.position >= originPosition);
-  const placed = rows.filter(row => row.placed).map(row => row.key);
   const withinYear = instant => new Date(instant) > now && new Date(instant) < new Date(+now + 366 * 86400000);
   function run(newPivotLocal = null, unchanged = false) {
     const context = base ? cloneProgramContext(base) : null, solutions = new Map(), restrictions = new Map(), requested = new Map(), warnings = new Map(), hardExcluded = new Set(), preferredDoctors = new Map();
@@ -190,7 +189,7 @@ async function preview({ plan, payload, actorId, now, contextFor, dto, solve, sl
         }
       }
     }
-    const proposals = rows.map(row => ({ key: row.key, label: row.label, solution: solutions.get(row.key) || null, placed: row.placed,
+    const proposals = rows.map(row => ({ key: row.key, label: row.label, solution: solutions.get(row.key) || null, placed: row.placed && solutions.has(row.key),
       selections: row.choice.selections, priority_acknowledged: row.choice.priority_acknowledged,
       ...(row.duration_selection || {}), ...(requested.has(row.key) ? { requested_start_local: requested.get(row.key) } : {}),
       duration_required: row.duration_minutes == null,
@@ -217,7 +216,7 @@ async function preview({ plan, payload, actorId, now, contextFor, dto, solve, sl
     if (!result) { applied = false; result = run(null, true); }
   } else result = run();
   return { ...dto(plan), proposals: result.proposals, unproposed_count: plan.sessions.filter(row => row.scheduling_status === 'pending').length - rows.length,
-    draft_strategy: { action: draft.action, ...(pivot ? { pivot_key: pivot.key } : {}), applied, affected_keys: affected.map(row=>row.key), placed_keys: placed,
+    draft_strategy: { action: draft.action, ...(pivot ? { pivot_key: pivot.key } : {}), applied, affected_keys: affected.map(row=>row.key), placed_keys: result.proposals.filter(row=>row.placed).map(row=>row.key),
       ...(draft.preferences ? {preferences:draft.preferences} : {}),
       ...(!applied ? { reason_code: 'program_draft_no_candidate' } : {}) } };
 }
