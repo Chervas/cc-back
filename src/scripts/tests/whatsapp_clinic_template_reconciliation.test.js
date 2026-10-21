@@ -25,7 +25,7 @@ function runtime() {
   const original = source(), rows = [original], calls = [], f = { sourceValid: true, routed: true, fail: null, jobsFail: false };
   const wrap = row => ({ ...row, async update(patch) { Object.assign(row, patch); Object.assign(this, patch); } });
   const model = {
-    findAll: async ({ where }) => rows.filter(row => where.clinic_id ? row.clinic_id === where.clinic_id && row.origin === 'custom' && row.is_active : row.waba_id === where.waba_id),
+    findAll: async ({ where }) => rows.filter(row => where.clinic_id ? row.clinic_id === where.clinic_id && row.origin === 'custom' : row.waba_id === where.waba_id),
     findByPk: async (id, opts) => {
       const row = rows.find(row => row.id === id);
       if (id === 1 && !f.sourceValid) return { ...row, is_active: false };
@@ -68,6 +68,15 @@ test('incompatible copies and a foreign or retired target go to review, never ov
   const changed = source({ id: 2, waba_id: 'second', components: [{ type: 'BODY', text: 'TESTONLY changed address' }] });
   const diverged = rules.planClinicTemplates({ clinicId: 58, wabaId: 'new', sources: [source(), changed], targets: [] });
   assert.equal(diverged.plan.length, 0); assert.equal(diverged.reviews[0].reason, 'clinic_template_copies_diverged');
+});
+test('equal visible titles do not merge distinct identities or resurrect a predecessor retired on another WABA', () => {
+  const other = source({ id: 3, name: 'testonly_distinct', components: [{ type: 'BODY', text: 'TESTONLY independent template' }] });
+  const distinct = rules.planClinicTemplates({ clinicId: 58, wabaId: 'new', sources: [source(), other], targets: [] });
+  assert.equal(distinct.plan.length, 2); assert.equal(distinct.reviews.length, 0);
+  const retired = source({ id: 4, waba_id: 'second', is_active: false, superseded_by_template_id: 5 });
+  const result = rules.planClinicTemplates({ clinicId: 58, wabaId: 'new', sources: [source(), retired, other], targets: [] });
+  assert.equal(result.plan.length, 1); assert.equal(result.plan[0].source.name, other.name);
+  assert.equal(result.reviews[0].reason, 'clinic_template_identity_retired_elsewhere');
 });
 test('native reconciliation checkpoints before POST, preserves author/content and does not repeat on restart', async () => {
   const f = runtime();

@@ -20,13 +20,19 @@ function isSource(row, clinicId) {
 }
 function planClinicTemplates({ clinicId, wabaId, sources, targets }) {
   const groups = new Map(), plan = [], reviews = [];
+  const identity = row => JSON.stringify([row.created_by_user_id, row.name, row.language]);
+  const retired = new Set(sources.map(plain).filter(row => Number(row.clinic_id) === Number(clinicId)
+    && row.origin === 'custom' && (!active(row) || row.retired_at || row.superseded_by_template_id)).map(identity));
   for (const row of sources.map(plain).filter(row => isSource(row, clinicId) && row.meta_template_id
     && ['APPROVED', 'PENDING', 'IN_REVIEW'].includes(row.status))) {
-    const key = JSON.stringify([row.created_by_user_id, row.display_name || row.name, row.language]);
+    const key = identity(row);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
   for (const rows of groups.values()) {
+    if (retired.has(identity(rows[0]))) {
+      reviews.push({ reason: 'clinic_template_identity_retired_elsewhere', source_ids: rows.map(row => row.id) }); continue;
+    }
     if (new Set(rows.map(contract)).size > 1) {
       reviews.push({ reason: 'clinic_template_copies_diverged', source_ids: rows.map(row => row.id) }); continue;
     }
@@ -39,6 +45,9 @@ function planClinicTemplates({ clinicId, wabaId, sources, targets }) {
     const equivalent = targets.map(plain).find(row => isSource(row, clinicId)
       && Number(row.created_by_user_id) === Number(source.created_by_user_id)
       && (row.display_name || row.name) === (source.display_name || source.name) && contract(row) === contract(source));
+    if (equivalent && equivalent.name !== source.name) {
+      reviews.push({ reason: 'clinic_template_equivalent_unlinked', source_ids: [source.id], target_id: equivalent.id }); continue;
+    }
     if (equivalent && equivalent.rejection_reason !== 'custom_submission_not_started') continue;
     if (String(source.waba_id || '') === String(wabaId)) continue;
     plan.push({ source, fingerprint: contract(source), existing: target || equivalent || null });

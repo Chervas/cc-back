@@ -2493,7 +2493,7 @@ async function reconcileClinicCustomTemplatesWithLease(input) {
   const clinicIds = await customTemplateTargetClinics(input);
   const result = { copied: 0, pending: 0, reviews: [] };
   for (const clinicId of clinicIds) {
-    const sources = await WhatsappTemplate.findAll({ where: { clinic_id: clinicId, origin: 'custom', is_active: true }, raw: true });
+    const sources = await WhatsappTemplate.findAll({ where: { clinic_id: clinicId, origin: 'custom' }, raw: true });
     const targets = await WhatsappTemplate.findAll({ where: { waba_id: String(wabaId) }, raw: true });
     const planned = rules.planClinicTemplates({ clinicId, wabaId, sources, targets });
     result.reviews.push(...planned.reviews.map(row => ({ clinic_id: clinicId, ...row })));
