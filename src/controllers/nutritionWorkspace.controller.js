@@ -15,14 +15,16 @@ function sendNutritionError(error, res) {
       details: error.details || null,
     });
   }
-  if (error.status === 400 && ['nutrition_clinic_id_invalid','nutrition_history_cursor_invalid'].includes(error.code)) {
+  if (error.status === 400 && ['nutrition_clinic_id_invalid','nutrition_history_cursor_invalid','nutrition_report_options_invalid'].includes(error.code)) {
     return res.status(400).json({ message: error.message, code: error.code });
   }
   return null;
 }
 
-function reportOptionsFromRequest(req) {
+function reportOptionsFromRequest(req, strict = false) {
+  const invalid = () => Object.assign(new Error('Revisa la configuración del informe.'), { status: 400, code: 'nutrition_report_options_invalid' });
   const rawMode = String(req.query?.report_branding_mode || req.query?.branding_mode || '').trim().toLowerCase();
+  if (strict && rawMode && !['clinic','clinicaclick'].includes(rawMode)) throw invalid();
   const options = {
     actorUserId: req.userData?.userId,
     brandingMode: rawMode === 'clinic' ? 'clinic' : 'clinicaclick',
@@ -32,9 +34,9 @@ function reportOptionsFromRequest(req) {
     const normalized = String(rawComparison).trim().toLowerCase();
     if (!normalized || ['none', 'null', 'false', '0'].includes(normalized)) {
       options.compareMeasurementId = null;
-    } else if (/^\d+$/.test(normalized)) {
+    } else if (/^\d+$/.test(normalized) && Number.isSafeInteger(Number(normalized)) && Number(normalized)>0) {
       options.compareMeasurementId = Number(normalized);
-    }
+    } else if (strict) throw invalid();
   }
   const rawFatMassEquation = req.query?.fat_mass_equation ?? req.query?.fat_mass_equation_code;
   if (rawFatMassEquation !== undefined) {
@@ -207,6 +209,7 @@ exports.finalizePatientNutritionMeasurementReport = asyncHandler(async (req, res
       req.params.id,
       req.params.measurementId,
       actorUserId,
+      reportOptionsFromRequest(req, true),
     );
     if (!snapshot) {
       return res.status(202).json({

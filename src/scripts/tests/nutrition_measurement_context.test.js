@@ -89,10 +89,15 @@ function fixture() {
   const areaRevisions = new Map([10, 20].map(id => [id, {
     ...contracts.getBaseContractForArea('nutricion'), revision: { id, number: 1, hash: 'fictitious' },
   }]));
+  const openingHoursModule = { exports: {} };
+  const openingHoursFile = path.resolve(__dirname, '../../services/clinicOpeningHours.service.js');
+  vm.runInNewContext(`(function(require,module,exports){${fs.readFileSync(openingHoursFile, 'utf8')}\n})`,
+    { Date })(name => name === '../../models' ? db : createRequire(openingHoursFile)(name), openingHoursModule, openingHoursModule.exports);
   const wrappedRequire = name => name === '../../models' ? db : name === '../lib/access-policy' ? {
     assertUserCanAccessFeature: permission,
     getAccessibleClinicIdsForFeature: async ({ clinicIds, featureKey }) => state.deniedFeatures.includes(featureKey) ? [] : clinicIds.filter(id => state.grants.includes(id)),
   }
+    : name === './clinicOpeningHours.service' ? openingHoursModule.exports
     : name === './medicalAreaContracts.service' ? { ...contracts,
       getContractForArea: async (code, options) => {
         state.calls.push({ name: 'areaContract', ...options });

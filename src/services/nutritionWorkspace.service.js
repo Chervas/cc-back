@@ -16,6 +16,8 @@ const { createNutritionMeasurementContextResolver } = require('./nutritionMeasur
 const resolveMeasurementContext = createNutritionMeasurementContextResolver({ db, assertUserCanAccessFeature });
 const { createNutritionReadContextResolver, nutritionSnapshotDependencies, isNutritionSnapshotReadable } = require('./nutritionReadContext.service');
 const resolveReadContext = createNutritionReadContextResolver({ db, assertUserCanAccessFeature, getAccessibleClinicIdsForFeature });
+const { resolveClinicTimeZone, DEFAULT_TIME_ZONE } = require('./clinicOpeningHours.service');
+const { responsiveNutritionReportHtml } = require('./nutritionReportResponsive.service');
 
 const { Op } = db.Sequelize;
 const execFileAsync = promisify(execFile);
@@ -530,22 +532,26 @@ function isMissingReportTableError(error) {
     || /PatientNutritionReports/i.test(message) && /doesn't exist|does not exist|no such table/i.test(message);
 }
 
-async function generateUniqueNutritionReportPublicId() {
+async function generateUniqueNutritionReportPublicId(transaction = null) {
   const model = db.PatientNutritionReport;
   if (!model) return `nrep_${crypto.randomBytes(10).toString('hex')}`;
   for (let i = 0; i < 5; i += 1) {
     const publicId = `nrep_${crypto.randomBytes(10).toString('hex')}`;
-    const existing = await model.findOne({ where: { public_id: publicId }, attributes: ['id'] });
+    const existing = await model.findOne({ where: { public_id: publicId }, attributes: ['id'], ...(transaction ? { transaction } : {}) });
     if (!existing) return publicId;
   }
   return `nrep_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 }
 
-function formatDate(value, withTime = true) {
+function formatDate(value, withTime = true, timeZone = DEFAULT_TIME_ZONE) {
   if (!value) return 'No indicado';
-  const date = new Date(value);
+  // SQL DATETIME strings represent the same UTC instants as Sequelize Dates.
+  // Never let a naive driver string inherit the process timezone.
+  const instant = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value) ? value.replace(' ', 'T') + 'Z' : value;
+  const date = new Date(instant);
   if (!Number.isFinite(date.getTime())) return 'No indicado';
   return new Intl.DateTimeFormat('es-ES', {
+    timeZone,
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
@@ -2863,21 +2869,22 @@ function attachReportSnapshots(reports = [], snapshotRows = []) {
   });
 }
 
-async function readableReportSnapshots(rows, context) {
+async function readableReportSnapshots(rows, context, transaction = null) {
   if (!rows.length) return [];
   const ids = [...new Set(rows.flatMap(row => nutritionSnapshotDependencies(row)?.measurementIds || []))];
   if (!ids.length) return [];
   const measurements = await db.PatientNutritionMeasurement.findAll({
     where: { patient_id: context.patientId, id: { [Op.in]: ids }, clinic_id: { [Op.in]: context.readableClinicIds } },
     attributes: ['id', 'clinic_id'],
+    ...(transaction ? { transaction } : {}),
   });
   const clinics = new Map(measurements.map(row => [Number(row.id), Number(row.clinic_id)]));
   return rows.filter(row => isNutritionSnapshotReadable(row, context, clinics));
 }
 
-async function checkedReportSnapshot(snapshot, context) {
+async function checkedReportSnapshot(snapshot, context, transaction = null) {
   if (!snapshot) return null;
-  if ((await readableReportSnapshots([snapshot], context)).length) return snapshot;
+  if ((await readableReportSnapshots([snapshot], context, transaction)).length) return snapshot;
   if (snapshot.status === 'final') throw Object.assign(new Error('No se puede abrir este informe final con tus permisos actuales. Solicita su revisión a un responsable.'), {
     status: 403, code: 'nutrition_report_scope_forbidden',
   });
@@ -2903,7 +2910,7 @@ async function findCurrentNutritionReportSnapshotsForPatient(patientId, context,
   }
 }
 
-async function findNutritionReportSnapshotByStatus(measurementId, reportType, status) {
+async function findNutritionReportSnapshotByStatus(measurementId, reportType, status, transaction = null) {
   if (!db.PatientNutritionReport || !measurementId) return null;
   try {
     return await db.PatientNutritionReport.findOne({
@@ -2913,6 +2920,7 @@ async function findNutritionReportSnapshotByStatus(measurementId, reportType, st
         ...(reportType ? { report_type: reportType } : {}),
       },
       order: [['generated_at', 'DESC'], ['id', 'DESC']],
+      ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {}),
     });
   } catch (error) {
     if (isMissingReportTableError(error)) return null;
@@ -3363,7 +3371,7 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
   const measurementClinicId = Number(measurement.clinic_id);
   const measurementClinic = measurementClinicId === Number(patient.clinica_id)
     ? patient.clinica
-    : await db.Clinica.findByPk(measurementClinicId, { attributes: ['id_clinica', 'nombre_clinica', 'url_avatar'] });
+    : await db.Clinica.findByPk(measurementClinicId, { attributes: ['id_clinica', 'nombre_clinica', 'url_avatar', 'configuracion'] });
   if (!measurementClinic) throw Object.assign(new Error('measurement_clinic_not_found'), { status: 404 });
   const projection = buildProjectionForMeasurement(reportMeasurements, measurement.id);
   const sourceIds = new Set([Number(measurement.id), Number(previousMeasurement?.id),
@@ -3400,6 +3408,7 @@ async function buildNutritionMeasurementReportData(patientIdentifier, measuremen
       area_contract_revision: nutritionContract.revision,
       area_contract_provenance: measurementRow.area_contract_revision_id ? 'recorded' : 'legacy_baseline',
       generated_at: new Date().toISOString(),
+      clinic_timezone: resolveClinicTimeZone(measurementClinic),
       source_measurements: measurements.filter(item => sourceIds.has(Number(item.id))).map(item => ({ id: Number(item.id), clinic_id: Number(item.clinic_id) })),
       pdf_strategy: 'json_snapshot_printable_on_demand',
       storage: 'not_persisted',
@@ -3441,163 +3450,92 @@ async function getNutritionMeasurementReport(patientIdentifier, measurementIdent
   };
 }
 
-async function createNutritionMeasurementReportSnapshot(patientIdentifier, measurementIdentifier, actorUserId = null) {
+function validateFinalReportOptions(options = {}) {
+  const invalid = () => Object.assign(new Error('Revisa la comparación y la configuración del informe.'), { status: 400, code: 'nutrition_report_options_invalid' });
+  if (!options || typeof options !== 'object' || Array.isArray(options)) throw invalid();
+  if (hasReportComparisonOverride(options) && options.compareMeasurementId !== null
+    && (!Number.isSafeInteger(options.compareMeasurementId) || options.compareMeasurementId <= 0)) throw invalid();
+  const equation = options.fatMassEquationCode ?? options.fat_mass_equation;
+  if (equation != null && equation !== '' && (typeof equation !== 'string'
+    || !FAT_MASS_EQUATION_OPTIONS_BY_CODE.has(equation.trim().toLowerCase()))) throw invalid();
+  if (options.brandingMode != null && !NUTRITION_REPORT_BRANDING_MODES.has(options.brandingMode)) throw invalid();
+}
+
+async function persistNutritionMeasurementReportSnapshot(patientIdentifier, measurementIdentifier, actorUserId, status, options = {}) {
   if (!db.PatientNutritionReport) return null;
-
-  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, { actorUserId, featureKey: 'nutrition.measurements.create' });
-  const finalSnapshot = await checkedReportSnapshot(await findNutritionReportSnapshotByStatus(
-    reportData.measurement.id,
-    reportData.report.report_type,
-    'final',
-  ), reportData.access_context);
-  if (finalSnapshot) {
-    return nutritionReportSnapshotToJson(finalSnapshot);
-  }
-
-  const existing = await findNutritionReportSnapshotByStatus(
-    reportData.measurement.id,
-    reportData.report.report_type,
-    'active',
-  );
-  if (existing) {
-    if (!await checkedReportSnapshot(existing, reportData.access_context)) throw Object.assign(new Error('access_policy_forbidden'), { status: 403 });
-    if (isCurrentNutritionReportSnapshot(existing)) return nutritionReportSnapshotToJson(existing);
-    existing.status = 'superseded';
-    await existing.save();
-  }
-
-  const generatedAt = new Date().toISOString();
-  const clinicalStorage = buildClinicalStoragePolicy({
-    storageStrategy: 'json_snapshot_printable_on_demand',
-    status: 'active',
-    snapshotPersisted: true,
-    primary: 'database_snapshot',
+  if (status === 'final') validateFinalReportOptions(options);
+  // The actor and operation are server-owned; request options can only select
+  // presentation/calculation. A saved measurement has no update operation.
+  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, {
+    ...options, actorUserId, featureKey: status === 'final' ? 'nutrition.reports.finalize' : 'nutrition.measurements.create',
   });
-  const normalizedReportData = {
-    ...reportData,
-    meta: {
-      ...reportData.meta,
-      generated_at: generatedAt,
-      storage: 'patient_nutrition_report_snapshot',
-      storage_strategy: 'json_snapshot_printable_on_demand',
-      clinical_storage: clinicalStorage,
-    },
-  };
-  const renderedHtml = buildNutritionReportHtml(normalizedReportData);
-  const { snapshot, snapshot_hash: snapshotHash } = buildNutritionReportSnapshotPayload(
-    normalizedReportData,
-    renderedHtml,
-    generatedAt,
-  );
-
+  if (status === 'final' && options.compareMeasurementId === Number(reportData.measurement.id)) {
+    throw Object.assign(new Error('Selecciona otra medición para comparar.'), { status: 400, code: 'nutrition_report_options_invalid' });
+  }
   try {
-    const row = await db.PatientNutritionReport.create({
-      public_id: await generateUniqueNutritionReportPublicId(),
-      measurement_id: reportData.measurement.id,
-      patient_id: reportData.patient.id,
-      clinic_id: reportData.patient.clinic_id,
-      appointment_id: reportData.measurement.appointment_id || null,
-      treatment_id: reportData.measurement.treatment_id || null,
-      report_type: reportData.report.report_type,
-      title: reportData.report.title,
-      status: 'active',
-      formula_version: reportData.report.formula_version || FORMULA_VERSION,
-      snapshot_json: snapshot,
-      snapshot_html: renderedHtml,
-      snapshot_hash: snapshotHash,
-      pdf_asset_id: null,
-      storage_strategy: 'json_snapshot_printable_on_demand',
-      generated_by: toIntOrNull(actorUserId),
-      generated_at: generatedAt,
+    return await db.sequelize.transaction(async transaction => {
+      // All canonical active/final writers serialize on this existing row. The
+      // report table has no unique-final constraint, so locking only a missing
+      // final row would not protect the first concurrent finalization.
+      const measurement = await db.PatientNutritionMeasurement.findOne({
+        where: { id: reportData.measurement.id, patient_id: reportData.patient.id, clinic_id: reportData.patient.clinic_id },
+        transaction, lock: transaction.LOCK.UPDATE,
+      });
+      if (!measurement) throw Object.assign(new Error('measurement_not_found'), { status: 404 });
+      const existingFinal = await checkedReportSnapshot(await findNutritionReportSnapshotByStatus(
+        measurement.id, reportData.report.report_type, 'final', transaction,
+      ), reportData.access_context, transaction);
+      if (existingFinal) return nutritionReportSnapshotToJson(existingFinal);
+      const active = await findNutritionReportSnapshotByStatus(measurement.id, reportData.report.report_type, 'active', transaction);
+      if (active && !await checkedReportSnapshot(active, reportData.access_context, transaction)) {
+        throw Object.assign(new Error('access_policy_forbidden'), { status: 403 });
+      }
+      if (status === 'active' && active && isCurrentNutritionReportSnapshot(active)) return nutritionReportSnapshotToJson(active);
+      const generatedAt = new Date().toISOString();
+      const strategy = status === 'final' ? 'final_json_snapshot_printable_on_demand' : 'json_snapshot_printable_on_demand';
+      const clinicalStorage = buildClinicalStoragePolicy({ storageStrategy: strategy, status, snapshotPersisted: true, primary: 'database_snapshot' });
+      const normalizedReportData = {
+        ...reportData,
+        meta: {
+          ...reportData.meta, generated_at: generatedAt, storage: 'patient_nutrition_report_snapshot',
+          storage_strategy: strategy, clinical_storage: clinicalStorage,
+          report_options: {
+            branding_mode: normalizeReportBrandingOptions(options).mode,
+            compare_measurement_id: reportData.previous_measurement?.id || null,
+            fat_mass_equation_code: reportData.meta.fat_mass_equation_code,
+          },
+          ...(status === 'final' ? { document_status: 'final', finalized_at: generatedAt, finalized_by: toIntOrNull(actorUserId) } : {}),
+        },
+      };
+      const renderedHtml = buildNutritionReportHtml(normalizedReportData, options);
+      const { snapshot, snapshot_hash: snapshotHash } = buildNutritionReportSnapshotPayload(normalizedReportData, renderedHtml, generatedAt);
+      await db.PatientNutritionReport.update({ status: 'superseded' }, {
+        where: { measurement_id: measurement.id, report_type: reportData.report.report_type, status: 'active' }, transaction,
+      });
+      const row = await db.PatientNutritionReport.create({
+        public_id: await generateUniqueNutritionReportPublicId(transaction), measurement_id: measurement.id,
+        patient_id: reportData.patient.id, clinic_id: reportData.patient.clinic_id,
+        appointment_id: reportData.measurement.appointment_id || null, treatment_id: reportData.measurement.treatment_id || null,
+        report_type: reportData.report.report_type, title: reportData.report.title, status,
+        formula_version: reportData.report.formula_version || FORMULA_VERSION,
+        snapshot_json: snapshot, snapshot_html: renderedHtml, snapshot_hash: snapshotHash, pdf_asset_id: null,
+        storage_strategy: strategy, generated_by: toIntOrNull(actorUserId), generated_at: generatedAt,
+        ...(status === 'final' ? { finalized_by: toIntOrNull(actorUserId), finalized_at: generatedAt } : {}),
+      }, { transaction });
+      return nutritionReportSnapshotToJson(row);
     });
-    return nutritionReportSnapshotToJson(row);
   } catch (error) {
     if (isMissingReportTableError(error)) return null;
     throw error;
   }
 }
 
-async function finalizeNutritionMeasurementReportSnapshot(patientIdentifier, measurementIdentifier, actorUserId = null) {
-  if (!db.PatientNutritionReport) return null;
+async function createNutritionMeasurementReportSnapshot(patientIdentifier, measurementIdentifier, actorUserId = null) {
+  return persistNutritionMeasurementReportSnapshot(patientIdentifier, measurementIdentifier, actorUserId, 'active');
+}
 
-  const reportData = await buildNutritionMeasurementReportData(patientIdentifier, measurementIdentifier, { actorUserId, featureKey: 'nutrition.reports.finalize' });
-  const existingFinal = await checkedReportSnapshot(await findNutritionReportSnapshotByStatus(
-    reportData.measurement.id,
-    reportData.report.report_type,
-    'final',
-  ), reportData.access_context);
-  if (existingFinal) {
-    return nutritionReportSnapshotToJson(existingFinal);
-  }
-  const activeSnapshot = await findNutritionReportSnapshotByStatus(reportData.measurement.id, reportData.report.report_type, 'active');
-  if (activeSnapshot && !await checkedReportSnapshot(activeSnapshot, reportData.access_context)) {
-    throw Object.assign(new Error('access_policy_forbidden'), { status: 403 });
-  }
-
-  const generatedAt = new Date().toISOString();
-  const clinicalStorage = buildClinicalStoragePolicy({
-    storageStrategy: 'final_json_snapshot_printable_on_demand',
-    status: 'final',
-    snapshotPersisted: true,
-    primary: 'database_snapshot',
-  });
-  const normalizedReportData = {
-    ...reportData,
-    meta: {
-      ...reportData.meta,
-      generated_at: generatedAt,
-      storage: 'patient_nutrition_report_snapshot',
-      storage_strategy: 'final_json_snapshot_printable_on_demand',
-      clinical_storage: clinicalStorage,
-      document_status: 'final',
-      finalized_at: generatedAt,
-      finalized_by: toIntOrNull(actorUserId),
-    },
-  };
-  const renderedHtml = buildNutritionReportHtml(normalizedReportData);
-  const { snapshot, snapshot_hash: snapshotHash } = buildNutritionReportSnapshotPayload(
-    normalizedReportData,
-    renderedHtml,
-    generatedAt,
-  );
-
-  try {
-    await db.PatientNutritionReport.update(
-      { status: 'superseded' },
-      {
-        where: {
-          measurement_id: reportData.measurement.id,
-          report_type: reportData.report.report_type,
-          status: 'active',
-        },
-      },
-    );
-    const row = await db.PatientNutritionReport.create({
-      public_id: await generateUniqueNutritionReportPublicId(),
-      measurement_id: reportData.measurement.id,
-      patient_id: reportData.patient.id,
-      clinic_id: reportData.patient.clinic_id,
-      appointment_id: reportData.measurement.appointment_id || null,
-      treatment_id: reportData.measurement.treatment_id || null,
-      report_type: reportData.report.report_type,
-      title: reportData.report.title,
-      status: 'final',
-      formula_version: reportData.report.formula_version || FORMULA_VERSION,
-      snapshot_json: snapshot,
-      snapshot_html: renderedHtml,
-      snapshot_hash: snapshotHash,
-      pdf_asset_id: null,
-      storage_strategy: 'final_json_snapshot_printable_on_demand',
-      generated_by: toIntOrNull(actorUserId),
-      generated_at: generatedAt,
-      finalized_by: toIntOrNull(actorUserId),
-      finalized_at: generatedAt,
-    });
-    return nutritionReportSnapshotToJson(row);
-  } catch (error) {
-    if (isMissingReportTableError(error)) return null;
-    throw error;
-  }
+async function finalizeNutritionMeasurementReportSnapshot(patientIdentifier, measurementIdentifier, actorUserId = null, options = {}) {
+  return persistNutritionMeasurementReportSnapshot(patientIdentifier, measurementIdentifier, actorUserId, 'final', options);
 }
 
 function rawMeasurementRows(measurement = {}, profileDefinitions = PROFILE_DEFINITIONS, fieldDefinitions = FIELD_DEFINITIONS) {
@@ -3671,6 +3609,7 @@ function buildReportBrandHtml(patient = {}, brandingOptions = {}) {
 
 function buildNutritionReportHtml(reportData, options = {}) {
   const { patient, treatment, appointment, measurement, previous_measurement: previousMeasurement, report, projection, meta } = reportData;
+  const formatReportDate = value => formatDate(value, true, resolveClinicTimeZone({ timezone: meta?.clinic_timezone }));
   const brandHtml = buildReportBrandHtml(patient, options);
   const profileLabel = nutritionProfileLabel(measurement.profile_code);
   const isFinalDocument = meta?.document_status === 'final';
@@ -3731,7 +3670,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
   const comparisonHtml = comparison.available ? `
     <section class="card">
       <h2>Comparativa</h2>
-      <p class="muted">Comparado con la medición del ${escapeHtml(formatDate(comparison.previous_measured_at))}${comparison.days_between != null ? ` · ${escapeHtml(comparison.days_between)} días entre mediciones` : ''}.</p>
+      <p class="muted">Comparado con la medición del ${escapeHtml(formatReportDate(comparison.previous_measured_at))}${comparison.days_between != null ? ` · ${escapeHtml(comparison.days_between)} días entre mediciones` : ''}.</p>
       <table>
         <thead><tr><th>Métrica</th><th>Anterior</th><th>Actual</th><th>Diferencia</th></tr></thead>
         <tbody>
@@ -3855,7 +3794,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
     </section>
   ` : '';
 
-  return `<!doctype html>
+  return responsiveNutritionReportHtml(`<!doctype html>
 <html lang="es">
 <head>
   <meta charset="utf-8">
@@ -4082,7 +4021,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
       <div>
         ${brandHtml}
         <h1>${escapeHtml(report.title)}</h1>
-        <p class="muted">${escapeHtml(patient.clinic_name || 'Clínica')} · Generado el ${escapeHtml(formatDate(meta.generated_at))}</p>
+        <p class="muted">${escapeHtml(patient.clinic_name || 'Clínica')} · Generado el ${escapeHtml(formatReportDate(meta.generated_at))}</p>
       </div>
       ${documentStatusBadgeHtml}
     </header>
@@ -4090,9 +4029,9 @@ function buildNutritionReportHtml(reportData, options = {}) {
       <dl class="summary">
         <div><dt>Paciente</dt><dd>${escapeHtml(patient.name || 'Paciente')}</dd></div>
         <div><dt>Perfil</dt><dd>${escapeHtml(profileLabel)}</dd></div>
-        <div><dt>Medición</dt><dd>${escapeHtml(formatDate(measurement.measured_at))}</dd></div>
+        <div><dt>Medición</dt><dd>${escapeHtml(formatReportDate(measurement.measured_at))}</dd></div>
         <div><dt>Tratamiento</dt><dd>${escapeHtml(displayNutritionText(treatment?.nombre) || 'No asociado')}</dd></div>
-        <div><dt>Cita</dt><dd>${escapeHtml(appointment?.inicio ? formatDate(appointment.inicio) : 'No asociada')}</dd></div>
+        <div><dt>Cita</dt><dd>${escapeHtml(appointment?.inicio ? formatReportDate(appointment.inicio) : 'No asociada')}</dd></div>
       </dl>
     </section>
     ${reportVisualIntroHtml}
@@ -4117,7 +4056,7 @@ function buildNutritionReportHtml(reportData, options = {}) {
     </footer>
   </main>
 </body>
-</html>`;
+</html>`);
 }
 
 async function htmlToPdfBuffer(html, filenameSeed = 'nutrition-report') {
