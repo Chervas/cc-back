@@ -25,6 +25,7 @@ router.get('/:id/clinical-attachments/:attachmentId', patientClinicalAttachments
 router.get('/:id/clinical-attachments/:attachmentId/preview', patientClinicalAttachmentsController.previewPatientClinicalAttachment);
 router.get('/:id/clinical-episodes', require('../controllers/clinicalEpisodes.controller').list);
 router.post('/:id/clinical-episodes', require('../controllers/clinicalEpisodes.controller').create);
+router.patch('/:id/clinical-reference', require('../controllers/patientClinicalReference.controller').update);
 router.get('/:id/clinical-drawings', require('../controllers/clinicalDrawings.controller').list);
 router.post('/:id/clinical-drawings', require('../controllers/clinicalDrawings.controller').create);
 router.get('/:id/clinical-drawings/:drawingId', require('../controllers/clinicalDrawings.controller').get);

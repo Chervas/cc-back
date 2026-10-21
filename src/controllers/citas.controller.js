@@ -207,6 +207,7 @@ function protectAppointmentPayload(citaLike, capabilities = {}, timeZone) {
         protectedPayload.tratamiento_id = null;
         protectedPayload.tratamiento = null;
         protectedPayload.program_context = null;
+        protectedPayload.voucher_public_id = null;
         protectedPayload.precio_cita_resuelto = null;
         protectedPayload.conversation_id = null;
         protectedPayload.unread_count = 0;
@@ -2578,6 +2579,7 @@ exports.getCitas = asyncHandler(async (req, res) => {
     await attachUnreadCountsToCitas(citas, req.userData?.userId || null);
     await consentimientosService.attachConsentSummaryToCitas(citas);
     await attachAppointmentProgramContexts(db, citas);
+    await require('../services/appointmentVoucherRead.service').attachAppointmentVoucherIdentities(db, citas);
     attachResolvedAppointmentPricesToCitas(citas);
     res.json(await protectAppointmentsForRequest(req, citas));
 });
