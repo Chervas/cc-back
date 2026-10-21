@@ -2452,7 +2452,7 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
     // Refresh remote state under the same WABA lease before calculating the
     // next technical version.
     await syncTemplatesForWaba({ wabaId, accessToken: asset.waAccessToken });
-    return await createTemplatesFromCatalogWithLease({
+    const result = await createTemplatesFromCatalogWithLease({
       wabaId,
       clinicId,
       groupId,
@@ -2460,9 +2460,112 @@ async function createTemplatesFromCatalog({ wabaId, clinicId, groupId, assignmen
       asset,
       catalogTemplateIds,
     });
+    if (catalogTemplateIds === null) result.custom = await reconcileClinicCustomTemplatesWithLease({ wabaId, clinicId, groupId, assignmentScope });
+    return result;
   } finally {
     await lease.release();
   }
+}
+
+async function customTemplateTargetClinics({ wabaId, clinicId, groupId, assignmentScope }) {
+  const clinics = await Clinica.findAll({ where: assignmentScope === 'group'
+    ? { grupoClinicaId: Number(groupId) || -1 } : { id_clinica: Number(clinicId) || -1 },
+  attributes: ['id_clinica', 'grupoClinicaId'], raw: true });
+  const assets = await ClinicMetaAsset.findAll({ where: { assetType: 'whatsapp_phone_number' },
+    attributes: ['id', 'assetType', 'assignmentScope', 'clinicaId', 'grupoClinicaId', 'phoneNumberId', 'wabaId',
+      'isActive', 'whatsappAuthorizationId', 'additionalData', 'updatedAt',
+      [db.sequelize.literal("CASE WHEN waAccessToken IS NOT NULL AND TRIM(waAccessToken) <> '' THEN 1 ELSE 0 END"), 'hasCredentials']], raw: true });
+  const channelBindings = await db.WhatsappChannelBinding.findAll({ where: {
+    clinic_id: { [Op.in]: clinics.map(row => row.id_clinica) }, is_active: true }, raw: true });
+  const broker = require('../lib/whatsappAuthorizedBrokerClient'), configured = broker.configuration();
+  const authorizedBindings = configured ? [] : null;
+  if (configured) for (const row of configured.bindings.filter(row => clinics.some(clinic => clinic.id_clinica === row.clinicId))) {
+    try { const binding = await broker.binding(row.clinicId, row.assetId); if (binding) authorizedBindings.push(binding); }
+    catch { /* A lost or revoked grant never falls back to local credentials. */ }
+  }
+  const { templateAssetsForClinic } = require('../lib/whatsapp-template-clinic-routing');
+  return clinics.filter(clinic => templateAssetsForClinic({ clinic, assets, channelBindings, authorizedBindings })
+    .some(asset => String(asset.wabaId) === String(wabaId))).map(row => Number(row.id_clinica));
+}
+
+async function reconcileClinicCustomTemplatesWithLease(input) {
+  const { wabaId } = input, rules = require('../lib/whatsapp-clinic-template-reconciliation');
+  const clinicIds = await customTemplateTargetClinics(input);
+  const result = { copied: 0, pending: 0, reviews: [] };
+  for (const clinicId of clinicIds) {
+    const sources = await WhatsappTemplate.findAll({ where: { clinic_id: clinicId, origin: 'custom', is_active: true }, raw: true });
+    const targets = await WhatsappTemplate.findAll({ where: { waba_id: String(wabaId) }, raw: true });
+    const planned = rules.planClinicTemplates({ clinicId, wabaId, sources, targets });
+    result.reviews.push(...planned.reviews.map(row => ({ clinic_id: clinicId, ...row })));
+    for (const { source, fingerprint, existing } of planned.plan) {
+      const fresh = await WhatsappTemplate.findByPk(source.id, { raw: true });
+      if (!rules.isSource(fresh, clinicId) || rules.contract(fresh) !== fingerprint
+        || !(await customTemplateTargetClinics(input)).includes(clinicId)) {
+        result.reviews.push({ clinic_id: clinicId, source_ids: [source.id], reason: 'clinic_template_source_or_routing_changed' }); continue;
+      }
+      const asset = await resolveWabaAssetById(wabaId);
+      const prepared = await prepareTemplateImageHeaderForMeta({ wabaId, accessToken: asset?.waAccessToken,
+        template: { name: source.name, category: source.category, components: source.components } });
+      if (prepared.issue) {
+        result.reviews.push({ clinic_id: clinicId, source_ids: [source.id], reason: prepared.issue }); continue;
+      }
+      const row = existing ? await WhatsappTemplate.findByPk(existing.id) : await WhatsappTemplate.create({
+        waba_id: String(wabaId), clinic_id: clinicId, name: source.name, display_name: source.display_name,
+        language: source.language, category: source.category, components: prepared.template.components,
+        variables: source.variables, created_by_user_id: source.created_by_user_id, origin: 'custom',
+        status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, is_active: true, rejection_reason: 'custom_submission_not_started',
+      });
+      await enqueueCustomSubmissionSync(row, { clinicId, createdByUserId: source.created_by_user_id });
+      const beforeSend = await WhatsappTemplate.findByPk(source.id, { raw: true });
+      if (!rules.isSource(beforeSend, clinicId) || rules.contract(beforeSend) !== fingerprint
+        || !(await customTemplateTargetClinics(input)).includes(clinicId)) {
+        result.reviews.push({ clinic_id: clinicId, source_ids: [source.id], reason: 'clinic_template_source_or_routing_changed' }); continue;
+      }
+      await row.update({ rejection_reason: 'custom_submission_outcome_unknown' });
+      try {
+        const response = await createTemplateInMeta({ wabaId, accessToken: asset?.waAccessToken,
+          template: prepared.template, language: source.language });
+        if (!response?.id) { result.pending++; continue; }
+        await row.update({ meta_template_id: response.id, status: WHATSAPP_TEMPLATE_STATUS.PENDING, rejection_reason: null });
+        result.copied++;
+      } catch (error) {
+        if (error?.code === 'rate_limited' || error?.response?.status === 429 || templateSyncState.blockedCode(error)) {
+          await row.update({ rejection_reason: 'custom_submission_not_started' }); throw error;
+        }
+        if (Number(error?.response?.status) >= 400 && Number(error?.response?.status) < 500) {
+          await row.update({ status: WHATSAPP_TEMPLATE_STATUS.REJECTED, rejection_reason: buildLocalPendingReasonFromMetaError(error) });
+          result.reviews.push({ clinic_id: clinicId, source_ids: [source.id], reason: 'clinic_template_provider_rejected' });
+        } else result.pending++;
+      }
+    }
+  }
+  return result;
+}
+
+async function reconcileClinicCustomTemplates(input) {
+  const lease = await acquireWabaCatalogCreationLease(input.wabaId, { sequelizeInstance: db.sequelize });
+  if (!lease.acquired) throw Object.assign(Error('waba_catalog_creation_in_progress'), { retryable: true });
+  try {
+    if (!(await customTemplateTargetClinics(input)).length) return { skipped: true, reason: 'no_configured_clinic_sender' };
+    const asset = await resolveWabaAssetById(input.wabaId);
+    await syncTemplatesForWaba({ wabaId: input.wabaId, accessToken: asset?.waAccessToken });
+    return await reconcileClinicCustomTemplatesWithLease(input);
+  } finally { await lease.release(); }
+}
+
+async function enqueueCustomTemplateReconciliation(data) {
+  const scopeId = Number(data?.assignmentScope === 'clinic' ? data?.clinicId : data?.groupId);
+  if (!data?.wabaId || !['clinic', 'group'].includes(data.assignmentScope)
+    || !Number.isSafeInteger(scopeId) || scopeId <= 0) return null;
+  const { job } = await jobRequestsService.enqueueUniqueJobRequest({ type: 'whatsapp_template_create', priority: 'normal',
+    origin: 'whatsapp_clinic_custom_reconciliation', maxAttempts: 3,
+    dedupeScope: 'clinic-custom:' + require('node:crypto').createHash('sha256')
+      .update(JSON.stringify([data.wabaId, data.clinicId || null, data.groupId || null, data.assignmentScope])).digest('hex')
+      + ':' + Math.floor(Date.now() / 60000),
+    payload: { mode: 'reconcile_clinic_custom', wabaId: data.wabaId, clinicId: data.clinicId || null,
+      groupId: data.groupId || null, assignmentScope: data.assignmentScope } },
+  { activeStatuses: ['pending', 'queued', 'running', 'waiting', 'completed'] });
+  return job;
 }
 
 async function createTemplatesFromCatalogWithLease({
@@ -3556,6 +3659,8 @@ async function enqueueSyncForAllWabas(options = {}) {
 }
 
 module.exports = {
+  enqueueCustomTemplateReconciliation,
+  reconcileClinicCustomTemplates,
   createTemplatesFromCatalog,
   createCustomTemplateForClinic,
   createPlaceholderTemplatesForClinic,

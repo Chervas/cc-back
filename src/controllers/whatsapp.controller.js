@@ -21,6 +21,7 @@ const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryG
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const {
   buildWhatsappTemplateCatalogCoverage,
+  buildWhatsappCatalogStatus,
 } = require('../lib/whatsapp-template-catalog-coverage');
 const {
   canUserAccessWhatsappTemplateAsset,
@@ -2321,6 +2322,11 @@ exports.listPhones = async (req, res) => {
         payment_last_error_href: payment.last_error_href || null,
         payment_last_detected_at: payment.last_detected_at || null,
         payment_last_success_at: payment.last_success_at || null,
+        payment_recovery_probe: managementBinding?.sendEnabled === true && !manualDisconnect
+          && permissionStatuses.get(Number(p.id)) === 'connected'
+          ? require('../lib/whatsapp-payment-recovery-probe').availability({ asset: p,
+            health: whatsappAccountHealthService.summarizeAssetHealth(p) })
+          : { allowed: false, reason: 'payment_probe_sender_unavailable' },
         template_count: templateCounts.get(p.wabaId)?.total || 0,
         approved_template_count: templateCounts.get(p.wabaId)?.approved || 0,
         pending_template_count: templateCounts.get(p.wabaId)?.pending || 0,
@@ -2843,6 +2849,8 @@ exports.listCatalog = async (req, res) => {
           'assetType',
           'wabaId',
           'phoneNumberId',
+          'whatsappAuthorizationId',
+          'additionalData',
           [
             db.sequelize.literal(
               "CASE WHEN waAccessToken IS NOT NULL AND TRIM(waAccessToken) <> '' THEN 1 ELSE 0 END"
@@ -2855,6 +2863,16 @@ exports.listCatalog = async (req, res) => {
         raw: true,
       }),
     ]);
+
+    const channelBindings = await db.WhatsappChannelBinding.findAll({ where: { is_active: true }, raw: true });
+    const broker = require('../lib/whatsappAuthorizedBrokerClient');
+    const brokerConfig = broker.configuration(), authorizedBindings = brokerConfig ? [] : null;
+    if (brokerConfig) for (const configured of brokerConfig.bindings) {
+      const asset = whatsappAssets.find(asset => Number(asset.id) === configured.assetId);
+      if (!asset) continue;
+      try { const binding = await broker.binding(configured.clinicId, configured.assetId, asset); if (binding) authorizedBindings.push(binding); }
+      catch { /* Coverage cannot fall back to a revoked or unverified grant. */ }
+    }
 
     const automationCatalogItems = await AutomationFlowCatalog.findAll({
       attributes: ['id', 'name', 'display_name', 'template_key', 'template_version', 'is_active'],
@@ -2875,30 +2893,16 @@ exports.listCatalog = async (req, res) => {
     return res.json(
       items.map((item) => {
         const data = item?.toJSON ? item.toJSON() : item;
-        const lastPropagatedAt = data?.last_propagated_at ? new Date(data.last_propagated_at) : null;
-        const updatedAt = data?.updatedAt || data?.updated_at ? new Date(data.updatedAt || data.updated_at) : null;
-        const createdAt = data?.createdAt || data?.created_at ? new Date(data.createdAt || data.created_at) : null;
-        const rawPropagationState = String(data?.propagation_state || '').trim().toLowerCase();
-        const isPending = rawPropagationState === 'pending';
-        const propagated = !isPending && !!lastPropagatedAt && (!updatedAt || updatedAt.getTime() <= lastPropagatedAt.getTime());
         const familyRows = instancesByCatalogId.get(Number(data?.id)) || [];
         const coverage = buildWhatsappTemplateCatalogCoverage({
           catalog: data,
           familyRows,
           clinics,
           assets: whatsappAssets,
+          channelBindings,
+          authorizedBindings,
         });
-        const approvalStale =
-          !isPending &&
-          (
-            (!!lastPropagatedAt && !!updatedAt && updatedAt.getTime() > lastPropagatedAt.getTime()) ||
-            (!lastPropagatedAt &&
-              familyRows.length > 0 &&
-              !!createdAt &&
-              !!updatedAt &&
-              updatedAt.getTime() > createdAt.getTime())
-          );
-        const approved = !isPending && !approvalStale && coverage.approved_by_coverage;
+        const status = buildWhatsappCatalogStatus(data, coverage);
         const associatedAutomations = automationCatalogItems
           .filter((automationItem) => {
             const linkedTemplate = automationLinkedTemplatesByCatalogId.get(Number(automationItem.id));
@@ -2916,17 +2920,12 @@ exports.listCatalog = async (req, res) => {
           }));
         return {
           ...data,
-          propagated,
-          approved,
+          ...status,
           approved_count: coverage.approved_count,
           approved_total: coverage.approved_total,
           unapproved_clinics: coverage.unapproved_clinics,
           automation_count: associatedAutomations.length,
           automations: associatedAutomations,
-          approval_state: isPending
-            ? 'pending_propagation'
-            : (approvalStale ? 'stale_local_changes' : (approved ? 'approved' : 'unapproved')),
-          propagation_state: isPending ? 'pending' : (propagated ? 'completed' : 'idle'),
         };
       })
     );
@@ -3606,6 +3605,10 @@ exports.updatePhoneRouting = async (req, res) => {
       ),
     });
     await phone.update({ additionalData });
+
+    await require('../services/whatsappTemplates.service').enqueueCustomTemplateReconciliation({
+      wabaId: phone.wabaId, clinicId: phone.clinicaId, groupId: phone.grupoClinicaId, assignmentScope: phone.assignmentScope,
+    }).catch(error => console.error('Could not queue routing template reconciliation', error.code || error.name));
 
     return res.json({
       success: true,

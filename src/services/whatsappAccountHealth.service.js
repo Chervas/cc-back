@@ -22,8 +22,9 @@ const {
 
 const STALE_MINUTES = Math.max(5, Number(process.env.WHATSAPP_HEALTH_STALE_MINUTES || 90) || 90);
 const RECOVERY_OBSERVATIONS_REQUIRED = 2;
-const PAYMENT_RECOVERY_PROBE_MIN_AGE_MS = 5 * 60 * 1000;
-const PAYMENT_RECOVERY_PROBE_COOLDOWN_MS = 30 * 60 * 1000;
+const paymentProbe = require('../lib/whatsapp-payment-recovery-probe');
+const PAYMENT_RECOVERY_PROBE_MIN_AGE_MS = paymentProbe.MIN_AGE_MS;
+const PAYMENT_RECOVERY_PROBE_COOLDOWN_MS = paymentProbe.COOLDOWN_MS;
 
 function clean(value) {
   return value === undefined || value === null ? '' : String(value).trim();
@@ -46,33 +47,11 @@ function parseDate(value, fallback = new Date()) {
 function paymentRecoveryProbeEligibility({ asset, health, message, now = new Date() } = {}) {
   const plainAsset = asset?.get ? asset.get({ plain: true }) : asset;
   const plainMessage = message?.get ? message.get({ plain: true }) : message;
-  const additionalData = safeObject(plainAsset?.additionalData);
-  const payment = safeObject(additionalData.payment);
   const metadata = safeObject(plainMessage?.metadata);
   const nowMs = now instanceof Date ? now.getTime() : Date.parse(now || '');
-  const failureMs = Date.parse(payment.last_detected_at || '');
-  const lastProbeMs = Date.parse(payment.last_probe_at || '');
   const messageCreatedMs = Date.parse(plainMessage?.createdAt || plainMessage?.created_at || '');
-
-  if (
-    health?.state !== 'blocked'
-    || health?.reason_code !== 'meta_error_131042_payment_missing'
-    || String(health?.provider_status || '').toUpperCase() !== 'CONNECTED'
-    || Number(payment.last_error_code || 0) !== 131042
-    || String(payment.status || '').toLowerCase() !== 'missing_payment_method'
-  ) {
-    return { allowed: false, reason: 'payment_probe_not_applicable' };
-  }
-  if (!Number.isFinite(nowMs) || !Number.isFinite(failureMs) || nowMs - failureMs < PAYMENT_RECOVERY_PROBE_MIN_AGE_MS) {
-    return { allowed: false, reason: 'payment_probe_failure_too_recent' };
-  }
-  if (Number.isFinite(lastProbeMs) && nowMs - lastProbeMs < PAYMENT_RECOVERY_PROBE_COOLDOWN_MS) {
-    return {
-      allowed: false,
-      reason: 'payment_probe_cooldown',
-      retry_after_seconds: Math.ceil((PAYMENT_RECOVERY_PROBE_COOLDOWN_MS - (nowMs - lastProbeMs)) / 1000),
-    };
-  }
+  const available = paymentProbe.availability({ asset: plainAsset, health, now });
+  if (!available.allowed) return available;
   if (
     !plainMessage
     || plainMessage.direction !== 'outbound'

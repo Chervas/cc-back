@@ -123,6 +123,12 @@ async function upsertClinicBinding({
     }, { transaction });
   });
   await require('./patientMobileVerificationLifecycle.service').signal(normalizedClinicId);
+  try {
+    const asset = await ClinicMetaAsset.findByPk(normalizedAssetId);
+    await require('./whatsappTemplates.service').enqueueCustomTemplateReconciliation({
+      wabaId: asset?.wabaId, clinicId: normalizedClinicId, assignmentScope: 'clinic',
+    });
+  } catch (error) { console.error('Could not queue clinic template reconciliation', error.code || error.name); }
   return binding;
 }
 

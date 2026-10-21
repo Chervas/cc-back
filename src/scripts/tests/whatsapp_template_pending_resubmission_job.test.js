@@ -2,7 +2,12 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+require('./fixtures/campaign_offline_runtime.cjs');
 const axios = require('axios');
+// Stub the exact transport used by the service, not the frozen production
+// quarantine wrapper. Every network socket remains denied by the preload.
+const transportFile = require.resolve('../../lib/metaQuarantineHttp');
+require.cache[transportFile] = { id: transportFile, filename: transportFile, loaded: true, exports: axios };
 
 const db = require('../../../models');
 const { queues } = require('../../services/queue.service');

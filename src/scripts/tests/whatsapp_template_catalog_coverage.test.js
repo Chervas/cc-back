@@ -5,7 +5,45 @@ const test = require('node:test');
 
 const {
   buildWhatsappTemplateCatalogCoverage,
+  buildWhatsappCatalogStatus,
 } = require('../../lib/whatsapp-template-catalog-coverage');
+
+test('broker-only primary and secondary approvals are visible and group WABAs count once', () => {
+  const clinics = [clinic(10, 1), clinic(20, 1)];
+  const assets = [clinicAsset(1, 10, 'waba-a', { waAccessToken: null }), groupAsset(2, 1, 'waba-b', { waAccessToken: null })];
+  const channelBindings = [{ id: 1, clinic_id: 10, asset_id: 1, is_active: true, role: 'primary' },
+    { id: 2, clinic_id: 10, asset_id: 2, is_active: true, role: 'secondary', purposes: ['bulk_campaigns'] },
+    { id: 3, clinic_id: 20, asset_id: 2, is_active: true, role: 'primary' }];
+  const authorizedBindings = [[10, assets[0]], [10, assets[1]], [20, assets[1]]].map(([id, asset]) => ({
+    clinicId: id, assetId: asset.id, phoneId: asset.phoneNumberId, wabaId: asset.wabaId, sendEnabled: true,
+  }));
+  const coverage = buildWhatsappTemplateCatalogCoverage({ catalog: catalog(), clinics, assets, channelBindings, authorizedBindings,
+    familyRows: [remoteTemplate(1, 'waba-a', BASE_NAME, 'APPROVED'), remoteTemplate(2, 'waba-b', BASE_NAME, 'PENDING')] });
+  assert.equal(coverage.approved_total, 2); assert.equal(coverage.approved_count, 1); assert.equal(coverage.submitted_count, 2);
+  const status = buildWhatsappCatalogStatus({ propagation_state: 'failed' }, coverage);
+  assert.equal(status.propagation_state, 'completed'); assert.equal(status.propagated, true); assert.equal(status.approved, false);
+});
+test('a partial failure never erases other approvals or masquerades as not submitted', () => {
+  const coverage = { approved_total: 8, approved_count: 7, submitted_count: 7, approved_by_coverage: false };
+  const status = buildWhatsappCatalogStatus({ propagation_state: 'failed' }, coverage);
+  assert.equal(status.propagation_state, 'failed'); assert.equal(status.propagated_count, 7); assert.equal(status.propagated_total, 8);
+  assert.equal(status.approval_state, 'partial'); assert.equal(status.approved, false);
+  const approved = buildWhatsappCatalogStatus({ propagation_state: 'failed' }, { ...coverage, approved_count: 8, submitted_count: 8, approved_by_coverage: true });
+  assert.equal(approved.approved, true); assert.equal(approved.propagation_state, 'completed');
+});
+test('broker configured without an authorized current binding cannot fall back to legacy credentials', () => {
+  const result = buildWhatsappTemplateCatalogCoverage({ catalog: catalog(), clinics: [clinic(10, 1)],
+    assets: [clinicAsset(1, 10, 'waba-a')], authorizedBindings: [], familyRows: [remoteTemplate(1, 'waba-a', BASE_NAME, 'APPROVED')] });
+  assert.equal(result.approved_total, 0); assert.equal(result.approved_by_coverage, false);
+});
+
+test('wrong locale and inactive provider instances never count as current approvals', () => {
+  for (const extra of [{ language: 'en_US' }, { is_active: false }]) {
+    const result = buildWhatsappTemplateCatalogCoverage({ catalog: catalog(), clinics: [clinic(10, 1)],
+      assets: [clinicAsset(1, 10, 'waba-a')], familyRows: [remoteTemplate(1, 'waba-a', BASE_NAME, 'APPROVED', CURRENT_BODY, extra)] });
+    assert.equal(result.approved_count, 0); assert.equal(result.submitted_count, 0);
+  }
+});
 
 const BASE_NAME = 'clinicaclick_recordatorio_acceso';
 const CURRENT_BODY = 'Hola {{1}}, estas son las indicaciones actuales.';

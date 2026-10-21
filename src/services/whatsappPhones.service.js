@@ -549,6 +549,11 @@ async function getTemplateCreateNeed(asset) {
 async function maybeEnsureTemplatesForOperationalPhone(asset, remote) {
   if (!isOperationalPhoneAsset(asset, remote)) return;
 
+  await whatsappTemplatesService.enqueueCustomTemplateReconciliation({
+    wabaId: asset.wabaId, clinicId: asset.clinicaId, groupId: asset.grupoClinicaId,
+    assignmentScope: resolveTemplateAssignmentScope(asset),
+  }).catch(error => console.warn('Could not queue custom template reconciliation', error.code || error.name));
+
   const additionalData = { ...(asset.additionalData || {}) };
   const templateNeed = await getTemplateCreateNeed(asset);
   if (!templateNeed.needed) return;

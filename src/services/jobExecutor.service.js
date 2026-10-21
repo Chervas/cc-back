@@ -284,6 +284,9 @@ async function runAutomationFlowV2Job(payload = {}, _job, jobClaim) {
 }
 
 async function runWhatsappTemplateCreateJob(payload = {}) {
+  if (payload.mode === 'reconcile_clinic_custom') {
+    return { status: 'completed', result: await whatsappTemplatesService.reconcileClinicCustomTemplates(payload) };
+  }
   if (payload.mode === 'propagate_catalog_item') {
     return {status:'completed',result:await whatsappTemplatesService.propagateCatalogTemplateToAllClinics(payload)};
   }
@@ -308,7 +311,7 @@ async function runWhatsappTemplateCreateJob(payload = {}) {
   const groupId = payload.groupId ?? payload.group_id ?? null;
   const assignmentScope = payload.assignmentScope || payload.assignment_scope || 'unassigned';
 
-  await whatsappTemplatesService.createTemplatesFromCatalog({
+  const provisioning = await whatsappTemplatesService.createTemplatesFromCatalog({
     wabaId,
     clinicId,
     groupId,
@@ -323,6 +326,7 @@ async function runWhatsappTemplateCreateJob(payload = {}) {
       clinicId,
       groupId,
       assignmentScope,
+      ...(provisioning ? { provisioning } : {}),
     },
   };
 }

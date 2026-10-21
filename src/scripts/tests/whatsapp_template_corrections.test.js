@@ -10,6 +10,46 @@ function sourceFunction(file,name,dependencies){
 }
 function response(){return {statusCode:200,status(v){this.statusCode=v;return this;},json(v){this.body=v;return this;}};}
 const ownership=require('../../lib/whatsapp-template-ownership');
+test('native job routes custom reconciliation only to the scoped reconciler, never to catalog propagation',async()=>{
+  const calls=[];
+  const run=sourceFunction('../../services/jobExecutor.service','runWhatsappTemplateCreateJob',{
+    whatsappTemplatesService:{reconcileClinicCustomTemplates:async input=>{calls.push(input);return {copied:1};},
+      createTemplatesFromCatalog:()=>assert.fail('unrelated catalog provisioning'),
+      propagateCatalogTemplateToAllClinics:()=>assert.fail('global propagation')},
+  });
+  const payload={mode:'reconcile_clinic_custom',wabaId:'TESTONLY',clinicId:58,assignmentScope:'clinic'};
+  assert.equal((await run(payload)).status,'completed');assert.equal(calls[0],payload);
+});
+test('catalog activation also reconciles custom templates under its lease, but selective template updates never do',async()=>{
+  let custom=0,releases=0;
+  const create=sourceFunction('../../services/whatsappTemplates.service','createTemplatesFromCatalog',{
+    resolveWabaAssetById:async()=>({whatsappAuthorizedBinding:{}}),db:{sequelize:{}},
+    acquireWabaCatalogCreationLease:async()=>({acquired:true,release:async()=>{releases++;}}),
+    syncTemplatesForWaba:async()=>{},createTemplatesFromCatalogWithLease:async()=>({connected:1}),
+    reconcileClinicCustomTemplatesWithLease:async()=>{custom++;return {copied:1};},
+  });
+  await create({wabaId:'TESTONLY',clinicId:58,assignmentScope:'clinic'});assert.equal(custom,1);assert.equal(releases,1);
+  await create({wabaId:'TESTONLY',clinicId:58,assignmentScope:'clinic',catalogTemplateIds:[119]});
+  assert.equal(custom,1);assert.equal(releases,2);
+});
+test('catalog read computes real broker-only coverage without a Meta request or writes',async()=>{
+  const coverage=require('../../lib/whatsapp-template-catalog-coverage');
+  const asset={id:1,assetType:'whatsapp_phone_number',assignmentScope:'clinic',clinicaId:58,wabaId:'101',phoneNumberId:'201',isActive:true};
+  const list=sourceFunction('../../controllers/whatsapp.controller','listCatalog',{
+    ...coverage,assertAdmin:()=>true,Op:{in:Symbol.for('in')},
+    WhatsappTemplateCatalog:{findAll:async()=>[{id:119,name:'TESTONLY',is_generic:true,components:[{type:'BODY',text:'TESTONLY'}],propagation_state:'failed'}]},
+    WhatsappTemplateCatalogDiscipline:{},WhatsappTemplate:{findAll:async()=>[{id:2,catalog_template_id:119,name:'TESTONLY',waba_id:'101',
+      language:'es',status:'APPROVED',meta_template_id:'TESTONLY-meta',components:[{type:'BODY',text:'TESTONLY'}]}]},
+    Clinica:{findAll:async()=>[{id_clinica:58,grupoClinicaId:5}]},ClinicMetaAsset:{findAll:async()=>[asset]},
+    db:{sequelize:{literal:()=>null},WhatsappChannelBinding:{findAll:async()=>[]}},
+    AutomationFlowCatalog:{findAll:async()=>[]},loadAutomationCatalogLinkedTemplates:async()=>new Map(),
+    require:name=>{assert.equal(name,'../lib/whatsappAuthorizedBrokerClient');return {
+      configuration:()=>({bindings:[{clinicId:58,assetId:1}]}),binding:async()=>({clinicId:58,assetId:1,phoneId:'201',wabaId:'101',sendEnabled:true}),
+    };},
+  });
+  const res=response();await list({},res);assert.equal(res.statusCode,200);
+  assert.equal(res.body[0].approved_count,1);assert.equal(res.body[0].propagation_state,'completed');assert.equal(res.body[0].approved,true);
+});
 test('native all-sender listing identifies both roles/WABAs, merges same-WABA copies, filters owner and inactive catalog without provider calls',async()=>{
   const assets=[{id:1,phoneNumberId:'first',wabaId:'waba1',metaAssetName:'TESTONLY 1',isActive:true},
     {id:2,phoneNumberId:'second',wabaId:'waba2',metaAssetName:'TESTONLY 2',isActive:true}];

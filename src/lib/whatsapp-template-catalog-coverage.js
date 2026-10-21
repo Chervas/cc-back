@@ -1,6 +1,7 @@
 'use strict';
 
 const { haveSameTemplateComponents } = require('./whatsapp-template-components');
+const { normalizeWhatsappLocale } = require('./whatsapp-template-locale');
 
 const WHATSAPP_ASSET_TYPES = Object.freeze([
   'whatsapp_phone_number',
@@ -168,16 +169,24 @@ function buildWhatsappTemplateCatalogCoverage({
   familyRows = [],
   clinics = [],
   assets = [],
+  channelBindings = [],
+  authorizedBindings = null,
 } = {}) {
   const applicableClinics = (Array.isArray(clinics) ? clinics : [])
     .filter((clinic) => catalogAppliesToClinic(catalog, clinic))
-    .map((clinic) => ({
-      clinic,
-      clinic_id: toPositiveInt(clinic?.id_clinica),
-      clinic_name: cleanString(clinic?.nombre_clinica)
-        || `Clínica ${toPositiveInt(clinic?.id_clinica) || '-'}`,
-      waba_id: resolveEffectiveWabaForClinic({ clinic, assets }),
-    }))
+    .flatMap((clinic) => {
+      const wabas = authorizedBindings !== null || channelBindings.length
+        ? require('./whatsapp-template-clinic-routing').templateAssetsForClinic({ clinic, assets, channelBindings, authorizedBindings })
+          .map(asset => cleanString(asset.wabaId))
+        : [resolveEffectiveWabaForClinic({ clinic, assets })];
+      return [...new Set(wabas)].map(wabaId => ({
+        clinic,
+        clinic_id: toPositiveInt(clinic?.id_clinica),
+        clinic_name: cleanString(clinic?.nombre_clinica)
+          || `Clínica ${toPositiveInt(clinic?.id_clinica) || '-'}`,
+        waba_id: wabaId,
+      }));
+    })
     .filter((entry) => entry.clinic_id && entry.waba_id);
 
   const applicableWabaIds = Array.from(
@@ -194,7 +203,9 @@ function buildWhatsappTemplateCatalogCoverage({
   const coverageByWaba = new Map();
   applicableWabaIds.forEach((wabaId) => {
     const wabaFamilyRows = remoteFamilyRows.filter((row) => cleanString(row?.waba_id) === wabaId);
-    const contractRows = wabaFamilyRows.filter((row) => hasCurrentCatalogContract(catalog, row));
+    const contractRows = wabaFamilyRows.filter((row) => row.is_active !== false && row.is_active !== 0
+      && normalizeWhatsappLocale(row.language || catalog?.locale || 'es') === normalizeWhatsappLocale(catalog?.locale || 'es')
+      && hasCurrentCatalogContract(catalog, row));
     const approvedRow = contractRows.find((row) => (
       cleanString(row?.status).toUpperCase() === 'APPROVED'
       && !!cleanString(row?.meta_template_id)
@@ -202,6 +213,7 @@ function buildWhatsappTemplateCatalogCoverage({
     const diagnosticRow = pickDiagnosticRow(contractRows);
     coverageByWaba.set(wabaId, {
       approved: !!approvedRow,
+      submitted: contractRows.some(row => !!cleanString(row.meta_template_id)),
       status: approvedRow
         ? 'APPROVED'
         : (cleanString(diagnosticRow?.status).toUpperCase()
@@ -226,12 +238,26 @@ function buildWhatsappTemplateCatalogCoverage({
     approved_by_coverage: approvalTotal > 0 && approvedCount === approvalTotal,
     approved_count: approvedCount,
     approved_total: approvalTotal,
+    submitted_count: applicableWabaIds.filter(wabaId => coverageByWaba.get(wabaId)?.submitted).length,
     applicable_waba_ids: applicableWabaIds,
     unapproved_clinics: unapprovedClinics,
   };
 }
 
+function buildWhatsappCatalogStatus(catalog, coverage) {
+  const raw = cleanString(catalog?.propagation_state).toLowerCase();
+  const pending = raw === 'pending', total = coverage.approved_total, submitted = coverage.submitted_count;
+  const propagated = total > 0 && submitted === total;
+  return { propagated, propagated_count: submitted, propagated_total: total,
+    approved: coverage.approved_by_coverage,
+    approval_state: coverage.approved_by_coverage ? 'approved' : pending ? 'pending_propagation'
+      : submitted > 0 ? 'partial' : raw === 'failed' ? 'failed' : 'unapproved',
+    propagation_state: pending ? 'pending' : propagated ? 'completed' : raw === 'failed' ? 'failed'
+      : submitted > 0 ? 'partial' : 'idle' };
+}
+
 module.exports = {
+  buildWhatsappCatalogStatus,
   buildWhatsappTemplateCatalogCoverage,
   catalogAppliesToClinic,
   extractTechnicalTemplateVersion,
