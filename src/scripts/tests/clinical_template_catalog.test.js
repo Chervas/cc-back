@@ -45,21 +45,48 @@ test('source preparation is explicit and keeps existing customized publications 
 test('operator source preparation refuses unbound targets, dirty sources, wrong SQL identity/fixture and missing actors before writes', async () => {
   const { argumentsFor, assertSource, assertTarget, verifyDatabase } = require('../prepare-clinical-template-catalog');
   const args = ['--apply-source-presets', '--target=dev', '--actor-id=1']; assert.equal(argumentsFor(args).actorId, 1);
-  for (const bad of [args.filter(value => value !== '--target=dev'), args.map(value => value.replace('target=dev', 'target=crm')), args.map(value => value.replace('actor-id=1', 'actor-id=7'))]) assert.throws(() => argumentsFor(bad), /CLINICAL_CATALOG_/);
+  assert.deepEqual(argumentsFor(args.map(value => value.replace('target=dev', 'target=crm'))), { actorId: 1, target: 'crm' });
+  for (const bad of [args.filter(value => value !== '--target=dev'), args.map(value => value.replace('target=dev', 'target=staging')), [...args, '--target=crm'], args.map(value => value.replace('actor-id=1', 'actor-id=7'))]) assert.throws(() => argumentsFor(bad), /CLINICAL_CATALOG_/);
   const source = { cwd: '/home/ubuntu/wt/back-dev', sourceRoot: '/home/ubuntu/wt/back-dev', branch: 'dev', dirty: false };
   assertSource(source); assert.throws(() => assertSource({ ...source, dirty: true }), /CANONICAL_DEV_SOURCE/); assert.throws(() => assertSource({ ...source, branch: 'staging' }), /CANONICAL_DEV_SOURCE/);
   const config = { host: 'localhost', port: 3306, database: 'clinicaclick_dev_isolated', user: 'cc_dev_api' };
-  assertTarget('dev', config); assert.throws(() => assertTarget('crm', config), /ISOLATED_DEV_TARGET/); assert.throws(() => assertTarget('dev', { ...config, database: 'clinicaclick' }), /ISOLATED_DEV_TARGET/);
-  function sql({ wrongIdentity = false, anchor = 1, actor = 1 } = {}) {
+  assertTarget('dev', config); assert.throws(() => assertTarget('crm', config), /LOCAL_EXPLICIT_TARGET/); assert.throws(() => assertTarget('dev', { ...config, database: 'clinicaclick' }), /LOCAL_EXPLICIT_TARGET/);
+  const crm = { ...config, database: 'clinicaclick', user: 'crm-operator' }; assertTarget('crm', crm);
+  const calls = [];
+  function sql({ current = config, identity = {}, anchor = 1, actor = 1 } = {}) {
     return { query: async (text, options) => {
+      calls.push(text);
       assert.match(text, /^SELECT /); assert.doesNotMatch(text, /INSERT|UPDATE|DELETE/i);
-      if (text.includes('CURRENT_USER')) return [[{ database_name: wrongIdentity ? 'clinicaclick' : config.database, database_user: 'cc_dev_api@localhost', server_port: 3306 }]];
+      if (text.includes('CURRENT_USER')) return [[{ database_name: current.database, database_user: current.user + '@localhost', server_port: 3306, ...identity }]];
       if (text.includes('fictional_anchor')) return [[{ fictional_anchor: anchor }]];
       assert.equal(options.replacements.actorId, 1); return [[{ actor_exists: actor }]];
     } };
   }
-  await verifyDatabase(sql(), config, 1);
-  await assert.rejects(verifyDatabase(sql({ wrongIdentity: true }), config, 1), /DATABASE_IDENTITY/);
-  await assert.rejects(verifyDatabase(sql({ anchor: 0 }), config, 1), /FICTIONAL_ANCHOR/);
-  await assert.rejects(verifyDatabase(sql({ actor: 0 }), config, 1), /ACTOR_NOT_PRESENT/);
+  await verifyDatabase(sql(), 'dev', config, 1);
+  await assert.rejects(verifyDatabase(sql({ identity: { database_name: 'clinicaclick' } }), 'dev', config, 1), /DATABASE_IDENTITY/);
+  await assert.rejects(verifyDatabase(sql({ anchor: 0 }), 'dev', config, 1), /FICTIONAL_ANCHOR/);
+  await assert.rejects(verifyDatabase(sql({ actor: 0 }), 'dev', config, 1), /ACTOR_NOT_PRESENT/);
+  calls.length = 0; await verifyDatabase(sql({ current: crm }), 'crm', crm, 1);
+  assert.equal(calls.length, 2); assert(!calls.some(text => text.includes('fictional_anchor')));
+  for (const identity of [{ database_name: config.database }, { database_user: 'other@localhost' }, { server_port: 3307 }]) await assert.rejects(verifyDatabase(sql({ current: crm, identity }), 'crm', crm, 1), /DATABASE_IDENTITY/);
+  await assert.rejects(verifyDatabase(sql({ current: crm, actor: 0 }), 'crm', crm, 1), /ACTOR_NOT_PRESENT/);
+});
+test('source preparation shares each target schema lock, releases on failure and never writes when another operator holds it', async () => {
+  const { withCatalogLock } = require('../prepare-clinical-template-catalog');
+  for (const target of ['dev', 'crm']) {
+    const calls = [], name = `clinicaclick_${target}_schema_release`;
+    const sql = { query: async (text, options) => { calls.push(text); assert.equal(options.replacements.name, name); return [[{ acquired: 1 }]]; } };
+    assert.equal(await withCatalogLock(sql, target, async () => 'prepared'), 'prepared');
+    assert.match(calls[0], /GET_LOCK/); assert.match(calls[1], /RELEASE_LOCK/);
+    await assert.rejects(withCatalogLock(sql, target, async () => { throw Error('source-create-failed'); }), /source-create-failed/);
+    assert.match(calls.at(-1), /RELEASE_LOCK/);
+    await assert.rejects(withCatalogLock({ query: async () => [[{ acquired: 0 }]] }, target, () => assert.fail('Must not publish while schema release is active')), /OTHER_OPERATOR_ACTIVE/);
+  }
+});
+test('source preparation requires the complete reviewed form/catalog schema before creating publications', () => {
+  const { assertPreparedSchema } = require('../prepare-clinical-template-catalog'), release = require('../clinical-forms-schema-release');
+  const before = { metadata_names: [...release.PREREQUISITES], columns: [], tables: [] };
+  assert.throws(() => assertPreparedSchema(before), /SCHEMA_RELEASE_REQUIRED/);
+  assert.throws(() => assertPreparedSchema({ ...before, metadata_names: [] }), /PRIOR_CLINICAL_MIGRATIONS_REQUIRED/);
+  assert.throws(() => assertPreparedSchema({ ...before, tables: [{ TABLE_NAME: release.NEW_TABLES[0] }] }), /UNREGISTERED_CATALOG/);
 });

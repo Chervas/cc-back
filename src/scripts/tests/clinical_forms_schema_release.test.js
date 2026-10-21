@@ -12,10 +12,21 @@ function complete(){
  for(const [table,column,parent,key]of cut.FOREIGN_KEYS){s.foreignKeys.push({TABLE_NAME:table,COLUMN_NAME:column,CONSTRAINT_NAME:table+'_'+column+'_fk',REFERENCED_TABLE_NAME:parent,REFERENCED_COLUMN_NAME:key,UPDATE_RULE:'NO ACTION',DELETE_RULE:'RESTRICT'});if(!s.indexes.some(row=>row.TABLE_NAME===table&&row.COLUMN_NAME===column&&row.SEQ_IN_INDEX===1))ix(table,column,[column],false);}
  s.tables.sort((a,b)=>a.TABLE_NAME.localeCompare(b.TABLE_NAME));s.columns.sort((a,b)=>a.TABLE_NAME.localeCompare(b.TABLE_NAME)||a.ORDINAL_POSITION-b.ORDINAL_POSITION);s.indexes.sort((a,b)=>a.TABLE_NAME.localeCompare(b.TABLE_NAME)||a.INDEX_NAME.localeCompare(b.INDEX_NAME)||a.SEQ_IN_INDEX-b.SEQ_IN_INDEX);s.foreignKeys.sort((a,b)=>a.TABLE_NAME.localeCompare(b.TABLE_NAME)||a.CONSTRAINT_NAME.localeCompare(b.CONSTRAINT_NAME));s.metadata_names.push(...cut.MIGRATIONS);return s;
 }
-test('new cut admits only isolated DEV and exactly the two reviewed additive files',()=>{
+test('new cut admits only explicit local DEV/CRM identities and exactly the two reviewed additive files',()=>{
  assert.deepEqual(cut.MIGRATIONS,['20261021210000-clinical-structured-forms.js','20261021210500-clinical-template-catalog.js']);
  const cfg={host:'127.0.0.1',port:3306,database:'clinicaclick_dev_isolated',user:'cc_dev_api'};assert.doesNotThrow(()=>cut.assertTarget('dev',cfg));
- for(const [target,patch]of [['crm',{}],['dev',{database:'clinicaclick'}],['dev',{host:'remote'}],['dev',{user:'root'}],['dev',{port:3307}]])assert.throws(()=>cut.assertTarget(target,{...cfg,...patch}),/ISOLATED_DEV_TARGET/);
+ const crm={...cfg,database:'clinicaclick',user:'crm-operator'};assert.doesNotThrow(()=>cut.assertTarget('crm',crm));
+ for(const [target,config]of [['crm',cfg],['dev',crm],['staging',crm],['dev',{...cfg,host:'remote'}],['dev',{...cfg,user:'root'}],['dev',{...cfg,port:3307}],['crm',{...crm,host:'remote'}],['crm',{...crm,user:'cc_dev_api'}],['crm',{...crm,user:''}],['crm',{...crm,port:3307}]])assert.throws(()=>cut.assertTarget(target,config),/LOCAL_EXPLICIT_TARGET/);
+ assert.equal(cut.lockNameForTarget('dev'),'clinicaclick_dev_schema_release');assert.equal(cut.lockNameForTarget('crm'),'clinicaclick_crm_schema_release');assert.throws(()=>cut.lockNameForTarget('staging'),/LOCAL_EXPLICIT_TARGET/);
+});
+test('capture binds authenticated SQL user/database/port; only DEV requires its fictional anchor',async()=>{
+ const config={host:'127.0.0.1',port:3306,database:'clinicaclick',user:'crm-operator'},calls=[];
+ function sql(patch={},anchor=1){return{query:async text=>{calls.push(text);assert.match(text,/^SELECT /);if(text.includes('CURRENT_USER()'))return[[{database_name:config.database,database_user:config.user+'@localhost',server_name:'synthetic-server',server_port:3306,...patch}]];if(text.includes('nombre_clinica'))return[[{ok:anchor}]];if(text.includes('information_schema.TABLES'))return[baseline().tables];if(text.includes('information_schema.COLUMNS'))return[baseline().columns];if(text.includes('SELECT name FROM SequelizeMeta'))return[cut.PREREQUISITES.map(name=>({name}))];return[[]];}};}
+ const state=await cut.capture(sql(),'crm',config);assert.equal(state.database_name,'clinicaclick');assert(!calls.some(text=>text.includes('nombre_clinica')));
+ for(const patch of [{database_name:'clinicaclick_dev_isolated'},{database_user:'other@localhost'},{server_port:3307}])await assert.rejects(cut.capture(sql(patch),'crm',config),/DATABASE_IDENTITY/);
+ const dev={...config,database:'clinicaclick_dev_isolated',user:'cc_dev_api'};
+ await assert.rejects(cut.capture(sql({database_name:dev.database,database_user:dev.user+'@localhost'},0),'dev',dev),/FICTIONAL_ANCHOR/);
+ assert(calls.some(text=>text.includes('nombre_clinica')));
 });
 test('registry prerequisites and partial/unregistered schema block blind retries',()=>{
  const before=baseline();assert.deepEqual(cut.pending(before),cut.MIGRATIONS);assert.deepEqual(cut.pending(complete()),[]);
@@ -32,11 +43,22 @@ test('plan binds source commit, both migration hashes, target, freshness, prior 
  const info={commit:'a'.repeat(40),migrations:cut.MIGRATIONS.map(name=>({name,sha256:'b'.repeat(64)}))},before=baseline(),plan={version:cut.VERSION,target:'dev',source_commit:info.commit,migrations:info.migrations,pending:cut.MIGRATIONS,before,generated_at:new Date().toISOString()};assert.doesNotThrow(()=>cut.validatePlan(plan,info,'dev',before));
  for(const patch of [{target:'crm'},{source_commit:'old'},{migrations:[]},{pending:['other.js']},{generated_at:'2020-01-01'}])assert.throws(()=>cut.validatePlan({...plan,...patch},info,'dev',before),/PLAN_INVALID/);
  assert.throws(()=>cut.validatePlan(plan,info,'dev',{...before,indexes:[{}]}),/PLAN_DRIFT/);
+ const crm={...plan,target:'crm',before:{...before,database_name:'clinicaclick'}};assert.doesNotThrow(()=>cut.validatePlan(crm,info,'crm',crm.before));
+ assert.throws(()=>cut.validatePlan(crm,info,'dev'),/PLAN_INVALID/);assert.throws(()=>cut.validatePlan(plan,info,'crm'),/PLAN_INVALID/);assert.throws(()=>cut.validatePlan({...crm,before},info,'crm'),/PLAN_INVALID/);
 });
-test('full verified backup must be fresh and cover the exact DEV host/database and all retained tables',()=>{
- const plan={before:baseline()},b={version:'cliniccloud-operator-backup/1',database_target:'dev',database_name:plan.before.database_name,server_name:'synthetic-server',full_gzip_verified:true,dump_completion_verified:true,tables:cut.PARENTS,generated_at:new Date().toISOString()};assert.doesNotThrow(()=>cut.validateBackupManifest(b,plan));
- for(const patch of [{database_target:'crm'},{server_name:'other'},{tables:[]},{full_gzip_verified:false},{generated_at:'2020-01-01'}])assert.throws(()=>cut.validateBackupManifest({...b,...patch},plan),/FRESH_DEV_BACKUP/);
+test('full verified backup must be fresh and cover the exact target/database/server and all retained tables',()=>{
+ for(const target of ['dev','crm']){
+  const plan={target,before:{...baseline(),database_name:target==='dev'?'clinicaclick_dev_isolated':'clinicaclick'}},b={version:'cliniccloud-operator-backup/1',database_target:target,database_name:plan.before.database_name,server_name:'synthetic-server',full_gzip_verified:true,dump_completion_verified:true,tables:cut.PARENTS,generated_at:new Date().toISOString()};assert.doesNotThrow(()=>cut.validateBackupManifest(b,plan));
+  for(const patch of [{database_target:target==='dev'?'crm':'dev'},{database_name:'other'},{server_name:'other'},{tables:[]},{full_gzip_verified:false},{dump_completion_verified:false},{generated_at:'2020-01-01'},{generated_at:new Date(Date.now()+60000).toISOString()}])assert.throws(()=>cut.validateBackupManifest({...b,...patch},plan),/FRESH_TARGET_BACKUP/);
+ }
 });
 test('both DEV writers must already be stopped, without issuing a stop/restart command',()=>{
- const calls=[];assert.doesNotThrow(()=>cut.assertStopped('dev',(cmd,args)=>{calls.push([cmd,args]);return'inactive\n';}));assert.equal(calls.length,2);assert(calls.every(([cmd,args])=>cmd==='systemctl'&&args[0]==='show'));assert.throws(()=>cut.assertStopped('dev',()=> 'active\n'),/STOP_DEV_WRITERS/);assert.throws(()=>cut.assertStopped('crm',()=> 'inactive\n'),/ISOLATED_DEV/);
+ const calls=[];assert.doesNotThrow(()=>cut.assertStopped('dev',(cmd,args)=>{calls.push([cmd,args]);return'inactive\n';}));assert.equal(calls.length,2);assert(calls.every(([cmd,args])=>cmd==='systemctl'&&args[0]==='show'));assert.throws(()=>cut.assertStopped('dev',()=> 'active\n'),/STOP_DEV_WRITERS/);assert.throws(()=>cut.assertStopped('unknown',()=> 'inactive\n'),/LOCAL_EXPLICIT_TARGET/);
+});
+test('CRM requires exactly its API stopped and port3001 closed, without stopping gateway or any process',()=>{
+ const stopped={name:'pm2-back-staging',pid:0,pm2_env:{status:'stopped'}},gateway={name:'gateway',pid:123,pm2_env:{status:'online'}},calls=[];
+ function command(processes=[stopped,gateway],listening='LISTEN 0 511 127.0.0.1:3306 0.0.0.0:*\n'){return(cmd,args)=>{calls.push([cmd,args]);return cmd==='pm2'?JSON.stringify(processes):listening;};}
+ assert.doesNotThrow(()=>cut.assertStopped('crm',command()));assert.deepEqual(calls,[['pm2',['jlist']],['ss',['-H','-ltn']]]);
+ for(const rows of [[],[stopped,stopped],[{...stopped,pid:456}],[{...stopped,pm2_env:{status:'online'}}],[{name:stopped.name,pid:0}]])assert.throws(()=>cut.assertStopped('crm',command(rows)),/STOP_CRM_API/);
+ for(const address of ['127.0.0.1:3001','[::]:3001','*:3001'])assert.throws(()=>cut.assertStopped('crm',command(undefined,`LISTEN 0 511 ${address} 0.0.0.0:*\n`)),/CRM_PORT_STILL_LISTENING/);
 });

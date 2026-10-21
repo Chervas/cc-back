@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// Operator for the two reviewed additive form/catalog migrations. DEV only.
+// Operator for the two reviewed additive form/catalog migrations, from dev.
 // No application bootstrap, fixture data, provider, configuration or restart.
 const fs=require('node:fs'),path=require('node:path'),{execFileSync}=require('node:child_process');
 const {Sequelize}=require('sequelize'),{hash}=require('../lib/cliniccloud-import/adapter');
@@ -10,6 +10,7 @@ const {privateJson}=require('./cliniccloud-import-appointments-apply'),{validate
 const {newJournal}=require('./program-commercial-schema-release');
 const foundation=require('./clinical-workspace-schema-release'),previous=require('./clinical-nutrition-schema-release');
 const ROOT='/home/ubuntu/wt/back-dev',VERSION='clinical-forms-schema/1';
+const DATABASES=Object.freeze({dev:'clinicaclick_dev_isolated',crm:'clinicaclick'});
 const MIGRATIONS=Object.freeze(['20261021210000-clinical-structured-forms.js','20261021210500-clinical-template-catalog.js']);
 const PREREQUISITES=previous.MIGRATIONS;
 const PARENTS=Object.freeze(['Clinicas','Pacientes','CitasPacientes','AppointmentClinicalReports','AppointmentClinicalReportRevisions','ClinicalEpisodeTemplates','ClinicalEpisodeTemplateVersions','SequelizeMeta']);
@@ -28,12 +29,17 @@ function source(clean=false){
  const dirty=Boolean(execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim());if(clean&&dirty)fail('CLINICAL_FORMS_COMMITTED_SOURCE_REQUIRED');
  return{commit:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),dirty,migrations:MIGRATIONS.map(name=>({name,sha256:hash(fs.readFileSync(path.join(ROOT,'migrations',name)))}))};
 }
-function assertTarget(target,config){if(target!=='dev'||!['127.0.0.1','localhost','::1'].includes(config.host)||config.port!==3306||config.database!=='clinicaclick_dev_isolated'||config.user!=='cc_dev_api')fail('CLINICAL_FORMS_ISOLATED_DEV_TARGET_REQUIRED');}
+function assertTarget(target,config){
+ if(!Object.hasOwn(DATABASES,target)||!['127.0.0.1','localhost','::1'].includes(config.host)||config.port!==3306||config.database!==DATABASES[target]
+  ||typeof config.user!=='string'||!config.user.trim()||(target==='dev'?config.user!=='cc_dev_api':config.user==='cc_dev_api'))fail('CLINICAL_FORMS_LOCAL_EXPLICIT_TARGET_REQUIRED');
+}
+function lockNameForTarget(target){if(!Object.hasOwn(DATABASES,target))fail('CLINICAL_FORMS_LOCAL_EXPLICIT_TARGET_REQUIRED');return `clinicaclick_${target}_schema_release`;}
 async function capture(sql,target,config){
+ assertTarget(target,config);
  const query=async(text,replacements)=>(await sql.query(text,{replacements}))[0];
  const [identity]=await query('SELECT DATABASE() database_name,CURRENT_USER() database_user,@@hostname server_name,@@port server_port');
- if(target!=='dev'||identity.database_name!==config.database||String(identity.database_user).split('@')[0]!==config.user||Number(identity.server_port)!==3306)fail('CLINICAL_FORMS_DATABASE_IDENTITY_INVALID');
- const [anchor]=await query("SELECT EXISTS(SELECT 1 FROM Clinicas WHERE id_clinica=1 AND nombre_clinica='Clinica ficticia DEV') ok");if(!Number(anchor.ok))fail('CLINICAL_FORMS_FICTIONAL_ANCHOR_REQUIRED');
+ if(identity.database_name!==config.database||String(identity.database_user).split('@')[0]!==config.user||Number(identity.server_port)!==3306)fail('CLINICAL_FORMS_DATABASE_IDENTITY_INVALID');
+ if(target==='dev'){const [anchor]=await query("SELECT EXISTS(SELECT 1 FROM Clinicas WHERE id_clinica=1 AND nombre_clinica='Clinica ficticia DEV') ok");if(!Number(anchor.ok))fail('CLINICAL_FORMS_FICTIONAL_ANCHOR_REQUIRED');}
  return captureMetadata(sql,identity);
 }
 // Factored metadata reader for an owned, socket-only QA instance. Runtime run()
@@ -85,18 +91,27 @@ function verifyAfter(before,after,names,registered=true){
  if(hash([...after.metadata_names].sort())!==hash([...before.metadata_names,...(registered?names:[])].sort()))fail('CLINICAL_FORMS_UNRELATED_MIGRATION_CHANGED');
  prerequisites(after);verifyFormColumn(after);verifyCatalog(after);
 }
-function assertStopped(target,command=execFileSync){if(target!=='dev')fail('CLINICAL_FORMS_ISOLATED_DEV_TARGET_REQUIRED');foundation.assertStopped(command);}
+function assertStopped(target,command=execFileSync){
+ if(!Object.hasOwn(DATABASES,target))fail('CLINICAL_FORMS_LOCAL_EXPLICIT_TARGET_REQUIRED');
+ if(target==='dev')return foundation.assertStopped(command);
+ const processes=JSON.parse(command('pm2',['jlist'],{encoding:'utf8',maxBuffer:4*1024*1024}));
+ const api=processes.filter(item=>item.name==='pm2-back-staging');
+ if(api.length!==1||api[0].pm2_env?.status!=='stopped'||api[0].pid)fail('CLINICAL_FORMS_STOP_CRM_API_FIRST');
+ const listening=command('ss',['-H','-ltn'],{encoding:'utf8'});
+ if(listening.split('\n').some(line=>/\S+:3001\s/.test(line)))fail('CLINICAL_FORMS_CRM_PORT_STILL_LISTENING');
+}
 function validatePlan(plan,info,target,state,fresh=true){
- if(plan?.version!==VERSION||target!=='dev'||plan.target!==target||plan.source_commit!==info.commit||hash(plan.migrations)!==hash(info.migrations)||!Number.isFinite(Date.parse(plan.generated_at))||Date.parse(plan.generated_at)>Date.now()||fresh&&Date.now()-Date.parse(plan.generated_at)>7200000||hash(plan.pending)!==hash(pending(plan.before))||!plan.pending.length)fail('CLINICAL_FORMS_PLAN_INVALID');
+ if(plan?.version!==VERSION||!Object.hasOwn(DATABASES,target)||plan.target!==target||plan.before?.database_name!==DATABASES[target]||plan.source_commit!==info.commit||hash(plan.migrations)!==hash(info.migrations)||!Number.isFinite(Date.parse(plan.generated_at))||Date.parse(plan.generated_at)>Date.now()||fresh&&Date.now()-Date.parse(plan.generated_at)>7200000||hash(plan.pending)!==hash(pending(plan.before))||!plan.pending.length)fail('CLINICAL_FORMS_PLAN_INVALID');
  if(state&&hash(state)!==hash(plan.before))fail('CLINICAL_FORMS_PLAN_DRIFT');
 }
-function validateBackupManifest(backup,plan){if(backup.version!=='cliniccloud-operator-backup/1'||backup.database_target!=='dev'||backup.database_name!==plan.before.database_name||hash(backup.server_name)!==plan.before.server_sha256||!backup.full_gzip_verified||!backup.dump_completion_verified||!plan.before.tables.every(table=>backup.tables?.includes(table.TABLE_NAME))||!Number.isFinite(Date.parse(backup.generated_at))||Date.parse(backup.generated_at)>Date.now()||Date.now()-Date.parse(backup.generated_at)>7200000)fail('CLINICAL_FORMS_FRESH_DEV_BACKUP_REQUIRED');}
+function validateBackupManifest(backup,plan){if(backup.version!=='cliniccloud-operator-backup/1'||!Object.hasOwn(DATABASES,plan.target)||backup.database_target!==plan.target||backup.database_name!==DATABASES[plan.target]||backup.database_name!==plan.before.database_name||hash(backup.server_name)!==plan.before.server_sha256||!backup.full_gzip_verified||!backup.dump_completion_verified||!plan.before.tables.every(table=>backup.tables?.includes(table.TABLE_NAME))||!Number.isFinite(Date.parse(backup.generated_at))||Date.parse(backup.generated_at)>Date.now()||Date.now()-Date.parse(backup.generated_at)>7200000)fail('CLINICAL_FORMS_FRESH_TARGET_BACKUP_REQUIRED');}
 async function run(args){
  const o=parseArgs(args,['--mode','--target','--private-output','--plan','--approved-plan-sha256','--backup-manifest','--private-journal']),mode=o['--mode'],target=o['--target'];
- if(!['inspect','prepare','apply','verify'].includes(mode)||target!=='dev')fail('CLINICAL_FORMS_EXPLICIT_DEV_MODE_REQUIRED');
+ if(!['inspect','prepare','apply','verify'].includes(mode)||!Object.hasOwn(DATABASES,target))fail('CLINICAL_FORMS_EXPLICIT_TARGET_MODE_REQUIRED');
  const info=source(mode!=='inspect'),config=databaseOptions(target);assertTarget(target,config);
- const sql=new Sequelize(config.database,config.user,config.password,{host:config.host,port:config.port,dialect:'mysql',dialectOptions:{...(config.ssl?{ssl:config.ssl}:{}),dateStrings:true},timezone:'+00:00',logging:false,pool:{min:0,max:1,idle:1000,acquire:15000}});
- let journal,locked=false;const lockName='clinicaclick_dev_schema_release';
+ // Keep the sole SQL session alive: its advisory lock must survive idle gaps.
+ const sql=new Sequelize(config.database,config.user,config.password,{host:config.host,port:config.port,dialect:'mysql',dialectOptions:{...(config.ssl?{ssl:config.ssl}:{}),dateStrings:true},timezone:'+00:00',logging:false,pool:{min:1,max:1,idle:1000,acquire:15000}});
+ let journal,locked=false;const lockName=lockNameForTarget(target);
  try{
   await sql.query('SET SESSION lock_wait_timeout=10');await sql.query('SET SESSION innodb_lock_wait_timeout=5');
   if(mode!=='apply'){
@@ -121,4 +136,4 @@ async function run(args){
  finally{try{if(locked)await sql.query('SELECT RELEASE_LOCK(:name)',{replacements:{name:lockName}});}finally{journal?.close();await sql.close();}}
 }
 if(require.main===module)run(process.argv.slice(2)).then(result=>console.log(JSON.stringify(result))).catch(error=>{console.error(/^CLINICAL_FORMS_[A-Z_]+$/.test(error.message)?error.message:'CLINICAL_FORMS_FAILED_INSPECT_PRIVATE_EVIDENCE');process.exitCode=1;});
-module.exports={VERSION,MIGRATIONS,PREREQUISITES,PARENTS,NEW_TABLES,EXPECTED,FOREIGN_KEYS,source,assertTarget,capture,captureMetadata,verifyFormColumn,verifyCatalog,pending,verifyAfter,assertStopped,validatePlan,validateBackupManifest,run};
+module.exports={VERSION,MIGRATIONS,PREREQUISITES,PARENTS,NEW_TABLES,EXPECTED,FOREIGN_KEYS,source,assertTarget,lockNameForTarget,capture,captureMetadata,verifyFormColumn,verifyCatalog,pending,verifyAfter,assertStopped,validatePlan,validateBackupManifest,run};
