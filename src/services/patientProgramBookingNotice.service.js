@@ -153,7 +153,7 @@ function createRuntime(deps) {
       || Number(execution.context?.trigger?.data?.request_event_id) !== Number(request.id)) C.fail('program_details_execution_scope');
     return request;
   }
-  async function current(request, transaction, lock = false) {
+  async function currentSource(request, transaction, lock = false) {
     const m = request.metadata || {}, n = m.notice;
     if (!isRequest(request) || m.schema_version !== C.SCHEMA || !n || n.schema_version !== C.SCHEMA) return null;
     const voucher = await db.PatientVoucher.findOne({ where: { id: n.voucher_id, clinic_id: request.clinic_id,
@@ -181,7 +181,7 @@ function createRuntime(deps) {
       occurredAt: n.occurred_at, timeZone: require('../lib/availability-calendar').resolveClinicTimezone(clinic), communicationLanguage: n.language, native }); }
     catch { return null; }
     if (C.hash(actual) !== C.hash(n) || (!m.review_only && (n.membership.some(row => !row.native_program_booking)
-      || n.overdue_count)) || n.appointments.some(row => C.time(row.start_at) <= +now())) return null;
+      || n.overdue_count))) return null;
     const template = await db.AutomationFlowTemplateV2.findByPk(m.template_version_id, { transaction });
     if (!enabled() || (!m.delivery_enabled && !(native && m.review_only)) || !template?.is_active || template.is_system || !template.published_at
       || Number(template.clinic_id) !== Number(request.clinic_id)
@@ -197,6 +197,13 @@ function createRuntime(deps) {
         || row.reschedule_reason === 'administrative_error' && C.time(row.updated_at || row.updatedAt) > C.time(request.occurred_at))) return null;
     }
     return { voucher, clinic, patient, template, ...membership };
+  }
+  const hasStarted = request => request.metadata.notice.appointments.some(row => C.time(row.start_at) <= +now());
+  async function current(request, transaction, lock = false) {
+    const scope = await currentSource(request, transaction, lock);
+    // Sending and confirming require future dates; closing an already started
+    // follow-up must still retain every source, receipt, scope and gate check.
+    return scope && !hasStarted(request) ? scope : null;
   }
   async function communicationAllowed(request) {
     await deps.authorizeActor(request);
@@ -304,7 +311,7 @@ function createRuntime(deps) {
   }
   async function waitContext({ execution }) {
     const request = await fromExecution(execution);
-    if (!await current(request) || await resultFor(request)) return { status: 'superseded' };
+    if (!await currentSource(request) || await resultFor(request)) return { status: 'superseded' };
     const fresh = await db.FlowExecutionV2.findByPk(execution.id), reply = fresh?.context?.program_confirmation || {};
     if (reply.response_message_id) return C.time(reply.response_buffer_until) > +now()
       ? { status: 'buffering', reply, wait_until: new Date(reply.response_buffer_until) } : { status: 'responded', reply };
@@ -369,11 +376,11 @@ function createRuntime(deps) {
     if (!eventId && !payload.startsWith('ppb:')) return { handled: false };
     const ignored = reason => ({ handled: true, ignored: true, reason });
     const request = eventId ? await db.PatientOperationalEvent.findByPk(eventId) : null;
-    if (!request || !await current(request) || await resultFor(request)) return ignored('superseded_or_resolved');
+    if (!request || !await currentSource(request) || await resultFor(request)) return ignored('superseded_or_resolved');
     outbound ||= await messageFor(request);
     if (!await replyProof(request, outbound, message, conversation)) return ignored('reply_not_correlated');
     return db.sequelize.transaction(async transaction => {
-      if (!await current(request, transaction, true) || await resultFor(request, transaction)) return ignored('superseded_or_resolved');
+      if (!await currentSource(request, transaction, true) || await resultFor(request, transaction)) return ignored('superseded_or_resolved');
       const execution = await db.FlowExecutionV2.findOne({ where: { idempotency_key: key(request) }, transaction, lock: transaction.LOCK.UPDATE });
       if (!execution || !['running', 'waiting'].includes(execution.status)) return ignored('execution_not_available');
       const template = await db.AutomationFlowTemplateV2.findByPk(execution.template_version_id, { transaction });
@@ -416,7 +423,7 @@ function createRuntime(deps) {
     const request = await fromExecution(execution);
     return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
       await deps.stop.assertExecutionActive(execution, transaction);
-      const scope = await current(request, transaction, true), previous = await resultFor(request, transaction);
+      const scope = await currentSource(request, transaction, true), previous = await resultFor(request, transaction);
       if (!scope) return done('on_fail', { applied: false, reason: 'source_changed' });
       if (previous) return done('on_success', { applied: false, result: previous.metadata.state, reason: previous.metadata.reason });
       const fresh = await db.FlowExecutionV2.findByPk(execution.id, { transaction, lock: transaction.LOCK.UPDATE });
@@ -453,8 +460,11 @@ function createRuntime(deps) {
         const failed = await db.FlowExecutionLogV2.findOne({ where: { flow_execution_id: execution.id, node_id: { [Op.in]: sends }, status: 'error' }, transaction });
         if (transport.status !== 'delivery_failed' || !transport.message && !failed) return done('on_fail', { applied: false, reason: 'delivery_failure_required' });
       } else return done('on_fail', { applied: false, reason: 'result_not_supported' });
+      const expiredConfirmation = outcome === 'confirmed' && hasStarted(request);
+      const finalOutcome = expiredConfirmation ? 'review_required' : outcome;
+      const finalReason = expiredConfirmation ? 'appointment_started' : reason;
       const changed = [];
-      if (outcome === 'confirmed') for (const appointment of scope.appointments) {
+      if (finalOutcome === 'confirmed') for (const appointment of scope.appointments) {
         if (!request.metadata.notice.membership.some(row => row.appointment_id === Number(appointment.id_cita))) continue;
         if (!['pendiente', 'info_enviada', 'reprogramada'].includes(appointment.estado)) continue;
         const before = appointment.estado;
@@ -467,18 +477,18 @@ function createRuntime(deps) {
       }
       const resolved = await db.PatientOperationalEvent.create({ patient_id: request.patient_id, clinic_id: request.clinic_id,
         actor_user_id: null, event_type: C.TRANSITION, source: 'automation_v2', channel: proof ? 'whatsapp' : 'internal', occurred_at: now(),
-        metadata: { schema_version: C.SCHEMA, request_event_id: Number(request.id), state: outcome, reason,
+        metadata: { schema_version: C.SCHEMA, request_event_id: Number(request.id), state: finalOutcome, reason: finalReason,
           receipt_id: request.metadata.notice.receipt_id, snapshot_sha256: request.metadata.notice.snapshot_sha256,
           inbound_message_ids: proof?.response_message_ids || [], resolved_at: now().toISOString(),
           updated_appointment_ids: changed.map(row => Number(row.id_cita)), attendance_confirmed: false } }, { transaction });
       if (changed.length && deps.emitAppointments) transaction.afterCommit(() => deps.emitAppointments(changed));
-      return done('on_success', { applied: true, result: outcome, reason, reason_text: C.reasons[reason] || null,
+      return done(expiredConfirmation ? 'on_fail' : 'on_success', { applied: true, result: finalOutcome, reason: finalReason, reason_text: C.reasons[finalReason] || null,
         revision: Number(resolved.id), appointment_ids: changed.map(row => Number(row.id_cita)), attendance_confirmed: false });
     });
   }
   async function withNotification({ execution, node }, createNotification) {
     const request = await fromExecution(execution), resolved = await resultFor(request);
-    if (!resolved || resolved.metadata.state !== 'review_required' || !await current(request)) return { kind: 'success', output: { notifications_created: 0 }, next_node_id: node.outputs?.on_success || null };
+    if (!resolved || resolved.metadata.state !== 'review_required' || !await currentSource(request)) return { kind: 'success', output: { notifications_created: 0 }, next_node_id: node.outputs?.on_success || null };
     const blocked = request.metadata.delivery_disabled_reason;
     const explanation = blocked === 'program_details_body_too_long'
       ? 'El programa está guardado, pero no se ha enviado el resumen: todas las fechas no caben en un único mensaje. Revisa las citas con el paciente.'

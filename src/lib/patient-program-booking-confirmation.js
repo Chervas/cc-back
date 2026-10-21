@@ -34,7 +34,8 @@ const copy = value => JSON.parse(JSON.stringify(value));
 const fail = code => { throw Object.assign(Error(code), { code, retryable: false }); };
 const reasons = Object.freeze({ patient_requested_changes: 'El paciente solicita revisar las fechas del programa',
   response_unclear: 'La respuesta no confirma inequívocamente los datos del programa', no_response: 'Sin respuesta al resumen de citas',
-  delivery_failed: 'No se ha podido enviar el resumen de citas', source_changed: 'Las fechas o el programa han cambiado' });
+  delivery_failed: 'No se ha podido enviar el resumen de citas', source_changed: 'Las fechas o el programa han cambiado',
+  appointment_started: 'Una cita del resumen ya ha comenzado; revisa la respuesta sin confirmar automáticamente las fechas' });
 const time = value => value == null || value === '' ? NaN : new Date(value).getTime();
 const receiptResult = value => { const { communication, ...business } = object(value); return business; };
 function configValid(config) {
