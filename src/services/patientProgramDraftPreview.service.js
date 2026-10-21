@@ -18,6 +18,17 @@ function normalize(plan, payload, now) {
     || !/^\d{4}-\d{2}-\d{2}$/.test(payload.from_date || '') || !Number.isInteger(payload.days ?? 90) || (payload.days ?? 90) < 1 || (payload.days ?? 90) > 180) {
     fail('Actualiza el borrador y revisa las sesiones que quieres proponer.');
   }
+  const today = civilLocal(now, plan.timeZone).slice(0, 10);
+  if (value.action === 'initial') {
+    // This is a day-based search, not an appointment placement. Today remains
+    // valid after the old client's hidden default hour has already passed.
+    const date = new Date(payload.from_date + 'T12:00:00Z');
+    if (!Number.isFinite(+date) || date.toISOString().slice(0, 10) !== payload.from_date
+      || payload.from_date < today
+      || localInstant(payload.from_date + 'T00:00', plan.timeZone) - now > 366 * 86400000) {
+      fail('Elige hoy o una fecha dentro del próximo año.');
+    }
+  }
   const sessions = plan.sessions.filter(row => row.scheduling_status === 'pending').slice(0, 30);
   const supplied = value.sessions || [];
   if (!Array.isArray(supplied) || supplied.length > 30 || new Set(supplied.map(row => row?.key)).size !== supplied.length
@@ -65,12 +76,14 @@ function normalize(plan, payload, now) {
     fail('La sesión de origen todavía no tiene fecha. Colócala antes de desplazar fechas posteriores.', 'program_draft_origin_date_required');
   }
   if (pivot && pivot.duration_minutes == null) fail('Elige la duración de la sesión antes de cambiar su fecha.', 'program_duration_required');
+  let startLocal = value.start_local;
   if (['cascade','initial'].includes(value.action) && value.start_local != null) {
     const instant = localInstant(value.start_local, plan.timeZone);
-    if (instant <= now || instant - now > 366 * 86400000) fail('Elige una fecha futura dentro del próximo año.');
     if (value.action==='initial' && value.start_local.slice(0,10)!==payload.from_date) fail('La hora inicial debe pertenecer a la fecha elegida.');
+    if (value.action === 'initial' && payload.from_date === today && instant <= now) startLocal = undefined;
+    else if (instant <= now || instant - now > 366 * 86400000) fail('Elige una fecha futura dentro del próximo año.');
   } else if (value.start_local != null) fail('La nueva fecha sólo corresponde a un cambio explícito del borrador.');
-  return { action: value.action, pivot, rows, start_local: value.start_local, days: payload.days ?? 90, from_date: payload.from_date,
+  return { action: value.action, pivot, rows, start_local: startLocal, days: payload.days ?? 90, from_date: payload.from_date,
     preferences: normalizePreferences(value.preferences) };
 }
 function shiftedLocal(previous, next, original, timeZone) {

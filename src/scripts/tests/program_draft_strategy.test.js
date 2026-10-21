@@ -22,12 +22,12 @@ function rows(dates = ['2030-01-07T10:00', '2030-01-22T10:00', '2030-02-06T10:00
   return dates.map((local, i) => ({ key: 's' + i, start_at: localInstant(local, zone).toISOString(), placed: placed.includes(i),
     selections: { care: { installation_id: 9, doctor_id: 5 } } }));
 }
-function fixture(p = plan()) {
+function fixture(p = plan(), at = now) {
   const resource = key => ({ resource_key: key, windows: [{ start: '2030-01-01T00:00:00Z', end: '2031-01-01T00:00:00Z' }], busy: [] });
-  const context = { timeZone: zone, doctors: new Map([[5, resource('doctor:5')]]), installations: new Map([[9, resource('installation:9')]]),
+  const context = { timeZone: p.timeZone, doctors: new Map([[5, resource('doctor:5')]]), installations: new Map([[9, resource('installation:9')]]),
     installationKeys: new Map([[9, 'installation:9']]), patientBusy: [] };
   let reads = 0;
-  const run = payload => preview({ plan: p, payload, actorId: 1, now, contextFor: async () => { reads++; return context; },
+  const run = payload => preview({ plan: p, payload, actorId: 1, now: at, contextFor: async () => { reads++; return context; },
     dto: () => ({ sessions: p.sessions, snapshot_sha256: p.snapshot.sha256 }), solve: solveBookingProfile, slots: solutionsForCalendar,
     addVirtualBusy, supportIds: () => [], supportAvailable: () => true, assessment: () => null });
   return { p, context, run, reads: () => reads };
@@ -39,6 +39,69 @@ test('initial external continuation anchors the first managed original session, 
   assert.equal(result.proposals[0].solution.start_local.slice(0,10), '2030-01-07');
   assert.equal(result.proposals[1].solution.start_local.slice(0,10), '2030-01-22');
   assert.equal(f.reads(), 1); assert.equal(f.context.doctors.get(5).busy.length, 0); assert.equal(f.context.patientBusy.length, 0);
+});
+test('initial date-only search starts today after now, including old hidden hours, without changing a future lower hour', async () => {
+  const at = new Date('2030-01-07T10:07:34Z'); // 11:07 in the clinic, not the host timezone.
+  for (const startLocal of [undefined, '2030-01-07T09:00', '2030-01-07T11:07']) {
+    const f = fixture(plan(), at);
+    const result = await f.run({ from_date: '2030-01-07', days: 45,
+      draft_strategy: { action: 'initial', ...(startLocal ? { start_local: startLocal } : {}) } });
+    assert.equal(result.proposals[0].solution.start_local, '2030-01-07T11:15', startLocal);
+    assert(result.proposals.every(row => new Date(row.solution.start_at) > at));
+    assert.equal(result.proposals[1].solution.start_local.slice(0, 10), '2030-01-22');
+    assert.equal(f.context.patientBusy.length, 0);
+  }
+  const future = await fixture(plan(), at).run({ from_date: '2030-01-07', days: 45,
+    draft_strategy: { action: 'initial', start_local: '2030-01-07T14:00' } });
+  assert.equal(future.proposals[0].solution.start_local, '2030-01-07T14:00');
+});
+test('today is clinic-local around midnight and DST, never UTC or browser time', async () => {
+  for (const [timeZone, at, date, expected] of [
+    ['Europe/Madrid', '2030-01-01T23:07:00Z', '2030-01-02', '2030-01-02T00:15'],
+    ['America/New_York', '2030-01-02T02:07:00Z', '2030-01-01', '2030-01-01T21:15'],
+    ['Europe/Madrid', '2030-03-31T01:07:00Z', '2030-03-31', '2030-03-31T03:15'],
+    ['Europe/Madrid', '2030-10-27T01:07:00Z', '2030-10-27', '2030-10-27T03:00'],
+  ]) {
+    const p = plan(); p.timeZone = timeZone; p.sessions = p.sessions.slice(0, 1);
+    const result = await fixture(p, new Date(at)).run({ from_date: date, days: 1, draft_strategy: { action: 'initial' } });
+    assert.equal(result.proposals[0].solution.start_local, expected, timeZone + ' ' + at);
+    assert(new Date(result.proposals[0].solution.start_at) > new Date(at));
+  }
+});
+test('today respects hard exclusions and soft ranges, and an exhausted day is unavailable rather than a past appointment', async () => {
+  const at = new Date('2030-01-07T17:07:00Z'), p = plan(); p.sessions = p.sessions.slice(0, 1);
+  const f = fixture(p, at);
+  const fallback = await f.run({ from_date: '2030-01-07', days: 1, draft_strategy: { action: 'initial', start_local: '2030-01-07T09:00',
+    preferences: { prefer_after_minutes: 960, prefer_before_minutes: 1080 } } });
+  assert.equal(fallback.proposals[0].solution.start_local, '2030-01-07T18:15');
+  assert.equal(fallback.proposals[0].preference_warnings[0].code, 'program_preference_time_fallback');
+  const excluded = await f.run({ from_date: '2030-01-07', days: 1,
+    draft_strategy: { action: 'initial', preferences: { exclude_weekdays: [1] } } });
+  assert.equal(excluded.proposals[0].solution, null);
+  for (const resources of [f.context.doctors, f.context.installations]) for (const resource of resources.values())
+    resource.windows = [{ start: '2030-01-07T08:00Z', end: '2030-01-07T17:00Z' }, { start: '2030-01-08T08:00Z', end: '2030-01-08T17:00Z' }];
+  const exhausted = await f.run({ from_date: '2030-01-07', days: 1, draft_strategy: { action: 'initial' } });
+  assert.equal(exhausted.proposals[0].solution, null);
+  assert.equal(exhausted.proposals[0].reason_code, 'program_booking_unavailable');
+  const following = await f.run({ from_date: '2030-01-07', days: 2, draft_strategy: { action: 'initial' } });
+  assert.equal(following.proposals[0].solution.start_local, '2030-01-08T09:00');
+});
+test('initial search rejects genuinely past, invalid, mismatched or over-year days and never shifts an explicit past placement', async () => {
+  const at = new Date('2030-01-07T10:07:00Z');
+  for (const date of ['2030-01-06', '2030-02-30', '2030-13-01', '2031-01-09']) {
+    const f = fixture(plan(), at);
+    await assert.rejects(f.run({ from_date: date, days: 1, draft_strategy: { action: 'initial' } }), { code: 'program_draft_invalid' });
+    assert.equal(f.reads(), 0);
+  }
+  await assert.rejects(fixture(plan(), at).run({ from_date: '2030-01-07', days: 1,
+    draft_strategy: { action: 'initial', start_local: '2030-01-08T09:00' } }), { code: 'program_draft_invalid' });
+  for (const action of ['initial', 'reset', 'cascade']) {
+    const supplied = rows(undefined, [0]);
+    await assert.rejects(fixture(plan(), at).run(input(supplied, action,
+      action === 'cascade' ? { start_local: '2030-01-07T09:00' } : {})), { code: 'program_draft_invalid' });
+  }
+  await assert.rejects(fixture(plan(), at).run(input(rows(['2030-01-08T10:00', '2030-01-23T10:00', '2030-02-07T10:00']), 'cascade',
+    { start_local: '2030-01-07T09:00' })), { code: 'program_draft_invalid' });
 });
 test('cascade preserves prefix, resources and placed following drafts by civil wall-clock shift across DST', async () => {
   const f = fixture(), supplied = rows(['2030-03-01T10:00','2030-03-18T10:00','2030-04-02T10:00'],[0,2]);
