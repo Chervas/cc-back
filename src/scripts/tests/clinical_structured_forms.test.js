@@ -13,6 +13,12 @@ test('four manual Word forms retain their distinct field inventory and informati
  }
  assert(T.builtin('initial-general').form_schema.sections.flatMap(s=>s.fields).some(f=>f.options?.some(o=>o.value==='none'&&o.exclusive)));
 });
+test('corporal retains the source skin-lesion screening question without changing general or facial infection wording',()=>{
+ const question=key=>T.builtin(key).form_schema.sections.find(s=>s.id==='screening').fields.find(f=>f.id==='infection');
+ assert.equal(question('corporal').label,'¿Infección, herida o lesión en la piel de la zona?');
+ for(const key of ['initial-general','facial'])assert.equal(question(key).label,'¿Tiene hoy infección, herida o herpes activo en la zona?');
+ assert.equal(question('corporal').type,'yesno');assert.equal(question('corporal').required,false);
+});
 test('unknown, no and unanswered remain distinct, with no medical defaults; required fields permit draft but reject final',()=>{
  const definition=schema([field('question','yesno',{required:true})]);
  assert.equal(F.answers(definition,{}).question,null);assert.equal(F.answers(definition,{question:'no'}).question,'no');assert.equal(F.answers(definition,{question:'unknown'},{final:true}).question,'unknown');
