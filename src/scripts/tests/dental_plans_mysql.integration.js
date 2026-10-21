@@ -8,6 +8,9 @@ withIsolatedCampaignMysql(async scope=>{
  const agenda=await createOwnedBookingDurationFixture({...scope,registerOwnedLoopbackServer:undefined,nativeCatalogModel:true,includePatientScope:true});
  for(const file of ['economicbudget','economicbudgetversion','economicbudgetevent','appointmentclinicalreport','appointmentclinicalreportrevision','clinicalepisodeappointment','dependenciatratamiento','usuarioclinica']){const model=require('../../../models/'+file)(sql,D);db[model.name]=model;}
  await sql.sync();
+ // The real appointment provenance uniqueness is required here: model sync
+ // alone does not reproduce the imported-source index present in DEV/CRM.
+ await require('../../../migrations/20260726221000-add-appointment-import-source-fields').up(sql.getQueryInterface(),Sequelize);
  const migration=require('../../../migrations/20261021220000-dental-clinical-plans');await migration.up(sql.getQueryInterface(),Sequelize);
  for(const file of ['dentalplan','dentalplanrevision']){const model=require('../../../models/'+file)(sql,D);db[model.name]=model;}
  await require('../../../migrations/20261021220500-dental-supporting-tools').up(sql.getQueryInterface(),Sequelize);
@@ -94,7 +97,7 @@ withIsolatedCampaignMysql(async scope=>{
  await db.EconomicBudgetEvent.create({budget_id:quantityBudget.id,version_number:1,event_type:'accepted',to_status:'accepted',metadata:{accepted_line_keys:['three-units']},created_at:clock});
  const quantitySource={id:quantityBudget.public_id,version:1,line_keys:['three-units']};
  await assert.rejects(service.create({...base,payload:request('ambiguous-quantity-no-desglose',{source_budget:quantitySource})}),{code:'dental_budget_scope_review_required'});
- const split=(await service.create({...base,payload:request('quantity-explicit-desglose',{source_budget:quantitySource,line_breakdown:[{line_key:'three-units',acts:[16,17,18].map(fdi=>({allocated_quantity:1,targets:[{kind:'tooth',fdi}]}))}]})})).item;
+ let split=(await service.create({...base,payload:request('quantity-explicit-desglose',{source_budget:quantitySource,line_breakdown:[{line_key:'three-units',acts:[16,17,18].map(fdi=>({allocated_quantity:1,professional_id:2,targets:[{kind:'tooth',fdi}]}))}]})})).item;
  assert.equal(split.acts.length,3);assert.equal(split.acts.reduce((n,a)=>n+a.source.allocated_quantity,0),3);assert.equal(new Set(split.acts.map(a=>a.targets[0].id)).size,3);
  await assert.rejects(service.get({...base,id:split.id,patientIdentifier:'2'}),{code:'dental_plan_not_found'});
  // Review indications remain inert. A doctor explicitly supplies a separate,
@@ -120,9 +123,25 @@ withIsolatedCampaignMysql(async scope=>{
  independent=(await service.command({...base,id:independent.id,payload:{...request('owned-second-review-indication'),expected_version:independent.version,command:'review',due_on:'2030-02-01',notes:'Segundo control ficticio'}})).item;
  independent=(await service.command({...base,id:independent.id,payload:{...request('owned-second-review-explicitly-validated'),expected_version:independent.version,command:'prepare_review',review_id:independent.review.id,review_session:true,act:{title:'Valoración sin contratación',duration_minutes:20,professional_id:2,targets:[{kind:'general'}]}}})).item;
  assert.equal(independent.status,'agenda');assert.equal(independent.sessions.at(-1).status,'reviewed');assert.deepEqual(independent.review.appointment_ids,[]);assert.equal(await db.CitaPaciente.count(),beforeReviewCount+1);
+ const partitionScope={...base,id:split.id},partitionCommand=async(command,extra={})=>{split=(await service.command({...partitionScope,payload:{...request('partition-command-'+command+'-'+split.version),expected_version:split.version,command,...extra}})).item;};
+ const partitionEconomics=await economicHash();await partitionCommand('generate');await partitionCommand('merge_sessions',{session_ids:split.sessions.slice(0,2).map(session=>session.id)});const partitionSession=split.sessions.at(-1).id;await partitionCommand('review_session',{session_id:partitionSession});
+ const beforePartitionCount=await db.CitaPaciente.count(),partitionPayloads=[],partitionAppointments=[];
+ for(const act of split.acts.slice(0,2)){
+  const availability=await service.availability({...partitionScope,payload:{expected_version:split.version,session_id:partitionSession,act_ids:[act.id],from_date:'2030-01-21',days:1}});assert(availability.proposals.length);
+  const payload={...request('partition-book-'+act.id),expected_version:split.version,session_id:partitionSession,act_ids:[act.id],start_at:availability.proposals[0].start_at,selection:availability.proposals[0].selections};partitionPayloads.push(payload);
+  const booked=await service.book({...partitionScope,payload});split=booked.item;partitionAppointments.push(await db.CitaPaciente.findByPk(booked.appointment.id));
+ }
+ assert.equal(await db.CitaPaciente.count(),beforePartitionCount+2);assert.notEqual(partitionAppointments[0].id_cita,partitionAppointments[1].id_cita);assert.notEqual(partitionAppointments[0].source_reference,partitionAppointments[1].source_reference);assert(partitionAppointments.every(row=>row.source_system==='dental_plan'&&row.source_reference.length<=120));
+ assert.deepEqual(partitionAppointments.map(row=>row.import_metadata.dental_plan.act_ids),split.acts.slice(0,2).map(act=>[act.id]));assert(partitionAppointments.every(row=>row.import_metadata.dental_plan.session_id===partitionSession));
+ for(const payload of partitionPayloads)assert.equal((await service.book({...partitionScope,payload})).replayed,true);assert.equal(await db.CitaPaciente.count(),beforePartitionCount+2);
+ await assert.rejects(service.book({...partitionScope,payload:{...partitionPayloads[0],idempotency_key:'partition-overlap-refused',expected_version:split.version}}),{code:'dental_reservation_scope_invalid'});
+ const firstPartition=split.reservations.find(reservation=>reservation.appointment_id===Number(partitionAppointments[0].id_cita)),sourceReference=partitionAppointments[0].source_reference;
+ split=(await service.book({...partitionScope,payload:{...request('partition-reschedule-first'),expected_version:split.version,mode:'reschedule',appointment_id:firstPartition.appointment_id,expected_appointment_revision:firstPartition.appointment_revision,reason:'Cambio de hueco ficticio',session_id:partitionSession,start_at:'2030-01-22T09:00:00.000Z',selection:partitionPayloads[0].selection}})).item;
+ assert.equal((await partitionAppointments[0].reload()).source_reference,sourceReference);assert.equal(await db.CitaPaciente.count(),beforePartitionCount+2);assert.equal(split.reservations.filter(reservation=>reservation.session_id===partitionSession).length,2);assert.equal(await economicHash(),partitionEconomics);
  const workspace=await service.workspace(base);assert.equal(workspace.plans.length,3);assert(!JSON.stringify({catalog:workspace.catalog,acts:plan.acts}).includes('456.78'));
  report.checks.push('Actual two-table Dental migration/FK/unique revisions; immutable accepted economic source and no duplicate active accepted-line plan; real agenda canonical composite two-professional itinerary and occupancy without vouchers; replay and coordinated reschedule retain reservation identity; wrong clinic/role/CAS reject; target-level partial execution pins exact plan/tools revision and episode atomically; injected second-write failure fully rolls back, retry works, concurrent writers yield one winner; closing/reopening episode preserves work, care state, money, source and earlier immutable revisions.');
  report.checks.push('A second owned real support aggregate supplies exact pinned tools version; independent 0-appointment work persists without bookings; quantity3 cannot auto-collapse into1act and explicit three-way reviewed allocation preserves exactly3units/target identities.');
  report.checks.push('Review indication creates no act/session/appointment; explicit doctor-only preparation persists a non-contracted act and linked session once under concurrent replay; pending session cannot book, explicit review enables canonical real reservation and immutable review appointment linkage exactly once; optional explicit combined validation creates no appointment or economic mutation.');
+ report.checks.push('Actual canonical UNIQUE(clinic,source_system,source_reference) is installed: two disjoint subsets of one merged session create distinct real bookings/provenance, both replay without duplicates, overlapping scope rejects and rescheduling retains the same appointment/source identity without economic changes.');
  await agenda.close();
 }).catch(error=>{console.error(error.stack);process.exitCode=1;});
