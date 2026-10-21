@@ -238,6 +238,7 @@ function serializeFiscalDocument(document) {
   const value = document.toJSON ? document.toJSON() : document;
   return {
     id: value.public_id,
+    clinic_id: Number(value.clinic_id),
     patient_id: Number(value.patient_id),
     document_type: value.document_type,
     series: value.series,
@@ -440,6 +441,7 @@ async function cashForDate(
   businessDate,
   openingCash = 0,
   timeZone = DEFAULT_CLINIC_TIME_ZONE,
+  transaction = null,
 ) {
   const start = localDateTimeToUtc(businessDate, '00:00:00', timeZone);
   const end = localDateTimeToUtc(nextDate(businessDate), '00:00:00', timeZone);
@@ -451,6 +453,7 @@ async function cashForDate(
         paid_at: { [Op.gte]: start, [Op.lt]: end },
       },
       attributes: ['id', 'public_id', 'amount', 'method'],
+      transaction,
     }),
     AccountingExpenseDocument.findAll({
       where: {
@@ -460,6 +463,7 @@ async function cashForDate(
         paid_at: { [Op.gte]: start, [Op.lt]: end },
       },
       attributes: ['id', 'public_id', 'total'],
+      transaction,
     }),
     AccountingCashMovement.findAll({
       where: {
@@ -467,6 +471,7 @@ async function cashForDate(
         occurred_at: { [Op.gte]: start, [Op.lt]: end },
       },
       attributes: ['id', 'public_id', 'movement_type', 'amount', 'method'],
+      transaction,
     }),
   ]);
   const cashPayments = payments.filter((row) => row.method === 'cash');
@@ -1004,66 +1009,75 @@ async function closeCash({ clinicId, actorId, payload }) {
     payload.business_date,
     dateInTimeZone(new Date(), clinic.time_zone),
   );
-  const existing = await AccountingCashClosure.findOne({ where: { clinic_id: clinicId, business_date: businessDate } });
-  if (existing) throw domainError(409, 'cash_already_closed', 'La caja de este día ya está cerrada.');
-  const session = await AccountingCashSession.findOne({
-    where: { clinic_id: clinicId, business_date: businessDate },
-  });
-  if (!session) throw domainError(409, 'cash_not_open', 'Abre la caja antes de cerrarla.');
-  if (session.status !== 'open') throw domainError(409, 'cash_already_closed', 'La caja de este día ya está cerrada.');
-  const openingCash = money(session.opening_cash);
-  const allowedDenominations = new Set([
-    '500', '200', '100', '50', '20', '10', '5', '2', '1',
-    '0.5', '0.2', '0.1', '0.05', '0.02', '0.01',
-  ]);
-  const rawBreakdown = payload.denomination_breakdown && typeof payload.denomination_breakdown === 'object'
-    ? payload.denomination_breakdown
-    : {};
-  const denominationBreakdown = {};
-  for (const [rawDenomination, rawCount] of Object.entries(rawBreakdown)) {
-    const denomination = String(Number(rawDenomination));
-    const count = Number.parseInt(String(rawCount), 10);
-    if (!allowedDenominations.has(denomination) || !Number.isInteger(count) || count < 0 || count > 10000) {
-      throw domainError(400, 'cash_denomination_invalid', 'El recuento de efectivo contiene un valor no válido.');
+  // The session lock serializes competing closures. All source reads and both
+  // persistence writes share this transaction, so a failed session update
+  // cannot leave a committed closure behind an apparently open session.
+  return db.sequelize.transaction(async transaction => {
+    const session = await AccountingCashSession.findOne({
+      where: { clinic_id: clinicId, business_date: businessDate },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    const existing = await AccountingCashClosure.findOne({
+      where: { clinic_id: clinicId, business_date: businessDate }, transaction,
+    });
+    if (existing) throw domainError(409, 'cash_already_closed', 'La caja de este día ya está cerrada.');
+    if (!session) throw domainError(409, 'cash_not_open', 'Abre la caja antes de cerrarla.');
+    if (session.status !== 'open') throw domainError(409, 'cash_already_closed', 'La caja de este día ya está cerrada.');
+    const openingCash = money(session.opening_cash);
+    const allowedDenominations = new Set([
+      '500', '200', '100', '50', '20', '10', '5', '2', '1',
+      '0.5', '0.2', '0.1', '0.05', '0.02', '0.01',
+    ]);
+    const rawBreakdown = payload.denomination_breakdown && typeof payload.denomination_breakdown === 'object'
+      ? payload.denomination_breakdown
+      : {};
+    const denominationBreakdown = {};
+    for (const [rawDenomination, rawCount] of Object.entries(rawBreakdown)) {
+      const denomination = String(Number(rawDenomination));
+      const count = Number.parseInt(String(rawCount), 10);
+      if (!allowedDenominations.has(denomination) || !Number.isInteger(count) || count < 0 || count > 10000) {
+        throw domainError(400, 'cash_denomination_invalid', 'El recuento de efectivo contiene un valor no válido.');
+      }
+      if (count) denominationBreakdown[denomination] = count;
     }
-    if (count) denominationBreakdown[denomination] = count;
-  }
-  const countedFromBreakdown = money(Object.entries(denominationBreakdown)
-    .reduce((sum, [denomination, count]) => sum + Number(denomination) * Number(count), 0));
-  const actualCash = Object.keys(denominationBreakdown).length
-    ? countedFromBreakdown
-    : money(payload.actual_cash);
-  if (actualCash < 0) throw domainError(400, 'cash_amount_invalid', 'El efectivo contado no es válido.');
-  const snapshot = await cashForDate(clinicId, businessDate, openingCash, clinic.time_zone);
-  const difference = money(actualCash - snapshot.expected_cash);
-  const notes = clean(payload.notes, 4000) || null;
-  if (Math.abs(difference) > 0.01 && !notes) {
-    throw domainError(400, 'cash_difference_note_required', 'Indica el motivo de la diferencia para cerrar la caja.');
-  }
-  const row = await AccountingCashClosure.create({
-    public_id: crypto.randomUUID(),
-    clinic_id: clinicId,
-    business_date: businessDate,
-    opening_cash: openingCash,
-    cash_receipts: snapshot.cash_receipts,
-    cash_outflows: snapshot.cash_outflows,
-    expected_cash: snapshot.expected_cash,
-    actual_cash: actualCash,
-    denomination_breakdown: denominationBreakdown,
-    tender_reconciliation: snapshot.tender_reconciliation,
-    difference,
-    notes,
-    snapshot,
-    closed_by: actorId,
-    closed_at: new Date(),
+    const countedFromBreakdown = money(Object.entries(denominationBreakdown)
+      .reduce((sum, [denomination, count]) => sum + Number(denomination) * Number(count), 0));
+    const actualCash = Object.keys(denominationBreakdown).length
+      ? countedFromBreakdown
+      : money(payload.actual_cash);
+    if (actualCash < 0) throw domainError(400, 'cash_amount_invalid', 'El efectivo contado no es válido.');
+    const snapshot = await cashForDate(clinicId, businessDate, openingCash, clinic.time_zone, transaction);
+    const difference = money(actualCash - snapshot.expected_cash);
+    const notes = clean(payload.notes, 4000) || null;
+    if (Math.abs(difference) > 0.01 && !notes) {
+      throw domainError(400, 'cash_difference_note_required', 'Indica el motivo de la diferencia para cerrar la caja.');
+    }
+    const row = await AccountingCashClosure.create({
+      public_id: crypto.randomUUID(),
+      clinic_id: clinicId,
+      business_date: businessDate,
+      opening_cash: openingCash,
+      cash_receipts: snapshot.cash_receipts,
+      cash_outflows: snapshot.cash_outflows,
+      expected_cash: snapshot.expected_cash,
+      actual_cash: actualCash,
+      denomination_breakdown: denominationBreakdown,
+      tender_reconciliation: snapshot.tender_reconciliation,
+      difference,
+      notes,
+      snapshot,
+      closed_by: actorId,
+      closed_at: new Date(),
+    }, { transaction });
+    await session.update({
+      status: 'closed',
+      closure_id: row.id,
+      closed_by: actorId,
+      closed_at: row.closed_at,
+    }, { transaction });
+    return serializeClosure(row);
   });
-  await session.update({
-    status: 'closed',
-    closure_id: row.id,
-    closed_by: actorId,
-    closed_at: row.closed_at,
-  });
-  return serializeClosure(row);
 }
 
 function normalizePayroll(payload) {
