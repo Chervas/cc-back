@@ -262,7 +262,8 @@ function createRuntime(deps) {
     if (Number(conversation?.clinic_id) !== Number(request.clinic_id) || Number(conversation?.patient_id) !== Number(request.patient_id)
       || conversation.lead_id || C.phone(conversation.contact_id) !== request.metadata.phone || C.phone(recipient) !== request.metadata.phone
       || !/^[a-f0-9]{36}$/.test(request.metadata.reply_token)) C.fail('program_details_recipient_or_payload_changed');
-    if (C.hash([1, 2, 3, 4].map(position => String(templateParams[position] ?? ''))) !== C.hash(request.metadata.notice.parameters)) C.fail('program_details_parameters_changed');
+    if (!templateParams || C.hash(Object.keys(templateParams).sort()) !== C.hash(['1', '2', '3'])
+      || C.hash([1, 2, 3].map(position => String(templateParams[position] ?? ''))) !== C.hash(request.metadata.notice.parameters)) C.fail('program_details_parameters_changed');
     return { metadata: { kind: 'patient_program_booking_notice', program_booking_request_event_id: Number(request.id),
       program_booking_notice_sha256: request.metadata.notice.snapshot_sha256 }, template_components: [
       { type: 'body', parameters: request.metadata.notice.parameters.map(text => ({ type: 'text', text })) },
@@ -272,28 +273,32 @@ function createRuntime(deps) {
   }
   async function authorizeEligibility({ message, conversation, payload, execution }) {
     if (!enabled() || !C.isFlow(execution) || message.metadata?.kind !== 'patient_program_booking_notice'
-      || payload?.type !== 'template' || payload.template?.name !== C.TEMPLATE) return false;
+      || payload?.type !== 'template' || !C.templateNameValid(payload.template?.name)) return false;
     const request = await fromExecution(execution), scope = await current(request), m = message.metadata || {};
     if (!scope || !request.metadata.delivery_enabled || request.metadata.review_only || await resultFor(request) || Number(m.program_booking_request_event_id) !== Number(request.id)
       || m.program_booking_notice_sha256 !== request.metadata.notice.snapshot_sha256 || message.automation_delivery_key !== messageKey(request)
       || Number(conversation?.patient_id) !== Number(request.patient_id) || Number(conversation?.clinic_id) !== Number(request.clinic_id)
       || conversation.lead_id || C.phone(conversation.contact_id) !== request.metadata.phone
       || C.hash(payload.template.components) !== C.hash(m.template_components)) return false;
+    const template = await db.WhatsappTemplate.findByPk(m.template_id);
+    if (!C.templateValid(template, request.metadata.notice.language) || template.name !== payload.template.name
+      || String(template.waba_id) !== String(m.wabaId)) return false;
     try { await communicationAllowed(request); return true; } catch { return false; }
   }
   async function authorizeTransport({ message, to, sender, useTemplate, templateName, templateLanguage, templateComponents }) {
     const execution = await db.FlowExecutionV2.findByPk(message.metadata?.execution_id);
     const conversation = await db.Conversation.findByPk(message.conversation_id);
     const request = execution && C.isFlow(execution) ? await fromExecution(execution) : null;
-    if (!request || C.phone(to) !== request.metadata.phone || !useTemplate || templateName !== C.TEMPLATE
-      || templateLanguage !== ({ es: 'es_ES', ca: 'ca', en: 'en_US' })[request.metadata.notice.language]
+    if (!request || C.phone(to) !== request.metadata.phone || !useTemplate || !C.templateNameValid(templateName)
+      || require('../lib/whatsapp-template-locale').normalizeWhatsappLocale(templateLanguage) !== request.metadata.notice.language
       || String(sender.phoneNumberId) !== String(message.metadata?.phoneNumberId) || String(sender.wabaId) !== String(message.metadata?.wabaId)
       || !await authorizeEligibility({ message, conversation, execution, payload: { type: 'template', template: { name: templateName, components: templateComponents } } })) {
       return { allowed: false, reason: 'program_details_transport_ineligible' };
     }
     const template = await db.WhatsappTemplate.findByPk(message.metadata.template_id);
     const scope = await current(request);
-    if (!C.templateValid(template, request.metadata.notice.language) || String(template.waba_id) !== String(sender.wabaId) || !scope
+    if (!C.templateValid(template, request.metadata.notice.language) || template.name !== templateName || template.language !== templateLanguage
+      || String(template.waba_id) !== String(sender.wabaId) || !scope
       || !await deps.deliveryReady(request.clinic_id, scope.template, undefined, request.metadata.notice.language)) return { allowed: false, reason: 'program_details_template_unavailable' };
     const quiet = deps.engine.computeQuietHoursDelayMs({ now: now(), enabled: true, timeZone: request.metadata.notice.time_zone });
     return quiet.delayMs > 0 ? { allowed: true, deferredUntil: quiet.scheduledAt } : { allowed: true };

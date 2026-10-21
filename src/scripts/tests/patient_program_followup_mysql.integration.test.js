@@ -46,7 +46,8 @@ test('native appointment programs keep audited reception follow-up after the fir
     templates[source.trigger_type] = await db.AutomationFlowTemplateV2.create(adapted);
     graphHashes[source.trigger_type] = C.hash(adapted.nodes);
   }
-  await db.WhatsappTemplate.create({ waba_id: t.sender.wabaId, name: C.TEMPLATE, language: 'es_ES', category: 'UTILITY', status: 'APPROVED', is_active: true,
+  await db.WhatsappTemplateCatalog.create({ id: 119, ...C.catalogPreparation().whatsapp, is_active: true, is_generic: true });
+  await db.WhatsappTemplate.create({ waba_id: t.sender.wabaId, catalog_template_id: 119, name: C.TEMPLATE + '_v6', language: 'es', category: 'UTILITY', status: 'APPROVED', is_active: true,
     components: [{ type: 'BODY', text: C.BODY }, { type: 'BUTTONS', buttons: C.BUTTONS.map(text => ({ type: 'QUICK_REPLY', text })) }] });
   const stop = require('../../lib/automation-runtime-stop');
   const dependencies = { ...t.dependencies, '../lib/automation-runtime-stop': stop,

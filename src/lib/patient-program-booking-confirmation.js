@@ -5,17 +5,20 @@
 const N = require('./patient-program-booking-notice');
 const { hash } = require('./cliniccloud-import/adapter');
 const { schedulingState } = require('./program-replan');
+const { normalizeWhatsappLocale } = require('./whatsapp-template-locale');
+const { extractTechnicalTemplateVersion } = require('./whatsapp-template-catalog-coverage');
 const REQUEST = N.EVENT, TRANSITION = 'patient.program_appointment_details_resolved';
 const SCHEMA = 'patient-program-appointment-details/v1', FAMILY = N.FAMILY, TEMPLATE = N.TEMPLATE;
 const ACTION = 'action/resolve_program_appointment_details';
+const templateNameValid = name => extractTechnicalTemplateVersion(TEMPLATE, name) !== null;
 const BUTTONS = Object.freeze(['Confirmar datos', 'Pedir cambios']);
 // One exact Utility contract covers both a new reservation and a replan. It
 // states the current reservations, rather than falsely saying every date has
 // just been created/moved; the immutable receipt retains the actual operation.
-const BODY = 'Hola, somos {{1}}. Estas son las citas reservadas actualmente de tu programa {{2}}: {{3}}. Quedan {{4}} citas por asignar; las programaremos después. Son citas a futuro: alguna fecha podría cambiar por necesidades de agenda. ¿Confirmas estos datos?';
+const BODY = 'Hola, somos {{1}}. Estas son las citas que tienes asignadas actualmente para tu programa {{2}}: {{3}}.\n\nSi quedan citas del programa por asignar, las programaremos más adelante.\n\n¿Confirmas estos datos?';
 const BODIES = Object.freeze({ es: BODY,
-  ca: 'Hola, som {{1}}. Aquestes són les cites reservades actualment del teu programa {{2}}: {{3}}. Queden {{4}} cites per assignar; les programarem més endavant. Són cites futures: alguna data podria canviar per necessitats de l’agenda. Confirmes aquestes dades?',
-  en: 'Hello, this is {{1}}. These are the appointments currently booked for your programme {{2}}: {{3}}. There are {{4}} appointments still to schedule; we will arrange them later. These are future bookings: some dates may need to change for scheduling reasons. Do you confirm these details?' });
+  ca: 'Hola, som {{1}}. Aquestes són les cites que tens assignades actualment per al teu programa {{2}}: {{3}}.\n\nSi queden cites del programa per assignar, les programarem més endavant.\n\nConfirmes aquestes dades?',
+  en: 'Hello, this is {{1}}. These are the appointments currently scheduled for your programme {{2}}: {{3}}.\n\nIf any programme appointments remain to be scheduled, we will arrange them later.\n\nDo you confirm these details?' });
 const LOCALIZED_BUTTONS = Object.freeze({ es: BUTTONS, ca: ['Confirmar dades', 'Demanar canvis'], en: ['Confirm details', 'Request changes'] });
 const AI_INSTRUCTION = 'Analiza únicamente la respuesta nueva del paciente al resumen de fechas y horas provisionales de su programa. '
   + 'Confirmar significa confirmar DATOS de las citas incluidas, nunca asistencia, llegada, consentimiento, pago ni publicidad. '
@@ -60,7 +63,7 @@ function templateValid(template, language = 'es') {
   const components = template?.components, body = components?.find(c => c.type?.toUpperCase() === 'BODY');
   const buttons = components?.find(c => c.type?.toUpperCase() === 'BUTTONS')?.buttons;
   return template?.status === 'APPROVED' && (template.is_active === true || template.is_active === 1)
-    && template.category === 'UTILITY' && template.name === TEMPLATE && template.language === ({ es: 'es_ES', ca: 'ca', en: 'en_US' })[language]
+    && template.category === 'UTILITY' && templateNameValid(template.name) && normalizeWhatsappLocale(template.language) === language
     && Array.isArray(components) && components.length === 2 && body?.text === BODIES[language]
     && Array.isArray(buttons) && buttons.length === 2 && buttons.every((button, index) =>
       button.type?.toUpperCase() === 'QUICK_REPLY' && button.text === LOCALIZED_BUTTONS[language]?.[index]);
@@ -117,12 +120,12 @@ function projection({ receipt, voucher, snapshot, clinic, sessions, appointments
     voucher, snapshot, clinic, actorId, timeZone, communicationLanguage: locale, occurredAt: occurred, deferPreview: native });
   const list = base.appointments.map(row => `${row.number}) ${native ? row.local_date.replaceAll('/', '-') : row.local_date.slice(0, 6) + row.local_date.slice(-2)} ${row.local_time}`).join('; ');
   const name = String(snapshot.name || voucher.name || '').trim().normalize('NFC');
-  const parameters = [base.clinic_name, name, list, String(pending)];
+  const parameters = [base.clinic_name, name, list];
   if (!name || !base.clinic_name || parameters.some(value => /[\u0000-\u001f\u007f\u2028\u2029]| {5}|\{\{|\}\}/u.test(value))) {
     if (!native) fail('program_details_parameter_invalid');
     representationError ||= 'program_details_parameter_invalid';
   }
-  const body = representationError ? null : (native ? BODIES[base.language] : BODY).replace(/\{\{([1234])\}\}/g, (_, index) => parameters[Number(index) - 1]);
+  const body = representationError ? null : (native ? BODIES[base.language] : BODY).replace(/\{\{([123])\}\}/g, (_, index) => parameters[Number(index) - 1]);
   if (!native && body.length > N.MAX_BODY_CHARACTERS) fail('program_details_body_too_long');
   const result = { schema_version: SCHEMA, receipt_id: base.booking_receipt_id, receipt_request_key: receipt.request_key,
     receipt_request_sha256: receipt.request_sha256, receipt_result_sha256: hash(receiptResult(receipt.result)),
@@ -168,7 +171,7 @@ function definition(clinicId = null) {
         recipient_mode: 'context_patient', sender_mode: 'clinic_default', communication_scope: 'care', quiet_hours_enabled: true,
         outside_send_window_policy: 'schedule_next_window', program_booking_protocol: true, variables: {
           1: '{{program_confirmation.clinic_name}}', 2: '{{program_confirmation.program_name}}',
-          3: '{{program_confirmation.appointment_list}}', 4: '{{program_confirmation.pending_count}}',
+          3: '{{program_confirmation.appointment_list}}',
         } }, { on_success: 'N3', on_fail: 'N11' }, 0, 250),
       node('N3', 'delay/wait_response', { listens_to_node_id: 'N2', timeout_duration: '{{trigger.data.response_timeout_minutes}}',
         timeout_unit: 'minutes', response_buffer_enabled: true, response_buffer_delay_seconds: 90 }, { on_response: 'N4', on_timeout: 'N10', on_fail: 'N11' }, 0, 500),
@@ -201,12 +204,11 @@ function catalogPreparation() {
     variables: [
       { position: 1, name: 'clinica', example: 'Clínica de ejemplo', description: 'Clínica del programa; se conserva su zona horaria.' },
       { position: 2, name: 'programa', example: 'Programa corporal', description: 'Nombre del programa contratado o asignado.' },
-      { position: 3, name: 'fechas', example: '1) 04/11/26 09:00; 2) 19/11/26 09:00', description: 'Todas las citas futuras reservadas: posición original, dd/mm/aa HH:mm; lista íntegra en una sola línea.' },
-      { position: 4, name: 'pendientes', example: '3', description: 'Citas aún pendientes de asignar; excluye las realizadas.' },
+      { position: 3, name: 'fechas', example: '1) 04-11-2026 09:00; 2) 19-11-2026 09:00', description: 'Todas las citas futuras reservadas: posición original, DD-MM-YYYY HH:mm; lista íntegra en una sola línea.' },
     ],
-    components: [{ type: 'BODY', text: BODY, example: { body_text: [['Clínica de ejemplo', 'Programa corporal', '1) 04/11/26 09:00; 2) 19/11/26 09:00', '3']] } },
+    components: [{ type: 'BODY', text: BODY, example: { body_text: [['Clínica de ejemplo', 'Programa corporal', '1) 04-11-2026 09:00; 2) 19-11-2026 09:00']] } },
       { type: 'BUTTONS', buttons: BUTTONS.map(text => ({ type: 'QUICK_REPLY', text })) }] } };
 }
 module.exports = { REQUEST, TRANSITION, SCHEMA, FAMILY, TEMPLATE, ACTION, BODY, BODIES, BUTTONS, LOCALIZED_BUTTONS, AI_INSTRUCTION, reasons,
-  id, phone, plain, object, copy, hash, time, fail, receiptResult, configValid, graphValid, templateValid, projection, publicState, definition, catalogPreparation,
+  id, phone, plain, object, copy, hash, time, fail, receiptResult, configValid, graphValid, templateValid, templateNameValid, projection, publicState, definition, catalogPreparation,
   isFlow: execution => execution?.trigger_type === REQUEST || require('./patient-program-appointment-flow').nativeFlow(execution) };

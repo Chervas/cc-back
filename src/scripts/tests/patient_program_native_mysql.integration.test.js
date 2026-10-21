@@ -41,7 +41,8 @@ test('actual booking coordinator -> actual published appointment graph adapted -
     assert(A.graphValid(adapted), 'Persisted draft fixture must configure both trigger projections');
     templates[source.trigger_type] = await db.AutomationFlowTemplateV2.create(adapted);
   }
-  await db.WhatsappTemplate.create({ waba_id: t.sender.wabaId, name: C.TEMPLATE, language: 'es_ES', category: 'UTILITY', status: 'APPROVED', is_active: true,
+  await db.WhatsappTemplateCatalog.create({ id: 119, ...C.catalogPreparation().whatsapp, is_active: true, is_generic: true });
+  await db.WhatsappTemplate.create({ waba_id: t.sender.wabaId, catalog_template_id: 119, name: C.TEMPLATE + '_v6', language: 'es', category: 'UTILITY', status: 'APPROVED', is_active: true,
     components: [{ type: 'BODY', text: C.BODY }, { type: 'BUTTONS', buttons: C.BUTTONS.map(text => ({ type: 'QUICK_REPLY', text })) }] });
   const stop = require('../../lib/automation-runtime-stop');
   const appointmentRuntime = loadSource('appointmentAutomationV2Runtime.service', { '../../models': db, './socket.service': { getIO: () => null },
@@ -155,10 +156,12 @@ test('actual booking coordinator -> actual published appointment graph adapted -
     assert.equal((await resolution(failed.request)).metadata.reason, 'delivery_failed');
     const pending = await send(await move('clinic_schedule'));
     const transport = { message: pending.message, to: '34600000001', sender: t.sender, useTemplate: true,
-      templateName: C.TEMPLATE, templateLanguage: 'es_ES', templateComponents: pending.message.metadata.template_components };
+      templateName: pending.message.metadata.template_name, templateLanguage: pending.message.metadata.template_language, templateComponents: pending.message.metadata.template_components };
+    assert.equal(transport.templateName, C.TEMPLATE + '_v6'); assert.equal(transport.templateLanguage, 'es');
+    assert.equal(transport.templateComponents[0].parameters.length, 3);
     assert.equal((await runtime.authorizeTransport(transport)).allowed, true);
     const eligibility = { message: pending.message, conversation: await db.Conversation.findByPk(pending.message.conversation_id),
-      payload: { type: 'template', template: { name: C.TEMPLATE, components: transport.templateComponents } },
+      payload: { type: 'template', template: { name: transport.templateName, components: transport.templateComponents } },
       loadExecution: id => db.FlowExecutionV2.findByPk(id), patientHeld: async () => true,
       authorizeProgramBatch: runtime.authorizeEligibility };
     const guard = require('../../lib/whatsappAppointmentEligibility');
@@ -169,6 +172,8 @@ test('actual booking coordinator -> actual published appointment graph adapted -
     assert.equal((await runtime.authorizeTransport({ ...transport, to: '34600000002' })).allowed, false);
     assert.equal((await runtime.authorizeTransport({ ...transport, sender: { ...t.sender, wabaId: 'TESTONLY-FOREIGN' } })).allowed, false);
     assert.equal((await runtime.authorizeTransport({ ...transport, templateComponents: [] })).allowed, false);
+    assert.equal((await runtime.authorizeTransport({ ...transport, templateName: C.TEMPLATE + '_v7' })).allowed, false);
+    assert.equal((await runtime.authorizeTransport({ ...transport, templateLanguage: 'es_ES' })).allowed, false);
     for (const denied of ['accessDenied', 'preferenceDenied', 'senderBlocked']) {
       t[denied] = true; assert.equal((await runtime.authorizeTransport(transport)).allowed, false, denied); t[denied] = false;
     }

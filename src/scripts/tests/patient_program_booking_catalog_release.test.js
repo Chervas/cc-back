@@ -16,7 +16,7 @@ test('native controllers validate/normalize three central inactive candidates fo
   assert.equal(rows.catalog.steps.length, 13); assert.equal(rows.catalog.is_default_for_trigger, false);
   assert.equal(rows.whatsapp.locale, 'es'); assert.equal(rows.whatsapp.category, 'UTILITY');
   assert.equal(rows.whatsapp.body_text, C.BODY); assert.equal(rows.whatsapp.components[0].text, C.BODY);
-  assert.match(C.BODY, /citas reservadas actualmente/); assert.match(rows.catalog.description, /Reserva o reprogramación/);
+  assert.match(C.BODY, /citas que tienes asignadas actualmente/); assert.match(rows.catalog.description, /Reserva o reprogramación/);
   assert.deepEqual(rows.whatsapp.components[1].buttons.map(row => row.text), [...C.BUTTONS]);
   assert.equal(rows.flows.trigger_config.configured, false);
   for (const config of [rows.flows.trigger_config, rows.flows.nodes[0].config]) {

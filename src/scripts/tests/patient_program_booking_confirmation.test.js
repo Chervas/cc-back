@@ -24,8 +24,9 @@ test('summary includes every future reservation, not just the latest receipt, an
   const before = clone(input), result = C.projection(input);
   assert.deepEqual(input, before); assert.equal(result.appointment_count, 2); assert.equal(result.pending_count, 2); assert.equal(result.completed_count, 1);
   assert.deepEqual(result.appointments.map(row => row.number), [2, 5]);
-  assert.match(result.body, /citas reservadas actualmente/); assert.match(result.body, /podría cambiar por necesidades de agenda/);
-  assert.match(result.body, /Quedan 2 citas por asignar/);
+  assert.match(result.body, /citas que tienes asignadas actualmente/);
+  assert.match(result.body, /Si quedan citas del programa por asignar/);
+  assert.equal(result.parameters.length, 3); assert.doesNotMatch(result.body, /Quedan \d|\{\{/);
   assert.match(result.parameters[2], /^2\) 11\/01\/27 10:00; 5\)/); assert.equal(result.summary_policy, 'each_booking');
 });
 test('receipt business hash ignores only communication projection, not its dates or actual booking intent', () => {
@@ -34,6 +35,39 @@ test('receipt business hash ignores only communication projection, not its dates
   assert.deepEqual(C.projection(input), first);
   input.receipt.result.sessions[0].start_at = '2027-02-04T09:00:00.000Z';
   assert.notEqual(C.projection(input).snapshot_sha256, first.snapshot_sha256);
+});
+test('one three-variable contract covers complete and partial programmes in every supported language', () => {
+  for (const language of ['es', 'ca', 'en']) for (const remaining of [0, 1, 4]) {
+    const input = fixture(5); input.native = true; input.communicationLanguage = language;
+    for (let i = 0; i < remaining; i++) input.sessions[i].appointment_id = null;
+    input.appointments = input.appointments.filter(row => input.sessions.some(session => session.appointment_id === row.id_cita));
+    const result = C.projection(input);
+    assert.equal(result.pending_count, remaining); assert.equal(result.parameters.length, 3);
+    assert.equal(result.appointment_count, 5 - remaining);
+    assert.equal(result.body, C.BODIES[language].replace(/\{\{([123])\}\}/g, (_, position) => result.parameters[Number(position) - 1]));
+    assert.doesNotMatch(result.body, /\{\{|Quedan \d|Queden \d|There are \d/);
+    assert.deepEqual([...C.BODIES[language].matchAll(/\{\{(\d+)\}\}/g)].map(match => match[1]), ['1', '2', '3']);
+  }
+  const proposal = C.catalogPreparation();
+  assert.deepEqual(proposal.whatsapp.variables.map(variable => variable.position), [1, 2, 3]);
+  assert.equal(proposal.whatsapp.components[0].example.body_text[0].length, 3);
+  assert.deepEqual(Object.keys(proposal.flow.nodes.find(node => node.type === 'action/send_whatsapp').config.variables), ['1', '2', '3']);
+});
+test('programme transport rejects a stale fourth parameter and binds exactly the three frozen values', async () => {
+  const input = fixture(), notice = C.projection(input), phone = '34600000123';
+  const template = { id: 1, waba_id: 'TESTONLY', ...C.catalogPreparation().whatsapp, is_active: true, status: 'APPROVED', language: 'es_ES' };
+  const runtime = createRuntime({ db: { Sequelize: { Op: {} }, WhatsappTemplate: { findByPk: async () => template } } });
+  const request = { id: 10, clinic_id: 66, patient_id: 123, metadata: { notice, phone, reply_token: 'a'.repeat(36) } };
+  const parameters = Object.fromEntries(notice.parameters.map((value, index) => [String(index + 1), value]));
+  const options = { request, template, templateParams: parameters, sender: { wabaId: 'TESTONLY' },
+    conversation: { clinic_id: 66, patient_id: 123, contact_id: phone, lead_id: null }, recipient: phone };
+  const envelope = await runtime.sendEnvelope(options);
+  assert.equal(envelope.template_components[0].parameters.length, 3);
+  assert.deepEqual(envelope.template_components[0].parameters.map(value => value.text), notice.parameters);
+  for (const templateParams of [null, { ...parameters, 4: '0' }, { ...parameters, 2: 'TESTONLY changed' },
+    { 1: parameters[1], 3: parameters[3] }]) {
+    await assert.rejects(runtime.sendEnvelope({ ...options, templateParams }), /program_details_parameters_changed/);
+  }
 });
 test('new booking and reprogramming share the exact current-summary Utility but keep distinct immutable receipt proofs', () => {
   const initial = fixture(), booked = C.projection(initial), moved = clone(initial);
@@ -57,7 +91,7 @@ test('sealed external entry excludes unrecorded prefix from pending/completed/re
   assert.equal(result.unrecorded_count, 2); assert.equal(result.pending_count, 1);
   assert.equal(result.completed_count, 0); assert.equal(result.appointment_count, 2);
   assert.deepEqual(result.appointments.map(row => row.number), [3, 5]);
-  assert.match(result.parameters[2], /^3\)/); assert.match(result.body, /Quedan 1 citas por asignar/);
+  assert.match(result.parameters[2], /^3\)/); assert.match(result.body, /Si quedan citas del programa por asignar/);
   for (const state of [null, 'pendiente', 'completada']) {
     const corrupt = clone(input), old = fixture();
     corrupt.sessions.push(old.sessions[0]);
@@ -114,6 +148,19 @@ test('gate closed is schema-independent and causes no event, outbox, patient rea
   const forbidden = new Proxy({}, { get() { throw Error('DATABASE_ACCESS_FORBIDDEN'); } });
   const runtime = createRuntime({ db: { Sequelize: { Op: {} }, PatientOperationalEvent: forbidden }, enabled: () => false });
   assert.deepEqual(await runtime.recordBookingReceipt({}), { status: 'not_available', reason: 'runtime_disabled', sent: false });
+});
+test('approved versioned catalogue instances use provider locale without accepting another family or body', () => {
+  for (const language of ['es', 'ca', 'en']) {
+    const template = { name: C.TEMPLATE + '_v7', status: 'APPROVED', is_active: true, category: 'UTILITY',
+      language, components: [{ type: 'BODY', text: C.BODIES[language] },
+        { type: 'BUTTONS', buttons: C.LOCALIZED_BUTTONS[language].map(text => ({ type: 'QUICK_REPLY', text })) }] };
+    assert(C.templateValid(template, language));
+    assert(C.templateValid({ ...template, language: ({ es: 'es_ES', ca: 'ca', en: 'en_US' })[language] }, language));
+    for (const name of ['other', C.TEMPLATE + '_other', C.TEMPLATE + '_v0', C.TEMPLATE + '_v7_suffix']) assert.equal(C.templateValid({ ...template, name }, language), false);
+    assert.equal(C.templateValid({ ...template, status: 'PENDING' }, language), false);
+    assert.equal(C.templateValid({ ...template, language: 'fr' }, language), false);
+    assert.equal(C.templateValid({ ...template, components: [{ ...template.components[0], text: C.BODIES[language] + ' changed' }, template.components[1]] }, language), false);
+  }
 });
 test('queueing never means sent; only accepted persisted provider evidence reports sent', () => {
   const request = { id: 9, metadata: { notice: { appointment_count: 2, pending_count: 3 }, delivery_enabled: true } };
