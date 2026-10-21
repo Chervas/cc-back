@@ -1,27 +1,49 @@
 'use strict';
 
 const C = require('../lib/clinical-episode-contract');
+const FIELDS = ['alergias', 'medicacion', 'antecedentes', 'notas_medicas'];
 
 function createPatientClinicalReferenceService({ db, canAccess } = {}) {
   const denied = () => C.error(403, 'access_policy_forbidden', 'No tienes permisos para actualizar estos datos clínicos.');
-  async function permissions(actorId, clinicId) {
-    const checks = await Promise.all(['patients.view', 'patients.sensitive.view', 'patients.edit']
+  async function permissions(actorId, clinicId, writing = true) {
+    const checks = await Promise.all(['patients.view', 'patients.sensitive.view', ...(writing ? ['patients.edit'] : ['clinical.reports.view'])]
       .map(featureKey => canAccess({ actorId, clinicId, featureKey })));
     if (checks.some(allowed => !allowed)) throw denied();
   }
+  const item = (patient, clinicId) => ({ patient_id: Number(patient.id_paciente), clinic_id: clinicId,
+    ...Object.fromEntries(FIELDS.map(field => [field, patient[field] ?? null])) });
   function values(payload) {
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
-      || Object.keys(payload).some(key => !['medicacion', 'expected_medication'].includes(key))) {
-      throw C.error(400, 'clinical_reference_invalid_payload', 'Revisa los datos de medicación.');
+    const invalid = () => C.error(400, 'clinical_reference_invalid_payload', 'Revisa los datos clínicos.');
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw invalid();
+    let changes, expected;
+    if (Object.hasOwn(payload, 'medicacion') || Object.hasOwn(payload, 'expected_medication')) {
+      if (Object.keys(payload).some(key => !['medicacion', 'expected_medication'].includes(key))) throw invalid();
+      if (!Object.hasOwn(payload, 'expected_medication')) throw C.error(428, 'clinical_reference_version_required', 'Vuelve a cargar los datos antes de guardar.');
+      changes = { medicacion: payload.medicacion }; expected = { medicacion: payload.expected_medication };
+    } else {
+      if (Object.keys(payload).some(key => !['changes', 'expected_values'].includes(key))) throw invalid();
+      if (!Object.hasOwn(payload, 'expected_values')) throw C.error(428, 'clinical_reference_version_required', 'Vuelve a cargar los datos antes de guardar.');
+      changes = payload.changes; expected = payload.expected_values;
+      if (!changes || typeof changes !== 'object' || Array.isArray(changes) || !expected || typeof expected !== 'object' || Array.isArray(expected)
+        || !Object.keys(changes).length || Object.keys(changes).some(key => !FIELDS.includes(key))
+        || Object.keys(expected).length !== Object.keys(changes).length) throw invalid();
     }
-    if (!Object.hasOwn(payload, 'expected_medication')) throw C.error(428, 'clinical_reference_version_required', 'Vuelve a cargar la medicación antes de guardar.');
-    for (const field of ['medicacion', 'expected_medication']) {
-      if (!Object.hasOwn(payload, field) || payload[field] !== null && (typeof payload[field] !== 'string'
-        || payload[field].includes('\u0000') || Buffer.byteLength(payload[field], 'utf8') > 65535)) {
-        throw C.error(400, 'clinical_reference_invalid_payload', 'La medicación supera el tamaño admitido o contiene caracteres no válidos.');
-      }
+    for (const field of Object.keys(changes)) for (const group of [changes, expected]) {
+      if (!Object.hasOwn(group, field) || group[field] !== null && (typeof group[field] !== 'string'
+        || group[field].includes('\u0000') || Buffer.byteLength(group[field], 'utf8') > 65535
+        || field === 'notas_medicas' && group[field].length > 16000)) throw invalid();
     }
-    return payload;
+    return { changes, expected };
+  }
+  async function read({ patientIdentifier, clinicId, actorId }) {
+    if (!actorId) throw C.error(401, 'unauthenticated', 'Usuario no autenticado.');
+    actorId = C.integer(actorId, 'actor_id'); clinicId = C.integer(clinicId, 'clinic_id'); await permissions(actorId, clinicId, false);
+    const identifier = String(patientIdentifier || '');
+    if (!identifier || identifier.length > 80) throw C.error(400, 'clinical_reference_patient_invalid', 'Selecciona un paciente válido.');
+    const patient = await db.Paciente.findOne({ where: /^[1-9]\d*$/.test(identifier) ? { id_paciente: C.integer(identifier) } : { public_id: identifier } });
+    const member = patient && (Number(patient.clinica_id) === clinicId || await db.PacienteClinica.findOne({ where: { paciente_id: patient.id_paciente, clinica_id: clinicId }, attributes: ['id'] }));
+    if (!member) throw C.error(404, 'clinical_reference_patient_not_found', 'Paciente no encontrado en esta clínica.');
+    return { item: item(patient, clinicId) };
   }
   async function update({ patientIdentifier, clinicId, actorId, payload }) {
     if (!actorId) throw C.error(401, 'unauthenticated', 'Usuario no autenticado.');
@@ -39,19 +61,21 @@ function createPatientClinicalReferenceService({ db, canAccess } = {}) {
       // The field belongs to the patient record. An active member clinic cannot
       // bypass the owning clinic's existing patient-edit policy.
       if (Number(patient.clinica_id) !== clinicId) await permissions(actorId, Number(patient.clinica_id));
-      const current = patient.medicacion ?? null;
-      if (current !== data.expected_medication) throw C.error(409, 'clinical_reference_conflict', 'La medicación ha cambiado. Tu texto se conserva; consulta la versión actual antes de guardar.');
-      const updated = current !== data.medicacion;
-      if (updated) await patient.update({ medicacion: data.medicacion }, { transaction, fields: ['medicacion'] });
-      return { item: { patient_id: Number(patient.id_paciente), clinic_id: clinicId, medicacion: patient.medicacion ?? null }, updated };
+      const fields = Object.keys(data.changes);
+      for (const field of fields) if ((patient[field] ?? null) !== data.expected[field]) {
+        throw C.error(409, 'clinical_reference_conflict', 'Los datos clínicos han cambiado. Tu texto se conserva; consulta los valores actuales antes de guardar.');
+      }
+      const updated = fields.some(field => (patient[field] ?? null) !== data.changes[field]);
+      if (updated) await patient.update(data.changes, { transaction, fields });
+      return { item: item(patient, clinicId), updated };
     });
   }
-  return { update };
+  return { update, read };
 }
 
 let service;
-module.exports = { createPatientClinicalReferenceService, update: input => {
+module.exports = { createPatientClinicalReferenceService, ...Object.fromEntries(['update', 'read'].map(method => [method, input => {
   service ||= createPatientClinicalReferenceService({ db: require('../../models'),
     canAccess: input => require('../lib/access-policy').canUserAccessFeature(input) });
-  return service.update(input);
-} };
+  return service[method](input);
+}])) };

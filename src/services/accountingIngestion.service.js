@@ -7,6 +7,7 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const accounting = require('./accounting.service');
+const { withIngestionLease } = require('../lib/accountingIngestionLease');
 
 const {
   sequelize,
@@ -47,6 +48,11 @@ function decodeAttachment(attachment) {
   if (!buffer.length || buffer.length > MAX_BYTES) {
     throw domainError(413, 'accounting_ingestion_file_too_large', 'Cada archivo debe ocupar menos de 18 MB.');
   }
+  const validSignature = contentType === 'application/pdf' ? buffer.subarray(0, 5).toString('ascii') === '%PDF-'
+    : contentType === 'image/jpeg' || contentType === 'image/jpg' ? buffer.length >= 3 && buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
+    : contentType === 'image/png' ? buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    : buffer.length >= 12 && buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP';
+  if (!validSignature) throw domainError(400, 'accounting_ingestion_content_invalid', 'El contenido del archivo no coincide con su formato.');
   return {
     filename: clean(attachment.filename, 255) || 'factura-proveedor',
     contentType,
@@ -113,10 +119,22 @@ async function enqueue({
     throw domainError(400, 'accounting_ingestion_kind_invalid', 'El tipo de documento no es válido.');
   }
   const file = decodeAttachment(attachment);
-  const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
-    purpose: normalizedKind === 'payroll'
+  const purpose = normalizedKind === 'payroll'
       ? 'accounting_payroll_document'
-      : 'accounting_expense_document',
+      : 'accounting_expense_document';
+  const sha256 = crypto.createHash('sha256').update(file.buffer).digest('hex');
+  return withIngestionLease(sequelize, `${clinicId}:${normalizedKind}:${sha256}`, async () => {
+    const matches = await ClinicalPrivateAsset.findAll({ where: { clinic_id: clinicId, purpose, sha256, status: 'active' } });
+    const ids = matches.map(asset => asset.id);
+    const existing = ids.length ? await AccountingIngestionJob.findOne({ where: { clinic_id: clinicId,
+      document_kind: normalizedKind, source_asset_id: { [Op.in]: ids } }, order: [['created_at', 'DESC']] }) : null;
+    if (existing) return { ...serialize(existing, matches.find(asset => Number(asset.id) === Number(existing.source_asset_id))), duplicate: true };
+    const recorded = ids.length && normalizedKind === 'expense'
+      ? await AccountingExpenseDocument.findOne({ where: { clinic_id: clinicId, attachment_asset_id: { [Op.in]: ids } } }) : null;
+    if (recorded) throw domainError(409, 'expense_duplicate_detected', 'Este archivo ya pertenece a una factura recibida.', { expense_id: recorded.public_id });
+    // Retry a failed job insert by reusing its already stored private original.
+    const asset = matches.find(value => value.owner_type === 'accounting_ingestion') || await clinicalPrivateStorage.storeClinicalPrivateAsset({
+    purpose,
     clinicId,
     ownerType: 'accounting_ingestion',
     ownerId: crypto.randomUUID(),
@@ -140,6 +158,7 @@ async function enqueue({
     created_by: actorId,
   });
   return serialize(job, asset);
+  });
 }
 
 function expenseSchema() {
@@ -322,13 +341,10 @@ async function applySupplierHistory(clinicId, extracted) {
   const supplierTaxId = clean(extracted.supplier_tax_id, 40);
   const supplierName = clean(extracted.supplier_name, 180);
   if (!supplierTaxId && !supplierName) return extracted;
-  const conditions = [];
-  if (supplierTaxId) conditions.push({ supplier_tax_id: supplierTaxId });
-  if (supplierName) conditions.push({ supplier_name: supplierName });
   const previous = await AccountingExpenseDocument.findAll({
     where: {
       clinic_id: clinicId,
-      [Op.or]: conditions,
+      ...(supplierTaxId ? { supplier_tax_id: supplierTaxId } : { supplier_name: supplierName }),
     },
     attributes: ['category', 'payment_method'],
     order: [['issue_date', 'DESC'], ['id', 'DESC']],
@@ -350,6 +366,8 @@ async function applySupplierHistory(clinicId, extracted) {
       previous_documents: previous.length,
       suggested_category: suggestedCategory,
       category_applied: Boolean(categoryIsGeneric && suggestedCategory),
+      suggested_payment_method: suggestedPaymentMethod,
+      payment_method_applied: Boolean(paymentMethodMissing && suggestedPaymentMethod),
     },
   };
 }
@@ -480,6 +498,10 @@ async function accept({ publicId, clinicId, actorId, payload }) {
       lock: transaction.LOCK.UPDATE,
     });
     if (!job) throw domainError(404, 'accounting_ingestion_not_found', 'Documento de la cola no encontrado.');
+    if (job.status === 'accepted') {
+      const asset = await ClinicalPrivateAsset.findByPk(job.source_asset_id, { transaction });
+      return { job: serialize(job, asset), already_accepted: true };
+    }
     if (job.status !== 'review') {
       throw domainError(409, 'accounting_ingestion_not_reviewable', 'El documento todavía no está listo para revisar.');
     }
@@ -508,6 +530,22 @@ async function accept({ publicId, clinicId, actorId, payload }) {
         payroll_document: payrollDocument,
       };
     }
+    if (!['pending', 'paid', 'cancelled'].includes(payload?.status)
+      || !['cash', 'card', 'transfer', 'direct_debit', 'other'].includes(payload?.payment_method)) {
+      throw domainError(400, 'accounting_ingestion_review_required', 'Confirma la situación y la forma de pago antes de guardar.');
+    }
+    const amounts = ['taxable_base', 'tax_amount', 'withholding_amount', 'total'];
+    if (amounts.some(key => typeof payload[key] !== 'number' || !Number.isFinite(payload[key]) || payload[key] < 0)) {
+      throw domainError(400, 'accounting_ingestion_amounts_required', 'Comprueba base, IVA, retención y total. Un dato no leído no equivale a cero.');
+    }
+    if (payload.status === 'paid' && (typeof payload.paid_at !== 'string' || !Number.isFinite(Date.parse(payload.paid_at)))) {
+      throw domainError(400, 'accounting_ingestion_paid_date_required', 'Indica la fecha de pago; la fecha de lectura no acredita un pago.');
+    }
+    if (Math.abs(Number(payload.taxable_base) + Number(payload.tax_amount) - Number(payload.withholding_amount) - Number(payload.total)) > 0.02) {
+      throw domainError(400, 'accounting_ingestion_totals_mismatch', 'La base, el IVA y la retención no coinciden con el total. Revisa el original.');
+    }
+    const currency = clean(job.extracted_data?.currency, 10).toUpperCase();
+    if (currency && currency !== 'EUR') throw domainError(409, 'accounting_ingestion_currency_unsupported', 'La factura está en otra moneda. Necesita revisión contable antes de registrarse en euros.');
     const expense = await accounting.createExpense({
       clinicId,
       actorId,

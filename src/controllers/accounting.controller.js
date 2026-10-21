@@ -9,8 +9,8 @@ const accountingExport = require('../services/accountingExport.service');
 const { canUserAccessFeature } = require('../lib/access-policy');
 
 function positiveInteger(value) {
-  const parsed = Number.parseInt(String(value ?? ''), 10);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function actorId(req) {
@@ -210,12 +210,13 @@ exports.getFiscalDocument = asyncHandler(async (req, res) => {
   res.json(await accounting.getFiscalDocument({
     publicId: req.params.documentId,
     clinicId: resolvedClinicId,
+    portalMode: await accountingFirms.isPortalUser({ actorId: actorId(req) }),
   }));
 });
 
 exports.exportCsv = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'accounting.export');
-  const csv = await accounting.exportCsv({ clinicId: resolvedClinicId, query: req.query });
+  const csv = await accounting.exportCsv({ clinicId: resolvedClinicId, query: req.query, portalMode: await accountingFirms.isPortalUser({ actorId: actorId(req) }) });
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="contabilidad-${resolvedClinicId}.csv"`);
   res.send(`\uFEFF${csv}`);
@@ -231,7 +232,13 @@ exports.issueFirmCredentials = asyncHandler(async (req, res) => {
   res.json(await accountingFirms.issueCredentials({
     clinicId: resolvedClinicId,
     actorId: actorId(req),
+    email: req.body?.email,
   }));
+});
+
+exports.revokeFirmAccess = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.firm.manage');
+  res.json(await accountingFirms.revokeAccess({ clinicId: resolvedClinicId, actorId: actorId(req) }));
 });
 
 exports.getPortalScope = asyncHandler(async (req, res) => {
@@ -255,7 +262,7 @@ exports.exportPortalCsv = asyncHandler(async (req, res) => {
     actorId: actorId(req),
     clinicId: req.query.clinic_id,
   });
-  const csv = await accounting.exportCsv({ clinicId: resolvedClinicId, query: req.query });
+  const csv = await accounting.exportCsv({ clinicId: resolvedClinicId, query: req.query, portalMode: true });
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="gestoria-${resolvedClinicId}.csv"`);
   res.send(`\uFEFF${csv}`);
@@ -276,12 +283,13 @@ exports.enqueueIngestion = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
   const documentKind = String(req.body.document_kind || 'expense').toLowerCase();
   if (documentKind === 'payroll') await requireFeature(req, 'accounting.payroll.manage');
-  res.status(201).json(await accountingIngestion.enqueue({
+  const result = await accountingIngestion.enqueue({
     clinicId: resolvedClinicId,
     actorId: actorId(req),
     attachment: req.body.attachment,
     documentKind,
-  }));
+  });
+  res.status(result.duplicate ? 200 : 201).json(result);
 });
 
 exports.processIngestion = asyncHandler(async (req, res) => {

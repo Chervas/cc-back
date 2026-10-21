@@ -540,7 +540,7 @@ async function getWorkspace({
     payrollDocuments,
   ] = await Promise.all([
     PatientFiscalDocument.findAll({
-      where: { clinic_id: clinicId, issue_date: { [Op.gte]: period.from, [Op.lt]: period.toExclusive } },
+      where: { clinic_id: clinicId, ...(portalMode ? { status: 'issued' } : {}), issue_date: { [Op.gte]: period.from, [Op.lt]: period.toExclusive } },
       order: [['issue_date', 'DESC'], ['id', 'DESC']],
     }),
     AccountingExpenseDocument.findAll({
@@ -1360,8 +1360,8 @@ async function readPayrollDocumentAttachment({ publicId, clinicId }) {
   return { asset, buffer: stored.buffer };
 }
 
-async function getFiscalDocument({ publicId, clinicId }) {
-  const document = await PatientFiscalDocument.findOne({ where: { public_id: publicId, clinic_id: clinicId } });
+async function getFiscalDocument({ publicId, clinicId, portalMode = false }) {
+  const document = await PatientFiscalDocument.findOne({ where: { public_id: publicId, clinic_id: clinicId, ...(portalMode ? { status: 'issued' } : {}) } });
   if (!document) throw domainError(404, 'fiscal_document_not_found', 'Documento fiscal no encontrado.');
   return serializeFiscalDocument(document);
 }
@@ -1371,8 +1371,8 @@ function csvCell(value) {
   return `"${text}"`;
 }
 
-async function exportCsv({ clinicId, query = {} }) {
-  const workspace = await getWorkspace({ clinicId, query });
+async function exportCsv({ clinicId, query = {}, portalMode = false }) {
+  const workspace = await getWorkspace({ clinicId, query, portalMode });
   const rows = [
     ['tipo', 'fecha', 'numero', 'tercero', 'nif', 'base', 'impuestos', 'retencion', 'total', 'estado'],
     ...workspace.issued_documents.map((document) => [

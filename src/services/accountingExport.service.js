@@ -37,7 +37,7 @@ async function exportBundle({ clinicIds, query = {}, actorId }) {
     });
     entries.push({
       name: `${prefix}/contabilidad-${workspace.period.from}-${workspace.period.to}.csv`,
-      data: `\uFEFF${await accounting.exportCsv({ clinicId: clinic.id_clinica, query })}`,
+      data: `\uFEFF${await accounting.exportCsv({ clinicId: clinic.id_clinica, query, portalMode: true })}`,
     });
     for (const document of workspace.issued_documents) {
       if (document.status !== 'issued') continue;

@@ -312,6 +312,7 @@ app.use('/api', templatesRoutes);
 console.log('Rutas /api/templates y /api/message-log configuradas');
 app.use('/api/citas', citasRoutes);
 app.use('/api/clinical-episodes', require('./routes/clinicalEpisodes.routes'));
+app.use('/api/clinical-episode-templates', require('./routes/clinicalEpisodeTemplates.routes'));
 app.use('/api/patient-follow-ups', patientFollowUpsRoutes);
 app.use('/api/treatment-programs', treatmentProgramsRoutes);
 console.log('Ruta /api/citas configurada');

@@ -23,6 +23,9 @@ async function requireClinicFeature(req, featureKey, clinicId) {
   if (!resolvedClinicId) {
     throw economics.domainError(400, 'clinic_scope_required', 'Debes indicar una clínica válida.');
   }
+  if (await require('../services/accountingFirms.service').isPortalUser({ actorId: actorId(req) })) {
+    throw economics.domainError(403, 'accounting_portal_read_only', 'El portal de gestoría solo permite consultar documentos contables.');
+  }
   const allowed = await getAccessibleClinicIdsForFeature({
     actorId: actorId(req),
     featureKey,
@@ -64,9 +67,16 @@ async function requirePaymentFeature(req, featureKey) {
 async function requireFiscalDocumentFeature(req, featureKey) {
   const document = await db.PatientFiscalDocument.findOne({
     where: { public_id: String(req.params.documentId || '').trim() },
-    attributes: ['clinic_id'],
+    attributes: ['clinic_id', 'status'],
   });
   if (!document) throw economics.domainError(404, 'fiscal_document_not_found', 'Documento fiscal no encontrado.');
+  const firms = require('../services/accountingFirms.service');
+  if (await firms.isPortalUser({ actorId: actorId(req) })) {
+    if (featureKey !== 'billing.reports.view') throw economics.domainError(403, 'accounting_portal_read_only', 'El portal de gestoría es de solo lectura.');
+    if (document.status !== 'issued') throw economics.domainError(404, 'fiscal_document_not_found', 'Documento fiscal no encontrado.');
+    await firms.assertPortalClinic({ actorId: actorId(req), clinicId: Number(document.clinic_id) });
+    return Number(document.clinic_id);
+  }
   return requireClinicFeature(req, featureKey, document.clinic_id);
 }
 

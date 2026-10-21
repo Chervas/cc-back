@@ -54,6 +54,7 @@ module.exports = (sequelize, DataTypes) => {
     clinic_id: { type: DataTypes.INTEGER, allowNull: false },
     professional_id: { type: DataTypes.INTEGER, allowNull: true },
     appointment_id: { type: DataTypes.INTEGER, allowNull: true },
+    episode_id: {type:DataTypes.STRING(36),allowNull:true},
     treatment_id: { type: DataTypes.INTEGER, allowNull: true },
     area_contract_revision_id: { type: DataTypes.INTEGER, allowNull: true },
     profile_code: { type: DataTypes.STRING(40), allowNull: false, defaultValue: 'quick' },

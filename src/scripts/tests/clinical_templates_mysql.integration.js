@@ -1,0 +1,61 @@
+'use strict';
+const assert = require('node:assert/strict'), { DataTypes: D, Sequelize } = require('sequelize');
+const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
+const C = require('../../lib/clinical-episode-contract'), T = require('../../lib/clinical-template-contract');
+withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
+  db.Clinica = sql.define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true } }, { tableName: 'Clinicas', timestamps: false });
+  db.Paciente = sql.define('Paciente', { id_paciente: { type: D.INTEGER, primaryKey: true }, public_id: D.STRING, clinica_id: D.INTEGER,
+    nombre: D.STRING, alergias: D.TEXT, medicacion: D.TEXT, antecedentes: D.TEXT, notas_medicas: D.TEXT, peso: D.DECIMAL(10,2) }, { tableName: 'Pacientes', timestamps: false });
+  db.PacienteClinica = sql.define('PacienteClinica', { id: { type: D.INTEGER, primaryKey: true }, paciente_id: D.INTEGER, clinica_id: D.INTEGER }, { timestamps: false });
+  db.CitaPaciente = sql.define('CitaPaciente', { id_cita: { type: D.INTEGER, primaryKey: true }, paciente_id: D.INTEGER, clinica_id: D.INTEGER, inicio: D.DATE }, { tableName: 'CitasPacientes', timestamps: false });
+  for (const file of ['appointmentclinicalreport','appointmentclinicalreportrevision','clinicalepisodeappointment']) { const model = require('../../../models/'+file)(sql,D); db[model.name] = model; }
+  await sql.sync(); await db.Clinica.bulkCreate([{id_clinica:72},{id_clinica:73}]);
+  await db.Paciente.create({ id_paciente:11,public_id:'synthetic-patient',clinica_id:72,nombre:'Ficticio',alergias:null,medicacion:'Original',antecedentes:'Conservar',notas_medicas:null,peso:82.5 });
+  const old = await db.AppointmentClinicalReport.create({ public_id:'retained-report',clinic_id:72,patient_id:11,status:'final',version_number:1,title:'Histórico',summary:'Texto histórico exacto',private_notes:'Privado conservado',template_key:'general',created_by:7,updated_by:7 });
+  const historical = { public_id:'retained-report',version:1,summary:'Texto histórico exacto' };
+  await db.AppointmentClinicalReportRevision.create({ report_id:old.id,version_number:1,status:'final',snapshot:historical,change_type:'created',actor_id:7 });
+  const retainedBefore = (await db.AppointmentClinicalReport.findByPk(old.id)).toJSON(); delete retainedBefore.template_snapshot;
+  await sql.getQueryInterface().removeColumn('AppointmentClinicalReports','template_snapshot');
+  const migration = require('../../../migrations/20261021090000-clinical-episode-templates'); await migration.up(sql.getQueryInterface(),Sequelize); await migration.up(sql.getQueryInterface(),Sequelize);
+  for (const file of ['clinicalepisodetemplate','clinicalepisodetemplateversion']) { const model = require('../../../models/'+file)(sql,D); db[model.name] = model; }
+  const retainedAfter = (await db.AppointmentClinicalReport.findByPk(old.id)).toJSON(); assert.equal(retainedAfter.template_snapshot,null); delete retainedAfter.template_snapshot; assert.deepEqual(retainedAfter,retainedBefore);
+  assert.deepEqual((await db.AppointmentClinicalReportRevision.findOne({where:{report_id:old.id}})).snapshot,historical);
+  await assert.rejects(migration.down(),/history_preserved/);
+  assert((await sql.getQueryInterface().showIndex('ClinicalEpisodeTemplateVersions')).some(index=>index.name==='clinical_template_revision_once'&&index.unique));
+  const refs=await sql.getQueryInterface().getForeignKeyReferencesForTable('ClinicalEpisodeTemplateVersions');assert(refs.some(ref=>ref.referencedTableName==='ClinicalEpisodeTemplates'));
+  report.checks.push('Actual additive migration twice in owned MySQL preserves retained clinical row/revision exactly, adds nullable snapshot and real unique/FK constraints; destructive down refuses. No runtime schema touched.');
+  const templates = require('../../services/clinicalEpisodeTemplates.service').createClinicalEpisodeTemplateService({db});
+  const payload = {...T.builtin('estetica'),expected_version:0,idempotency_key:'owned-template-request',title:'Texto genérico de prueba'};
+  const concurrent = await Promise.all([templates.create({clinicId:72,actorId:7,payload}),templates.create({clinicId:72,actorId:7,payload})]);
+  assert.equal(concurrent.filter(item=>item.created).length,1); assert.equal(await db.ClinicalEpisodeTemplate.count(),1); assert.equal(await db.ClinicalEpisodeTemplateVersion.count(),1);
+  const v1=concurrent[0].item, originalSnapshot=JSON.stringify((await db.ClinicalEpisodeTemplateVersion.findOne()).snapshot);
+  const race=await Promise.allSettled(['Versión A','Versión B'].map(title=>templates.save({id:v1.id,clinicId:72,actorId:7,payload:{...payload,title,expected_version:1}})));
+  assert.equal(race.filter(item=>item.status==='fulfilled').length,1); assert.equal(race.find(item=>item.status==='rejected').reason.code,'clinical_template_version_conflict');
+  assert.equal(await db.ClinicalEpisodeTemplateVersion.count(),2);assert.equal(JSON.stringify((await db.ClinicalEpisodeTemplateVersion.findOne({where:{version_number:1}})).snapshot),originalSnapshot);
+  await assert.rejects(templates.get({id:v1.id,clinicId:73}),{code:'clinical_template_not_found'});assert((await templates.list({clinicId:73})).items.every(item=>item.builtin));
+  const immutable=await db.ClinicalEpisodeTemplateVersion.findOne();await assert.rejects(immutable.update({snapshot:{changed:true}}),/immutable/);
+  report.checks.push('Native template create replay makes one identity/revision; concurrent edits produce one v2 and one CAS409, v1 remains immutable; foreign clinic cannot read/select custom template.');
+  const episodes = require('../../services/clinicalEpisodes.service').createClinicalEpisodeService({db});
+  const texts=Object.fromEntries(C.TEXT_FIELDS.map(field=>[field,'Contenido '+field]));
+  const rich={version:1,sections:Object.fromEntries(C.TEXT_FIELDS.map(field=>[field,{ops:[{insert:texts[field],attributes:{bold:true}},{insert:'\n'}]}]))};
+  const created=await episodes.create({patientIdentifier:'synthetic-patient',clinicId:72,actorId:7,payload:{expected_version:0,idempotency_key:'owned-episode-request',title:'Consulta de prueba',template_key:'estetica',occurred_at:'2026-10-21T10:00:00Z',template_ref:{id:v1.id,version:1},...texts,rich_document:rich}});
+  assert.equal(created.item.template_snapshot.version,1);assert.equal(created.item.template_snapshot.sha256,v1.sha256);
+  const saved=await episodes.save({id:created.item.id,clinicId:72,actorId:7,payload:{expected_version:1,plan:'Plan revisado'}});
+  for(const field of C.TEXT_FIELDS.filter(field=>field!=='plan')){assert.equal(saved.item[field],texts[field]);assert.equal(saved.item.rich_document.sections[field].ops[0].attributes.bold,true);}
+  assert.equal(saved.item.template_snapshot.version,1);
+  const closed=await episodes.save({id:created.item.id,clinicId:72,actorId:7,mode:'finalize',payload:{expected_version:2}});assert.equal(closed.item.template_snapshot.version,1);
+  await assert.rejects(episodes.save({id:created.item.id,clinicId:72,actorId:7,payload:{expected_version:3,template_ref:{id:v1.id,version:2}}}),{code:'clinical_report_final'});
+  const oldRevision=await db.AppointmentClinicalReportRevision.findOne({where:{report_id:created.item.id===undefined?-1:(await db.AppointmentClinicalReport.findOne({where:{public_id:created.item.id}})).id,version_number:3}});assert.equal(oldRevision.snapshot.template_snapshot.version,1);
+  assert.equal((await templates.get({id:v1.id,clinicId:72})).item.version,2);
+  await assert.rejects(episodes.create({patientIdentifier:'synthetic-patient',clinicId:72,actorId:7,payload:{expected_version:0,idempotency_key:'foreign-template-request',title:'No',occurred_at:'2026-10-21T10:00:00Z',template_ref:{id:v1.id,version:99}}}),{code:'clinical_template_version_not_found'});
+  report.checks.push('Episode selection pins exact server template snapshot/hash; custom template v2 never upgrades existing episode. Partial edits/finalization preserve all eight text fields, rich Delta and immutable v1 clinical snapshot; final edits and nonexistent versions reject without ghost records.');
+  const reference = require('../../services/patientClinicalReference.service').createPatientClinicalReferenceService({db,canAccess:async()=>true});
+  const scope={patientIdentifier:'synthetic-patient',clinicId:72,actorId:7};
+  const updates=await Promise.allSettled(['Alergia A','Alergia B'].map(alergias=>reference.update({...scope,payload:{changes:{alergias},expected_values:{alergias:null}}})));
+  assert.equal(updates.filter(item=>item.status==='fulfilled').length,1);assert.equal(updates.find(item=>item.status==='rejected').reason.code,'clinical_reference_conflict');
+  await assert.rejects(reference.update({...scope,payload:{changes:{alergias:'No',medicacion:'No'},expected_values:{alergias:null,medicacion:'Original'}}}),{code:'clinical_reference_conflict'});
+  const patient=await db.Paciente.findByPk(11);assert.equal(patient.medicacion,'Original');assert.equal(patient.antecedentes,'Conservar');assert.equal(Number(patient.peso),82.5);assert.equal(patient.nombre,'Ficticio');
+  assert.equal((await reference.read(scope)).item.alergias,patient.alergias);
+  const final=(await episodes.get({id:created.item.id,clinicId:72})).item;assert.equal(final.status,'final');assert.equal(final.summary,texts.summary);
+  report.checks.push('Reference clinical edits use native per-field CAS under patient lock: concurrent updates one winner/409, stale multi-field patch rolls back, patient metrics/name/other clinical fields and final narrative remain unchanged. No narrative extraction or automatic diagnoses.');
+}).catch(error=>{console.error(error);process.exitCode=1;});

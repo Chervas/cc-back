@@ -6,11 +6,18 @@ const controller = require('../controllers/accounting.controller');
 
 const router = express.Router();
 router.use(authMiddleware);
+router.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
 
 router.get('/workspace', controller.getWorkspace);
 router.get('/cash/workspace', controller.getCashWorkspace);
 router.get('/firm', controller.getFirm);
 router.post('/firm/credentials', controller.issueFirmCredentials);
+router.post('/firm/revoke', controller.revokeFirmAccess);
 router.get('/portal/scope', controller.getPortalScope);
 router.get('/portal/workspace', controller.getPortalWorkspace);
 router.get('/portal/export.csv', controller.exportPortalCsv);

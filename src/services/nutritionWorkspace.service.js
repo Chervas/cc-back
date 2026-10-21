@@ -1,5 +1,6 @@
 'use strict';
 
+const {createNutritionEpisodeResolver}=require('./nutritionEpisodeContext.service');
 const crypto = require('crypto');
 const fsSync = require('fs');
 const fs = require('fs/promises');
@@ -2337,6 +2338,7 @@ function measurementToJson(row, clinicalPhotos = []) {
     clinic_id: plain.clinic_id,
     professional_id: plain.professional_id,
     appointment_id: plain.appointment_id,
+    episode_id:plain.episode_id||null,
     treatment_id: plain.treatment_id,
     profile_code: plain.profile_code,
     measured_at: plain.measured_at,
@@ -2882,12 +2884,13 @@ async function checkedReportSnapshot(snapshot, context) {
   return null;
 }
 
-async function findCurrentNutritionReportSnapshotsForPatient(patientId, context) {
+async function findCurrentNutritionReportSnapshotsForPatient(patientId, context, measurementIds = null) {
   if (!db.PatientNutritionReport || !patientId) return [];
   try {
     return await db.PatientNutritionReport.findAll({
       where: {
         patient_id: patientId,
+        ...(measurementIds?{measurement_id:{[Op.in]:measurementIds}}:{}),
         clinic_id: { [Op.in]: context.readableClinicIds },
         status: { [Op.in]: NUTRITION_REPORT_CURRENT_STATUSES },
       },
@@ -3021,16 +3024,31 @@ async function getPatientNutritionWorkspace(patientIdentifier, options = {}) {
   const nutritionContract = await getNutritionContract(clinicId);
   const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
   const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
-  const measurements = await db.PatientNutritionMeasurement.findAll({
-    where: { patient_id: patient.id_paciente, clinic_id: { [Op.in]: context.readableClinicIds } },
-    order: [['measured_at', 'DESC'], ['id', 'DESC']],
-    limit: 50,
+  let before=null;
+  if(options.before){try{before=JSON.parse(Buffer.from(String(options.before),'base64url').toString('utf8'));if(!Number.isSafeInteger(before.id)||before.id<=0||!Number.isFinite(new Date(before.at).getTime()))throw new Error();}catch{throw Object.assign(new Error('Cursor de mediciones no válido.'),{status:400,code:'nutrition_history_cursor_invalid'});}}
+  const workspaceClinicIds=options.scopeClinicOnly?[context.clinicId]:context.readableClinicIds;
+  const measurementPage=await db.PatientNutritionMeasurement.findAll({
+    where:{patient_id:patient.id_paciente,clinic_id:{[Op.in]:workspaceClinicIds},...(before?{[Op.or]:[{measured_at:{[Op.lt]:new Date(before.at)}},{measured_at:new Date(before.at),id:{[Op.lt]:before.id}}]}:{})},
+    order:[['measured_at','DESC'],['id','DESC']],limit:51,
   });
+  const measurements=measurementPage.slice(0,50),hasMore=measurementPage.length>50,last=measurements[measurements.length-1];
+  const nextCursor=hasMore&&last?Buffer.from(JSON.stringify({at:new Date(last.measured_at).toISOString(),id:Number(last.id)})).toString('base64url'):null;
+  // A selected historical row must open that exact measurement, even when it
+  // is older than the first page. It is additive and cannot change the cursor.
+  if (options.measurementId !== undefined && options.measurementId !== null) {
+    const focusId = toIntOrNull(options.measurementId);
+    if (!focusId || String(focusId) !== String(options.measurementId)) throw Object.assign(new Error('measurement_not_found'), {status:404});
+    if (!measurements.some(row => Number(row.id) === focusId)) {
+      const focus = await db.PatientNutritionMeasurement.findOne({where:{id:focusId,patient_id:patient.id_paciente,clinic_id:{[Op.in]:workspaceClinicIds}}});
+      if (!focus) throw Object.assign(new Error('measurement_not_found'), {status:404});
+      measurements.push(focus);
+    }
+  }
   const measurementIds = measurements.map((measurement) => Number(measurement.id)).filter(Boolean);
   const photosByMeasurement = groupClinicalPhotosByMeasurement(
     await listNutritionPhotoAssetsForMeasurements(patient.id_paciente, measurementIds, context.readableClinicIds),
   );
-  const reportSnapshots = await readableReportSnapshots(await findCurrentNutritionReportSnapshotsForPatient(patient.id_paciente, context), context);
+  const reportSnapshots = await readableReportSnapshots(await findCurrentNutritionReportSnapshotsForPatient(patient.id_paciente, context, measurementIds), context);
   const reports = attachReportSnapshots(buildReports(measurements, fieldDefinitions), reportSnapshots);
   const patientFormulaContext = buildPatientFormulaContext(patient);
   const measurementJsonRows = measurements.map((measurement) => (
@@ -3055,6 +3073,7 @@ async function getPatientNutritionWorkspace(patientIdentifier, options = {}) {
     projection: buildProjection(measurements),
     reports,
     meta: {
+      next_measurement_cursor:nextCursor,
       formula_version: FORMULA_VERSION,
       calculation_profile: CALCULATION_PROFILE,
       formula_references: FORMULA_REFERENCES.map(({ profiles, ...reference }) => reference),
@@ -3192,6 +3211,7 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
     const lockedPatient = await findPatient(patient.id_paciente, transaction);
     if (!lockedPatient) throw Object.assign(new Error('patient_not_found'), { status: 404 });
     const context = await resolveMeasurementContext({ patient: lockedPatient, payload, actorUserId, transaction });
+    const episodeId=await createNutritionEpisodeResolver({db,assertUserCanAccessFeature})({patient:lockedPatient,context,payload,actorUserId,transaction});
     const nutritionContract = await getNutritionContract(context.clinic_id, transaction);
     const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
     const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
@@ -3205,6 +3225,7 @@ async function createNutritionMeasurement(patientIdentifier, payload = {}, actor
     return db.PatientNutritionMeasurement.create({
       patient_id: lockedPatient.id_paciente,
       ...context,
+      episode_id:episodeId,
       profile_code: profileCode,
       area_contract_revision_id: nutritionContract.revision.id,
       measured_at: measuredAt,
