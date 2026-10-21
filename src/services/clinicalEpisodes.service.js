@@ -3,13 +3,15 @@
 const crypto = require('node:crypto');
 const { Op, literal, where: sqlWhere } = require('sequelize');
 const C = require('../lib/clinical-episode-contract');
+const F = require('../lib/clinical-form-contract');
 const { requireExpectedVersion, assertCurrentVersion } = require('../lib/clinical-report-version');
 const plain = row => row?.toJSON ? row.toJSON() : row;
 const SORT_DATE = literal('COALESCE(`AppointmentClinicalReport`.`occurred_at`, (SELECT `inicio` FROM `CitasPacientes` WHERE `id_cita` = `AppointmentClinicalReport`.`appointment_id`), `AppointmentClinicalReport`.`created_at`)');
 
-function createClinicalEpisodeService({ db, now = () => new Date(), validateMaterialRefs } = {}) {
+function createClinicalEpisodeService({ db, now = () => new Date(), validateMaterialRefs, canAccess } = {}) {
   const { AppointmentClinicalReport: Report, AppointmentClinicalReportRevision: Revision,
     ClinicalEpisodeAppointment: Link, CitaPaciente: Appointment, Paciente: Patient } = db;
+  const forms=require('./clinicalEpisodeForms.service').createClinicalEpisodeFormsService({db,now,...(canAccess?{canAccess}:{})});
 
   async function patientInClinic(identifier, clinicId, transaction, lock = false) {
     const raw = String(identifier ?? '');
@@ -92,7 +94,7 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
           status: appointment.estado, title: appointment.titulo || null, treatment_id: appointment.tratamiento_id ? Number(appointment.tratamiento_id) : null,
           professional_id: appointment.doctor_id ? Number(appointment.doctor_id) : null })),
         title, occurred_at: value.occurred_at || primary?.inicio || value.created_at,
-        template_key: value.template_key || 'general', template_snapshot: value.template_snapshot || null, rich_document: C.richDocument(value), material_refs: value.material_refs || [],
+        template_key: value.template_key || 'general', template_snapshot: value.template_snapshot || null, form_data:value.form_data||null, rich_document: C.richDocument(value), material_refs: value.material_refs || [],
         treatment_id: value.treatment_id ? Number(value.treatment_id) : null, treatment_name: treatment?.nombre || primary?.titulo || null,
         professional_id: value.professional_id ? Number(value.professional_id) : null,
         professional_name: professional ? [professional.nombre, professional.apellidos].filter(Boolean).join(' ').trim() || null : null,
@@ -146,7 +148,7 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
       appointment_id: value.appointment_id ? Number(value.appointment_id) : null, appointment_ids: appointmentIds,
       treatment_id: value.treatment_id ? Number(value.treatment_id) : null, professional_id: value.professional_id ? Number(value.professional_id) : null,
       title: value.title || null, occurred_at: value.occurred_at || null, template_key: value.template_key || 'general', template_snapshot: value.template_snapshot || null,
-      status: value.status, version: Number(value.version_number), rich_document: C.richDocument(value), material_refs: value.material_refs || [],
+      status: value.status, version: Number(value.version_number), form_data:value.form_data||null, rich_document: C.richDocument(value), material_refs: value.material_refs || [],
       ...Object.fromEntries(C.TEXT_FIELDS.map(key => [key, value[key] || null])), finalized_at: value.finalized_at,
     };
     await Revision.create({ report_id: row.id, version_number: row.version_number, status: row.status,
@@ -202,7 +204,7 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     if (expected !== 0) throw C.error(409, 'clinical_report_version_conflict', 'El episodio nuevo debe comenzar en la versión inicial.', { expected_version: expected, current_version: 0 });
     const key = C.idempotencyKey(payload.idempotency_key, true), normalized = C.normalizePatch(payload), ids = normalized.appointment_ids || [];
     delete normalized.appointment_ids;
-    const requestHash = C.hash({ values: normalized, appointment_ids: ids, material_refs: payload.material_refs || [], template_ref: payload.template_ref });
+    const requestHash = C.hash({ values: normalized, appointment_ids: ids, material_refs: payload.material_refs || [], template_ref: payload.template_ref,form_data:payload.form_data,clinical_reference_update:payload.clinical_reference_update });
     return db.sequelize.transaction(async transaction => {
       const patient = await patientInClinic(patientIdentifier, clinicId, transaction, true);
       const creationKey = C.hash([clinicId, Number(patient.id_paciente), key]);
@@ -222,6 +224,11 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
         ...normalized, ...materials, ...await templateValues(payload, clinicId, transaction), creation_key: creationKey, creation_payload_hash: requestHash,
         status: 'draft', version_number: 1, created_by: actorId, updated_by: actorId,
       }, { transaction });
+      if(C.has(payload,'form_data')||C.has(payload,'clinical_reference_update')){
+        let data=await forms.normalize({input:payload.form_data,previous:null,row,transaction});
+        data=await forms.applyReference({input:payload.clinical_reference_update,data,row,actorId,transaction,idempotencyKey:key,nextVersion:1});
+        await row.update({form_data:data},{transaction});
+      }
       await replaceLinks(row, ids, actorId, transaction);
       await revision(row, actorId, 'created', transaction);
       return { item: (await hydrate([row], transaction))[0], created: true };
@@ -231,7 +238,8 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
   async function updateRow({ row, actorId, payload, mode, transaction, legacy = false }) {
     const expected = requireExpectedVersion(payload), normalized = C.normalizePatch(payload, plain(row), { legacy });
     const key = C.idempotencyKey(payload.idempotency_key), requestHash = C.hash({ mode, expected_version: expected,
-      values: C.normalizePatch(payload, {}, { legacy }), material_refs: payload.material_refs, template_ref: payload.template_ref });
+      values: C.normalizePatch(payload, {}, { legacy }), material_refs: payload.material_refs, template_ref: payload.template_ref,form_data:payload.form_data,clinical_reference_update:payload.clinical_reference_update });
+    if(legacy&&(C.has(payload,'form_data')||C.has(payload,'clinical_reference_update')))throw F.invalid('Abre el episodio para actualizar sus formularios.');
     if (key) {
       const mutationKey = C.hash(key);
       const prior = await Revision.findOne({ where: { report_id: row.id, mutation_key: mutationKey }, transaction });
@@ -242,11 +250,11 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     }
     assertCurrentVersion(expected, row);
     if (row.status === 'final' && mode !== 'reopen') {
-      if (mode === 'finalize' && !Object.keys(normalized).length && !C.has(payload, 'material_refs') && !C.has(payload, 'template_ref')) return { item: (await hydrate([row], transaction))[0], replayed: true };
+      if (mode === 'finalize' && !Object.keys(normalized).length && !C.has(payload, 'material_refs') && !C.has(payload, 'template_ref')&&!C.has(payload,'form_data')&&!C.has(payload,'clinical_reference_update')) return { item: (await hydrate([row], transaction))[0], replayed: true };
       throw C.error(409, 'clinical_report_final', 'El episodio está cerrado. Reábrelo antes de modificarlo.');
     }
     if (mode === 'reopen' && row.status !== 'final') {
-      if (Object.keys(normalized).length || C.has(payload, 'material_refs') || C.has(payload, 'template_ref')) throw C.error(409, 'clinical_episode_not_final', 'El episodio ya está abierto. Guarda los cambios como borrador.');
+      if (Object.keys(normalized).length || C.has(payload, 'material_refs') || C.has(payload, 'template_ref')||C.has(payload,'form_data')||C.has(payload,'clinical_reference_update')) throw C.error(409, 'clinical_episode_not_final', 'El episodio ya está abierto. Guarda los cambios como borrador.');
       return { item: (await hydrate([row], transaction))[0], replayed: true };
     }
     const oldIds = await linkedIds(row, transaction), ids = normalized.appointment_ids;
@@ -259,10 +267,12 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     if (!legacy) Object.assign(normalized, await templateValues(payload, Number(row.clinic_id), transaction));
     if (!legacy && !C.has(payload, 'template_ref') && normalized.template_key && row.template_snapshot
       && row.template_snapshot.area_key !== normalized.template_key) normalized.template_snapshot = null;
+    if(C.has(payload,'form_data')||mode==='finalize')normalized.form_data=await forms.normalize({input:payload.form_data,previous:row.form_data,row:{...plain(row),...normalized},transaction,final:mode==='finalize'});
     const combined = { ...plain(row), ...normalized };
-    if (mode === 'finalize' && !C.TEXT_FIELDS.filter(key => key !== 'private_notes').some(key => combined[key]) && !combined.material_refs?.length) {
+    if (mode === 'finalize' && !C.TEXT_FIELDS.filter(key => key !== 'private_notes').some(key => combined[key]) && !combined.material_refs?.length&&!F.hasContent(combined.form_data)) {
       throw C.error(400, 'clinical_report_empty', 'Añade contenido clínico o material de esta consulta antes de cerrar el episodio.');
     }
+    if(C.has(payload,'clinical_reference_update'))normalized.form_data=await forms.applyReference({input:payload.clinical_reference_update,data:combined.form_data,row,actorId,transaction,idempotencyKey:key});
     await row.update({ ...normalized, status: mode === 'finalize' ? 'final' : 'draft', version_number: Number(row.version_number) + 1,
       finalized_at: mode === 'finalize' ? now() : null, finalized_by: mode === 'finalize' ? actorId : null, updated_by: actorId }, { transaction });
     if (ids && JSON.stringify(oldIds) !== JSON.stringify(ids)) await replaceLinks(row, ids, actorId, transaction);

@@ -584,6 +584,7 @@ exports.createClinica = async (req, res) => {
         if (!Array.isArray(configPayload.disciplinas) || configPayload.disciplinas.length === 0) {
             configPayload.disciplinas = ['dental'];
         }
+        const clinicalTemplateSelections = require('../lib/clinical-template-catalog-contract').selections(req.body.clinical_template_catalog_selections);
 
         const newClinica = await Clinica.sequelize.transaction(async (transaction) => {
             const created = await Clinica.create({
@@ -621,6 +622,9 @@ exports.createClinica = async (req, res) => {
             await require('../services/medicalAreaContracts.service').initializeClinic(created.id_clinica, {
                 transaction, actorId: Number(req.userData?.userId),
             });
+            await require('../services/clinicalTemplateCatalog.service').adoptSelections({
+                clinicId: created.id_clinica, actorId: Number(req.userData?.userId), selections: clinicalTemplateSelections, transaction,
+            });
             return created;
         });
 
@@ -638,6 +642,7 @@ exports.createClinica = async (req, res) => {
             clinica: newClinica
         });
     } catch (error) {
+        if (String(error.code || '').startsWith('clinical_catalog_')) return res.status(error.statusCode || 400).json({ message: error.message, code: error.code });
         console.error('Error al crear la clínica:', error);
         return respondControllerError(res, error, 'Error al crear la clínica');
     }

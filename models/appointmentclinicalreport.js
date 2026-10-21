@@ -14,6 +14,7 @@ module.exports = (sequelize, DataTypes) => {
     occurred_at: DataTypes.DATE,
     template_key: DataTypes.STRING(40),
     template_snapshot: DataTypes.JSON,
+    form_data: DataTypes.JSON,
     rich_document: DataTypes.JSON,
     material_refs: DataTypes.JSON,
     creation_key: { type: DataTypes.STRING(64), allowNull: true, unique: true },

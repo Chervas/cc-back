@@ -45,13 +45,13 @@ function createPatientClinicalReferenceService({ db, canAccess } = {}) {
     if (!member) throw C.error(404, 'clinical_reference_patient_not_found', 'Paciente no encontrado en esta clínica.');
     return { item: item(patient, clinicId) };
   }
-  async function update({ patientIdentifier, clinicId, actorId, payload }) {
+  async function applyInTransaction({ patientIdentifier, clinicId, actorId, payload, transaction }) {
+    if(!transaction)throw C.error(500,'clinical_reference_transaction_required','No se pudo guardar la referencia clínica.');
     if (!actorId) throw C.error(401, 'unauthenticated', 'Usuario no autenticado.');
     actorId = C.integer(actorId, 'actor_id'); clinicId = C.integer(clinicId, 'clinic_id');
     const data = values(payload), identifier = String(patientIdentifier || '');
     if (!identifier || identifier.length > 80) throw C.error(400, 'clinical_reference_patient_invalid', 'Selecciona un paciente válido.');
     await permissions(actorId, clinicId);
-    return db.sequelize.transaction(async transaction => {
       const patient = await db.Paciente.findOne({ where: /^[1-9]\d*$/.test(identifier)
         ? { id_paciente: C.integer(identifier, 'patient_id') } : { public_id: identifier },
       transaction, lock: transaction.LOCK.UPDATE });
@@ -66,11 +66,15 @@ function createPatientClinicalReferenceService({ db, canAccess } = {}) {
         throw C.error(409, 'clinical_reference_conflict', 'Los datos clínicos han cambiado. Tu texto se conserva; consulta los valores actuales antes de guardar.');
       }
       const updated = fields.some(field => (patient[field] ?? null) !== data.changes[field]);
+      const previous=Object.fromEntries(fields.map(field=>[field,patient[field]??null]));
       if (updated) await patient.update(data.changes, { transaction, fields });
-      return { item: item(patient, clinicId), updated };
-    });
+      return { item: item(patient, clinicId), updated, previous };
   }
-  return { update, read };
+  async function update(input) {
+    const {item,updated}=await db.sequelize.transaction(transaction=>applyInTransaction({...input,transaction}));
+    return{item,updated};
+  }
+  return { update, read, applyInTransaction };
 }
 
 let service;
