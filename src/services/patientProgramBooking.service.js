@@ -270,6 +270,8 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     }
     const reschedule = rescheduleInput(payload);
     if (reschedule) {
+      const { normalizePreferences, allowedInterval, timeWarning } = require('../lib/program-booking-preferences');
+      const preferences = normalizePreferences(payload.booking_preferences);
       assertRevision(plan, reschedule.expected_plan_revision);
       const selected = rescheduleSessions(plan, reschedule, now()); assertRelativeSessions(selected);
       if (payload.fixed_sessions?.length || payload.session_keys != null && (!Array.isArray(payload.session_keys)
@@ -289,20 +291,25 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
       const context = await contextFor(plan, explicit, new Date(Math.min(...explicit.map(row => new Date(row.start_at).getTime()))),
         new Date(Math.max(...explicit.map(row => new Date(row.end_at).getTime()))), null, false, selected.map(row => Number(row.appointment.id_cita)));
       const proposals = explicit.map(session => {
-        let solution = orderIssues.length ? null : solveBookingProfile({ profile: session.booking_profile, ...context, start: new Date(session.start_at), selections: session.choice.selections });
-        const exception = !orderIssues.length && !solution ? scheduleAssessment(plan, session, context, options.actorId) : null;
+        const excluded = !allowedInterval(preferences, session.start_at, session.end_at, plan.timeZone);
+        let solution = orderIssues.length || excluded ? null : solveBookingProfile({ profile: session.booking_profile, ...context, start: new Date(session.start_at), selections: session.choice.selections });
+        const exception = !orderIssues.length && !excluded && !solution ? scheduleAssessment(plan, session, context, options.actorId) : null;
         if (exception) solution = exception.solution;
         const available = solution && supportAvailable(context, solution, supportIds(session))
           && !context.patientBusy.some(busy => new Date(busy.start) < new Date(session.end_at) && new Date(busy.end) > new Date(session.start_at));
         if (available) addVirtualBusy(context, solution, supportIds(session), session.booking_profile);
+        const warnings = available ? timeWarning(preferences, solution, plan.timeZone) : [];
         return { key: session.key, label: session.label, solution: available ? solution : null, previous_appointment: previousAppointment(session),
           requested_start_at: session.start_at, requested_start_local: choices.find(row => row.key === session.key).start_local,
           selections: session.choice.selections, priority_acknowledged: session.choice.priority_acknowledged,
-          reason_code: available ? null : orderIssues.length ? 'program_cadence_conflict' : 'program_booking_unavailable',
-          reason: available ? null : orderIssues.length ? 'Las fechas no respetan el orden o la pauta del programa.' : 'Este horario no está disponible. Elige otro inicio; no se desplazarán fechas automáticamente.',
+          reason_code: available ? null : orderIssues.length ? 'program_cadence_conflict' : excluded ? 'program_booking_preference_conflict' : 'program_booking_unavailable',
+          reason: available ? null : orderIssues.length ? 'Las fechas no respetan el orden o la pauta del programa.' : excluded
+            ? 'La fecha coincide con un día excluido por el paciente.' : 'Este horario no está disponible. Elige otro inicio; no se desplazarán fechas automáticamente.',
+          ...(warnings.length ? { preference_warnings: warnings } : {}),
           ...(available && exception ? { requires_schedule_confirmation: true, schedule_restrictions: exception.restrictions } : {}) };
       });
-      return { ...dto(plan), proposals, unproposed_count: 0, reschedule: rescheduleDto(reschedule, selected, payload.reschedule_start_local) };
+      return { ...dto(plan), proposals, unproposed_count: 0, reschedule: rescheduleDto(reschedule, selected, payload.reschedule_start_local),
+        ...(preferences ? { booking_preferences: preferences } : {}) };
     }
     const resume = resumeInput(payload);
     if (resume) assertRevision(plan, resume.expected_plan_revision);

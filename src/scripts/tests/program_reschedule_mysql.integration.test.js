@@ -14,25 +14,42 @@ test('owned SQL reschedule: only existing future reservations, civil DST shift, 
       await assert.rejects(f.move(originalIds[1], '2030-03-26T09:00:00.000Z', '2030-03-26T09:45:00.000Z'), error => error.code === 'program_reschedule_required');
       assert.deepEqual(await f.databaseState(), baseline);
       const plan = await f.read(), base = { mode: 'reschedule', reschedule_scope: 'following', replan_from_key: 's2', expected_plan_revision: plan.plan_revision };
-      const preview = await f.propose({ ...base, reschedule_start_local: '2030-04-01T12:00' });
+      const preferences = { prefer_after_minutes: 660, prefer_before_minutes: 720 };
+      const preview = await f.propose({ ...base, reschedule_start_local: '2030-04-01T12:00', booking_preferences: preferences });
+      assert.deepEqual(preview.booking_preferences, preferences);
+      assert(preview.proposals.every(row => !row.preference_warnings));
+      const excludedPreferences = { ...preferences, exclude_weekdays: [1] };
+      const excludedPreview = await f.propose({ ...base, reschedule_start_local: '2030-04-01T12:00', booking_preferences: excludedPreferences });
+      assert(excludedPreview.proposals.every(row => row.solution === null && row.reason_code === 'program_booking_preference_conflict'
+        && !row.requires_schedule_confirmation));
+      const outsidePreferredRange = await f.propose({ ...base, reschedule_start_local: '2030-04-01T12:00',
+        booking_preferences: { prefer_after_minutes: 960, prefer_before_minutes: 1080 } });
+      assert(outsidePreferredRange.proposals.every(row => row.solution && row.preference_warnings[0].code === 'program_preference_time_fallback'));
+      await assert.rejects(f.propose({ ...base, reschedule_start_local: '2030-04-01T12:00',
+        booking_preferences: { prefer_after_minutes: 1080, prefer_before_minutes: 960 } }), { code: 'program_booking_preferences_invalid' });
       assert.deepEqual(preview.reschedule.affected_keys, ['s2', 's4']); assert.equal(preview.reschedule.source_appointment_id, originalIds[1]);
       assert.deepEqual(preview.proposals.map(row => row.requested_start_local), ['2030-04-01T12:00', '2030-04-08T12:00']);
       assert.deepEqual(preview.proposals.map(row => row.solution?.start_at), ['2030-04-01T10:00:00.000Z', '2030-04-08T10:00:00.000Z']);
       assert.equal(preview.proposals[0].selections.t1_p1.installation_id, 101); assert.equal(preview.proposals[0].selections.t1_p1.doctor_id, 1);
       assert.deepEqual(await f.databaseState(), baseline);
-      const payload = { ...base, request_key: 'owned-move-following-reserved', sessions: preview.proposals.map(row => ({ key: row.key,
+      const payload = { ...base, booking_preferences: preferences, request_key: 'owned-move-following-reserved', sessions: preview.proposals.map(row => ({ key: row.key,
         start_at: row.solution.start_at, selections: row.selections, priority_acknowledged: row.priority_acknowledged })) };
+      await assert.rejects(f.book({ ...payload, booking_preferences: excludedPreferences }), { code: 'program_booking_preference_conflict' });
+      assert.deepEqual(await f.databaseState(), baseline);
       for (const bad of [
         { ...payload, sessions: payload.sessions.slice(0, 1) },
         { ...payload, sessions: [...payload.sessions, { key: 's3', start_at: '2030-04-06T10:00:00.000Z' }] },
         { ...payload, sessions: payload.sessions.map(row => row.key === 's4' ? { ...row, start_at: '2030-04-08T11:00:00.000Z' } : row) },
       ]) { await assert.rejects(f.book(bad)); assert.deepEqual(await f.databaseState(), baseline); }
       const moved = await f.book(payload); assert.equal(moved.sessions.length, 2); assert(moved.sessions.every(row => row.action === 'rescheduled'));
+      assert.deepEqual(moved.booking_preferences, preferences);
       assert.deepEqual(Array.from(moved.sessions, row => row.appointment_id), originalIds.slice(1));
       assert.equal(await db.CitaPaciente.count(), 3); assert.equal(await db.PatientProgramSession.count(), 3);
       assert.equal(await f.byKey('s1'), null); assert.equal(await f.byKey('s3'), null);
       assert.equal(new Date((await f.appointment('s0')).inicio).toISOString(), '2030-03-18T09:00:00.000Z');
       assert.equal((await f.book(payload)).replayed, true);
+      await assert.rejects(f.book({ ...payload, booking_preferences: { ...preferences, prefer_before_minutes: 721 } }),
+        { code: 'program_booking_request_conflict' });
       const after = await f.databaseState();
       for (const table of ['PatientVoucher', 'PatientVoucherMovement', 'EconomicBudget', 'EconomicBudgetVersion', 'EconomicPayment', 'ConsentDeliveryEvent']) {
         assert.deepEqual(after[table], baseline[table]);
@@ -44,7 +61,7 @@ test('owned SQL reschedule: only existing future reservations, civil DST shift, 
       }
       await assert.rejects(f.book({ ...payload, request_key: 'owned-stale-reschedule-key' }), error => error.code === 'program_resume_changed');
       assert.deepEqual(await f.databaseState(), after);
-      report.checks.push('Real SQL following reschedule shifts only existing reservations by identical clinic civil delta across DST; keeps earlier and never-booked sessions untouched, preserves IDs/resources/equipment/HOLD/finances, rejects missing/extra/unequal dates atomically and replays one receipt');
+      report.checks.push('Real SQL following reschedule shifts only existing reservations by identical clinic civil delta across DST; keeps earlier and never-booked sessions untouched, preserves IDs/resources/equipment/HOLD/finances, rejects missing/extra/unequal dates atomically and replays one receipt; clinic-local range preferences agree in preview/save, excluded days reject atomically and a changed upper bound cannot replay another receipt');
 
       const singlePlan = await f.read(), single = { mode: 'reschedule', reschedule_scope: 'single', replan_from_key: 's2', expected_plan_revision: singlePlan.plan_revision };
       const singlePreview = await f.propose({ ...single, reschedule_start_local: '2030-04-02T12:00' });

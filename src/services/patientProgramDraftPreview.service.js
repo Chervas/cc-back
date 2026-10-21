@@ -7,7 +7,7 @@ const { bookingRequest, materializeSession, seriesIssues, schedulingMode } = req
 const { civilLocal, civilMinute, localInstant } = require('../lib/program-reschedule');
 const { addDays } = require('../lib/personal-schedule-recurring');
 const { cloneProgramContext } = require('../lib/program-schedule-confirmation');
-const { normalizePreferences, allowedInterval, minuteOfDay, timeWarning } = require('../lib/program-booking-preferences');
+const { normalizePreferences, allowedInterval, preferredStart, timeWarning } = require('../lib/program-booking-preferences');
 const fail = (message, code = 'program_draft_invalid', status = 400) => { throw domainError(status, code, message); };
 const actions = ['initial', 'cascade', 'reset', 'previous_time', 'next_time', 'previous_day', 'next_day'];
 function normalize(plan, payload, now) {
@@ -142,8 +142,9 @@ async function preview({ plan, payload, actorId, now, contextFor, dto, solve, sl
       const ranked=choices.flatMap((selections,rank)=>slots({profile:row.booking_profile,context:calendar,date:day,days:1,stepMinutes:15,limit:96,now,selections})
         .filter(solution=>allowedInterval(draft.preferences,solution.start_at,solution.end_at,plan.timeZone)
           && (rank || choices.length===1 || preservesPriority(solution,row))).map(solution=>({solution,rank})));
-      ranked.sort((a,b)=> (draft.preferences?.prefer_after_minutes==null ? 0 : Number(minuteOfDay(a.solution.start_at,plan.timeZone)<draft.preferences.prefer_after_minutes)
-        -Number(minuteOfDay(b.solution.start_at,plan.timeZone)<draft.preferences.prefer_after_minutes)) || a.rank-b.rank || +new Date(a.solution.start_at)-+new Date(b.solution.start_at));
+      ranked.sort((a,b)=> Number(!preferredStart(draft.preferences,a.solution.start_at,plan.timeZone))
+        -Number(!preferredStart(draft.preferences,b.solution.start_at,plan.timeZone))
+        || a.rank-b.rank || +new Date(a.solution.start_at)-+new Date(b.solution.start_at));
       return ranked.map(row=>row.solution);
     }
     const exact = (row, local, allowException = true) => {
@@ -209,8 +210,10 @@ async function preview({ plan, payload, actorId, now, contextFor, dto, solve, sl
       const day = addDays(date, dayOffset * (previous ? -1 : 1));
       if (day < civilLocal(now, plan.timeZone).slice(0,10)) break;
       const candidates = directionContext.candidates(pivot,day,base).filter(slot => !sameDay || (previous ? +new Date(slot.start_at) < +new Date(pivot.original_start_at) : +new Date(slot.start_at) > +new Date(pivot.original_start_at)));
-      candidates.sort((a,b) => sameDay ? (previous ? +new Date(b.start_at)-+new Date(a.start_at) : +new Date(a.start_at)-+new Date(b.start_at))
-        : Math.abs(civilMinute(a.start_at,plan.timeZone)%1440-civilMinute(pivot.original_start_at,plan.timeZone)%1440)-Math.abs(civilMinute(b.start_at,plan.timeZone)%1440-civilMinute(pivot.original_start_at,plan.timeZone)%1440));
+      candidates.sort((a,b) => Number(!preferredStart(draft.preferences,a.start_at,plan.timeZone))
+        -Number(!preferredStart(draft.preferences,b.start_at,plan.timeZone))
+        || (sameDay ? (previous ? +new Date(b.start_at)-+new Date(a.start_at) : +new Date(a.start_at)-+new Date(b.start_at))
+          : Math.abs(civilMinute(a.start_at,plan.timeZone)%1440-civilMinute(pivot.original_start_at,plan.timeZone)%1440)-Math.abs(civilMinute(b.start_at,plan.timeZone)%1440-civilMinute(pivot.original_start_at,plan.timeZone)%1440)));
       for (const candidate of candidates) { const trial = run(civilLocal(candidate.start_at, plan.timeZone)); if (trial.allAffectedAvailable) { result = trial; break; } }
     }
     if (!result) { applied = false; result = run(null, true); }

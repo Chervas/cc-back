@@ -78,6 +78,9 @@ test('owned SQL + HTTP: clinical enrollment without economic/outbound writes, im
         '../../models': db, '../services/patientEconomics.service': { domainError: require('../../lib/treatmentPrograms.contract').domainError },
         '../services/economicDocumentPdf.service': {}, '../services/patientVoucherAppointments.service': {},
         '../services/patientProgramEnrollment.service': enrollment, '../services/patientProgramBooking.service': booking,
+        // This fixture represents a native clinic operator, not the separate
+        // read-only accounting portal. Portal ACLs have their own owned suite.
+        '../services/accountingFirms.service': { isPortalUser: async () => false },
         '../lib/access-policy': { getAccessibleClinicIdsForFeature: async value => { acl.push(value); return deniedFeatures.has(value.featureKey) ? [] : value.clinicIds; } },
         '../services/programBookingRealtime.service': { publishProgramBookings: async () => {} },
         '../services/consentimientos.service': { ensurePackageForAppointment: async () => { packagePreparationAttempts++; return null; } },
@@ -210,9 +213,15 @@ test('owned SQL + HTTP: clinical enrollment without economic/outbound writes, im
         assert.deepEqual(draft.body.proposals.map(row => row.key), ['s1', 's2']);
         assert.equal(draft.body.proposals[0].solution.start_local.slice(0, 10), '2030-03-01');
         const preferredDraft=await send('POST',externalUrl+'/program-proposals',{from_date:'2030-03-01',days:45,
-          draft_strategy:{action:'initial',start_local:'2030-03-01T09:00',preferences:{exclude_weekdays:[5],prefer_after_minutes:960,keep_professional:true}}});
+          draft_strategy:{action:'initial',start_local:'2030-03-01T09:00',preferences:{exclude_weekdays:[5],prefer_after_minutes:960,prefer_before_minutes:1080,keep_professional:true}}});
         assert.equal(preferredDraft.status,200,JSON.stringify(preferredDraft.body));
         assert.equal(preferredDraft.body.proposals[0].solution.start_local,'2030-03-04T16:00');
+        assert.equal(preferredDraft.body.draft_strategy.preferences.prefer_before_minutes,1080);
+        assert(preferredDraft.body.proposals.every(row=>!row.preference_warnings));
+        const invalidRange=await send('POST',externalUrl+'/program-proposals',{from_date:'2030-03-01',days:45,
+          draft_strategy:{action:'initial',preferences:{prefer_after_minutes:1080,prefer_before_minutes:960}}});
+        assert.equal(invalidRange.status,400);
+        assert.equal(invalidRange.body.code,'program_booking_preferences_invalid');
         const draftRows = draft.body.proposals.map(row => ({ key: row.key, placed: true, start_at: row.solution.start_at,
           selections: Object.fromEntries(row.solution.phases.map(phase => [phase.key, { installation_id: phase.installation_id, doctor_id: phase.doctor_ids[0] }])) }));
         const cascade = await send('POST', externalUrl + '/program-proposals', { from_date: '2030-03-01', days: 45,
@@ -250,7 +259,7 @@ test('owned SQL + HTTP: clinical enrollment without economic/outbound writes, im
           error => error.code === 'program_session_unrecorded');
         } finally { await corrupt.rollback(); }
         const externalReservation = { request_key: 'owned-external-suffix-booking', snapshot_sha256: externalPlan.body.snapshot_sha256,
-          booking_preferences:{exclude_weekdays:[5],prefer_after_minutes:960,keep_professional:true},
+          booking_preferences:{exclude_weekdays:[5],prefer_after_minutes:960,prefer_before_minutes:1080,keep_professional:true},
           sessions: cascade.body.proposals.map(row => ({ key: row.key, start_at: row.solution.start_at, selections: row.selections })) };
         const excludedFriday=await send('POST',externalUrl+'/program-appointments',{...externalReservation,request_key:'owned-friday-local-rejected',
           sessions:[{...externalReservation.sessions[0],start_at:'2030-03-14T23:30:00Z'}]});
@@ -265,6 +274,8 @@ test('owned SQL + HTTP: clinical enrollment without economic/outbound writes, im
         assert.deepEqual(externalReplay.body.booking_preferences,externalReservation.booking_preferences);
         const changedPreference={...externalReservation,booking_preferences:{exclude_weekdays:[6]}};
         assert.equal((await send('POST',externalUrl+'/program-appointments',changedPreference)).body.code,'program_booking_request_conflict');
+        const changedUpperBound={...externalReservation,booking_preferences:{...externalReservation.booking_preferences,prefer_before_minutes:1081}};
+        assert.equal((await send('POST',externalUrl+'/program-appointments',changedUpperBound)).body.code,'program_booking_request_conflict');
         assert.deepEqual((await db.PatientProgramBookingRequest.findOne({where:{voucher_id:externalVoucher.id}})).result.booking_preferences,externalReservation.booking_preferences);
         const afterExternal = await send('GET', externalUrl + '/program-plan?clinic_id=100');
         assert.equal(afterExternal.body.pending_count, 0); assert.equal(afterExternal.body.unrecorded_units, 1);

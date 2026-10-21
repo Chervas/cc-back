@@ -109,6 +109,69 @@ test('initial preferences skip excluded clinic weekdays, prefer afternoon after 
   const blocked=await f.run(input(rows(),'cascade',{start_local:'2030-01-04T10:00',preferences:{exclude_weekdays:[5]}}));
   assert.equal(blocked.proposals[0].solution,null);assert.equal(blocked.proposals[0].reason_code,'program_booking_preference_conflict');
 });
+test('initial/reset prefer inclusive start ranges, can end later, and never override a conflicting patient or resource',async()=>{
+  const preferences={prefer_after_minutes:960,prefer_before_minutes:1080},f=fixture();
+  f.context.patientBusy.push({start:'2030-01-07T15:00Z',end:'2030-01-07T15:30Z'});
+  f.context.installations.get(9).busy.push({start:'2030-01-07T15:30Z',end:'2030-01-07T16:00Z'});
+  const response=await f.run({from_date:'2030-01-07',days:45,draft_strategy:{action:'initial',preferences}});
+  assert.equal(response.proposals[0].solution.start_local,'2030-01-07T17:00');
+  assert(response.proposals.every(row=>!row.preference_warnings));
+  assert.deepEqual(response.draft_strategy.preferences,preferences);
+  const atBoundary=fixture();atBoundary.p.sessions=atBoundary.p.sessions.slice(0,1);
+  for(const resources of [atBoundary.context.doctors,atBoundary.context.installations])
+    for(const resource of resources.values()) resource.windows=[{start:'2030-01-07T17:00Z',end:'2030-01-07T17:30Z'}];
+  const endingLater=await atBoundary.run({from_date:'2030-01-07',days:1,draft_strategy:{action:'initial',preferences}});
+  assert.equal(endingLater.proposals[0].solution.start_local,'2030-01-07T18:00');
+  assert.equal(endingLater.proposals[0].solution.end_local,'2030-01-07T18:30');
+  assert(!endingLater.proposals[0].preference_warnings);
+  const reset=await fixture().run(input(rows(undefined,[0]),'reset',{preferences}));
+  assert.equal(reset.proposals[0].solution.start_local,'2030-01-07T10:00');
+  assert.equal(reset.proposals[0].preference_warnings[0].code,'program_preference_time_fallback');
+  assert(reset.proposals.slice(1).every(row=>row.solution.start_local.endsWith('T16:00')&&!row.preference_warnings));
+});
+test('range fallback is explicit on either side, while a full-day range retains the earliest real slot',async()=>{
+  for(const [start,end,expected] of [['2030-01-07T08:00Z','2030-01-07T11:00Z','2030-01-07T09:00'],
+    ['2030-01-07T18:00Z','2030-01-07T20:00Z','2030-01-07T19:00']]) {
+    const f=fixture();f.p.sessions=f.p.sessions.slice(0,1);
+    for(const resources of [f.context.doctors,f.context.installations])for(const resource of resources.values())resource.windows=[{start,end}];
+    const result=await f.run({from_date:'2030-01-07',days:1,draft_strategy:{action:'initial',preferences:{prefer_after_minutes:960,prefer_before_minutes:1080}}});
+    assert.equal(result.proposals[0].solution.start_local,expected);
+    assert.equal(result.proposals[0].preference_warnings[0].code,'program_preference_time_fallback');
+  }
+  const allDay=await fixture().run({from_date:'2030-01-07',days:1,draft_strategy:{action:'initial',preferences:{prefer_after_minutes:0,prefer_before_minutes:1439}}});
+  assert.equal(allDay.proposals[0].solution.start_local,'2030-01-07T00:00');
+  assert(!allDay.proposals[0].preference_warnings);
+});
+test('directional range search stays on the requested day/direction and prefers in-range starts before fallback',async()=>{
+  const preferences={prefer_after_minutes:960,prefer_before_minutes:1080};
+  for(const [action,initial,expected] of [
+    ['next_time',['2030-01-07T10:00','2030-01-22T10:00','2030-02-06T10:00'],'2030-01-07T16:00'],
+    ['previous_time',['2030-01-07T20:00','2030-01-22T20:00','2030-02-06T20:00'],'2030-01-07T18:00'],
+    ['next_day',undefined,'2030-01-08T16:00'],
+    ['previous_day',undefined,'2030-01-06T16:00'],
+  ]) {
+    const f=fixture(),result=await f.run(input(rows(initial),action,{preferences}));
+    assert.equal(result.proposals[0].solution.start_local,expected,action);
+    assert(result.proposals.every(row=>!row.preference_warnings),action);
+    assert.equal(f.context.patientBusy.length,0);
+  }
+  const fallback=await fixture().run(input(rows(),'previous_time',{preferences}));
+  assert.equal(fallback.proposals[0].solution.start_local,'2030-01-07T09:45');
+  assert.equal(fallback.proposals[0].preference_warnings[0].code,'program_preference_time_fallback');
+});
+test('manual cascade may choose outside the soft range but still preserves civil offsets across DST and hard exclusions',async()=>{
+  const f=fixture(),preferences={prefer_after_minutes:960,prefer_before_minutes:1080};
+  const result=await f.run(input(rows(['2030-03-15T16:00','2030-03-30T16:00','2030-04-14T16:00'],[0,1,2]),'cascade',
+    {pivot_key:'s1',start_local:'2030-03-31T19:00',preferences}));
+  assert.deepEqual(result.proposals.map(row=>row.solution.start_local),['2030-03-15T16:00','2030-03-31T19:00','2030-04-15T19:00']);
+  assert(!result.proposals[0].preference_warnings);
+  assert(result.proposals.slice(1).every(row=>row.preference_warnings[0].code==='program_preference_time_fallback'));
+  assert.equal(result.proposals[1].solution.start_at,'2030-03-31T17:00:00.000Z');
+  assert.deepEqual(result.draft_strategy.placed_keys,['s0','s1','s2']);
+  const excluded=await fixture().run(input(rows(),'cascade',{start_local:'2030-01-08T17:00',preferences:{...preferences,exclude_weekdays:[2]}}));
+  assert.equal(excluded.proposals[0].solution,null);
+  assert.equal(excluded.proposals[0].reason_code,'program_booking_preference_conflict');
+});
 test('keeping a professional is a real soft preference, with fallback warnings; it never overrides explicit resources or the clinical priority',async()=>{
   const f=fixture();f.p.sessions=f.p.sessions.slice(0,2);
   for(const row of f.p.sessions) row.booking_profile={...profile,phases:[{...profile.phases[0],professionals:{mode:'any',ids:[5,6],preferred_id:5}}]};
