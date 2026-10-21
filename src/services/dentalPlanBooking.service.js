@@ -107,6 +107,7 @@ function createDentalPlanBookingService({db,core,now=()=>new Date(),availability
   let metadata=appointment.import_metadata;if(typeof metadata==='string')metadata=JSON.parse(metadata);
   const result={appointment_id:Number(appointment.id_cita),session_id:plan.session.id,act_ids:actIds,start_at:new Date(appointment.inicio).toISOString(),end_at:new Date(appointment.fin).toISOString(),profile_snapshot:plan.profile,phases:metadata?.booking?.phases||[],appointment_status:appointment.estado,active:true,appointment_revision:require('../lib/appointment-import-review').importReviewVersion(appointment.toJSON?appointment.toJSON():appointment)};
   if(plan.moving){state.changes.push({id:D.uuid(),type:'rescheduled',before:D.clone(plan.moving),after:result,reason:D.text(p.reason),actor_id:options.actorId,created_at:now().toISOString()});Object.assign(plan.moving,result);}else{state.reservations.push(result);plan.session.appointment_ids.push(result.appointment_id);}plan.session.status='booked';state.phase='execution';
+  D.syncReviewLinks(state);
   return{appointment:{id:result.appointment_id,...result}};
  },'logistics_manage');}
  return{availability:availabilityFor,book};

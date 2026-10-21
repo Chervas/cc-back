@@ -11,15 +11,16 @@ const pick=(value,keys)=>Object.fromEntries(keys.filter(key=>C.has(value,key)).m
 function logisticsStateDTO(state){
  const result=pick(state,['schema_version','title','phase','source_budget','preferences']);
  if(result.source_budget)result.source_budget.snapshot.lines=result.source_budget.snapshot.lines.map(line=>{const output={...line};delete output.notes;return output;});
- result.acts=state.acts.map(act=>({...pick(act,['id','treatment_id','title','label','duration_minutes','professional_id','targets','status','visual_type','duration_selection','source','commercial_scope']),catalog_snapshot:act.catalog_snapshot?{...pick(act.catalog_snapshot,['id','title','code']),clinical_config:pick(act.catalog_snapshot.clinical_config||{},['booking_profile'])}:null}));
- result.sessions=state.sessions.map(session=>pick(session,['id','title','label','order','act_ids','status','parent_ids','appointment_ids','absorbed_into','earliest_date','tentative_on','reviewed_by','reviewed_at']));
+ result.acts=state.acts.map(act=>({...pick(act,['id','treatment_id','title','label','duration_minutes','professional_id','targets','status','visual_type','duration_selection','source','commercial_scope','review_id']),catalog_snapshot:act.catalog_snapshot?{...pick(act.catalog_snapshot,['id','title','code']),clinical_config:pick(act.catalog_snapshot.clinical_config||{},['booking_profile'])}:null}));
+ result.sessions=state.sessions.map(session=>pick(session,['id','title','label','order','act_ids','status','parent_ids','appointment_ids','absorbed_into','earliest_date','tentative_on','reviewed_by','reviewed_at','review_ids']));
  result.dependencies=state.dependencies.map(dependency=>pick(dependency,['id','from_act_id','to_act_id','min_wait_days','action','source','wait_min_value','wait_min_unit']));
  result.reservations=state.reservations.map(reservation=>pick(reservation,['appointment_id','session_id','act_ids','start_at','end_at','profile_snapshot','phases','appointment_status','active','appointment_revision']));
  result.execution=state.execution.map(event=>pick(event,['id','act_id','target_id','status','plan_version','episode_id','appointment_id','session_id','actor_id','recorded_at','tools_version']));
  result.changes=[];
  if(result.preferences)result.preferences=pick(result.preferences,['exclude_weekdays','prefer_after_minutes','prefer_before_minutes','keep_professional','doctor_id','installation_id','max_duration_minutes']);
- if(state.review)result.review=pick(state.review,['due_on','status','created_at','actor_id']);
- if(state.reviews)result.reviews=state.reviews.map(review=>pick(review,['id','due_on','status','created_at','actor_id']));
+ const reviewKeys=['id','due_on','status','created_at','actor_id','prepared_act_id','prepared_session_id','appointment_ids','prepared_by','prepared_at'];
+ if(state.review)result.review=pick(state.review,reviewKeys);
+ if(state.reviews)result.reviews=state.reviews.map(review=>pick(review,reviewKeys));
  return result;
 }
 function createDentalPlanService({db,canAccess=(...args)=>require('../lib/access-policy').canUserAccessFeature(...args),now=()=>new Date(),loadProtocol,
@@ -58,10 +59,10 @@ function createDentalPlanService({db,canAccess=(...args)=>require('../lib/access
   return{id:value.public_id,clinic_id:Number(value.clinic_id),patient_id:Number(value.patient_id),version:Number(value.version_number),status:value.status,...state,created_at:value.created_at,updated_at:value.updated_at};
  }
  async function reservationReadState(row,transaction=null,locking=false){
-  const state=D.clone(json(row.state)),ids=state.reservations.map(r=>r.appointment_id);if(!ids.length)return state;
+  const state=D.clone(json(row.state)),ids=state.reservations.map(r=>r.appointment_id);if(!ids.length)return D.syncReviewLinks(state);
   const appointments=await db.CitaPaciente.findAll({where:{id_cita:{[Op.in]:ids},clinica_id:row.clinic_id,paciente_id:row.patient_id},transaction,...(locking?{lock:transaction.LOCK.SHARE}:{})});
   for(const r of state.reservations){const a=appointments.find(a=>Number(a.id_cita)===r.appointment_id);if(!a){if(locking)D.fail('appointment_scope_changed','Falta una reserva del historial dental.',409);r.active=false;r.appointment_status='unavailable';continue;}r.appointment_status=a.estado;r.active=!['cancelada','no_asistio'].includes(a.estado);r.start_at=new Date(a.inicio).toISOString();r.end_at=new Date(a.fin).toISOString();r.appointment_revision=require('../lib/appointment-import-review').importReviewVersion(plain(a));}
-  return state;
+  return D.syncReviewLinks(state);
  }
  async function acceptedBudget(raw,patientId,clinicId,transaction){
   if(!raw||typeof raw!=='object'||Array.isArray(raw))D.fail('budget_invalid','Selecciona un presupuesto aceptado.');
@@ -147,7 +148,10 @@ function createDentalPlanService({db,canAccess=(...args)=>require('../lib/access
  async function command(options){
   const clinical=options.payload.command!=='preferences',preparation=['generate','move_act','merge_sessions','split_session'].includes(options.payload.command);return mutation(options,options.payload.command,async({state,transaction})=>{
    let preparedAct=null;const p=options.payload;
-   if(p.command==='add_act')preparedAct=await prepareAct(p.act,options.clinicId,transaction);
+   if(p.command==='add_act'||p.command==='prepare_review'){
+    if(p.command==='prepare_review'&&(!p.act||!Array.isArray(p.act.targets)||!p.act.targets.length||!Number.isInteger(p.act.duration_minutes)||p.act.duration_minutes<1||!Number.isSafeInteger(p.act.professional_id)||p.act.professional_id<1))D.fail('review_scope_required','Elige explícitamente trabajo, alcance, profesional y duración de la revisión.');
+    preparedAct=await prepareAct(p.act,options.clinicId,transaction);
+   }
    if(p.command==='update_act'){const old=state.acts.find(a=>a.id===p.act_id);if(!old)D.fail('act_not_found','Tratamiento no encontrado.',404);preparedAct=await prepareAct({...old,...p.act},options.clinicId,transaction,old);}
    if(p.command==='review_session')require('../lib/dental-protocol').validateReview(state,p);
    if(p.command==='preferences'){
@@ -157,9 +161,14 @@ function createDentalPlanService({db,canAccess=(...args)=>require('../lib/access
    }
    const clinic=await db.Clinica.findByPk(options.clinicId,{transaction}),calendar=require('../lib/availability-calendar');
    const updated=D.changeState(state,p,{actorId:options.actorId,now:now().toISOString(),localDate:calendar.formatDateLocal(now(),calendar.resolveClinicTimezone(clinic)),preparedAct});for(const k of Object.keys(state))delete state[k];Object.assign(state,updated);
-   if(['add_act','update_act','remove_act'].includes(p.command)){
+   if(['add_act','update_act','remove_act','prepare_review'].includes(p.command)){
     const ids=[...new Set(state.acts.map(a=>a.treatment_id).filter(Boolean))],rules=ids.length?await db.DependenciaTratamiento.findAll({where:{id_tratamiento_origen:{[Op.in]:ids},id_tratamiento_destino:{[Op.in]:ids}},transaction,limit:500}):[];
     const pinned=state.catalog_dependency_snapshot||[];for(const rule of rules)if(!pinned.some(r=>r.id===Number(rule.id)))pinned.push({id:Number(rule.id),id_tratamiento_origen:Number(rule.id_tratamiento_origen),id_tratamiento_destino:Number(rule.id_tratamiento_destino),tipo:rule.tipo,dias_espera:Number(rule.dias_espera)||0,notas:rule.notas||null});state.catalog_dependency_snapshot=pinned;Object.assign(state,require('../lib/dental-protocol').deriveProtocol(state,pinned));
+   }
+   if(p.command==='prepare_review'&&p.review_session===true){
+    require('../lib/dental-protocol').validateReview(state,p);
+    const review=D.reviewEntries(state).find(review=>review.id===p.review_id),reviewed=D.changeState(state,{...p,command:'review_session',session_id:review.prepared_session_id},{actorId:options.actorId,now:now().toISOString()});
+    Object.assign(state,reviewed,{phase:'agenda'});
    }
   },preparation?'prepare_plan':clinical?'clinical_manage':'logistics_manage');
  }

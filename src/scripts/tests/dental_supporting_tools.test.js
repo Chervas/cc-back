@@ -103,3 +103,24 @@ test('historical tools version zero stays empty and read-only even after later o
   db.Clinica.findByPk=async()=>({configuracion:{disciplinas:['nutricion']}});const disabled=await service.read(scope);assert.equal(disabled.item.version,9);assert.equal(disabled.capabilities.clinical_edit,false);assert.equal(disabled.capabilities.logistics_edit,false);assert.equal(disabled.capabilities.area_configured,false);
   await assert.rejects(service.read({...scope,clinicId:73,patientIdentifier:'other'}),{code:'dental_tools_patient_scope'});
 });
+test('patient asset picker uses exact patient/clinic clinical purpose, bounded cursor and minimal redacted metadata',async()=>{
+ const {Op}=require('sequelize'),queries=[];
+ const rows=[
+  {id:9,public_id:'invalid-stl',content_type:'application/octet-stream',metadata:{dental_stl_validated:false}},
+  {id:8,public_id:'photo',content_type:'image/png',metadata:{notes:'PRIVATE_NOTE'}},
+  {id:7,public_id:'validated-stl',content_type:'application/octet-stream',metadata:{dental_stl_validated:true}},
+ ].map(row=>({...row,original_filename:'Clinical private source.png',size_bytes:100,created_at:'2030-01-01T10:00:00Z',object_key:'PRIVATE_OBJECT_KEY'}));
+ const db={Clinica:{findByPk:async()=>({configuracion:{disciplinas:['dental']}})},DentalPlan:{findOne:async({where})=>where.clinic_id===72?{id:1,public_id:where.public_id,patient_id:11,clinic_id:72}:null},Paciente:{findByPk:async()=>({id_paciente:11,clinica_id:72,public_id:'patient-11'})},ClinicalPrivateAsset:{findAll:async query=>{queries.push(query);return rows.filter(row=>!query.where.id||row.id<query.where.id[Op.lt]).slice(0,query.limit);}}};
+ const {createDentalSupportingToolsService}=require('../../services/dentalSupportingTools.service'),service=createDentalSupportingToolsService({db,resolveRole:async()=>'doctor',canAccess:async({actorId,featureKey})=>actorId===7||actorId===8&&featureKey!=='clinical.reports.view'}),scope={actorId:7,clinicId:72,planId:'plan-1',patientIdentifier:11,limit:1};
+ const first=await service.patientAssets(scope);assert.deepEqual(first.items,[]);assert(first.next_cursor,'Skipping a nonvalidated STL must retain a cursor to later valid assets');
+ const second=await service.patientAssets({...scope,cursor:first.next_cursor});assert.equal(second.items[0].id,'photo');assert.equal(second.items[0].kind,'photo');assert.equal(second.items[0].original_name,'Clinical private source.png');assert(!JSON.stringify(second).includes('PRIVATE_'));
+ const query=queries[0];assert.deepEqual({clinic:query.where.clinic_id,patient:query.where.patient_id,purpose:query.where.purpose,scope:query.where.scope_type,status:query.where.status},{clinic:72,patient:11,purpose:'clinical_attachment',scope:'clinic',status:'active'});assert.equal(query.limit,2);assert.deepEqual(query.order,[['id','DESC']]);
+ const last=await service.patientAssets({...scope,cursor:second.next_cursor});assert.equal(last.items[0].kind,'stl');assert.equal(last.next_cursor,null);
+ const logistics=await service.patientAssets({...scope,actorId:8,cursor:first.next_cursor});assert.equal(logistics.items[0].original_name,null);
+ await assert.rejects(service.patientAssets({...scope,planId:'other-plan',cursor:first.next_cursor}),{code:'dental_tools_cursor_invalid'});
+ await assert.rejects(service.patientAssets({...scope,limit:101}),{code:'dental_tools_limit'});
+ await assert.rejects(service.patientAssets({...scope,cursor:'@@'}),{code:'dental_tools_cursor_invalid'});
+ await assert.rejects(service.patientAssets({...scope,clinicId:73}),{code:'dental_tools_plan_not_found'});
+ await assert.rejects(service.patientAssets({...scope,patientIdentifier:99}),{code:'dental_tools_patient_scope'});
+ await assert.rejects(service.patientAssets({...scope,actorId:9}),{code:'dental_tools_forbidden'});
+});

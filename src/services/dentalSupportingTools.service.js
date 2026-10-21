@@ -126,6 +126,29 @@ function createDentalSupportingToolsService({db,canAccess,resolveRole,storeAsset
     const row=await Row.findOne({where:{plan_id:plan.id},transaction});return{...(C.clone(parse(row?.state)||C.emptyState())),version:Number(row?.version_number||0),id:row?.public_id||null};
   }
   async function preview(input){const source=await asset(input);return require('./clinicalAttachmentPreview.service').createClinicalAttachmentPreview({buffer:source.buffer,contentType:source.contentType,page:input.page});}
+  async function patientAssets(input){
+    const ctx=await context(input),limit=input.limit===undefined?30:scopeInteger(input.limit);
+    if(limit>100)C.fail('limit','Solicita como máximo 100 archivos.');
+    let lastId=null;
+    if(input.cursor){try{
+      if(typeof input.cursor!=='string'||input.cursor.length>1024||!/^[A-Za-z0-9_-]+$/.test(input.cursor))throw Error('cursor');
+      const cursor=JSON.parse(Buffer.from(input.cursor,'base64url').toString('utf8'));
+      if(cursor.clinic!==ctx.clinicId||cursor.patient!==ctx.patientId||cursor.plan!==ctx.plan.public_id||!Number.isSafeInteger(cursor.id)||cursor.id<1)throw Error('cursor');
+      lastId=cursor.id;
+    }catch{C.fail('cursor_invalid','La página de archivos no corresponde a este paciente y plan.');}}
+    const rows=await db.ClinicalPrivateAsset.findAll({where:{clinic_id:ctx.clinicId,patient_id:ctx.patientId,purpose:'clinical_attachment',scope_type:'clinic',status:'active',
+      content_type:{[Op.in]:['application/pdf','image/jpeg','image/jpg','image/png','image/webp','application/octet-stream']},...(lastId?{id:{[Op.lt]:lastId}}:{})},
+      attributes:['id','public_id','original_filename','content_type','size_bytes','created_at','metadata'],order:[['id','DESC']],limit:limit+1,raw:true});
+    const page=rows.slice(0,limit),items=[];
+    for(const raw of page){const row=plain(raw),metadata=parse(row.metadata)||{},stl=row.content_type==='application/octet-stream';
+      if(stl&&metadata.dental_stl_validated!==true)continue;
+      const size=Number(row.size_bytes);if(!Number.isSafeInteger(size)||size<0)continue;
+      items.push({id:row.public_id,original_name:ctx.readClinical?String(row.original_filename||'Archivo clínico').replace(/[\x00-\x1f\x7f]/g,'').slice(0,255):null,
+        mime_type:row.content_type,size,created_at:row.created_at,kind:stl?'stl':row.content_type==='application/pdf'?'pdf':'photo'});
+    }
+    const cursor=rows.length>limit?{clinic:ctx.clinicId,patient:ctx.patientId,plan:ctx.plan.public_id,id:Number(page.at(-1).id)}:null;
+    return{items,next_cursor:cursor?Buffer.from(JSON.stringify(cursor)).toString('base64url'):null};
+  }
   async function laboratory(input){
     if(!input.actorId)C.fail('unauthenticated','Inicia sesión para continuar.',401);
     const actorId=scopeInteger(input.actorId),clinicId=scopeInteger(input.clinicId);
@@ -147,7 +170,7 @@ function createDentalSupportingToolsService({db,canAccess,resolveRole,storeAsset
     if(!next&&rows.length===21)next={clinic:clinicId,status,row:Number(rows[rows.length-1].id)+1,offset:0};
     return{items,next_cursor:next?Buffer.from(JSON.stringify(next)).toString('base64url'):null};
   }
-  return{read,command:input=>mutate(input),upload:input=>mutate(input,true),revisions,asset,preview,laboratory,getPlanToolState};
+  return{read,command:input=>mutate(input),upload:input=>mutate(input,true),revisions,asset,preview,patientAssets,laboratory,getPlanToolState};
 }
 let live;
 const current=()=>live||(live=createDentalSupportingToolsService({db:require('../../models')}));

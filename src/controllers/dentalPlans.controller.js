@@ -1,6 +1,6 @@
 'use strict';
 const C=require('../lib/clinical-episode-contract'),service=require('../services/dentalPlans.service');
-function createDentalPlansController({plans=service}={}){
+function createDentalPlansController({plans=service,preparations=require('../services/dentalPlanPreparation.service')}={}){
  const handler=action=>(req,res)=>Promise.resolve().then(async()=>{
   res.set('Cache-Control','private, no-store');if(!req.userData?.userId)throw C.error(401,'unauthenticated','Usuario no autenticado.');
   const actorId=C.integer(req.userData.userId),clinicId=C.integer(req.query.clinic_id??req.body?.clinic_id);
@@ -16,6 +16,7 @@ function createDentalPlansController({plans=service}={}){
  });
  const out=name=>handler(async(req,res,options)=>res.json(await plans[name]({...options,...(['workspace','list'].includes(name)?{patientIdentifier:req.params.id,requestedPatientIdentifier:options.patientIdentifier}:{})})));
  return{workspace:out('workspace'),list:out('list'),get:out('get'),command:out('command'),availability:out('availability'),book:out('book'),execution:out('execution'),revisions:out('revisions'),
+  preparation:handler(async(req,res,options)=>res.json(await preparations.read(options))),
   create:handler(async(req,res,options)=>{const result=await plans.create({...options,patientIdentifier:req.params.id,requestedPatientIdentifier:options.patientIdentifier});return res.status(result.created?201:200).json(result);})};
 }
 module.exports={...createDentalPlansController(),createDentalPlansController};

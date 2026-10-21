@@ -151,3 +151,28 @@ test('independent execution never reports performed or partial work against a fu
  const {assertIndependentExecutionDate}=require('../../services/dentalPlanExecution.service'),now=new Date('2030-01-01T10:00:00Z');
  assert.throws(()=>assertIndependentExecutionDate({occurred_at:'2030-01-02T10:00:00Z'},[{status:'performed'}],now),{code:'dental_execution_date_invalid'});assert.throws(()=>assertIndependentExecutionDate({occurred_at:'2030-01-02T10:00:00Z'},[{status:'partial'}],now),{code:'dental_execution_date_invalid'});assert.doesNotThrow(()=>assertIndependentExecutionDate({occurred_at:'2029-12-30T10:00:00Z'},[{status:'performed'}],now));
 });
+test('a review indication creates no clinical work until explicit professional preparation, preserving its original scope',()=>{
+ const initial=change(base(),{command:'generate'}),count=initial.acts.length,indicated=change(initial,{command:'review',due_on:'2030-02-01',title:'Control de cicatrización',notes:'Indicación del profesional',act_ids:[initial.acts[0].id]});
+ assert.equal(indicated.acts.length,count);assert.equal(indicated.sessions.length,initial.sessions.length);assert.equal(indicated.reservations.length,0);
+ const review=indicated.review,preparedAct=D.act({title:'Revisión clínica',duration_minutes:20,professional_id:7,targets:[{kind:'tooth',fdi:16}]}),payload={command:'prepare_review',review_id:review.id};
+ const ready=D.changeState(indicated,payload,{actorId:7,now:'2030-01-01T10:00:00Z',preparedAct}),act=ready.acts.at(-1),session=ready.sessions.at(-1);
+ assert.equal(act.review_id,review.id);assert.equal(act.source,null);assert.equal(act.commercial_scope,'not_contracted');assert.equal(session.status,'pending');assert.deepEqual(session.review_ids,[review.id]);assert.equal(session.tentative_on,'2030-02-01');
+ assert.deepEqual(ready.review.act_ids,review.act_ids);assert.equal(ready.review.prepared_act_id,act.id);assert.equal(ready.review.prepared_session_id,session.id);assert.equal(ready.review.status,'prepared');assert.deepEqual(ready.review.appointment_ids,[]);assert.equal(ready.reservations.length,0);
+ assert.throws(()=>D.changeState(ready,payload,{actorId:7,preparedAct}),{code:'dental_review_already_prepared'});
+ assert.throws(()=>D.changeState(indicated,{...payload,review_id:'foreign-review'},{actorId:7,preparedAct}),{code:'dental_review_not_found'});
+ assert.throws(()=>D.changeState(indicated,{...payload,review_session:'yes'},{actorId:7,preparedAct}),{code:'dental_review_validation_invalid'});
+ assert.throws(()=>D.changeState(indicated,payload,{actorId:7,preparedAct:D.act({title:'Sin profesional',duration_minutes:20})}),{code:'dental_review_scope_required'});
+ assert.deepEqual(indicated.review,review,'Preparation does not mutate its earlier indication snapshot');
+});
+test('review identity survives editing and session composition, and tracks real reservation history without duplicate appointments',()=>{
+ let s=change(change(base(),{command:'generate'}),{command:'review',due_on:'2030-02-01',act_ids:[]});const reviewId=s.review.id;
+ s=D.changeState(s,{command:'prepare_review',review_id:reviewId},{actorId:7,preparedAct:D.act({title:'Revisión elegida',duration_minutes:20,professional_id:7})});
+ const reviewAct=s.acts.at(-1),oldSession=s.review.prepared_session_id,target=s.sessions[0].id;
+ const edited=D.act({...reviewAct,title:'Control actualizado'},{previous:reviewAct});assert.equal(edited.review_id,reviewId);assert.equal(D.act({...reviewAct,review_id:'forged'}).review_id,undefined);
+ s=change(s,{command:'move_act',session_id:oldSession,target_session_id:target,act_id:reviewAct.id});assert.equal(s.review.prepared_session_id,target);assert(s.sessions.find(row=>row.id===target).review_ids.includes(reviewId));
+ s.reservations=[{appointment_id:50,session_id:target,act_ids:[reviewAct.id],active:true}];D.syncReviewLinks(s);assert.equal(s.review.status,'booked');assert.deepEqual(s.review.appointment_ids,[50]);
+ s.reservations[0].active=false;D.syncReviewLinks(s);assert.equal(s.review.status,'prepared');assert.deepEqual(s.review.appointment_ids,[50]);
+ s.reservations.push({appointment_id:51,session_id:target,act_ids:[reviewAct.id],active:true});D.syncReviewLinks(s);D.syncReviewLinks(s);assert.deepEqual(s.review.appointment_ids,[50,51]);
+ s.acts.find(row=>row.id===reviewAct.id).status='performed';D.syncReviewLinks(s);assert.equal(s.review.status,'completed');
+ const dto=createDentalPlanService({db:{}}).serialize({public_id:'plan',patient_id:1,clinic_id:72,version_number:3,status:s.phase,state:s},{clinical_view:false,billing_view:false});assert.equal(dto.review.prepared_session_id,target);assert.deepEqual(dto.review.appointment_ids,[50,51]);assert.equal(dto.acts.at(-1).review_id,reviewId);
+});

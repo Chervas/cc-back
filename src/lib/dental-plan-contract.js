@@ -35,7 +35,8 @@ function act(raw,{previous=null,treatment=null,source=null}={}){
   title:text(raw.title??raw.label??previous?.title??treatment?.nombre,255),duration_minutes:duration,
   professional_id:C.has(raw,'professional_id')?(raw.professional_id==null?null:C.integer(raw.professional_id)):previous?.professional_id||null,targets,status:previous?.status||'pending',notes:C.has(raw,'notes')?text(raw.notes):previous?.notes||null,visual_type:visual,
   source:previous?.source||source||null,commercial_scope:previous?.commercial_scope||(source?'accepted':'not_contracted'),
-  catalog_snapshot:snapshot,duration_selection:C.has(raw,'duration_selection')?(raw.duration_selection===null?null:require('./booking-profile-duration').normalizeDurationSelection(raw.duration_selection)):previous?.duration_selection||null};
+  catalog_snapshot:snapshot,duration_selection:C.has(raw,'duration_selection')?(raw.duration_selection===null?null:require('./booking-profile-duration').normalizeDurationSelection(raw.duration_selection)):previous?.duration_selection||null,
+  ...(previous?.review_id?{review_id:previous.review_id}:{})};
  if(!result.title)fail('act_invalid','Indica el nombre del tratamiento.');result.label=result.title;
  return result;
 }
@@ -53,6 +54,26 @@ function orderedActs(state){const result=[],seen=new Set();function add(a){if(se
 const session=(act,index)=>({id:uuid(),title:`Sesión ${index+1}`,label:`Sesión ${index+1}`,order:index+1,act_ids:[act.id],status:'pending',parent_ids:[],appointment_ids:[],notes:null,reviewed_by:null});
 function mutableSession(state,value){const s=state.sessions.find(s=>s.id===id(value));if(!s||s.status==='absorbed')fail('session_not_found','Sesión no encontrada.',404);if(s.appointment_ids.length||state.execution.some(e=>s.act_ids.includes(e.act_id)))fail('session_locked','La sesión tiene reservas o trabajo registrado. Revisa sus citas antes de cambiar su composición.',409);return s;}
 function invalidate(state,ids){for(const s of state.sessions.filter(s=>s.status!=='absorbed'&&s.act_ids.some(id=>ids.includes(id)))){if(s.appointment_ids.length)fail('session_locked','La sesión ya tiene reservas.',409);s.status='pending';s.reviewed_by=null;}}
+function reviewEntries(state){
+ const result=state.reviews||[];
+ if(state.review?.id&&!result.some(review=>review.id===state.review.id))return[...result,state.review];
+ return result;
+}
+function syncReviewLinks(state){
+ const reviews=reviewEntries(state);
+ for(const s of state.sessions){const ids=[...new Set(s.act_ids.map(id=>state.acts.find(act=>act.id===id)?.review_id).filter(Boolean))];if(ids.length)s.review_ids=ids;else delete s.review_ids;}
+ for(const review of reviews){
+  if(!review.prepared_act_id)continue;
+  const act=state.acts.find(act=>act.id===review.prepared_act_id&&act.review_id===review.id);if(!act)continue;
+  const current=state.sessions.find(session=>session.status!=='absorbed'&&session.act_ids.includes(act.id));if(current)review.prepared_session_id=current.id;
+  const reservations=state.reservations.filter(reservation=>reservation.act_ids.includes(act.id));
+  review.appointment_ids=[...new Set(reservations.map(reservation=>reservation.appointment_id))];
+  review.status=act.status==='cancelled'?'cancelled':act.status==='performed'?'completed':reservations.some(reservation=>reservation.active!==false)?'booked':'prepared';
+ }
+ if(reviews.length)state.reviews=reviews;
+ if(state.review?.id)state.review=reviews.find(review=>review.id===state.review.id)||state.review;
+ return state;
+}
 function changeState(previous,payload,{actorId,now=new Date().toISOString(),localDate=now.slice(0,10),preparedAct=null}={}){
  const state=clone(previous),command=payload.command,reason=text(payload.reason),record={id:uuid(),type:command,actor_id:actorId,created_at:now,reason};
  if(command==='generate'){
@@ -83,21 +104,33 @@ function changeState(previous,payload,{actorId,now=new Date().toISOString(),loca
   if(!reason)fail('change_reason_required','Indica el motivo del cambio.');record.before=old;
   if(command==='remove_act')state.acts[index]={...old,status:'cancelled',cancellation_reason:reason};else{if(!preparedAct)fail('act_invalid','Revisa el tratamiento.');state.acts[index]=preparedAct;}
   invalidate(state,[old.id]);record.after=state.acts[index];record.impacts=['clinical_scope','budget_review','consent','dependencies','laboratory','agenda'];
+ }else if(command==='prepare_review'){
+  const review=reviewEntries(state).find(review=>review.id===id(payload.review_id));if(!review)fail('review_not_found','Selecciona una revisión de este plan.',404);
+  if(review.prepared_act_id||review.prepared_session_id||state.acts.some(act=>act.review_id===review.id))fail('review_already_prepared','Esta revisión ya tiene trabajo preparado. Abre su sesión para continuar.',409,{review_id:review.id,act_id:review.prepared_act_id,session_id:review.prepared_session_id});
+  if(review.status!=='pending')fail('review_not_pending','Esta revisión ya no está pendiente de preparar.',409);
+  if(payload.review_session!==undefined&&typeof payload.review_session!=='boolean')fail('review_validation_invalid','Indica si el profesional valida la sesión ahora.');
+  if(!preparedAct||!preparedAct.duration_minutes||!preparedAct.professional_id||!preparedAct.targets?.length)fail('review_scope_required','Elige el trabajo, alcance, profesional y duración de la revisión.');
+  if(state.source_budget&&!reason)fail('change_reason_required','Explica el trabajo de revisión añadido al alcance aceptado.');
+  const act={...preparedAct,review_id:review.id,source:null,commercial_scope:'not_contracted'},prepared={...session(act,state.sessions.length),title:review.title,label:review.title,review_ids:[review.id],tentative_on:review.due_on||null};
+  state.acts.push(act);state.sessions.push(prepared);
+  Object.assign(review,{prepared_act_id:act.id,prepared_session_id:prepared.id,appointment_ids:[],prepared_by:actorId,prepared_at:now,status:'prepared'});
+  state.reviews=reviewEntries(state).map(row=>row.id===review.id?review:row);if(state.review?.id===review.id)state.review=review;
+  state.phase='provisional';record.review_id=review.id;record.act_id=act.id;record.session_id=prepared.id;record.after=act;record.impacts=['clinical_scope','budget_review','consent','dependencies','laboratory','agenda'];
  }else if(command==='review'){
   const due=payload.due_on??null;if(due!==null&&(!/^\d{4}-\d{2}-\d{2}$/.test(due)||new Date(due+'T12:00:00Z').toISOString().slice(0,10)!==due))fail('review_date_invalid','Indica una fecha de revisión válida.');
   const actIds=payload.act_ids??[];list(actIds,100);if(new Set(actIds).size!==actIds.length||actIds.some(id=>!state.acts.some(a=>a.id===id)))fail('review_scope_invalid','Selecciona trabajo de este plan.');
-  state.phase='review';record.notes=text(payload.notes);state.review={id:uuid(),title:text(payload.title,200)||'Revisión del plan',notes:record.notes,due_on:due,act_ids:actIds,actor_id:actorId,created_at:now,status:'pending'};state.reviews??=[];state.reviews.push(state.review);
+  state.phase='review';record.notes=text(payload.notes);state.reviews=reviewEntries(state);state.review={id:uuid(),title:text(payload.title,200)||'Revisión del plan',notes:record.notes,due_on:due,act_ids:actIds,appointment_ids:[],actor_id:actorId,created_at:now,status:'pending'};state.reviews.push(state.review);
  }else fail('command_invalid','Acción dental no válida.');
  if(['generate','move_act','merge_sessions','split_session','dependencies'].includes(command)){
   const acts=orderedActs(state),order=new Map(acts.map((a,i)=>[a.id,i])),dates=new Map();
   for(const a of acts){let earliest=localDate;for(const d of state.dependencies.filter(d=>d.to_act_id===a.id)){const date=require('./dental-civil-wait').dateForDependency(dates.get(d.from_act_id)||localDate,d);if(date>earliest)earliest=date;}dates.set(a.id,earliest);}
   for(const s of state.sessions.filter(s=>s.status!=='absorbed')){s.act_ids.sort((a,b)=>order.get(a)-order.get(b));s.earliest_date=s.act_ids.map(id=>dates.get(id)||localDate).sort().at(-1)||localDate;}
  }
- state.changes.push(record);if(state.changes.length>500)fail('plan_too_large','Conserva el historial y abre un plan nuevo.',413);return state;
+ state.changes.push(record);if(state.changes.length>500)fail('plan_too_large','Conserva el historial y abre un plan nuevo.',413);return syncReviewLinks(state);
 }
 function executionResults(state,payload){
  const results=list(payload.results,200);if(!results.length)fail('execution_empty','Selecciona el trabajo que deseas registrar.');const seen=new Set();
  return results.map(raw=>{const actId=id(raw.act_id),targetId=id(raw.target_id),a=state.acts.find(a=>a.id===actId&&a.status!=='cancelled');if(!a||!a.targets.some(t=>t.id===targetId)||!['partial','performed','not_performed'].includes(raw.status)||seen.has(actId+':'+targetId))fail('execution_invalid','Revisa el trabajo y su pieza o alcance.');seen.add(actId+':'+targetId);return{act_id:actId,target_id:targetId,status:raw.status,notes:text(raw.notes)};});
 }
-function initialState(title){return{schema_version:1,title:text(title,255)||'Plan de tratamiento dental',phase:'accepted',source_budget:null,acts:[],dependencies:[],sessions:[],reservations:[],preferences:null,execution:[],changes:[],review:null};}
-module.exports={clone,error,fail,uuid,id,text,list,version,key,target,act,dependencies,orderedActs,changeState,executionResults,initialState,clinicalConfig,VISUAL_TYPES};
+function initialState(title){return{schema_version:1,title:text(title,255)||'Plan de tratamiento dental',phase:'accepted',source_budget:null,acts:[],dependencies:[],sessions:[],reservations:[],preferences:null,execution:[],changes:[],review:null,reviews:[]};}
+module.exports={clone,error,fail,uuid,id,text,list,version,key,target,act,dependencies,orderedActs,changeState,executionResults,initialState,clinicalConfig,VISUAL_TYPES,reviewEntries,syncReviewLinks};

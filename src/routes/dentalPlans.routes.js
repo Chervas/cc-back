@@ -2,6 +2,7 @@
 const router=require('express').Router(),controller=require('../controllers/dentalPlans.controller');
 router.use(require('./auth.middleware'));
 router.get('/:id',controller.get);
+router.get('/:id/preparation',controller.preparation);
 router.patch('/:id',controller.command);
 router.post('/:id/commands',controller.command);
 router.post('/:id/availability',controller.availability);

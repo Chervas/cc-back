@@ -38,7 +38,7 @@ function createDentalPlanExecutionService({db,core,now=()=>new Date(),validateMa
    const version=Number(row.version_number)+1,recordedAt=now().toISOString();
    state.execution.push(...results.map(r=>({...r,id:D.uuid(),plan_version:version,episode_id:episodeId,appointment_id:appointmentId,session_id:session.id,actor_id:options.actorId,recorded_at:recordedAt,reason:D.text(p.reason),tools_version:tools?.version??0,dependency_override:issues.filter(i=>i.action!=='warn')})));
    const current=Dep.latestResults(state);for(const act of state.acts){if(act.status==='cancelled')continue;const rows=act.targets.map(t=>current.get(act.id+':'+t.id));act.status=rows.every(r=>r?.status==='performed')?'performed':rows.some(r=>r?.status==='performed'||r?.status==='partial')?'partial':'pending';}
-   session.status=session.act_ids.every(id=>state.acts.find(a=>a.id===id)?.status==='performed')?'done':session.appointment_ids.length?'booked':'reviewed';state.phase='execution';
+   session.status=session.act_ids.every(id=>state.acts.find(a=>a.id===id)?.status==='performed')?'done':session.appointment_ids.length?'booked':'reviewed';state.phase='execution';D.syncReviewLinks(state);
    return{afterPersist:async()=>{
     const refs=[...(report.material_refs||[]),{kind:'dental_execution',id:row.public_id,version}];
     const saved=await episodeService().saveInTransaction({id:episodeId,clinicId:Number(row.clinic_id),actorId:options.actorId,transaction,payload:{expected_version:episodeVersion,idempotency_key:'dental:'+C.hash(D.key(p)),material_refs:refs}});

@@ -12,6 +12,7 @@ function createController({getService=()=>service.current()}={}){
     upload:handler(async(req,res)=>res.status(201).json(await getService().upload(input(req)))),
     revisions:handler(async(req,res)=>res.json(await getService().revisions(input(req)))),
     laboratory:handler(async(req,res)=>res.json(await getService().laboratory(input(req)))),
+    patientAssets:handler(async(req,res)=>res.json(await getService().patientAssets(input(req)))),
     preview:handler(async(req,res)=>{const file=await getService().preview(input(req));res.set('Content-Type',file.contentType);res.set('X-Content-Type-Options','nosniff');res.set('X-Preview-Page-Count',String(file.pageCount));res.send(file.buffer);}),
     asset:handler(async(req,res)=>{const file=await getService().asset(input(req));res.set('X-Content-Type-Options','nosniff');res.set('Content-Type',file.contentType);
       const safe=String(file.filename||'archivo').replace(/[\r\n"\\]/g,'_').replace(/[^\x20-\x7e]/g,'_');res.set('Content-Disposition',`${req.query.download==='1'?'attachment':'inline'}; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(file.filename||'archivo')}`);res.send(file.buffer);}),
