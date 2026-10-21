@@ -2,13 +2,13 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), vm = require('node:vm'), { createRequire } = require('node:module');
 const bcrypt = require('bcryptjs');
-function load(file, overrides) {
+function load(file, overrides, env = {}) {
   const local = createRequire(file), module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(file, 'utf8'), { module, exports: module.exports, Buffer, Date, Map, Set, Object,
-    process: { env: {} }, require: name => Object.hasOwn(overrides, name) ? overrides[name] : local(name) }, { filename: file });
+    process: { env }, require: name => Object.hasOwn(overrides, name) ? overrides[name] : local(name) }, { filename: file });
   return module.exports;
 }
-function fixture({ group = false, configured = true, deniedClinic = null, resets = 0, duplicate = false } = {}) {
+function fixture({ group = false, configured = true, deniedClinic = null, resets = 0, duplicate = false, env = {} } = {}) {
   const changes = [], row = value => Object.assign(value, { async update(values, options) {
     assert(options.transaction); changes.push(values); Object.assign(this, values); return this;
   }, async reload(options) { assert.equal(options.lock, 'UPDATE'); return this; } });
@@ -37,7 +37,7 @@ function fixture({ group = false, configured = true, deniedClinic = null, resets
   } };
   const acl = [];
   const service = load(require.resolve('../../services/accountingFirms.service'), { '../../models': db,
-    '../lib/access-policy': { canUserAccessFeature: async input => { acl.push(input); return input.actorId === 5 && input.clinicId !== deniedClinic; } } });
+    '../lib/access-policy': { canUserAccessFeature: async input => { acl.push(input); return input.actorId === 5 && input.clinicId !== deniedClinic; } } }, env);
   return { service, firm, clinics, users, links, changes, revoked, audit, acl };
 }
 
@@ -89,4 +89,26 @@ test('portal scope follows current group composition and rejects malformed or fo
   await assert.rejects(f.service.assertPortalClinic({ actorId: 90, clinicId: 73 }), { code: 'accounting_portal_clinic_forbidden' });
   await assert.rejects(f.service.assertPortalClinic({ actorId: 90, clinicId: '72junk' }), { code: 'accounting_portal_clinic_forbidden' });
   assert.equal((await f.service.assertPortalClinic({ actorId: 90, clinicId: 72 })).clinicId, 72);
+});
+
+test('portal credentials use the canonical public frontend in CRM and preserve the isolated DEV origin', async () => {
+  const crm = fixture({ env: { RUNTIME_NAMESPACE: 'staging', EMAIL_PUBLIC_APP_URL: 'https://crm.clinicaclick.com/' } });
+  const issued = await crm.service.issueCredentials({ clinicId: 72, actorId: 5, email: 'gestor@example.test' });
+  assert.equal(issued.portal_url, 'https://crm.clinicaclick.com/gestoria');
+  assert(issued.credentials.message.includes('URL: https://crm.clinicaclick.com/gestoria\n'));
+  assert.equal((await crm.service.getFirm({ clinicId: 72 })).portal_url, issued.portal_url);
+  assert(!issued.credentials.message.includes('localhost'));
+  for (const env of [{ RUNTIME_NAMESPACE: 'dev' }, { RUNTIME_NAMESPACE: 'dev', EMAIL_PUBLIC_APP_URL: 'http://localhost:4203/' }]) {
+    const dev = fixture({ env });
+    assert.equal((await dev.service.getFirm({ clinicId: 72 })).portal_url, 'http://localhost:4203/gestoria');
+  }
+});
+test('portal URL keeps explicit overrides and frontend-base precedence without a localhost fallback for an unconfigured public runtime', async () => {
+  for (const [env, expected] of [
+    [{ ACCOUNTING_PORTAL_URL: 'https://accounting.example.test/gestoria/', EMAIL_PUBLIC_APP_URL: 'https://crm.example.test' }, 'https://accounting.example.test/gestoria'],
+    [{ EMAIL_PUBLIC_APP_URL: ' https://crm.example.test/ ', FRONTEND_PUBLIC_URL: 'https://other.example.test' }, 'https://crm.example.test/gestoria'],
+    [{ FRONTEND_PUBLIC_URL: 'https://crm.example.test/app/' }, 'https://crm.example.test/app/gestoria'],
+    [{ RUNTIME_NAMESPACE: 'staging' }, 'https://crm.clinicaclick.com/gestoria'],
+    [{}, 'https://crm.clinicaclick.com/gestoria'],
+  ]) assert.equal((await fixture({ env }).service.getFirm({ clinicId: 72 })).portal_url, expected);
 });

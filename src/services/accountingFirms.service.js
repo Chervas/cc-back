@@ -76,8 +76,17 @@ async function recordAccess(firm, user, actorId, action, transaction) {
 }
 
 function portalUrl() {
-  return String(process.env.ACCOUNTING_PORTAL_URL || 'http://localhost:4203/gestoria').replace(/\/+$/, '');
+  const clean = value => String(value || '').trim().replace(/\/+$/, '');
+  const explicit = clean(process.env.ACCOUNTING_PORTAL_URL);
+  if (explicit) return explicit;
+  // Match the canonical sign-in/reset frontend base; never derive the copied
+  // credential link from request Host/Origin or fall back to DEV in public CRM.
+  const namespace = process.env.RUNTIME_NAMESPACE || process.env.JOB_RUNTIME_NAMESPACE;
+  const base = clean(process.env.EMAIL_PUBLIC_APP_URL) || clean(process.env.FRONTEND_PUBLIC_URL)
+    || (namespace === 'dev' ? 'http://localhost:4203' : 'https://crm.clinicaclick.com');
+  return `${base}/gestoria`;
 }
+
 
 function serializeFirm(firm, clinics, user = null) {
   return {
