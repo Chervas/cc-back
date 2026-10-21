@@ -199,7 +199,7 @@ async function storeClinicalPrivateAsset(input = {}) {
 
   await writeLocalPrivateObject({ objectKey, buffer });
 
-  return db.ClinicalPrivateAsset.create({
+  try { return await db.ClinicalPrivateAsset.create({
     public_id: await generateUniquePublicId(),
     scope_type: clinicId ? 'clinic' : (groupId ? 'group' : 'system'),
     clinic_id: clinicId,
@@ -221,7 +221,13 @@ async function storeClinicalPrivateAsset(input = {}) {
     status: 'active',
     metadata: input.metadata && typeof input.metadata === 'object' ? input.metadata : null,
     created_by: toIntOrNull(input.createdBy || input.created_by),
-  });
+  }, input.transaction ? { transaction: input.transaction } : {}); }
+  catch (error) {
+    if (input.transaction) {
+      try { await fs.unlink(objectPathForKey(objectKey)); } catch { /* The clinical transaction error remains authoritative. */ }
+    }
+    throw error;
+  }
 }
 
 async function readClinicalPrivateAsset(assetOrId) {
@@ -263,6 +269,17 @@ async function readClinicalPrivateAsset(assetOrId) {
   };
 }
 
+// An upload can write bytes before its enclosing clinical transaction rolls
+// back. Only that new, uncommitted object may be discarded. A retained asset
+// row always wins, including when the caller lost its commit acknowledgement.
+async function discardUncommittedClinicalObject(asset) {
+  const value = typeof asset?.toJSON === 'function' ? asset.toJSON() : asset;
+  if (!value || value.provider !== 'local_private' || typeof value.object_key !== 'string') return;
+  const retained = await db.ClinicalPrivateAsset.findOne({ where: { object_key: value.object_key } });
+  if (retained) return;
+  try { await fs.unlink(objectPathForKey(value.object_key)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
+
 function getClinicalPrivateStorageStatus() {
   const config = getConfig();
   return {
@@ -281,6 +298,7 @@ module.exports = {
   getClinicalPrivateStorageStatus,
   storeClinicalPrivateAsset,
   readClinicalPrivateAsset,
+  discardUncommittedClinicalObject,
   __testing: {
     generateObjectKey,
     objectPathForKey,

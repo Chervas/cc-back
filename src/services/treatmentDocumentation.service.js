@@ -151,6 +151,7 @@ function createTreatmentDocumentationService(db = require('../../models')) {
         const purchased = await programs.programAppointmentContext(db, clinicalAppointment, transaction);
         treatmentIds = purchased.treatment_ids;
       }
+      if((typeof clinicalAppointment.import_metadata==='string'?JSON.parse(clinicalAppointment.import_metadata):clinicalAppointment.import_metadata)?.dental_plan)treatmentIds=(await require('../lib/dental-appointment-context').dentalAppointmentContext(db,clinicalAppointment,transaction)).treatment_ids;
       if (!Array.isArray(treatmentIds) || !treatmentIds.length || treatmentIds.some(id => !positive(id))
         || new Set(treatmentIds.map(Number)).size !== treatmentIds.length) {
         throw fail(409, 'appointment_documentation_treatments_unproven', 'No se puede verificar la composición clínica de esta cita.');
@@ -215,6 +216,11 @@ function createTreatmentDocumentationService(db = require('../../models')) {
         treatmentIds = frozen.treatment_ids;
         const allowed = await db.Tratamiento.findAll({ where: { ...(await scope(clinicId)), id_tratamiento: { [Op.in]: treatmentIds } }, attributes: ['id_tratamiento'], raw: true });
         if (allowed.length !== treatmentIds.length) return { ...base, documentation_status: 'treatment_unavailable' };
+      }
+      if((typeof appointment.import_metadata==='string'?JSON.parse(appointment.import_metadata):appointment.import_metadata)?.dental_plan){
+        treatmentIds=(await require('../lib/dental-appointment-context').dentalAppointmentContext(db,appointment)).treatment_ids;
+        const allowed=await db.Tratamiento.findAll({where:{...(await scope(clinicId)),id_tratamiento:{[Op.in]:treatmentIds}},attributes:['id_tratamiento'],raw:true});
+        if(allowed.length!==treatmentIds.length)return{...base,documentation_status:'treatment_unavailable'};
       }
       const treatment = await db.Tratamiento.findOne({
         where: { ...(await scope(clinicId)), id_tratamiento: appointment.tratamiento_id },

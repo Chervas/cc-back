@@ -222,7 +222,8 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
   allowObsolete = false, stateOnly = false, trustedProgramSession = null, preparedContext = null, force = false,
   additionalStaffIds = undefined, supportOnly = false, expectedRange = null, importEquipmentAssignment = null,
   trustedProgramSeries = null, reschedulePatientOverlap = null, durationSelection, expectedPlanSha256,
-  visitBirth = null, restrictionConfirmation = null, administrativeRestore = false, rescheduleNotice = null }) {
+  visitBirth = null, restrictionConfirmation = null, administrativeRestore = false, rescheduleNotice = null,
+  trustedDentalReservation = null }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
   durationSelection = normalizeDurationSelection(durationSelection);
   // Internal documentary reconciliation only, never forwarded from an HTTP
@@ -247,6 +248,9 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const previous = existing?.toJSON ? existing.toJSON() : (existing || {});
     assertGenericSourceIdentity(previous, appointmentValues);
     const values = { ...previous, ...appointmentValues };
+    const dentalContext=trustedDentalReservation?require('../lib/dental-booking-context').requireDentalBookingContext(trustedDentalReservation,{transaction:tx,values,existing}):null;
+    if(dentalContext&&(!transaction||trustedProgramSession||trustedProgramSeries||stateOnly||supportOnly||force||visitBirth||restrictionConfirmation))throw Error('dental_booking_context_invalid');
+    if(existing)require('../lib/dental-appointment-context').assertCoordinatedDentalScheduleChange(previous,values,!!dentalContext);
     // Re-evaluate the administrative correction under the row lock. The
     // controller and linked-group proposal may predate a patient confirmation.
     // This guard is only for an explicit reservation edit, never a later
@@ -393,6 +397,9 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const importMetadata = mergeAppointmentSourceMetadata(previousMetadata, metadataObject(values.import_metadata));
     delete importMetadata.booking; // A request cannot author a trusted booking snapshot.
     delete importMetadata.program_session;
+    delete importMetadata.dental_plan;
+    if(previousMetadata.dental_plan)importMetadata.dental_plan=previousMetadata.dental_plan;
+    if(dentalContext)importMetadata.dental_plan={id:dentalContext.planId,session_id:dentalContext.sessionId,act_ids:dentalContext.actIds};
     delete importMetadata.additional_staff;
     delete importMetadata.import_treatment_resolution;
     if (previousMetadata.import_treatment_resolution) importMetadata.import_treatment_resolution = previousMetadata.import_treatment_resolution;
@@ -435,7 +442,10 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     if (previousMetadata.booking && !snapshot && Number(previous.tratamiento_id) === Number(values.tratamiento_id)) {
       throw bookingError('booking_profile_invalid', 'Falta el perfil guardado de la cita. No se reinterpretará con el catálogo actual.');
     }
-    if (importEquipmentAssignment) {
+    if(dentalContext){
+      configuredProfile=normalizeBookingProfile(dentalContext.profile);
+      assertOperationalBookingProfile(configuredProfile,{capabilities});
+    } else if (importEquipmentAssignment) {
       const catalogProfile = requireOperationalProfile(treatment, { capabilities, allowObsolete });
       if (catalogProfile || session) throw bookingError('booking_import_equipment_invalid',
         'Esta cita ya utiliza un perfil de tratamiento o programa; revisa su reserva sin sustituirla.');
@@ -696,4 +706,4 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
   return transaction ? execute(transaction) : db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, execute);
 }
 
-module.exports = { lockBookingResources, lockExistingBookingResources, mutateAppointmentBooking, classifyImportedAppointment, registerPatientLinkContext };
+module.exports = { lockBookingResources, lockExistingBookingResources, mutateAppointmentBooking, classifyImportedAppointment, registerPatientLinkContext, phaseFitsClassification };

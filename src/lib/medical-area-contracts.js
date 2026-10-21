@@ -344,10 +344,12 @@ const NUTRITION_MEASUREMENT_PROFILE_SCHEMAS = [
 
 const PATIENT_WORKSPACES = {
   dental: {
+    // Activation is published/adopted explicitly; existing revision snapshots
+    // and clinic pins must not change when the application is deployed.
     enabled: false,
-    route: 'tratamientos',
-    labelKey: 'patients.detail.tabs.treatments',
-    label: 'Tratamientos',
+    route: 'historia-clinica',
+    labelKey: null,
+    label: 'Historia clínica',
     icon: 'heroicons_outline:clipboard-document-list',
   },
   nutricion: {
@@ -374,6 +376,20 @@ const PATIENT_WORKSPACES = {
 };
 
 const APPOINTMENT_ACTIONS = {
+  dental: {
+    enabled: false,
+    route: 'historia-clinica',
+    label: 'Abrir episodio dental',
+    compareLabel: 'Consultar historia dental',
+    detail: 'Abre el episodio de esta consulta con sus datos clínicos y materiales.',
+    icon: 'heroicons_outline:clipboard-document-list',
+    compareIcon: 'heroicons_outline:clock',
+    noProfileMessage: 'Esta clínica no tiene habilitado el acceso al episodio dental',
+    latestPrefix: 'Consulta anterior',
+    requiresProfile: false,
+    profileDetails: {},
+    serviceDetails: {},
+  },
   nutricion: {
     enabled: true,
     route: 'nutricion',

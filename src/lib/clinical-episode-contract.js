@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 const TEXT_FIELDS = Object.freeze(['reason', 'summary', 'findings', 'interventions', 'outcome', 'plan', 'next_steps', 'private_notes']);
-const TEMPLATE_KEYS = Object.freeze(['general', 'estetica', 'capilar', 'nutricion']);
+const TEMPLATE_KEYS = Object.freeze(['general', 'estetica', 'capilar', 'nutricion', 'dental']);
 const has = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 function error(statusCode, code, message, details) {

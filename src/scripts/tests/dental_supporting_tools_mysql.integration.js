@@ -1,0 +1,93 @@
+'use strict';
+const assert=require('node:assert/strict'),{DataTypes:D,Sequelize}=require('sequelize');
+const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fixture');
+withIsolatedCampaignMysql(async({sql,models:db,report})=>{
+  db.Clinica=sql.define('Clinica',{id_clinica:{type:D.INTEGER,primaryKey:true},configuracion:D.JSON},{tableName:'Clinicas',timestamps:false});
+  db.Paciente=sql.define('Paciente',{id_paciente:{type:D.INTEGER,primaryKey:true},public_id:D.STRING,clinica_id:D.INTEGER,nombre:D.STRING,apellidos:D.STRING},{tableName:'Pacientes',timestamps:false});
+  db.PacienteClinica=sql.define('PacienteClinica',{id:{type:D.INTEGER,primaryKey:true},paciente_id:D.INTEGER,clinica_id:D.INTEGER},{timestamps:false});
+  db.DentalPlan=sql.define('DentalPlan',{id:{type:D.BIGINT.UNSIGNED,primaryKey:true,autoIncrement:true},public_id:D.STRING,clinic_id:D.INTEGER,patient_id:D.INTEGER,state:D.JSON,status:D.STRING},{tableName:'DentalPlans',timestamps:false});
+  db.CitaPaciente=sql.define('CitaPaciente',{id_cita:{type:D.INTEGER,primaryKey:true},paciente_id:D.INTEGER,clinica_id:D.INTEGER},{tableName:'CitasPacientes',timestamps:false});
+  db.ClinicalPrivateAsset=require('../../../models/clinicalprivateasset')(sql,D);
+  await sql.sync();await db.Clinica.bulkCreate([{id_clinica:72,configuracion:{disciplinas:['dental']}},{id_clinica:73,configuracion:{disciplinas:['nutricion']}}]);await db.Paciente.create({id_paciente:11,public_id:'fictitious',clinica_id:72,nombre:'Paciente ficticio',apellidos:'QA'});
+  const plan=await db.DentalPlan.create({public_id:'owned-dental-plan',clinic_id:72,patient_id:11,status:'active',state:{acts:[{id:'act-1'},{id:'act-2'}],sessions:[{id:'session-1'},{id:'session-2'}],reservations:[{appointment_id:51,session_id:'session-1',act_ids:['act-1']}]}});
+  await db.CitaPaciente.create({id_cita:51,paciente_id:11,clinica_id:72});
+  const migration=require('../../../migrations/20261021220500-dental-supporting-tools');await migration.up(sql.getQueryInterface(),Sequelize);await migration.up(sql.getQueryInterface(),Sequelize);
+  for(const file of ['dentalsupportingtools','dentalsupportingtoolsrevision']){const model=require('../../../models/'+file)(sql,D);db[model.name]=model;}
+  assert((await sql.getQueryInterface().showIndex('DentalSupportingToolsRevisions')).some(i=>i.name==='dental_tools_command_once'&&i.unique));
+  const foreignKeys=await sql.getQueryInterface().getForeignKeyReferencesForTable('DentalSupportingTools');assert(foreignKeys.some(f=>f.referencedTableName==='DentalPlans'));
+  await assert.rejects(migration.down(),/history_preserved/);report.checks.push('Real additive DDL twice with FK and unique command/revision constraints, destructive rollback refused.');
+  let forcedRevisionFailure=false;
+  const originalCreate=db.DentalSupportingToolsRevision.create.bind(db.DentalSupportingToolsRevision);
+  db.DentalSupportingToolsRevision.create=(values,opts)=>{if(forcedRevisionFailure)throw Error('owned-revision-failure');return originalCreate(values,opts);};
+  const bytes=new Map();let uploads=0;
+  const service=require('../../services/dentalSupportingTools.service').createDentalSupportingToolsService({db,canAccess:async({actorId,featureKey})=>actorId===7||actorId===8||actorId===10&&['patients.view','patients.sensitive.view','appointments.manage'].includes(featureKey),
+    resolveRole:async({actorId})=>actorId===7?'doctor':'assistant',
+    storeAsset:async input=>{uploads++;const asset=await db.ClinicalPrivateAsset.create({public_id:'asset-'+uploads,clinic_id:input.clinicId,patient_id:input.patientId,purpose:input.purpose,scope_type:'clinic',provider:'local_private',bucket:'owned-test',object_key:'owned-'+uploads,content_type:input.contentType,size_bytes:input.buffer.length,sha256:require('node:crypto').createHash('sha256').update(input.buffer).digest('hex'),status:'active',metadata:input.metadata},{transaction:input.transaction});bytes.set(asset.public_id,input.buffer);return asset;},
+    readAsset:async asset=>({buffer:bytes.get(asset.public_id),asset:asset.toJSON(),contentType:asset.content_type,filename:'test.stl'}),
+  });
+  const scope={planId:plan.public_id,clinicId:72,patientIdentifier:'fictitious',actorId:7};
+  assert.equal((await service.read(scope)).item.version,0);assert.equal(await db.DentalSupportingTools.count(),0);
+  const create={expected_version:0,idempotency_key:'owned-lab-create',command:{type:'lab.create',order:{title:'Corona ficticia',laboratory:'Lab ficticio',act_ids:['act-1'],request_session_id:'session-1',needed_session_id:'session-2',appointment_id:51,request_before:'2026-10-22',needed_on:'2026-10-26'}}};
+  const concurrent=await Promise.all([service.command({...scope,payload:create}),service.command({...scope,payload:create})]);assert.equal(concurrent.filter(r=>!r.replayed).length,1);assert.equal(await db.DentalSupportingTools.count(),1);assert.equal(await db.DentalSupportingToolsRevision.count(),1);
+  const first=concurrent[0].item,labId=first.lab_orders[0].id;
+  const noToolsYet=await service.read({...scope,version:0});assert.equal(noToolsYet.item.version,0);assert.equal(noToolsYet.item.lab_orders.length,0);assert.equal(noToolsYet.capabilities.logistics_edit,false);assert.equal(noToolsYet.historical,true);assert.equal(await db.DentalSupportingToolsRevision.count(),1);
+  const wrong={...create,command:{...create.command,order:{...create.command.order,title:'Different'}}};await assert.rejects(service.command({...scope,payload:wrong}),{code:'dental_tools_idempotency_conflict'});
+  const race=await Promise.allSettled(['A','B'].map(key=>service.command({...scope,payload:{expected_version:1,idempotency_key:'owned-message-'+key,command:{type:'message.add',text:key,context:{kind:'lab_order',id:labId}}}})));assert.equal(race.filter(r=>r.status==='fulfilled').length,1);assert.equal(race.find(r=>r.status==='rejected').reason.code,'dental_tools_version_conflict');
+  assert.equal((await service.read({...scope,version:1})).item.messages.length,0);
+  report.checks.push('Concurrent creation replay yields one store/revision; later competing writes one winner/CAS409; exact immutable old snapshot retained; conflicting key rejected.');
+  let version=2;
+  const command=async(type,extra={},actorId=7)=>{const result=await service.command({...scope,actorId,payload:{expected_version:version,idempotency_key:'request-'+type+'-'+version,command:{type,...extra}}});version=result.item.version;return result;};
+  await command('lab.request',{id:labId},8);const received=await command('lab.receive',{id:labId},8);assert.equal(received.item.lab_orders[0].status,'received');
+  await assert.rejects(command('lab.review',{id:labId,decision:'approved'},8),{code:'dental_tools_clinical_forbidden'});await command('lab.review',{id:labId,decision:'approved'});assert.equal((await service.getPlanToolState({planPublicId:plan.public_id,clinicId:72,patientId:11})).lab_orders[0].status,'approved');
+  assert.equal((await service.read({...scope,actorId:8})).capabilities.clinical_edit,false);
+  await assert.rejects(service.read({...scope,clinicId:73}),{code:'dental_tools_plan_not_found'});await assert.rejects(service.read({...scope,patientIdentifier:'other-patient'}),{code:'dental_tools_patient_scope'});await assert.rejects(service.read({...scope,actorId:9}),{code:'dental_tools_forbidden'});
+  const before=JSON.stringify((await service.read(scope)).item);
+  await assert.rejects(command('evidence.add',{evidence:{title:'Foreign act',kind:'physical',act_ids:['foreign-act']}}),{code:'dental_tools_relation_scope'});
+  assert.equal(JSON.stringify((await service.read(scope)).item),before);
+  forcedRevisionFailure=true;await assert.rejects(command('message.add',{text:'Must roll back',context:{kind:'plan'}}),/owned-revision-failure/);forcedRevisionFailure=false;assert.equal(JSON.stringify((await service.read(scope)).item),before);
+  report.checks.push('Assistant physical reception never means clinical approval; clinical review requires doctor. Foreign clinic/patient/actor/relation fail; journal failure rolls back whole state and version.');
+  const binary=Buffer.alloc(134);binary.writeUInt32LE(1,80);
+  const upload={expected_version:version,idempotency_key:'owned-stl-upload',filename:'test.stl',content_type:'model/stl',data_base64:binary.toString('base64'),evidence:{title:'Modelo STL ficticio',kind:'stl',act_ids:['act-1']}};
+  const uploaded=await service.upload({...scope,payload:upload});version=uploaded.item.version;const evidence=uploaded.item.evidences[0];assert.equal(evidence.kind,'stl');assert.equal((await db.ClinicalPrivateAsset.findOne()).metadata.dental_stl_validated,true);
+  await service.upload({...scope,payload:upload});assert.equal(uploads,1);assert.deepEqual((await service.asset({...scope,assetId:evidence.asset_id})).buffer,binary);
+  await assert.rejects(service.asset({...scope,assetId:'foreign-asset'}),{code:'dental_tools_asset_not_found'});
+  const retained=JSON.stringify((await db.DentalSupportingToolsRevision.findOne({where:{version_number:1}})).snapshot);await command('message.add',{text:'Modelo recibido',context:{kind:'evidence',id:evidence.id}});assert.equal(JSON.stringify((await db.DentalSupportingToolsRevision.findOne({where:{version_number:1}})).snapshot),retained);
+  const revision=await db.DentalSupportingToolsRevision.findOne();await assert.rejects(revision.update({snapshot:{forged:true}}),/immutable/);
+  const newPlan=await db.DentalPlan.create({public_id:'other-owned-plan',clinic_id:72,patient_id:11,status:'active',state:{acts:[],sessions:[],reservations:[]}});const otherScope={...scope,planId:newPlan.public_id};assert.equal((await service.read(otherScope)).item.version,0);await assert.rejects(service.asset({...otherScope,assetId:evidence.asset_id}),{code:'dental_tools_asset_not_found'});
+  await service.command({...otherScope,payload:{expected_version:0,idempotency_key:'owned-reuse-private-model',command:{type:'evidence.add',evidence:{title:'Mismo original reutilizado explícitamente',kind:'stl',asset_id:evidence.asset_id}}}});assert.deepEqual((await service.asset({...otherScope,assetId:evidence.asset_id})).buffer,binary);assert.equal(uploads,1);
+  await service.command({...otherScope,payload:{expected_version:1,idempotency_key:'owned-other-plan-lab',command:{type:'lab.create',order:{title:'Segundo pedido ficticio',laboratory:'Otro laboratorio'}}}});
+  const firstPage=await service.laboratory({...scope,limit:1,status:'all'});assert.equal(firstPage.items.length,1);assert.equal(firstPage.items[0].patient_name,'Paciente ficticio QA');assert(firstPage.next_cursor);const secondPage=await service.laboratory({...scope,limit:1,status:'all',cursor:firstPage.next_cursor});assert.equal(secondPage.items.length,1);assert.notEqual(firstPage.items[0].id,secondPage.items[0].id);assert.equal(secondPage.next_cursor,null);
+  await assert.rejects(service.laboratory({...scope,clinicId:73,limit:1,status:'all',cursor:firstPage.next_cursor}),{code:'dental_tools_cursor_invalid'});assert.equal((await service.laboratory({...scope,status:'pending'})).items.length,1);await assert.rejects(service.laboratory({...scope,actorId:9}),{code:'dental_tools_forbidden'});
+  assert.deepEqual((await db.DentalPlan.findByPk(plan.id)).state,plan.state);assert.equal(await db.CitaPaciente.count(),1);
+  await command('odontogram.save',{odontogram:{dentition:'permanent',pieces:[{numero:16,estado:'sano',superficies:[],tratamientos:[]}]}});
+  const logisticsRead=await service.read({...scope,actorId:10});assert.equal(logisticsRead.capabilities.clinical_view,false);assert.equal(logisticsRead.capabilities.logistics_edit,true);assert.equal(logisticsRead.item.odontogram,null);assert((await service.read(scope)).item.odontogram);
+  await command('message.add',{text:'Recepción logística sin privilegio clínico',context:{kind:'lab_order',id:labId}},10);assert((await service.read(scope)).item.odontogram);assert((await db.DentalSupportingToolsRevision.findOne({order:[['version_number','DESC']]})).snapshot.odontogram,'logistics response redaction never changes retained clinical snapshot');
+  await assert.rejects(command('lab.review',{id:labId,decision:'approved'},10),{code:'dental_tools_clinical_forbidden'});await assert.rejects(command('message.add',{text:'Clinical denied',context:{kind:'plan'}},10),{code:'dental_tools_clinical_forbidden'});
+  assert((await service.laboratory({...scope,actorId:10,status:'all'})).items.length>=1);
+  report.checks.push('Validated private STL upload replays without second store, scoped binary download exact; another plan cannot download unlinked asset. Immutable revisions and core plan/reservation state unchanged by tools.');
+  report.checks.push('Explicit same-patient/clinic asset reuse shares original bytes without another upload; laboratory inbox cursor returns distinct orders, wrong clinic cursor rejected and pending filters preserve approval semantics.');
+  report.checks.push('Appointments-manage-only auxiliary can track lab and post lab-context message without clinical.reports.manage; response hides odontogram/periodontal and general clinical thread. Cannot approve/edit clinical results; canonical snapshot remains complete.');
+  const fs=require('node:fs/promises'),path=require('node:path'),privateRoot=await fs.mkdtemp(path.join(report.root,'dental-private-'));
+  const envKeys=['CLINICAL_PRIVATE_STORAGE_ROOT','CLINICAL_PRIVATE_STORAGE_PROVIDER','CLINICAL_PRIVATE_STORAGE_BUCKET'],previousEnv=Object.fromEntries(envKeys.map(k=>[k,process.env[k]]));
+  process.env.CLINICAL_PRIVATE_STORAGE_ROOT=privateRoot;process.env.CLINICAL_PRIVATE_STORAGE_PROVIDER='local_private';process.env.CLINICAL_PRIVATE_STORAGE_BUCKET='owned-dental-qa';
+  try{
+    const storage=require('../../services/clinicalPrivateStorage.service');
+    const actual=require('../../services/dentalSupportingTools.service').createDentalSupportingToolsService({db,canAccess:async()=>true,resolveRole:async()=>'doctor'});
+    const third=await db.DentalPlan.create({public_id:'owned-storage-plan',clinic_id:72,patient_id:11,status:'active',state:{acts:[],sessions:[],reservations:[]}}),realScope={...scope,planId:third.public_id};
+    const stored=await actual.upload({...realScope,payload:{...upload,expected_version:0,idempotency_key:'actual-owned-storage-upload',evidence:{title:'STL privado real de prueba',kind:'stl'}}});
+    const source=await db.ClinicalPrivateAsset.findOne({where:{public_id:stored.item.evidences[0].asset_id}});assert.deepEqual((await actual.asset({...realScope,assetId:source.public_id})).buffer,binary);
+    const diskPath=storage.__testing.objectPathForKey(source.object_key);assert.equal((await fs.stat(diskPath)).mode&0o777,0o600);
+    await storage.discardUncommittedClinicalObject(source);assert.deepEqual(await fs.readFile(diskPath),binary,'retained committed asset never removed by rollback cleanup');
+    const assetCount=await db.ClinicalPrivateAsset.count();const files=async dir=>{const out=[];for(const entry of await fs.readdir(dir,{withFileTypes:true})){const file=path.join(dir,entry.name);if(entry.isDirectory())out.push(...await files(file));else out.push(file);}return out.sort();};const beforeFiles=await files(privateRoot);
+    forcedRevisionFailure=true;await assert.rejects(actual.upload({...realScope,payload:{...upload,expected_version:1,idempotency_key:'actual-owned-rollback-upload',evidence:{title:'Rollback ficticio',kind:'stl'}}}),/owned-revision-failure/);forcedRevisionFailure=false;
+    assert.equal(await db.ClinicalPrivateAsset.count(),assetCount);assert.deepEqual(await files(privateRoot),beforeFiles);assert.equal((await actual.read(realScope)).item.version,1);
+    report.checks.push('Actual shared private storage writes 0600 and reads exact STL bytes; retained committed object survives cleanup. Forced revision rollback removes both new asset row and its uncommitted file, preserving tools version.');
+    const png=await require('sharp')({create:{width:32,height:24,channels:3,background:'#ddd'}}).png().toBuffer();
+    const image=await actual.upload({...realScope,payload:{...upload,expected_version:1,idempotency_key:'actual-owned-png-upload',filename:'test.png',content_type:'image/png',data_base64:png.toString('base64'),evidence:{title:'Fotografía ficticia',kind:'photo'}}});
+    const imageEvidence=image.item.evidences.find(e=>e.kind==='photo');assert.equal((await actual.preview({...realScope,assetId:imageEvidence.asset_id})).pageCount,1);
+    const bodies=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>','<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> /Contents 4 0 R >>','<< /Length 0 >>\nstream\n\nendstream'];let pdf='%PDF-1.4\n',offsets=[0];for(let i=0;i<bodies.length;i++){offsets.push(Buffer.byteLength(pdf));pdf+=`${i+1} 0 obj\n${bodies[i]}\nendobj\n`;}const xref=Buffer.byteLength(pdf);pdf+='xref\n0 5\n0000000000 65535 f \n'+offsets.slice(1).map(offset=>String(offset).padStart(10,'0')+' 00000 n \n').join('')+`trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    const document=await actual.upload({...realScope,payload:{...upload,expected_version:2,idempotency_key:'actual-owned-pdf-upload',filename:'test.pdf',content_type:'application/pdf',data_base64:Buffer.from(pdf).toString('base64'),evidence:{title:'Prueba PDF ficticia',kind:'pdf'}}});const pdfEvidence=document.item.evidences.find(e=>e.kind==='pdf'),preview=await actual.preview({...realScope,assetId:pdfEvidence.asset_id});assert.equal(preview.pageCount,1);assert.equal(preview.contentType,'image/png');assert.deepEqual(preview.buffer.subarray(0,8),Buffer.from([137,80,78,71,13,10,26,10]));
+    await assert.rejects(actual.upload({...realScope,payload:{...upload,expected_version:3,idempotency_key:'actual-owned-broken-png',filename:'bad.png',content_type:'image/png',data_base64:Buffer.from([137,80,78,71,13,10,26,10]).toString('base64'),evidence:{title:'Invalid fixture',kind:'photo'}}}),{code:'dental_tools_image_invalid'});
+    assert.equal((await actual.read(realScope)).item.version,3);report.checks.push('Real PNG/PDF uploads validate with sharp/pdfinfo; authorized page previews render PNG through existing helper. Truncated image rejected before storage without new tools version.');
+  }finally{for(const key of envKeys){if(previousEnv[key]===undefined)delete process.env[key];else process.env[key]=previousEnv[key];}await fs.rm(privateRoot,{recursive:true,force:true});}
+}).catch(error=>{console.error(error);process.exitCode=1;});

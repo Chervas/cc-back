@@ -100,6 +100,10 @@ async function assessAppointmentClinicalConsent({ db, appointment, transaction, 
     treatmentIds = context.treatment_ids;
     if (!Array.isArray(treatmentIds) || !treatmentIds.length) throw consentError('appointment_consent_configuration_required', 'Falta la composición comprada del programa.');
   }
+  if(object(cita.import_metadata).dental_plan){
+    const dental=await require('../lib/dental-appointment-context').dentalAppointmentContext(db,cita,transaction);
+    treatmentIds=dental.treatment_ids;
+  }
   if (!Array.isArray(treatmentIds) || treatmentIds.length > 250 || treatmentIds.some(id => !positive(id))) throw consentError('appointment_consent_configuration_required', 'Revisa los tratamientos de la cita.');
   treatmentIds = [...new Set(treatmentIds.map(Number))];
   if (!treatmentIds.length) return { allowed: true, blocking_count: 0, required_clinical_count: 0 };

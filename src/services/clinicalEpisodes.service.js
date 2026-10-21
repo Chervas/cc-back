@@ -281,13 +281,17 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     return { item: (await hydrate([row], transaction))[0], replayed: false };
   }
 
+  async function saveInTransaction({id,clinicId,actorId,payload,mode='save',transaction}){
+    if(!transaction)throw Error('clinical_episode_transaction_required');
+    const current=await scopedRow(id,clinicId,transaction);
+    await patientInClinic(String(current.patient_id),Number(current.clinic_id),transaction,true);
+    return updateRow({row:await scopedRow(id,clinicId,transaction,true),actorId,payload,mode,transaction});
+  }
   async function save({ id, clinicId, actorId, payload, mode = 'save' }) {
     if (!['save', 'finalize', 'reopen'].includes(mode)) throw C.error(400, 'clinical_episode_invalid_action', 'La acción no es válida.');
     C.integer(actorId, 'actor_id'); requireExpectedVersion(payload);
     return db.sequelize.transaction(async transaction => {
-      const current = await scopedRow(id, clinicId, transaction);
-      await patientInClinic(String(current.patient_id), Number(current.clinic_id), transaction, true);
-      return updateRow({ row: await scopedRow(id, clinicId, transaction, true), actorId, payload, mode, transaction });
+      return saveInTransaction({id,clinicId,actorId,payload,mode,transaction});
     });
   }
 
@@ -351,7 +355,7 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     const rows = await Report.findAll({ where: { clinic_id: Number(clinicId), patient_id: patient.id_paciente }, order: [['updated_at', 'DESC'], ['id', 'DESC']] });
     return hydrate(rows);
   }
-  return { get, getForAppointment, list, create, save, revisions, getLegacy, saveLegacy, listLegacy };
+  return { get, getForAppointment, list, create, save, saveInTransaction, revisions, getLegacy, saveLegacy, listLegacy };
 }
 
 const lazy = () => createClinicalEpisodeService({ db: require('../../models') });

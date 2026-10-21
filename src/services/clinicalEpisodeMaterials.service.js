@@ -13,8 +13,18 @@ function createMaterialValidator({ db, canAccess }) {
     if (!Array.isArray(refs) || refs.length > 100) fail('clinical_materials_invalid', 'La selección de materiales no es válida.');
     const result = [], seen = new Set();
     for (const ref of refs) {
-      if (!ref || !['attachment', 'drawing'].includes(ref.kind) || typeof ref.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(ref.id)) fail('clinical_material_invalid', 'Uno de los materiales no es válido.');
-      if (ref.kind === 'attachment') {
+      if (!ref || !['attachment', 'drawing','dental_execution'].includes(ref.kind) || typeof ref.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(ref.id)) fail('clinical_material_invalid', 'Uno de los materiales no es válido.');
+      if(ref.kind==='dental_execution'){
+        if(!positive(ref.version))fail('clinical_material_version_invalid','Selecciona una versión exacta del trabajo dental.');
+        if(!await canAccess({actorId,clinicId,featureKey:'clinical.reports.view'})||!await canAccess({actorId,clinicId,featureKey:'patients.sensitive.view'}))fail('clinical_material_forbidden','No tienes permiso para consultar este trabajo.',403);
+        const plan=await db.DentalPlan.findOne({where:{public_id:ref.id,patient_id:patientId,clinic_id:clinicId},transaction});
+        const revision=plan&&await db.DentalPlanRevision.findOne({where:{plan_id:plan.id,version_number:ref.version,command:'execution'},transaction});
+        const execution=revision?.snapshot?.execution?.filter(e=>e.plan_version===ref.version);
+        if(!revision||!execution?.length)fail('clinical_material_not_found','La versión del trabajo dental no está disponible.',404);
+        const key='dental_execution:'+plan.public_id+':'+ref.version;if(seen.has(key))continue;seen.add(key);
+        result.push({kind:'dental_execution',id:plan.public_id,version:ref.version,title:revision.snapshot.title||'Trabajo dental',sha256:revision.sha256,
+          execution:{episode_id:execution[0].episode_id,appointment_id:execution[0].appointment_id,session_id:execution[0].session_id,tools_version:Number(execution[0].tools_version||0)}});
+      }else if (ref.kind === 'attachment') {
         const asset = await db.ClinicalPrivateAsset.findOne({ where: {
           public_id: ref.id, patient_id: patientId, clinic_id: clinicId, scope_type: 'clinic', status: 'active',
         }, transaction });

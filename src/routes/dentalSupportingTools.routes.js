@@ -1,0 +1,11 @@
+'use strict';
+const router=require('express').Router(),controller=require('../controllers/dentalSupportingTools.controller');
+router.use(require('./auth.middleware'));
+router.get('/laboratory/orders',controller.laboratory);
+router.get('/:planId/tools',controller.read);
+router.post('/:planId/tools/commands',controller.command);
+router.post('/:planId/tools/uploads',controller.upload);
+router.get('/:planId/tools/revisions',controller.revisions);
+router.get('/:planId/tools/assets/:assetId',controller.asset);
+router.get('/:planId/tools/assets/:assetId/preview',controller.preview);
+module.exports=router;

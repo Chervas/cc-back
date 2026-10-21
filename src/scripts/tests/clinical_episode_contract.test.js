@@ -44,7 +44,8 @@ test('clinical metadata and links are explicit and bounded without silent coerci
   for (const value of [true, null, [], {}, '12x', '0', 0, -1, 1.2]) assert.throws(() => C.integer(value), { code: 'clinical_episode_invalid_identifier' });
   assert.throws(() => C.appointmentIds([1, 1]), { code: 'clinical_episode_duplicate_appointment' });
   assert.throws(() => C.normalizePatch({ occurred_at: '2026-10-20' }), { code: 'clinical_episode_invalid_date' });
-  assert.throws(() => C.normalizePatch({ template_key: 'dental' }), { code: 'clinical_episode_invalid_template' });
+  assert.equal(C.normalizePatch({ template_key: 'dental' }).template_key, 'dental');
+  assert.throws(() => C.normalizePatch({ template_key: 'unknown-area' }), { code: 'clinical_episode_invalid_template' });
   assert.throws(() => C.normalizePatch({ summary: 'x'.repeat(20001) }), { code: 'clinical_episode_invalid_text' });
 });
 

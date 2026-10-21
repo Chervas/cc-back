@@ -312,6 +312,8 @@ app.use('/api', templatesRoutes);
 console.log('Rutas /api/templates y /api/message-log configuradas');
 app.use('/api/citas', citasRoutes);
 app.use('/api/clinical-episodes', require('./routes/clinicalEpisodes.routes'));
+app.use('/api/dental-plans',require('./routes/dentalPlans.routes'));
+app.use('/api/dental-plans',require('./routes/dentalSupportingTools.routes'));
 app.use('/api/clinical-episode-templates', require('./routes/clinicalEpisodeTemplates.routes'));
 app.use('/api/clinical-template-catalog', require('./routes/clinicalTemplateCatalog.routes'));
 app.use('/api/patient-follow-ups', patientFollowUpsRoutes);

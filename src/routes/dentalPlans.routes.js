@@ -1,0 +1,11 @@
+'use strict';
+const router=require('express').Router(),controller=require('../controllers/dentalPlans.controller');
+router.use(require('./auth.middleware'));
+router.get('/:id',controller.get);
+router.patch('/:id',controller.command);
+router.post('/:id/commands',controller.command);
+router.post('/:id/availability',controller.availability);
+router.post('/:id/book',controller.book);
+router.post('/:id/execution',controller.execution);
+router.get('/:id/revisions',controller.revisions);
+module.exports=router;

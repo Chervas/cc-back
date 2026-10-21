@@ -11,6 +11,7 @@ async function hasAppointmentClinicalHistory(db, appointmentId, transaction) {
   if (db.ClinicalEpisodeAppointment && await db.ClinicalEpisodeAppointment.findOne({
     ...query, attributes: ['appointment_id'],
   })) return true;
+  if(db.DentalPlan&&await db.DentalPlan.findOne({attributes:['id'],transaction,where:where(fn('JSON_CONTAINS',col('state'),JSON.stringify({reservations:[{appointment_id:Number(appointmentId)}]})),1)}))return true;
   // Unlinking a reservation does not erase its historical membership. Match
   // numeric JSON references exactly, including the original single-cita shape.
   if (db.AppointmentClinicalReportRevision && await db.AppointmentClinicalReportRevision.findOne({

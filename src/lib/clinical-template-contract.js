@@ -2,9 +2,9 @@
 const C = require('./clinical-episode-contract');
 const F = require('./clinical-form-contract');
 const { FORM_PRESET_KEYS, formPreset } = require('./clinical-form-presets');
-const AREAS = ['general', 'estetica', 'capilar', 'nutricion'];
+const AREAS = ['general', 'estetica', 'capilar', 'nutricion', 'dental'];
 const LABELS = { reason: 'Motivo de consulta', summary: 'Resumen de la consulta', findings: 'Hallazgos y valoración', interventions: 'Actuación', outcome: 'Evolución', plan: 'Plan y seguimiento', next_steps: 'Próximos pasos', private_notes: 'Notas privadas' };
-const AREA_LABELS = { general: 'General', estetica: 'Estética', capilar: 'Capilar', nutricion: 'Nutrición' };
+const AREA_LABELS = { general: 'General', estetica: 'Estética', capilar: 'Capilar', nutricion: 'Nutrición', dental: 'Dental' };
 function definition(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw C.error(400, 'clinical_template_invalid', 'Revisa la plantilla.');
   const title = C.text(payload.title, 'title', 160), description = C.text(payload.description || null, 'description', 1000);
