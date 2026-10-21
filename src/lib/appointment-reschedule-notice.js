@@ -6,10 +6,10 @@ const instant = value => {
   const raw = typeof value === 'string' && /^\d{4}-\d\d-\d\d \d/.test(value) ? value.replace(' ', 'T') + 'Z' : value;
   return new Date(raw);
 };
-const notice = name => /^(clinicaclick_confirmacion_datos_cita_|clinicaclick_cita_reprogramada_peticion_paciente|clinicaclick_recordatorio_(dia_antes|mismo_dia))/.test(name || '')
+const notice = name => /^(clinicaclick_confirmacion_datos_cita_|clinicaclick_cita_reprogramada_peticion_paciente|clinicaclick_recordatorio_(dia_antes|mismo_dia)|clinicaclick_citas_programa_reservadas(?:_v\d+)?$)/.test(name || '')
   && !/_sin_respuesta(?:_|$)/.test(name);
 
-function assessment({ previous, values, actorId, messages, clinic, now = new Date(), decision }) {
+function assessment({ previous, values, actorId, messages, clinic, now = new Date(), decision, operationContext }) {
   if (!previous?.id_cita || !previous.paciente_id || sameAppointmentTime(previous, values)
     || values.reschedule_reason === 'administrative_error') return null;
   const zone = resolveClinicTimezone(clinic), day = formatDateLocal(now, zone);
@@ -21,6 +21,7 @@ function assessment({ previous, values, actorId, messages, clinic, now = new Dat
     appointment: Number(previous.id_cita), patient: Number(previous.paciente_id), clinic: Number(previous.clinica_id),
     previous: [instant(previous.inicio).toISOString(), instant(previous.fin).toISOString()],
     target: [start, end], day, notices: notices.map(message => [Number(message.id), instant(message.sent_at).toISOString()]).sort((a,b) => a[0]-b[0]),
+    ...(operationContext ? { operation: operationContext } : {}),
   })).digest('hex');
   const latest = [...notices].sort((a,b) => instant(b.sent_at) - instant(a.sent_at))[0];
   if (!decision || decision.acknowledgement !== acknowledgement || typeof decision.send !== 'boolean') {
@@ -35,7 +36,7 @@ function assessment({ previous, values, actorId, messages, clinic, now = new Dat
     start_at: start, end_at: end, acknowledgement, previous_message_ids: notices.map(message => Number(message.id)) };
 }
 
-async function checkRescheduleNotice({ db, previous, values, clinic, actorId, decision, transaction, now = new Date() }) {
+async function checkRescheduleNotice({ db, previous, values, clinic, actorId, decision, transaction, now = new Date(), operationContext }) {
   if (!previous?.id_cita || !previous.paciente_id || sameAppointmentTime(previous, values)
     || values.reschedule_reason === 'administrative_error') return null;
   const [messages] = await db.sequelize.query(`SELECT m.id, COALESCE(m.sent_at,m.createdAt) AS sent_at,
@@ -51,7 +52,7 @@ async function checkRescheduleNotice({ db, previous, values, clinic, actorId, de
       AND COALESCE(m.sent_at,m.createdAt)>=:since
     ORDER BY m.id DESC LIMIT 100`, { replacements: { clinic: Number(previous.clinica_id), patient: Number(previous.paciente_id),
       since: new Date(now.getTime() - 48 * 3600000) }, transaction });
-  return assessment({ previous, values, actorId, messages, clinic, now, decision });
+  return assessment({ previous, values, actorId, messages, clinic, now, decision, operationContext });
 }
 
 function suppressRescheduleNotice(appointment) {

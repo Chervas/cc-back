@@ -1665,6 +1665,12 @@ function isTriggerSelectionPendingConfig(config) {
 }
 
 function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) {
+  const program = require('../lib/patient-program-appointment-flow');
+  if (nodes?.some(node => node.type === require('../lib/patient-program-booking-confirmation').ACTION)
+    && program.EVENTS.includes(triggerType)) {
+    try { return { ok: true, trigger_config: program.triggerConfig({ triggerType, entryNodeId, nodes }) }; }
+    catch { return { ok: false, error: 'program_details_native_graph_changed', message: 'Revisa la composición de programa y su configuración antes de guardar.' }; }
+  }
   const normalizedTriggerType = cleanString(triggerType);
   const triggerNode = resolveTriggerNode({ entryNodeId, nodes });
   const rawConfig = isObject(triggerNode?.config) ? triggerNode.config : {};
@@ -2105,6 +2111,13 @@ async function findMessageReceivedTriggerConflict(row, triggerConfig) {
 
 function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerConfig }) {
   if (!Array.isArray(nodes)) return [];
+  if (triggerConfig?.program_booking_v1) {
+    const derived = require('../lib/patient-program-appointment-flow').triggerConfig({ triggerType, entryNodeId, nodes });
+    if (require('../lib/patient-program-booking-confirmation').hash(derived) !== require('../lib/patient-program-booking-confirmation').hash(triggerConfig)) {
+      throw Object.assign(Error('program_details_native_graph_changed'), { code: 'program_details_native_graph_changed', statusCode: 409 });
+    }
+    return structuredClone(nodes);
+  }
   const normalizedTriggerType = cleanString(triggerType);
   const triggerNode = resolveTriggerNode({ entryNodeId, nodes });
   const preservePendingSelection = isTriggerSelectionPendingConfig(triggerNode?.config);
@@ -2396,6 +2409,18 @@ function normalizeWaitResponseListeners(nodes) {
 }
 
 function normalizeNodesInput(nodes) {
+  const root = Array.isArray(nodes) && nodes.find(node => node.config?.program_booking_v1);
+  if (root && require('../lib/patient-program-appointment-flow').branchValid({ nodes, entry_node_id: root.id })) {
+    const normalIds = new Set(root.config.program_booking_v1.normal_ids);
+    const additions = normalizeBaseNodesInput(nodes.filter(node => !normalIds.has(node.id)));
+    // Do not normalize a copied ordinary graph (especially its proven AI
+    // config) just because a separate program branch is being prepared.
+    return nodes.map(node => normalIds.has(node.id) ? structuredClone(node) : additions.find(value => value.id === node.id));
+  }
+  return normalizeBaseNodesInput(nodes);
+}
+
+function normalizeBaseNodesInput(nodes) {
   if (!Array.isArray(nodes)) return [];
   const normalizedNodes = nodes
     .map((rawNode, index) => {
@@ -3227,7 +3252,7 @@ function validateFlowGraph({ entry_node_id, nodes }) {
   }
   const programDetails = require('../lib/patient-program-booking-confirmation');
   if (Array.isArray(nodes) && nodes.some(node => node?.type === `trigger/${programDetails.REQUEST}` || node?.type === programDetails.ACTION)
-    && !programDetails.graphValid(nodes)) {
+    && !programDetails.graphValid(nodes) && !require('../lib/patient-program-appointment-flow').branchValid({ entry_node_id, nodes })) {
     errors.push(buildValidationError('program_details_graph_invalid', 'El resumen de programa sólo admite nodos reutilizables de su dominio; no acciones de asistencia, publicidad ni consentimientos.'));
   }
 
@@ -3388,7 +3413,7 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
       `El nodo ${nodeId} sólo registra resultados de una solicitud de verificación de móvil vigente.`));
   }
   if (nodeType === 'action/resolve_program_appointment_details'
-    && (!Array.from(nodeMap.values()).some(n => n.type === 'trigger/patient.program_appointments_booked')
+    && (!Array.from(nodeMap.values()).some(n => ['trigger/patient.program_appointments_booked', 'trigger/appointment_created', 'trigger/appointment_rescheduled'].includes(n.type))
       || !['confirmed', 'review_required'].includes(config.result)
       || (config.result === 'confirmed' ? !!config.reason : !['patient_requested_changes', 'response_unclear', 'no_response', 'delivery_failed'].includes(config.reason)))) {
     errors.push(buildValidationError('program_details_result_invalid', `El nodo ${nodeId} sólo registra datos del resumen de programa vigente.`));
@@ -4224,7 +4249,12 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
   if (nodeType === 'delay/wait_response') {
     const timeoutDuration = Number(config.timeout_duration);
     const mobileTimeout = config.timeout_duration === '{{trigger.data.response_timeout_minutes}}'
-      && Array.from(nodeMap.values()).some(n => ['trigger/patient.mobile_verification_requested', 'trigger/patient.program_appointments_booked'].includes(n.type));
+      && (Array.from(nodeMap.values()).some(n => ['trigger/patient.mobile_verification_requested', 'trigger/patient.program_appointments_booked'].includes(n.type))
+        || (() => {
+          const nodes = Array.from(nodeMap.values()), root = nodes.find(n => n.config?.program_booking_v1);
+          return root && !root.config.program_booking_v1.normal_ids?.includes(nodeId)
+            && require('../lib/patient-program-appointment-flow').branchValid({ nodes, entry_node_id: root.id });
+        })());
     const timeoutUnit = cleanString(config.timeout_unit);
     const listensTo = cleanString(config.listens_to_node_id);
     const listenedNode = listensTo ? nodeMap.get(listensTo) : null;
@@ -5057,6 +5087,24 @@ async function loadWhatsappTemplateLookup(nodes) {
 }
 
 async function validateNodeConfigs(nodes) {
+  const root = Array.isArray(nodes) && nodes.find(node => node.config?.program_booking_v1);
+  const program = require('../lib/patient-program-appointment-flow');
+  if (root && program.branchValid({ nodes, entry_node_id: root.id })) {
+    const source = await AutomationFlowTemplateV2.findByPk(root.config.program_booking_v1.source_id);
+    const normal = program.normalProjection({ nodes, entry_node_id: root.id,
+      trigger_type: root.type.slice('trigger/'.length), trigger_config: program.triggerConfig({ triggerType: root.type.slice('trigger/'.length), entryNodeId: root.id, nodes }) });
+    const project = row => ({ nodes: row.nodes, entry_node_id: row.entry_node_id, trigger_type: row.trigger_type, trigger_config: row.trigger_config || {} });
+    if (!source?.published_at || require('../lib/patient-program-booking-confirmation').hash(normal)
+      !== require('../lib/patient-program-booking-confirmation').hash(project(source))) {
+      return { ok: false, errors: [buildValidationError('program_details_native_source_changed', 'La fuente publicada del flujo ha cambiado; revisa el borrador de programa.')] };
+    }
+    return require('../lib/appointment-single-notice-publication').validatePreservedNodeConfigs(source.toJSON ? source.toJSON() : source,
+      nodes, validateBaseNodeConfigs, () => ({ body: { nodes } }));
+  }
+  return validateBaseNodeConfigs(nodes);
+}
+
+async function validateBaseNodeConfigs(nodes) {
   const safeNodes = Array.isArray(nodes) ? nodes : [];
   const nodeMap = new Map(
     safeNodes

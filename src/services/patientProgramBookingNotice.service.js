@@ -5,16 +5,20 @@
 // applies one atomic, audited details-only mutation to the frozen batch.
 const { randomBytes } = require('node:crypto');
 const C = require('../lib/patient-program-booking-confirmation');
+const A = require('../lib/patient-program-appointment-flow');
 function createRuntime(deps) {
   const { db } = deps, { Op } = db.Sequelize;
   const now = () => new Date(deps.now ? deps.now() : Date.now());
-  const enabled = () => deps.enabled ? deps.enabled() === true : process.env.PATIENT_PROGRAM_BOOKING_NOTICE_ENABLED === 'true';
+  const enabled = () => deps.enabled ? deps.enabled() === true : process.env.PATIENT_PROGRAM_APPOINTMENT_AUTOMATION_ENABLED === 'true';
+  const native = deps.nativeOnly === true;
+  const isRequest = request => native ? A.EVENTS.includes(request?.event_type) && request?.metadata?.native_protocol === A.PROTOCOL
+    : request?.event_type === C.REQUEST;
   const key = request => `program-booking-notice:${request.clinic_id}:${request.id}`;
   const messageKey = request => `${key(request)}:outbound`;
   const eventWhere = (field, value) => db.Sequelize.where(db.Sequelize.literal(`JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.${field}'))`), String(value));
-  const requestForVoucher = (voucherId, transaction, scope = {}) => db.PatientOperationalEvent.findOne({ where: { event_type: C.REQUEST,
+  const requestForVoucher = (voucherId, transaction, scope = {}) => db.PatientOperationalEvent.findOne({ where: { event_type: native ? { [Op.in]: A.EVENTS } : C.REQUEST,
     ...(scope.clinicId ? { clinic_id: scope.clinicId } : {}), ...(scope.patientId ? { patient_id: scope.patientId } : {}),
-    [Op.and]: eventWhere('notice.voucher_id', voucherId) }, order: [['id', 'DESC']], transaction,
+    [Op.and]: [eventWhere('notice.voucher_id', voucherId), ...(native ? [eventWhere('native_protocol', A.PROTOCOL)] : [])] }, order: [['id', 'DESC']], transaction,
   ...(scope.lock && transaction ? { lock: transaction.LOCK.SHARE } : {}) });
   const resultFor = (request, transaction) => db.PatientOperationalEvent.findOne({ where: { event_type: C.TRANSITION,
     patient_id: request.patient_id, clinic_id: request.clinic_id, [Op.and]: eventWhere('request_event_id', request.id) },
@@ -53,6 +57,7 @@ function createRuntime(deps) {
     // A closed deployment must remain schema-independent and cannot create
     // work that a later activation could replay. No event/outbox reads either.
     if (!enabled()) return { status: 'not_available', reason: 'runtime_disabled', sent: false };
+    if (native) return recordNativeReceipt({ receipt, voucher, snapshot, clinic, actorId, transaction });
     if (!transaction || !C.id(actorId) || !C.id(receipt?.id)) C.fail('program_details_transactional_receipt_required');
     const previous = await requestForVoucher(voucher.id, transaction, { clinicId: voucher.clinic_id, patientId: voucher.patient_id });
     if (Number(previous?.metadata?.notice?.receipt_id) === Number(receipt.id)) return C.publicState(previous);
@@ -98,17 +103,59 @@ function createRuntime(deps) {
       origin: 'patient_program_booking_notice', dedupeScope: key(request), requestedBy: actorId, requestedByRole: 'system' }, { transaction });
     return C.publicState(request);
   }
+  async function recordNativeReceipt({ receipt, voucher, snapshot, clinic, actorId, transaction }) {
+    if (!transaction || !C.id(actorId) || !C.id(receipt?.id)) C.fail('program_details_transactional_receipt_required');
+    const op = A.operation(receipt);
+    if (op.unchanged) return { status: 'not_requested', reason: 'appointment_time_unchanged', sent: false };
+    if (op.reason === 'administrative_error' || op.declined) return { status: 'not_requested', reason: op.declined ? 'notice_declined_by_operator' : 'administrative_error', sent: false };
+    const previous = await requestForVoucher(voucher.id, transaction, { clinicId: voucher.clinic_id, patientId: voucher.patient_id });
+    if (Number(previous?.metadata?.notice?.receipt_id) === Number(receipt.id)) return C.publicState(previous);
+    const membership = await members(voucher, transaction), owner = membership.appointments.find(row => Number(row.id_cita) === op.ownerId);
+    if (!owner || !deps.resolveAppointmentTemplate) C.fail('program_details_native_owner_missing');
+    const template = await deps.resolveAppointmentTemplate(owner, op.event);
+    const occurred = now();
+    // Never select another active family to bypass this family's manual stop,
+    // binding, unreviewed composition or first-activation cutoff.
+    if (!template?.is_active || !template.published_at || Number(template.clinic_id) !== Number(voucher.clinic_id)
+      || !A.configured(template, occurred)) return { status: 'not_available', reason: 'program_automation_unconfigured_or_inactive', sent: false };
+    const patient = await db.Paciente.findByPk(voucher.patient_id, { transaction });
+    const notice = C.projection({ receipt, voucher, snapshot, clinic, ...membership, actorId, occurredAt: occurred,
+      timeZone: require('../lib/availability-calendar').resolveClinicTimezone(clinic), communicationLanguage: patient?.idioma_preferido || 'es', native: true });
+    const timeout = A.timeout(template, { startAt: owner.inicio, now: occurred, timeZone: notice.time_zone, reason: op.reason });
+    const recipient = C.phone(patient?.telefono_movil);
+    let blocked = notice.representation_error || (!recipient ? 'recipient_missing' : notice.overdue_count ? 'past_reservations_require_review'
+      : notice.membership.some(row => !row.native_program_booking) ? 'non_native_reservations_require_review' : null);
+    if (!blocked) {
+      try { if (!await deps.deliveryReady(voucher.clinic_id, template, transaction, notice.language)) blocked = 'sender_utility_unavailable'; }
+      catch { blocked = 'sender_utility_unavailable'; }
+    }
+    const request = await db.PatientOperationalEvent.create({ patient_id: voucher.patient_id, clinic_id: voucher.clinic_id,
+      actor_user_id: actorId, event_type: op.event, source: 'program_booking', channel: 'internal', occurred_at: occurred,
+      metadata: { schema_version: C.SCHEMA, native_protocol: A.PROTOCOL, owner_appointment_id: op.ownerId, reschedule_reason: op.reason,
+        notice, phone: recipient, reply_token: randomBytes(18).toString('hex'), delivery_enabled: !blocked, review_only: !!blocked,
+        delivery_disabled_reason: blocked, template_version_id: Number(template.id), response_timeout_minutes: timeout,
+        graph_sha256: C.hash({ nodes: template.nodes, trigger_config: template.trigger_config, entry_node_id: template.entry_node_id }),
+        supersedes_event_id: previous?.id ? Number(previous.id) : null } }, { transaction });
+    // Keep the existing transactional outbox. Execution creation happens after
+    // commit, retaining family -> execution -> clinical lock order; no second
+    // sender and no family/voucher lock inversion inside a booking transaction.
+    await deps.enqueueJob({ type: 'patient_program_booking_notice_dispatch',
+      payload: { request_event_id: Number(request.id), clinic_id: Number(voucher.clinic_id) }, priority: 'high', status: 'pending',
+      origin: 'appointment_automation_v2', dedupeScope: key(request), requestedBy: actorId, requestedByRole: 'system' }, { transaction });
+    return C.publicState(request);
+  }
   async function fromExecution(execution, transaction) {
-    if (!C.isFlow(execution) || execution.trigger_entity_type !== 'patient_operational_event') C.fail('program_details_execution_scope');
-    const request = await db.PatientOperationalEvent.findByPk(C.id(execution.trigger_entity_id), { transaction });
-    if (!request || request.event_type !== C.REQUEST || Number(request.clinic_id) !== Number(execution.clinic_id)
+    if (!C.isFlow(execution) || (native ? !A.nativeFlow(execution) : execution.trigger_entity_type !== 'patient_operational_event')) C.fail('program_details_execution_scope');
+    const request = await db.PatientOperationalEvent.findByPk(C.id(native ? execution.context?.program_confirmation?.request_event_id : execution.trigger_entity_id), { transaction });
+    if (!request || !isRequest(request) || Number(request.clinic_id) !== Number(execution.clinic_id)
+      || native && (execution.trigger_type !== request.event_type || Number(execution.trigger_entity_id) !== Number(request.metadata?.owner_appointment_id))
       || request.metadata?.schema_version !== C.SCHEMA || Number(request.metadata.template_version_id) !== Number(execution.template_version_id)
       || Number(execution.context?.trigger?.data?.request_event_id) !== Number(request.id)) C.fail('program_details_execution_scope');
     return request;
   }
   async function current(request, transaction, lock = false) {
     const m = request.metadata || {}, n = m.notice;
-    if (request.event_type !== C.REQUEST || m.schema_version !== C.SCHEMA || !n || n.schema_version !== C.SCHEMA) return null;
+    if (!isRequest(request) || m.schema_version !== C.SCHEMA || !n || n.schema_version !== C.SCHEMA) return null;
     const voucher = await db.PatientVoucher.findOne({ where: { id: n.voucher_id, clinic_id: request.clinic_id,
       patient_id: request.patient_id, source_system: 'treatment_program', status: 'active' }, transaction,
     ...(lock ? { lock: transaction.LOCK.UPDATE } : {}) });
@@ -131,16 +178,24 @@ function createRuntime(deps) {
     if (!receipt || Number(receipt.voucher_id) !== Number(voucher.id) || Number(latestReceipt?.id) !== Number(receipt.id)) return null;
     let actual;
     try { actual = C.projection({ receipt, voucher, snapshot, clinic, ...membership, actorId: request.actor_user_id,
-      occurredAt: n.occurred_at, timeZone: require('../lib/availability-calendar').resolveClinicTimezone(clinic), communicationLanguage: n.language }); }
+      occurredAt: n.occurred_at, timeZone: require('../lib/availability-calendar').resolveClinicTimezone(clinic), communicationLanguage: n.language, native }); }
     catch { return null; }
-    if (C.hash(actual) !== C.hash(n) || n.membership.some(row => !row.native_program_booking)
-      || n.overdue_count || n.appointments.some(row => C.time(row.start_at) <= +now())) return null;
+    if (C.hash(actual) !== C.hash(n) || (!m.review_only && (n.membership.some(row => !row.native_program_booking)
+      || n.overdue_count)) || n.appointments.some(row => C.time(row.start_at) <= +now())) return null;
     const template = await db.AutomationFlowTemplateV2.findByPk(m.template_version_id, { transaction });
-    if (!enabled() || !m.delivery_enabled || !template?.is_active || template.is_system || !template.published_at
-      || Number(template.clinic_id) !== Number(request.clinic_id) || template.trigger_type !== C.REQUEST
-      || !C.configValid(template.trigger_config) || !C.graphValid(template.nodes)
-      || C.time(request.occurred_at) < C.time(template.trigger_config.enabled_after)
+    if (!enabled() || (!m.delivery_enabled && !(native && m.review_only)) || !template?.is_active || template.is_system || !template.published_at
+      || Number(template.clinic_id) !== Number(request.clinic_id)
+      || (native ? template.trigger_type !== request.event_type || !A.configured(template, request.occurred_at)
+        : template.trigger_type !== C.REQUEST || !C.configValid(template.trigger_config) || !C.graphValid(template.nodes)
+          || C.time(request.occurred_at) < C.time(template.trigger_config.enabled_after))
       || C.hash({ nodes: template.nodes, trigger_config: template.trigger_config, entry_node_id: template.entry_node_id }) !== m.graph_sha256) return null;
+    if (native) {
+      const owner = membership.appointments.find(row => Number(row.id_cita) === Number(m.owner_appointment_id));
+      const selected = owner && await deps.resolveAppointmentTemplate(owner, request.event_type);
+      if (!selected || Number(selected.id) !== Number(template.id)) return null;
+      if (membership.appointments.some(row => require('../lib/appointment-reschedule-notice').suppressRescheduleNotice(row)
+        || row.reschedule_reason === 'administrative_error' && C.time(row.updated_at || row.updatedAt) > C.time(request.occurred_at))) return null;
+    }
     return { voucher, clinic, patient, template, ...membership };
   }
   async function communicationAllowed(request) {
@@ -161,11 +216,15 @@ function createRuntime(deps) {
       const n = request.metadata.notice;
       try { execution = await deps.stop.createExecution({ idempotency_key: key(request), template_version_id: template.id,
         engine_version: 'v2', status: 'running', current_node_id: template.entry_node_id, created_by: request.actor_user_id,
-        trigger_type: C.REQUEST, trigger_entity_type: 'patient_operational_event', trigger_entity_id: Number(request.id), clinic_id: request.clinic_id,
-        group_id: null, context: { trigger: { type: C.REQUEST, data: { request_event_id: Number(request.id), patient_id: request.patient_id,
-          clinic_id: request.clinic_id, response_timeout_minutes: request.metadata.response_timeout_minutes } },
-        program_confirmation: { request_event_id: Number(request.id), clinic_name: n.clinic_name, program_name: n.program_name,
-          appointment_list: n.parameters[2], pending_count: n.pending_count } } }); }
+        trigger_type: native ? request.event_type : C.REQUEST, trigger_entity_type: native ? 'appointment' : 'patient_operational_event',
+        trigger_entity_id: native ? request.metadata.owner_appointment_id : Number(request.id), clinic_id: request.clinic_id,
+        group_id: native ? template.group_id : null,
+        context: { communication_language: n.language, trigger: { type: native ? request.event_type : C.REQUEST,
+          data: { request_event_id: Number(request.id), patient_id: request.patient_id, clinic_id: request.clinic_id,
+            reschedule_reason: request.metadata.reschedule_reason || null, response_timeout_minutes: request.metadata.response_timeout_minutes } },
+          program_confirmation: { ...(native ? { protocol: A.PROTOCOL, response_timeout_minutes: request.metadata.response_timeout_minutes } : {}),
+            request_event_id: Number(request.id), clinic_name: n.clinic_name, program_name: n.program_name,
+            appointment_list: n.parameters[2], pending_count: n.pending_count } } }); }
       catch (error) { if (error.name !== 'SequelizeUniqueConstraintError') throw error;
         execution = await db.FlowExecutionV2.findOne({ where: { idempotency_key: key(request) } }); if (!execution) throw error; }
     }
@@ -178,19 +237,21 @@ function createRuntime(deps) {
     const request = await fromExecution(execution), scope = await current(request);
     const resolved = await resultFor(request);
     if (!scope || resolved) return { suppressed: true };
+    if (request.metadata.review_only) C.fail(request.metadata.delivery_disabled_reason);
     await communicationAllowed(request);
-    if (!await deps.deliveryReady(request.clinic_id, scope.template)) C.fail('program_details_sender_utility_unavailable');
+    if (!await deps.deliveryReady(request.clinic_id, scope.template, undefined, request.metadata.notice.language)) C.fail('program_details_sender_utility_unavailable');
     const candidates = await db.Conversation.findAll({ where: { clinic_id: request.clinic_id, channel: 'whatsapp',
       contact_id: { [Op.in]: require('../lib/phone').getPhoneIdentityCandidates(request.metadata.phone) } }, limit: 3 });
     if (candidates.length > 1 || candidates.some(row => Number(row.patient_id) !== Number(request.patient_id) || row.lead_id)) C.fail('program_details_conversation_conflict');
     return { request, delivery_key: key(request), recipient: request.metadata.phone,
+      language_code: ({ es: 'es_ES', ca: 'ca', en: 'en_US' })[request.metadata.notice.language],
       // Positional values belong to the frozen receipt, not to the generic
       // semantic-name inference (which may infer the same name more than once).
       template_params: Object.fromEntries(request.metadata.notice.parameters.map((value, index) => [String(index + 1), value])) };
   }
   async function sendEnvelope({ request, template, templateParams, sender, conversation, recipient }) {
     const stored = template?.id ? await db.WhatsappTemplate.findByPk(template.id) : null;
-    if (!C.templateValid(stored) || String(stored.waba_id) !== String(sender.wabaId)) C.fail('program_details_template_unavailable');
+    if (!C.templateValid(stored, request.metadata.notice.language) || String(stored.waba_id) !== String(sender.wabaId)) C.fail('program_details_template_unavailable');
     if (Number(conversation?.clinic_id) !== Number(request.clinic_id) || Number(conversation?.patient_id) !== Number(request.patient_id)
       || conversation.lead_id || C.phone(conversation.contact_id) !== request.metadata.phone || C.phone(recipient) !== request.metadata.phone
       || !/^[a-f0-9]{36}$/.test(request.metadata.reply_token)) C.fail('program_details_recipient_or_payload_changed');
@@ -206,7 +267,7 @@ function createRuntime(deps) {
     if (!enabled() || !C.isFlow(execution) || message.metadata?.kind !== 'patient_program_booking_notice'
       || payload?.type !== 'template' || payload.template?.name !== C.TEMPLATE) return false;
     const request = await fromExecution(execution), scope = await current(request), m = message.metadata || {};
-    if (!scope || await resultFor(request) || Number(m.program_booking_request_event_id) !== Number(request.id)
+    if (!scope || !request.metadata.delivery_enabled || request.metadata.review_only || await resultFor(request) || Number(m.program_booking_request_event_id) !== Number(request.id)
       || m.program_booking_notice_sha256 !== request.metadata.notice.snapshot_sha256 || message.automation_delivery_key !== messageKey(request)
       || Number(conversation?.patient_id) !== Number(request.patient_id) || Number(conversation?.clinic_id) !== Number(request.clinic_id)
       || conversation.lead_id || C.phone(conversation.contact_id) !== request.metadata.phone
@@ -217,15 +278,16 @@ function createRuntime(deps) {
     const execution = await db.FlowExecutionV2.findByPk(message.metadata?.execution_id);
     const conversation = await db.Conversation.findByPk(message.conversation_id);
     const request = execution && C.isFlow(execution) ? await fromExecution(execution) : null;
-    if (!request || C.phone(to) !== request.metadata.phone || !useTemplate || templateName !== C.TEMPLATE || templateLanguage !== 'es_ES'
+    if (!request || C.phone(to) !== request.metadata.phone || !useTemplate || templateName !== C.TEMPLATE
+      || templateLanguage !== ({ es: 'es_ES', ca: 'ca', en: 'en_US' })[request.metadata.notice.language]
       || String(sender.phoneNumberId) !== String(message.metadata?.phoneNumberId) || String(sender.wabaId) !== String(message.metadata?.wabaId)
       || !await authorizeEligibility({ message, conversation, execution, payload: { type: 'template', template: { name: templateName, components: templateComponents } } })) {
       return { allowed: false, reason: 'program_details_transport_ineligible' };
     }
     const template = await db.WhatsappTemplate.findByPk(message.metadata.template_id);
     const scope = await current(request);
-    if (!C.templateValid(template) || String(template.waba_id) !== String(sender.wabaId) || !scope
-      || !await deps.deliveryReady(request.clinic_id, scope.template)) return { allowed: false, reason: 'program_details_template_unavailable' };
+    if (!C.templateValid(template, request.metadata.notice.language) || String(template.waba_id) !== String(sender.wabaId) || !scope
+      || !await deps.deliveryReady(request.clinic_id, scope.template, undefined, request.metadata.notice.language)) return { allowed: false, reason: 'program_details_template_unavailable' };
     const quiet = deps.engine.computeQuietHoursDelayMs({ now: now(), enabled: true, timeZone: request.metadata.notice.time_zone });
     return quiet.delayMs > 0 ? { allowed: true, deferredUntil: quiet.scheduledAt } : { allowed: true };
   }
@@ -248,7 +310,8 @@ function createRuntime(deps) {
       ? { status: 'buffering', reply, wait_until: new Date(reply.response_buffer_until) } : { status: 'responded', reply };
     const transport = await delivery(request);
     return { ...transport, wait_until: transport.status === 'awaiting_transport' ? new Date(+now() + 60000)
-      : transport.status === 'awaiting_response' ? new Date(transport.deadline_at) : null };
+      : transport.status === 'awaiting_response' ? new Date(native && !['delivered', 'read'].includes(transport.message?.status)
+        ? Math.min(C.time(transport.deadline_at), +now() + 60000) : C.time(transport.deadline_at)) : null };
   }
   async function replyProof(request, outbound, message, conversation) {
     const m = message?.metadata || {}, payload = m.button?.payload || m.interactive?.button_reply?.id || '';
@@ -416,7 +479,11 @@ function createRuntime(deps) {
   async function withNotification({ execution, node }, createNotification) {
     const request = await fromExecution(execution), resolved = await resultFor(request);
     if (!resolved || resolved.metadata.state !== 'review_required' || !await current(request)) return { kind: 'success', output: { notifications_created: 0 }, next_node_id: node.outputs?.on_success || null };
-    return createNotification({ request, snapshot: { ...resolved.metadata, reason_text: C.reasons[resolved.metadata.reason] || 'Revisa las citas del programa' } });
+    const blocked = request.metadata.delivery_disabled_reason;
+    const explanation = blocked === 'program_details_body_too_long'
+      ? 'El programa está guardado, pero no se ha enviado el resumen: todas las fechas no caben en un único mensaje. Revisa las citas con el paciente.'
+      : C.reasons[resolved.metadata.reason] || 'Revisa las citas del programa';
+    return createNotification({ request, snapshot: { ...resolved.metadata, reason_text: explanation } });
   }
   async function view({ voucherId }) {
     const request = await requestForVoucher(voucherId);
@@ -428,28 +495,30 @@ function createRuntime(deps) {
 }
 function defaultDependencies(db) {
   const engine = () => require('./flowEngineV2.service');
-  return { db, engine: { computeQuietHoursDelayMs: options => engine().computeQuietHoursDelayMs(options) },
+  return { db, nativeOnly: true, engine: { computeQuietHoursDelayMs: options => engine().computeQuietHoursDelayMs(options) },
     enqueueJob: (...args) => require('./jobRequests.service').enqueueUniqueJobRequest(...args),
-    stop: { createExecution: values => require('../lib/automation-runtime-stop').createExecution(values),
+    stop: { createExecution: (...args) => require('../lib/automation-runtime-stop').createExecution(...args),
       assertExecutionActive: (...args) => require('../lib/automation-runtime-stop').assertExecutionActive(...args) },
+    resolveAppointmentTemplate: (...args) => require('./appointmentAutomationV2Runtime.service').resolveTemplateForCitaEvent(...args),
     authorizeActor: request => require('../lib/access-policy').assertUserCanAccessFeature({ actorId: request.actor_user_id,
       clinicId: request.clinic_id, featureKey: 'appointments.manage' }),
     communicationAllowed: options => require('./marketingOptOut.service').assertAutomationCommunicationAllowed(options),
     wake: (execution, transaction, dueAt) => db.sequelize.query("UPDATE JobRequests SET next_run_at=:dueAt WHERE type='automations_v2_execute' AND status IN ('pending','waiting') AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.execution_id'))=:execution AND JSON_UNQUOTE(JSON_EXTRACT(payload,'$.__runtime_namespace'))=:namespace", {
       replacements: { dueAt, execution: String(execution.id), namespace: execution.waiting_meta?.runtime_namespace
         || execution.context?.program_confirmation?.runtime_namespace || require('./jobRequests.service').getCurrentRuntimeNamespace() }, transaction }),
-    deliveryReady: async (clinicId, template, transaction) => {
+    deliveryReady: async (clinicId, template, transaction, language = 'es') => {
       const sender = await engine().resolveScheduledWhatsappSenderConfig({ clinicId });
       if (!sender?.originId || !sender.phoneNumberId || !sender.wabaId || sender.routingUnavailable || sender.authorizedBroker?.sendEnabled !== true) return false;
       const asset = await db.ClinicMetaAsset.findByPk(sender.originId, { transaction });
       if (!asset?.isActive || String(asset.phoneNumberId) !== String(sender.phoneNumberId) || String(asset.wabaId) !== String(sender.wabaId)) return false;
       const health = require('./whatsappAccountHealth.service').summarizeAssetHealth(asset);
       if (health?.can_send !== true || health.is_stale || !['healthy', 'degraded'].includes(health.state)) return false;
-      for (const node of template.nodes.filter(value => value.type === 'action/send_whatsapp')) {
+      for (const node of template.nodes.filter(value => value.type === 'action/send_whatsapp'
+        && (!A.EVENTS.includes(template.trigger_type) || A.programNodeIds(template).includes(value.id)))) {
         const selected = await engine()._loadConfiguredWhatsappTemplate(node.config, { trigger: { data: { clinic_id: clinicId } } },
-          { targetWabaId: String(sender.wabaId), expectedLocale: 'es' });
+          { targetWabaId: String(sender.wabaId), expectedLocale: language });
         const stored = selected?.id ? await db.WhatsappTemplate.findByPk(selected.id, { transaction }) : null;
-        if (!C.templateValid(stored) || String(stored.waba_id) !== String(sender.wabaId)) return false;
+        if (!C.templateValid(stored, language) || String(stored.waba_id) !== String(sender.wabaId)) return false;
       }
       return true;
     },

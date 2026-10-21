@@ -178,7 +178,11 @@ function bookingRequest(payload) {
   }).sort((a, b) => a.key.localeCompare(b.key));
   const resume = payload.mode === 'reschedule' ? require('./program-reschedule').rescheduleInput(payload) : require('./program-replan').resumeInput(payload);
   const preferences = require('./program-booking-preferences').normalizePreferences(payload.booking_preferences);
-  const contents = { snapshot_sha256: payload.snapshot_sha256, sessions, ...(resume || {}), ...(preferences ? { booking_preferences: preferences } : {}) };
+  const decision = payload.notice_decision;
+  if (decision != null && (payload.mode !== 'reschedule' || typeof decision.send !== 'boolean'
+    || !/^[a-f0-9]{64}$/.test(decision.acknowledgement || ''))) error('program_notice_decision_invalid', 'Revisa la decisión de comunicación del programa.');
+  const contents = { snapshot_sha256: payload.snapshot_sha256, sessions, ...(resume || {}), ...(preferences ? { booking_preferences: preferences } : {}),
+    ...(decision ? { notice_decision: { acknowledgement: decision.acknowledgement, send: decision.send } } : {}) };
   return { request_key: payload.request_key, ...contents, request_sha256: hash(contents),
     ...(payload.schedule_acknowledgement != null ? { schedule_acknowledgement: payload.schedule_acknowledgement } : {}) };
 }

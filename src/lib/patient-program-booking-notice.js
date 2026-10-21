@@ -92,7 +92,7 @@ function messagePreview({ clinic_name: clinicName, language: locale, appointment
  * programme position, so selecting sessions 3 and 7 never becomes "1 and 2".
  */
 function prepareCommittedBooking({ receipt: rawReceipt, voucher: rawVoucher, snapshot: rawSnapshot,
-  clinic: rawClinic, actorId, timeZone, communicationLanguage, occurredAt } = {}) {
+  clinic: rawClinic, actorId, timeZone, communicationLanguage, occurredAt, deferPreview = false } = {}) {
   const receipt = object(rawReceipt), voucher = object(rawVoucher), snapshot = object(rawSnapshot), clinic = object(rawClinic);
   const receiptId = positiveId(receipt.id), voucherId = positiveId(voucher.id), clinicId = positiveId(voucher.clinic_id);
   const patientId = positiveId(voucher.patient_id), actor = positiveId(actorId);
@@ -105,10 +105,11 @@ function prepareCommittedBooking({ receipt: rawReceipt, voucher: rawVoucher, sna
   if (result.replayed !== false || result.reminders_enabled !== false
     || typeof voucher.public_id !== 'string' || !voucher.public_id || result.voucher_id !== voucher.public_id) error('program_notice_receipt_invalid');
   const definitions = snapshot.appointments;
-  if (!Array.isArray(definitions) || !definitions.length || definitions.length > MAX_APPOINTMENTS
+  const maximum = deferPreview ? 120 : MAX_APPOINTMENTS;
+  if (!Array.isArray(definitions) || !definitions.length || definitions.length > maximum
     || new Set(definitions.map(row => row?.key)).size !== definitions.length
     || definitions.some(row => typeof row?.key !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(row.key))) error('program_notice_snapshot_invalid');
-  if (!Array.isArray(result.sessions) || !result.sessions.length || result.sessions.length > MAX_APPOINTMENTS) error('program_notice_batch_invalid');
+  if (!Array.isArray(result.sessions) || !result.sessions.length || result.sessions.length > maximum) error('program_notice_batch_invalid');
   const occurred = instant(occurredAt, 'program_notice_occurrence_invalid');
   const zone = clinicTimeZone(timeZone), locale = language(communicationLanguage);
   const appointments = result.sessions.map(row => {
@@ -129,12 +130,13 @@ function prepareCommittedBooking({ receipt: rawReceipt, voucher: rawVoucher, sna
     schema_version: SCHEMA, booking_receipt_id: receiptId, voucher_id: voucherId, voucher_public_id: voucher.public_id,
     request_key: receipt.request_key, request_sha256: receipt.request_sha256,
     program_snapshot_sha256: snapshot.sha256, patient_id: patientId, clinic_id: clinicId, actor_user_id: actor,
-    clinic_name: singleLine(clinic.nombre_clinica, 80, 'program_notice_clinic_name_invalid'),
+    clinic_name: deferPreview ? String(clinic.nombre_clinica || '').trim().normalize('NFC')
+      : singleLine(clinic.nombre_clinica, 80, 'program_notice_clinic_name_invalid'),
     timezone: zone, language: locale, program_session_count: definitions.length,
     appointment_count: appointments.length, occurred_at: occurred, appointments,
   };
   payload.snapshot_sha256 = hash(payload);
-  return { ...payload, preview: messagePreview(payload), delivery: deliveryReadiness() };
+  return { ...payload, ...(deferPreview ? {} : { preview: messagePreview(payload) }), delivery: deliveryReadiness() };
 }
 
 function eventPreparation(input) {
@@ -187,4 +189,4 @@ function catalogPreparation(communicationLanguage = 'es') {
 }
 
 module.exports = { EVENT, SCHEMA, FAMILY, TEMPLATE, TITLE, MAX_APPOINTMENTS, MAX_BODY_CHARACTERS,
-  BODIES, BLOCKERS, prepareCommittedBooking, eventPreparation, catalogPreparation, deliveryReadiness };
+  BODIES, BLOCKERS, language, prepareCommittedBooking, eventPreparation, catalogPreparation, deliveryReadiness };

@@ -13,8 +13,12 @@ function rescheduleInput(payload) {
     || !/^[a-f0-9]{64}$/.test(payload.expected_plan_revision || '')) {
     fail('program_reschedule_request_invalid', 'Actualiza el programa y elige qué citas quieres mover.', 400);
   }
+  if (payload.reschedule_reason != null && !['patient_request', 'clinic_schedule', 'administrative_error'].includes(payload.reschedule_reason)) {
+    fail('program_reschedule_reason_invalid', 'Elige un motivo válido para el cambio.', 400);
+  }
   return { mode: 'reschedule', reschedule_scope: payload.reschedule_scope, replan_from_key: payload.replan_from_key,
-    expected_plan_revision: payload.expected_plan_revision };
+    expected_plan_revision: payload.expected_plan_revision,
+    ...(payload.reschedule_reason != null ? { reschedule_reason: payload.reschedule_reason } : {}) };
 }
 const movable = (row, now) => row.scheduling_status === 'reserved' && row.appointment && !row.record?.consumption_movement_id
   && !row.appointment.care_started_at && !row.appointment.care_completed_at

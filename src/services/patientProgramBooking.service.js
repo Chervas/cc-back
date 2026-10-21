@@ -494,6 +494,16 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
         for (const [key, exception] of exceptions) scheduleExceptions.set(key, { doctorIds: exception.doctorIds,
           restrictions: exception.restrictions, acknowledgement, actorId: Number(options.actorId) });
       }
+      let noticeDecision = null;
+      const reason = request.reschedule_reason || 'clinic_schedule';
+      if (reschedule && require('../lib/patient-program-appointment-flow').enabled()) {
+        const owner = [...selected].sort((a, b) => new Date(a.start_at) - new Date(b.start_at) || a.position - b.position)[0];
+        noticeDecision = await require('../lib/appointment-reschedule-notice').checkRescheduleNotice({ db,
+          previous: owner.appointment, values: { inicio: owner.start_at, fin: owner.end_at, reschedule_reason: reason },
+          clinic: plan.clinic, actorId: options.actorId, decision: request.notice_decision, transaction, now: now(),
+          operationContext: { voucher_id: Number(plan.voucher.id), revision: plan.plan_revision, reason,
+            sessions: selected.map(row => ({ id: Number(row.appointment.id_cita), start: row.start_at, end: row.end_at })) } });
+      }
       for (const session of selected) {
         const definition = plan.snapshot.appointments[session.position];
         const sessionSnapshot = { ...definition, booking_profile: session.booking_profile, duration_minutes: session.duration_minutes,
@@ -520,7 +530,8 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
           additionalStaffIds: staff,
           capabilities: capabilities(), selections: session.choice.selections,
           priorityAcknowledged: session.choice.priority_acknowledged,
-          appointmentValues: moving ? { inicio: session.start_at, fin: session.end_at, estado: 'reprogramada', reschedule_reason: 'clinic_schedule', updated_by: options.actorId }
+          appointmentValues: moving ? { inicio: session.start_at, fin: session.end_at,
+            estado: reason === 'administrative_error' ? 'info_confirmada' : 'reprogramada', reschedule_reason: reason, updated_by: options.actorId }
             : { clinica_id: plan.voucher.clinic_id, paciente_id: plan.voucher.patient_id, voucher_id: plan.voucher.id,
             tratamiento_id: session.treatment_ids[0], inicio: session.start_at, fin: session.end_at, estado: 'pendiente', tipo_cita: 'continuacion',
             titulo: `${plan.snapshot.name} · ${session.label}`.slice(0, 255), created_by: options.actorId, updated_by: options.actorId,
@@ -539,6 +550,8 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
           start_at: solution.start_at, end_at: solution.end_at, phases: solution.phases });
       }
       const result = { voucher_id: plan.voucher.public_id, sessions: created, reminders_enabled: false, replayed: false,
+        ...(reschedule ? { reschedule_reason: reason } : {}),
+        ...(noticeDecision ? { notice_decision: { send: noticeDecision.send, acknowledgement: noticeDecision.acknowledgement } } : {}),
         ...(request.booking_preferences ? { booking_preferences: request.booking_preferences } : {}),
         ...(scheduleExceptions.size ? { schedule_exception_confirmed: true } : {}) };
       const receipt = await db.PatientProgramBookingRequest.create({ voucher_id: plan.voucher.id, request_key: request.request_key,

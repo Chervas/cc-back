@@ -48,3 +48,14 @@ test('date boundaries follow clinic daylight-saving rules, not the server UTC da
     assert.equal(details.notice_count,1);
   }
 });
+test('programme warning includes previous programme summaries and binds the full batch, revision and reason', () => {
+  const operationContext = { voucher_id: 10, revision: 'old', reason: 'clinic_schedule', sessions: [{ id: 1, start: values.inicio }, { id: 2, start: values.inicio }] };
+  const programme = { ...input, operationContext, messages: [{ ...messages[0], template_name: 'clinicaclick_citas_programa_reservadas' }] };
+  const details = warning(programme), decision = { acknowledgement: details.acknowledgement, send: false };
+  assert.equal(assessment({ ...programme, decision }).send, false);
+  for (const change of [{ ...operationContext, revision: 'new' }, { ...operationContext, reason: 'patient_request' },
+    { ...operationContext, sessions: operationContext.sessions.slice(0, 1) },
+    { ...operationContext, sessions: [{ id: 1, start: values.inicio }, { id: 2, start: previous.inicio }] }]) {
+    warning({ ...programme, operationContext: change, decision });
+  }
+});

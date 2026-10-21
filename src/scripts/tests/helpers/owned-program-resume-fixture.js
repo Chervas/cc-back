@@ -13,7 +13,7 @@ function scopedModule(filename, overrides) {
     require: name => Object.hasOwn(overrides, name) ? overrides[name] : local(name) }, { filename });
   return module.exports;
 }
-async function createOwnedProgramResumeFixture({ sql, models: db }) {
+async function createOwnedProgramResumeFixture({ sql, models: db }, { bookingNoticeAdapter, sessionCount = 5, programName = 'Programa sintético de cinco sesiones' } = {}) {
   const physical = await createOwnedBookingDurationFixture({ sql, models: db });
   const D = S.DataTypes;
   for (const file of ['economicbudget', 'economicbudgetversion', 'economicbudgetevent', 'economicpayment', 'patientvoucher',
@@ -57,20 +57,21 @@ async function createOwnedProgramResumeFixture({ sql, models: db }) {
   await db.Tratamiento.bulkCreate([[30, 100, profile], [31, 200, single(201, 2)], [32, 100, single(103, 3)], [33, 100, single(102, 2, true)]]
     .map(([id_tratamiento, clinica_id, booking_profile]) => ({ id_tratamiento, clinica_id, grupo_clinica_id: 50, origen: 'clinica', activo: true,
       nombre: 'Tratamiento ficticio ' + id_tratamiento, clinical_config: { catalog_status: 'active', booking_profile } })));
-  const frozen = snapshot({ id: 'owned-selected-resume', version: 1, status: 'active', kind: 'program', name: 'Programa sintético de cinco sesiones',
-    total_price: 121, summary: { issues: [] }, appointments: Array.from({ length: 5 }, (_, position) => ({ key: 's' + position, label: 'Sesión ' + (position + 1),
+  const frozen = snapshot({ id: 'owned-selected-resume', version: 1, status: 'active', kind: 'program', name: programName,
+    total_price: 121, summary: { issues: [] }, appointments: Array.from({ length: sessionCount }, (_, position) => ({ key: 's' + position, label: 'Sesión ' + (position + 1),
       offset_days: null, treatment_ids: [30], duration_minutes: 45, treatments: [{ id: 30, name: 'Combinado ficticio', booking_profile: profile }] })) });
   const budget = await db.EconomicBudget.create({ public_id: 'owned-resume-budget', clinic_id: 100, patient_id: 1, number: 'OWNED-QA', status: 'accepted' });
   await db.EconomicBudgetVersion.create({ budget_id: budget.id, version_number: 1, lines: [{ key: 'line', program_snapshot: frozen }],
     totals: { total: 121 }, payment_proposal: {}, design_config: {}, clinic_snapshot: {}, patient_snapshot: {} });
   const voucher = await db.PatientVoucher.create({ public_id: 'owned-resume-voucher', clinic_id: 100, patient_id: 1, budget_id: budget.id,
-    budget_line_key: 'line', name: frozen.name, total_units: 5, available_units: 5, sold_amount: 121, status: 'active', source_system: 'treatment_program' });
+    budget_line_key: 'line', name: frozen.name, total_units: sessionCount, available_units: sessionCount, sold_amount: 121, status: 'active', source_system: 'treatment_program' });
   const serviceFile = require.resolve('../../../services/patientProgramBooking.service');
   const local = createRequire(serviceFile), program = local('../lib/program-booking'), availability = local('./appointmentBookingAvailability.service');
   // Only environment capability lookups are scoped for the test. SQL loaders,
   // resource locks, solver, command, receipts, activities and transactions stay real.
   const command = scopedModule(local.resolve('./appointmentBookingCommand.service'), { '../lib/program-booking': { ...program, programBookingEnabled: () => true } });
   const loaded = scopedModule(serviceFile, { './appointmentBookingCommand.service': command,
+    ...(bookingNoticeAdapter ? { './patientProgramBookingNotice.service': bookingNoticeAdapter } : {}),
     './appointmentBookingAvailability.service': { ...availability, loadBookingContext: args => availability.loadBookingContext({ ...args, equipmentEnabled: true }) } });
   let clock = new Date('2030-01-01T00:00:00Z');
   const service = loaded.createPatientProgramBookingService({ db, enabled: () => true, capabilities: () => physical.capabilities, now: () => new Date(clock) });

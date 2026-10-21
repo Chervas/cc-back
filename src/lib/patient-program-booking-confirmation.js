@@ -13,6 +13,10 @@ const BUTTONS = Object.freeze(['Confirmar datos', 'Pedir cambios']);
 // states the current reservations, rather than falsely saying every date has
 // just been created/moved; the immutable receipt retains the actual operation.
 const BODY = 'Hola, somos {{1}}. Estas son las citas reservadas actualmente de tu programa {{2}}: {{3}}. Quedan {{4}} citas por asignar; las programaremos después. Son citas a futuro: alguna fecha podría cambiar por necesidades de agenda. ¿Confirmas estos datos?';
+const BODIES = Object.freeze({ es: BODY,
+  ca: 'Hola, som {{1}}. Aquestes són les cites reservades actualment del teu programa {{2}}: {{3}}. Queden {{4}} cites per assignar; les programarem més endavant. Són cites futures: alguna data podria canviar per necessitats de l’agenda. Confirmes aquestes dades?',
+  en: 'Hello, this is {{1}}. These are the appointments currently booked for your programme {{2}}: {{3}}. There are {{4}} appointments still to schedule; we will arrange them later. These are future bookings: some dates may need to change for scheduling reasons. Do you confirm these details?' });
+const LOCALIZED_BUTTONS = Object.freeze({ es: BUTTONS, ca: ['Confirmar dades', 'Demanar canvis'], en: ['Confirm details', 'Request changes'] });
 const AI_INSTRUCTION = 'Analiza únicamente la respuesta nueva del paciente al resumen de fechas y horas provisionales de su programa. '
   + 'Confirmar significa confirmar DATOS de las citas incluidas, nunca asistencia, llegada, consentimiento, pago ni publicidad. '
   + 'Devuelve intent="correct" sólo si acepta inequívocamente todos esos datos; "changes" si solicita revisar o modificar alguna fecha; '
@@ -51,16 +55,16 @@ function graphValid(nodes) {
     && nodes.filter(n => n.type === ACTION).every(n => ['confirmed', 'review_required'].includes(n.config?.result)
       && (n.config.result === 'confirmed' ? !n.config.reason : Object.hasOwn(reasons, n.config.reason)));
 }
-function templateValid(template) {
+function templateValid(template, language = 'es') {
   const components = template?.components, body = components?.find(c => c.type?.toUpperCase() === 'BODY');
   const buttons = components?.find(c => c.type?.toUpperCase() === 'BUTTONS')?.buttons;
   return template?.status === 'APPROVED' && (template.is_active === true || template.is_active === 1)
-    && template.category === 'UTILITY' && template.name === TEMPLATE && template.language === 'es_ES'
-    && Array.isArray(components) && components.length === 2 && body?.text === BODY
+    && template.category === 'UTILITY' && template.name === TEMPLATE && template.language === ({ es: 'es_ES', ca: 'ca', en: 'en_US' })[language]
+    && Array.isArray(components) && components.length === 2 && body?.text === BODIES[language]
     && Array.isArray(buttons) && buttons.length === 2 && buttons.every((button, index) =>
-      button.type?.toUpperCase() === 'QUICK_REPLY' && button.text === BUTTONS[index]);
+      button.type?.toUpperCase() === 'QUICK_REPLY' && button.text === LOCALIZED_BUTTONS[language]?.[index]);
 }
-function projection({ receipt, voucher, snapshot, clinic, sessions, appointments, actorId, occurredAt, timeZone, communicationLanguage }) {
+function projection({ receipt, voucher, snapshot, clinic, sessions, appointments, actorId, occurredAt, timeZone, communicationLanguage, native = false }) {
   receipt = plain(receipt); voucher = plain(voucher); clinic = plain(clinic); snapshot = object(snapshot);
   const records = sessions.map(plain), rows = appointments.map(plain), occurred = new Date(occurredAt).toISOString();
   if (!Array.isArray(snapshot.appointments) || records.some(record => Number(record.voucher_id) !== Number(voucher.id)
@@ -103,22 +107,33 @@ function projection({ receipt, voucher, snapshot, clinic, sessions, appointments
   if (!future.length) fail('program_details_no_future_reservations');
   // Reuse the existing pure receipt/scope/numbering/time-zone validation, but
   // derive the list from current canonical membership, not just the last batch.
+  let locale = communicationLanguage, representationError = null;
+  if (native) {
+    try { locale = N.language(communicationLanguage); }
+    catch { locale = 'es'; representationError = 'program_notice_language_unsupported'; }
+  }
   const base = N.prepareCommittedBooking({ receipt: { ...receipt, result: { ...object(receipt.result), sessions: future } },
-    voucher, snapshot, clinic, actorId, timeZone, communicationLanguage, occurredAt: occurred });
-  const list = base.appointments.map(row => `${row.number}) ${row.local_date.slice(0, 6)}${row.local_date.slice(-2)} ${row.local_time}`).join('; ');
+    voucher, snapshot, clinic, actorId, timeZone, communicationLanguage: locale, occurredAt: occurred, deferPreview: native });
+  const list = base.appointments.map(row => `${row.number}) ${native ? row.local_date.replaceAll('/', '-') : row.local_date.slice(0, 6) + row.local_date.slice(-2)} ${row.local_time}`).join('; ');
   const name = String(snapshot.name || voucher.name || '').trim().normalize('NFC');
   const parameters = [base.clinic_name, name, list, String(pending)];
-  if (!name || parameters.some(value => /[\u0000-\u001f\u007f\u2028\u2029]| {5}|\{\{|\}\}/u.test(value))) fail('program_details_parameter_invalid');
-  const body = BODY.replace(/\{\{([1234])\}\}/g, (_, index) => parameters[Number(index) - 1]);
-  if (body.length > N.MAX_BODY_CHARACTERS) fail('program_details_body_too_long');
+  if (!name || !base.clinic_name || parameters.some(value => /[\u0000-\u001f\u007f\u2028\u2029]| {5}|\{\{|\}\}/u.test(value))) {
+    if (!native) fail('program_details_parameter_invalid');
+    representationError ||= 'program_details_parameter_invalid';
+  }
+  const body = representationError ? null : (native ? BODIES[base.language] : BODY).replace(/\{\{([1234])\}\}/g, (_, index) => parameters[Number(index) - 1]);
+  if (!native && body.length > N.MAX_BODY_CHARACTERS) fail('program_details_body_too_long');
   const result = { schema_version: SCHEMA, receipt_id: base.booking_receipt_id, receipt_request_key: receipt.request_key,
     receipt_request_sha256: receipt.request_sha256, receipt_result_sha256: hash(receiptResult(receipt.result)),
     voucher_id: base.voucher_id, voucher_public_id: base.voucher_public_id, program_snapshot_sha256: base.program_snapshot_sha256,
     patient_id: base.patient_id, clinic_id: base.clinic_id, actor_user_id: actorId, occurred_at: occurred, time_zone: base.timezone,
-    summary_policy: 'each_booking', language: base.language, clinic_name: base.clinic_name, program_name: name,
+    summary_policy: 'each_booking', language: representationError === 'program_notice_language_unsupported' ? communicationLanguage : base.language,
+    clinic_name: base.clinic_name, program_name: name,
     appointment_count: future.length, pending_count: pending, completed_count: completed, overdue_count: overdue,
     ...(unrecorded ? { unrecorded_count: unrecorded } : {}),
-    appointments: base.appointments, membership, parameters, body };
+    appointments: base.appointments, membership, parameters, body,
+    ...(native && (representationError || body.length > N.MAX_BODY_CHARACTERS)
+      ? { representation_error: representationError || 'program_details_body_too_long' } : {}) };
   result.snapshot_sha256 = hash(result); return result;
 }
 function publicState(request, resolved = null, message = null) {
@@ -191,6 +206,6 @@ function catalogPreparation() {
     components: [{ type: 'BODY', text: BODY, example: { body_text: [['Clínica de ejemplo', 'Programa corporal', '1) 04/11/26 09:00; 2) 19/11/26 09:00', '3']] } },
       { type: 'BUTTONS', buttons: BUTTONS.map(text => ({ type: 'QUICK_REPLY', text })) }] } };
 }
-module.exports = { REQUEST, TRANSITION, SCHEMA, FAMILY, TEMPLATE, ACTION, BODY, BUTTONS, AI_INSTRUCTION, reasons,
+module.exports = { REQUEST, TRANSITION, SCHEMA, FAMILY, TEMPLATE, ACTION, BODY, BODIES, BUTTONS, LOCALIZED_BUTTONS, AI_INSTRUCTION, reasons,
   id, phone, plain, object, copy, hash, time, fail, receiptResult, configValid, graphValid, templateValid, projection, publicState, definition, catalogPreparation,
-  isFlow: execution => execution?.trigger_type === REQUEST };
+  isFlow: execution => execution?.trigger_type === REQUEST || require('./patient-program-appointment-flow').nativeFlow(execution) };

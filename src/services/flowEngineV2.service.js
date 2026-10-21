@@ -3999,6 +3999,7 @@ async function handleSendWhatsapp(node, context, runtime) {
   const operational = mobile || program;
   if (operational?.suppressed) return { kind: 'success', output: { suppressed: true, no_send: true }, next_node_id: null };
   const config = operational ? { ...configured, recipient_mode: 'manual_number', recipient_to: operational.recipient,
+    ...(program?.language_code ? { language_code: program.language_code } : {}),
     communication_scope: 'care', quiet_hours_enabled: true, outside_send_window_policy: 'schedule_next_window', suppress_flow_event: true } : configured;
   const managedService = require('./appointmentVisitManaged.service').current();
   const managedContext = execution?.context?.appointment_visit

@@ -165,7 +165,7 @@ async function assertAutomatedMessageEligibility({ message, conversation, payloa
   assertNoSyntheticDispatch(execution);
   if (!execution || Number(execution.clinic_id) !== Number(conversation.clinic_id)) fail('whatsapp_automation_scope_changed');
   assertClinicCommunicationAllowed(conversation.clinic_id, { metadata: m, payload }, execution);
-  if (execution.trigger_type === 'patient.program_appointments_booked') {
+  if (require('./patient-program-booking-confirmation').isFlow(execution)) {
     // One purpose-specific, current native batch authorization. It cannot
     // authorize a manual message, imported history or consent/review traffic.
     if (protectedCommunication({ metadata: m, payload }) || typeof authorizeProgramBatch !== 'function'

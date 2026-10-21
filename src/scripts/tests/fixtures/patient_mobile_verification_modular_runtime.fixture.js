@@ -8,7 +8,7 @@ const C = require('../../../lib/patient-mobile-verification');
 const { createRuntime } = require('../../../services/patientMobileVerification.service');
 const { loadSource } = require('./business_profile_flow_runtime.fixture');
 
-module.exports = async function modularRuntime({ sql, models: db }) {
+module.exports = async function modularRuntime({ sql, models: db }, { preserveClinicalModels = false } = {}) {
   db.Sequelize = S;
   const D = S.DataTypes, pk = () => ({ type: D.INTEGER, primaryKey: true, autoIncrement: true });
   const simple = (name, fields, table = name + 's') => sql.define(name, fields, { tableName: table, timestamps: false });
@@ -17,12 +17,12 @@ module.exports = async function modularRuntime({ sql, models: db }) {
     AutomationFlowCatalog: 'automationflowcatalog', WhatsappTemplateCatalog: 'whatsapptemplatecatalog', JobRequest: 'jobrequest' })) {
     db[name] = require('../../../../models/' + file)(sql, D);
   }
-  db.Clinica = simple('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, nombre_clinica: D.STRING,
+  if (!preserveClinicalModels || !db.Clinica) db.Clinica = simple('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, nombre_clinica: D.STRING,
     grupoClinicaId: D.INTEGER, direccion: D.STRING, telefono: D.STRING, url_web: D.STRING, url_ficha_local: D.STRING, configuracion: D.JSON }, 'Clinicas');
-  db.Paciente = simple('Paciente', { id_paciente: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER,
+  if (!preserveClinicalModels || !db.Paciente) db.Paciente = simple('Paciente', { id_paciente: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER,
     telefono_movil: D.STRING, nombre: D.STRING, apellidos: D.STRING, email: D.STRING, idioma_preferido: D.STRING }, 'Pacientes');
   db.PacienteClinica = simple('PacienteClinica', { id: pk(), paciente_id: D.INTEGER, clinica_id: D.INTEGER });
-  db.PatientConsentDocument = simple('PatientConsentDocument', { id: pk(), paciente_id: D.INTEGER, clinica_id: D.INTEGER,
+  if (!preserveClinicalModels || !db.PatientConsentDocument) db.PatientConsentDocument = simple('PatientConsentDocument', { id: pk(), paciente_id: D.INTEGER, clinica_id: D.INTEGER,
     status: D.STRING, revoked_at: D.DATE, snapshot_hash: D.STRING });
   db.Conversation = simple('Conversation', { id: pk(), clinic_id: D.INTEGER, patient_id: D.INTEGER, lead_id: D.INTEGER,
     channel: D.STRING, contact_id: D.STRING, unread_count: D.INTEGER, last_message_at: D.DATE, last_inbound_at: D.DATE, updatedAt: D.DATE });
