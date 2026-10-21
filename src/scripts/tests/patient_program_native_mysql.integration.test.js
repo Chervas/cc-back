@@ -37,6 +37,8 @@ test('actual booking coordinator -> actual published appointment graph adapted -
     Object.assign(adapted, { public_id: 'TESTONLY-' + source.trigger_type, version: 1, clinic_id: 100, group_id: 50,
       template_key: source.template_key.replace(/__clinic_\d+$/, '__clinic_100'), is_active: true, published_at: t.clock, created_by: 1 });
     Object.assign(adapted.trigger_config[A.POLICY], { configured: true, enabled_after: '2030-01-01T07:00:00Z' });
+    adapted.nodes.find(node => node.id === adapted.entry_node_id).config[A.POLICY] = structuredClone(adapted.trigger_config[A.POLICY]);
+    assert(A.graphValid(adapted), 'Persisted draft fixture must configure both trigger projections');
     templates[source.trigger_type] = await db.AutomationFlowTemplateV2.create(adapted);
   }
   await db.WhatsappTemplate.create({ waba_id: t.sender.wabaId, name: C.TEMPLATE, language: 'es_ES', category: 'UTILITY', status: 'APPROVED', is_active: true,

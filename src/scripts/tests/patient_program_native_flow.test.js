@@ -45,6 +45,18 @@ test('one operation owns one existing trigger; a mixed operation belongs only to
   unchanged.result.sessions[0].previous_appointment.end_at = unchanged.result.sessions[0].end_at;
   assert(A.operation(unchanged).unchanged, 'A column-only change cannot send another date summary');
 });
+test('serialized native drafts require matching activation and cut in both trigger projections', () => {
+  const draft = JSON.parse(JSON.stringify(A.adapt(source())));
+  assert(A.graphValid(draft));
+  Object.assign(draft.trigger_config[A.POLICY], { configured: true, enabled_after: '2030-01-01T07:00:00Z' });
+  assert.equal(A.graphValid(draft), false);
+  assert.equal(A.configured(draft, '2030-01-02T07:00:00Z'), false);
+  draft.nodes.find(node => node.id === draft.entry_node_id).config[A.POLICY] = structuredClone(draft.trigger_config[A.POLICY]);
+  assert(A.graphValid(draft));
+  assert.equal(A.configured(draft, '2030-01-01T06:59:59Z'), false);
+  assert.equal(A.configured(draft, '2030-01-01T07:00:00Z'), true);
+  assert.deepEqual(A.normalProjection(draft), A.normalProjection(A.adapt(source())));
+});
 test('wait duration comes from the current single-notice leg, never another follow-up send', () => {
   const adapted = A.adapt(source());
   assert.equal(A.timeout(adapted, { startAt: '2026-10-22T09:00:00Z', now: '2026-10-21T09:00:00Z', timeZone: 'Europe/Madrid' }), 840);
