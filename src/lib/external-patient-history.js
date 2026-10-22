@@ -82,7 +82,7 @@ function buildImportedClinicalCatalog(rows) {
     const record=row.record||{};let mapped={};
     try{mapped=require('./eurodent-odontogram').normalizeEurodentCatalogItem(record);}catch(error){if(error.code!=='MODULE_NOT_FOUND')throw error;}
     return {source_id:String(record.ID),code:plainText(record['Código']),name:plainText(record.Nombre),family_id:String(record.Familia||''),family_name:familyNames.get(String(record.Familia))||null,
-      graphic:plainText(record.Grafico),visual_type:mapped.visual_type||'unclassified',hidden:mapped.hidden===true,no_tooth:record.SinPza==='1',all_teeth:record.Todos==='1'};
+      graphic:mapped.graphic===true,visual_type:mapped.visual_type||null,hidden:mapped.hidden===true,no_tooth:record.SinPza==='1',all_teeth:record.Todos==='1'};
   });
   return{version:'imported_clinical_catalog/1',read_only:true,provider:'eurodent',source:'Eurodent',source_instance:catalog.source_instance,
     source_zip_sha256:catalog.source_zip_sha256,catalog_sha256:catalog.catalog_sha256,imported_date:dateOnly(catalog.imported_at instanceof Date?catalog.imported_at.toISOString():catalog.imported_at),items,families};

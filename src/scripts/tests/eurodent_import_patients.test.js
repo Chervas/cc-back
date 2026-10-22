@@ -61,6 +61,21 @@ test('new source hold is checked independently of ClinicCloud and fails closed o
   db.PatientImportedIdentity.findOne=async()=>null;assert.equal(await patientImportHeld(6,db),false);assert.equal(legacy,1);
   db.PatientImportedIdentity.findOne=async()=>{throw Error('TESTONLY storage unavailable');};await assert.rejects(patientImportHeld(6,db),/storage unavailable/);
 });
+test('catalogue distinguishes source zero flags from drawable restorations and never advertises an unavailable symbol',()=>{
+  const rows=[
+    {ID:'1',Nombre:'TESTONLY consulta',Familia:'23',Grafico:'0'},
+    {ID:'2',Nombre:'TESTONLY restauración',Familia:'2',Grafico:'1'},
+    {ID:'3',Nombre:'TESTONLY apunte económico',Familia:'0',Grafico:'1'},
+    {ID:'4',Nombre:'TESTONLY restauración archivada',Familia:'99',FamOldOcu:'2',Grafico:'1'},
+  ];
+  const view=buildImportedClinicalCatalog([{context_json:JSON.stringify({Tratamiento:rows.map(record=>({record}))})}]);
+  assert.deepEqual(view.items.map(item=>item.graphic),[false,true,false,true]);
+  assert.equal(view.items[0].visual_type,null);
+  assert.equal(view.items[1].visual_type,'obturacion');
+  assert.equal(view.items[2].visual_type,null);
+  assert.equal(view.items[3].hidden,true);
+  assert.equal(view.items[3].visual_type,'obturacion');
+});
 test('owned MySQL: actual migration, 50 native profiles/archive rows, rollback, concurrent exclusion and exact replay without economic/citation/provider side effects',{
   skip:process.env.EURODENT_IMPORT_MYSQL_TEST!=='1',timeout:180000,
 },async()=>{
