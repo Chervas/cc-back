@@ -621,7 +621,10 @@ function normalizeMassSendRecordKind(value, fallback = 'campaign') {
   return fallback === 'recipient_list' ? 'recipient_list' : 'campaign';
 }
 
-function ensureDispatchableCampaignRecord(list) {
+function ensureDispatchableCampaignRecord(list, { allowPaymentTest = false } = {}) {
+  if ((list?.source === 'whatsapp_payment_recovery_test' || list?.criteria?.whatsapp_payment_recovery_test === true) && !allowPaymentTest) {
+    throw Object.assign(new Error('payment_test_not_dispatchable'), { code: 'payment_test_not_dispatchable', status: 409 });
+  }
   if (normalizeMassSendRecordKind(list?.criteria?.record_kind, 'campaign') !== 'campaign') {
     const err = new Error('Selecciona esta lista dentro de una campaña antes de preparar o enviar mensajes');
     err.status = 409;
@@ -8418,10 +8421,24 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   };
 }
 
-async function sendTest(scope, campaignId, body = {}) {
+async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTest = false } = {}) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
-  ensureDispatchableCampaignRecord(list);
+  ensureDispatchableCampaignRecord(list, { allowPaymentTest: allowDiagnosticPaymentTest === true });
+  if (list.criteria?.whatsapp_payment_recovery_test === true) {
+    const criteria = list.criteria;
+    const sample = await MarketingPatientListItem.findOne({ where: { id: body.item_id, list_id: list.id } });
+    if (body.payment_recovery_probe !== true || body.channel && body.channel !== 'whatsapp'
+      || Number(body.sender_origin_id) !== Number(criteria.sender_origin_id)
+      || Number(body.whatsapp_template_id) !== Number(criteria.whatsapp_template_id)
+      || Number(body.clinic_id) !== Number(list.clinica_id)
+      || body.template_usage !== 'manual_patient_contact'
+      || require('../lib/phone').normalizePhoneDigits(body.to) !== criteria.probe_to
+      || body.sender_name !== undefined || body.senderName !== undefined || body.usuario_nombre !== undefined
+      || !sample || sample.paciente_id || sample.status !== 'test_sample' || sample.selected !== false) {
+      throw Object.assign(new Error('payment_test_input_changed'), { code: 'payment_test_input_changed', status: 409 });
+    }
+  }
   if (String(body.channel || '').toLowerCase() === 'email') {
     return marketingEmailDispatchService.sendTest(list, body);
   }
@@ -8907,6 +8924,7 @@ async function listRecipients(scope, campaignId, query = {}) {
 async function updateRecipient(scope, campaignId, itemId, body = {}, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  if (list.source === 'whatsapp_payment_recovery_test') ensureDispatchableCampaignRecord(list);
   const item = await MarketingPatientListItem.findOne({
     where: {
       id: itemId,

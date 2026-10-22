@@ -20,8 +20,9 @@ router.use((req, res, next) => {
     || (req.method === 'PUT' && /^\/template-catalog\/[1-9][0-9]*\/toggle$/.test(path))
     || (req.method === 'POST' && /^\/template-catalog\/[1-9][0-9]*\/(duplicate|translations|disciplines|propagate)$/.test(path));
   const authorizedProfileRefresh = req.method === 'POST' && /^\/phones\/[1-9][0-9]*\/refresh$/.test(path);
+  const authorizedPaymentTest = req.method === 'POST' && /^\/phones\/[1-9][0-9]*\/payment-recovery-test$/.test(path);
   const authorizedDisconnect = req.method === 'POST' && ['/phones/disconnect', '/phones/archive'].includes(path);
-  if (templateRoute || authorizedProfileRefresh || authorizedDisconnect || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
+  if (templateRoute || authorizedProfileRefresh || authorizedPaymentTest || authorizedDisconnect || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
   return authMiddleware(req, res, () => metaQuarantine.middleware(req, res));
 });
 
@@ -133,6 +134,8 @@ router.post('/phones/:phoneNumberId/profile', authMiddleware, whatsappController
 
 // Refrescar estado del número en Meta (estado registro, nombre, calidad)
 router.post('/phones/:phoneNumberId/refresh', authMiddleware, whatsappController.refreshPhoneStatus);
+router.get('/phones/:phoneNumberId/payment-recovery-test', authMiddleware, whatsappController.getPaymentRecoveryTest);
+router.post('/phones/:phoneNumberId/payment-recovery-test', authMiddleware, whatsappController.sendPaymentRecoveryTest);
 
 // Coexistencia: solicitar sync inicial de contactos e historial desde WhatsApp Business App
 router.post('/phones/:phoneNumberId/coexistence/sync-initial', authMiddleware, whatsappController.enqueueCoexistenceInitialSync);

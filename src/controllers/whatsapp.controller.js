@@ -85,6 +85,27 @@ function isWhatsappGlobalAdmin(userId) {
   return ADMIN_USER_IDS.includes(Number(userId));
 }
 
+const paymentRecoveryTest = require('../services/whatsappPaymentRecoveryTest.service').createService({
+  authorize: ({ clinicId, userId }) => hasMarketingClinicScopeAccess({ userId, clinicIds: [clinicId],
+    access: 'write', globalAdminCheck: isWhatsappGlobalAdmin }),
+});
+
+async function handlePaymentRecoveryTest(req, res, send) {
+  try {
+    const input = send ? req.body || {} : req.query || {};
+    const result = await paymentRecoveryTest[send ? 'send' : 'get']({ clinicId: Number(input.clinic_id),
+      phoneNumberId: req.params.phoneNumberId, userId: Number(req.userData?.userId),
+      requestId: input.request_id, ...(send ? { to: input.to } : {}) });
+    res.json(result);
+  } catch (error) {
+    const status = [400, 403, 404, 409].includes(error.statusCode || error.status) ? error.statusCode || error.status : 503;
+    const code = /^(payment_test_|payment_probe_)/.test(error.code || '') ? error.code : 'payment_test_unavailable';
+    res.status(status).json({ error: code, retry_after_seconds: error.details?.retry_after_seconds || null });
+  }
+}
+exports.getPaymentRecoveryTest = (req, res) => handlePaymentRecoveryTest(req, res, false);
+exports.sendPaymentRecoveryTest = (req, res) => handlePaymentRecoveryTest(req, res, true);
+
 async function assertWhatsappTemplateClinicAccess({ clinicId, userId }) {
   const safeClinicId = Number(clinicId);
   const safeUserId = Number(userId);
