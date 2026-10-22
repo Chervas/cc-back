@@ -21,6 +21,10 @@ const isUpper = number => [1,2,5,6].includes(Math.floor(number / 10));
 const isRight = number => [1,4,5,8].includes(Math.floor(number / 10));
 const isAnterior = number => number % 10 <= 3;
 const unique = values => [...new Set(values)];
+const isSourceScope = mark => ['range','prosthesis'].includes(mark.location.kind);
+const isEarlierDay = (previous,current) => /^\d{4}-\d{2}-\d{2}$/.test(previous.date || '') && /^\d{4}-\d{2}-\d{2}$/.test(current.date || '') && previous.date < current.date;
+const visualLayer = mark => mark.origin==='proposed'?(mark.source_table==='Presupuesto'?`Presupuesto:${mark.budget_source_id}`:mark.source_table):'historical';
+const visualGroup = mark => SURFACE_FAMILIES.has(mark.family_id)?`surface:${mark.surfaces.slice().sort().join('')}`:mark.visual_type;
 function sourcePrimaryKey(value,record) {
   if (value && typeof value === 'object') {
     if (value.ID !== undefined && value.ID !== null) return str(value.ID);
@@ -169,7 +173,7 @@ function sourceDate(value) {
 function projectEurodentOdontogram(envelopes = [],options = {}) {
   const teeth=new Map(ALL_TEETH.map(number => [number,{number,status:'unknown',marks:[]}]));
   const unresolved=[],warnings=[],layoutTeeth=[],items=[],catalog=[];
-  const counts={prior:0,performed:0,pending:0,budget:0,financial:0,non_graphic:0,unresolved:0,state_rows:0};
+  const counts={prior:0,performed:0,pending:0,budget:0,financial:0,non_graphic:0,unresolved:0,state_rows:0,ambiguous_day_groups:0};
   const configurationTables=[];
   for (const envelope of envelopes) {
     const record=envelope.record || envelope.raw || {},table=str(envelope.source_table);
@@ -200,20 +204,26 @@ function projectEurodentOdontogram(envelopes = [],options = {}) {
     }
   }
   for (const tooth of teeth.values()) {
+    // PK is a deterministic display tie-breaker, never an intraday clinical time.
     tooth.marks.sort((a,b)=>(a.date || '').localeCompare(b.date || '') || a.id.localeCompare(b.id,undefined,{numeric:true}));
-    // Display latest evidence per layer/visual group; original rows remain inspectable.
-    const latest=new Map();
+    const dates=unique(tooth.marks.filter(mark=>mark.origin!=='proposed' && mark.date).map(mark=>mark.date));
+    for (const date of dates) {
+      const sameDay=tooth.marks.filter(mark=>mark.origin!=='proposed' && mark.date===date);
+      if (unique(sameDay.map(mark=>mark.family_id)).length>1 && sameDay.some(mark=>['3','13','14','19','5'].includes(mark.family_id))) {
+        counts.ambiguous_day_groups++;
+        for (const mark of sameDay) mark.same_day_order_unknown=true;
+      }
+    }
     for (const mark of tooth.marks) {
-      const layer=mark.origin==='proposed'?(mark.source_table==='Presupuesto'?`Presupuesto:${mark.budget_source_id}`:mark.source_table):'historical';
-      const group=SURFACE_FAMILIES.has(mark.family_id)?`surface:${mark.surfaces.slice().sort().join('')}`:mark.visual_type;
-      const key=`${layer}:${group}`;
-      if (latest.has(key)) latest.get(key).visible=false;
-      latest.set(key,mark);
-      if (mark.origin!=='proposed' && ['3','13','14','19','5'].includes(mark.family_id)) {
-        for (const previous of tooth.marks) {
-          if (previous===mark) break;
-          if (previous.origin!=='proposed') previous.visible=false;
-        }
+      // A recorded multi-tooth scope remains one complete source act. Natural
+      // tooth operations cannot turn a 12-member prosthesis into a 10-member one,
+      // nor may overlapping orthodontic ranges silently become partial acts.
+      if (isSourceScope(mark)) continue;
+      for (const previous of tooth.marks) {
+        if (previous===mark) break;
+        if (isSourceScope(previous) || !isEarlierDay(previous,mark)) continue;
+        if (visualLayer(previous)===visualLayer(mark) && visualGroup(previous)===visualGroup(mark)) previous.visible=false;
+        if (mark.origin!=='proposed' && previous.origin!=='proposed' && ['3','13','14','19','5'].includes(mark.family_id)) previous.visible=false;
       }
     }
   }

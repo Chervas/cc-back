@@ -61,3 +61,19 @@ test('financial and non-graphic source entries do not fabricate restorative mark
 test('later extraction and implant retire older drawings while retaining original evidence',()=>{
  const p=project([row('Historial','old',{Cuadrante:'26',Fecha:'01/01/2020 00:00:00'}),row('Historial','extract',{'Nº Trat':'3',Fecha:'01/01/2021 00:00:00'},{Familia:'3',Grafico:'1'}),row('Historial','implant',{'Nº Trat':'19',Fecha:'01/01/2022 00:00:00'},{Familia:'19',Grafico:'1'})]);const marks=p.teeth.find(x=>x.number===16).marks;assert.equal(marks.length,3);assert.deepEqual(marks.map(x=>x.visible),[false,false,true]);assert.equal(marks[2].visual_type,'implante');
 });
+test('source primary keys never invent the intraday order of extraction and implantation',()=>{
+ for(const reverse of[false,true]){
+  const rows=[row('Historial',reverse?'z':'a',{'Nº Trat':'19'},{Familia:'19',Grafico:'1'}),row('Historial',reverse?'a':'z',{'Nº Trat':'3'},{Familia:'3',Grafico:'1'})];
+  const p=project(rows),marks=p.teeth.find(x=>x.number===16).marks;
+  assert.equal(marks.length,2);assert.ok(marks.every(x=>x.visible));assert.ok(marks.every(x=>x.same_day_order_unknown));assert.equal(p.counts.ambiguous_day_groups,1);
+ }
+});
+test('prosthesis membership is never reduced by natural tooth operations on the same or a later day',()=>{
+ const prosthesis=row('Historial','prosthesis',{'Nº Trat':'24',Pieza:'0',PzasProt:'111213141516212223242526',Fecha:'01/30/2023 00:00:00'},{Familia:'24',Grafico:'1'});
+ const p=project([prosthesis,row('Historial','implant',{'Nº Trat':'19',Pieza:'14',Fecha:'01/30/2023 00:00:00'},{Familia:'19',Grafico:'1'}),row('Historial','extraction',{'Nº Trat':'3',Pieza:'24',Fecha:'02/01/2023 00:00:00'},{Familia:'3',Grafico:'1'})]);
+ const visible=p.teeth.filter(t=>t.marks.some(m=>m.source_pk==='prosthesis'&&m.visible));assert.equal(visible.length,12);
+});
+test('overlapping source ranges remain complete acts rather than fabricated partial ranges',()=>{
+ const p=project([row('Historial','full',{'Nº Trat':'7',Pieza:'3646',Fecha:'01/01/2020 00:00:00'},{Familia:'7',Grafico:'1'}),row('Historial','short',{'Nº Trat':'7',Pieza:'3637',Fecha:'01/01/2021 00:00:00'},{Familia:'7',Grafico:'1'}),row('Historial','implant',{'Nº Trat':'19',Pieza:'36',Fecha:'01/01/2022 00:00:00'},{Familia:'19',Grafico:'1'})]);
+ assert.equal(p.teeth.filter(t=>t.marks.some(m=>m.source_pk==='full'&&m.visible)).length,12);assert.equal(p.teeth.filter(t=>t.marks.some(m=>m.source_pk==='short'&&m.visible)).length,2);
+});
