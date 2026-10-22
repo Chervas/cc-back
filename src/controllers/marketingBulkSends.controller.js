@@ -109,6 +109,17 @@ exports.listCampaigns = async (req, res) => {
   }
 };
 
+exports.listReviewImportedLists = async (req, res) => {
+  try {
+    const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });
+    await requireReviewHistoryAccess(req, scope);
+    res.set('Cache-Control', 'no-store');
+    return res.json(await marketingBulkSendsService.listReviewImportedLists(scope));
+  } catch (error) {
+    return sendError(res, error, 'No se pudieron cargar los listados importados.');
+  }
+};
+
 exports.getReviewRequestSummary = async (req, res) => {
   try {
     const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });

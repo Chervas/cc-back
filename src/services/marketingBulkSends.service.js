@@ -3676,6 +3676,34 @@ async function prepareReviewItemsForExclusions(items = [], scope = {}, body = {}
   return applyReviewRequestExclusions(datedItems, body);
 }
 
+function isReviewImportedListEligible(list) {
+  if (!list || list.status === 'archived') return false;
+  if (list.objective_id === 'reactivate_patients') return list.source === 'imported_file';
+  const criteria = asPlainObject(list.criteria);
+  return list.objective_id === OBJECTIVE_ID && !isReviewRequestList(list)
+    && (!criteria.record_kind || criteria.record_kind === 'recipient_list')
+    && (list.source === 'imported_file'
+      || list.source === 'saved_recipient_list' && !!normalizeText(criteria.import_file_name));
+}
+
+async function listReviewImportedLists(scope) {
+  const lists = await MarketingPatientList.findAll({
+    where: {
+      ...scopeToWhere(scope),
+      objective_id: { [Op.in]: ['reactivate_patients', OBJECTIVE_ID] },
+      source: { [Op.in]: ['imported_file', 'saved_recipient_list'] },
+      status: { [Op.ne]: 'archived' },
+    },
+    attributes: ['id', 'name', 'objective_id', 'source', 'status', 'criteria', 'counters'],
+    order: [['updated_at', 'DESC'], ['id', 'DESC']],
+    raw: true,
+  });
+  return { success: true, items: lists.filter(isReviewImportedListEligible).map(list => ({
+    id: Number(list.id), name: list.name,
+    total: Math.max(0, Number(list.counters?.total || 0)),
+  })) };
+}
+
 async function buildReviewItemsFromImportedList(scope, body = {}) {
   const importedListId = parseReviewImportListId(body);
   if (!importedListId) return null;
@@ -3687,9 +3715,7 @@ async function buildReviewItemsFromImportedList(scope, body = {}) {
     },
   });
   if (
-    !importedList
-    || importedList.objective_id !== 'reactivate_patients'
-    || importedList.source !== 'imported_file'
+    !isReviewImportedListEligible(importedList)
   ) {
     const err = new Error('El listado importado no existe o no pertenece a esta clínica.');
     err.status = 404;
@@ -3699,15 +3725,22 @@ async function buildReviewItemsFromImportedList(scope, body = {}) {
 
   const [rows, alreadyRequested] = await Promise.all([
     MarketingPatientListItem.findAll({
-      where: { list_id: importedListId },
+      where: { list_id: importedListId, [Op.or]: [
+        { clinica_id: { [Op.in]: scope.clinicIds || [] } },
+        { clinica_id: null },
+      ] },
       order: [['id', 'ASC']],
     }),
     getReviewRequestedPatientIds(scope),
   ]);
 
-  const items = mapReviewItemsFromImportedListBase(rows, importedList, alreadyRequested);
+  const items = mapReviewItemsFromImportedListBase(rows, importedList, alreadyRequested).map(item => {
+    if (importedList.objective_id !== OBJECTIVE_ID || item.paciente_id || String(item.status).startsWith('excluded')) return item;
+    return { ...item, status: 'excluded_no_patient', selected: false, exclusion_reason: 'sin_ficha_paciente',
+      reason: 'El contacto importado no está vinculado a una ficha de paciente de la clínica.' };
+  });
   return sortReviewRequestItemsByRecentCare(
-    await prepareReviewItemsForExclusions(items, scope, body)
+    await applyMarketingOptOutExclusions(await prepareReviewItemsForExclusions(items, scope, body), scope)
   );
 }
 
@@ -11130,6 +11163,7 @@ module.exports = {
   updateCampaign,
   getReviewRequestAutomationStatus,
   getReviewRequestSummary,
+  listReviewImportedLists,
   getMissingGoogleReviews,
   getReviewQueueSchedule,
   updateReviewQueueSchedule,
@@ -11159,6 +11193,8 @@ module.exports = {
   removeCampaign,
   reconcileDispatchJobState,
   __testing: {
+    isReviewImportedListEligible,
+    buildReviewItemsFromImportedList,
     isReviewRequestList,
     sendDispatchItem,
     sendReviewPrivateFeedbackAcknowledgement,
