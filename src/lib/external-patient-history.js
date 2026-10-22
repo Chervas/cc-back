@@ -80,12 +80,17 @@ function redactImportedHistoryFinancials(history,{mayViewFinancial=false}={}) {
 function buildImportedClinicalCatalog(rows) {
   const catalog=rows[0];
   if(!catalog)return{version:'imported_clinical_catalog/1',read_only:true,provider:'eurodent',source:'Eurodent',items:[],families:[],source_instance:null,source_zip_sha256:null,imported_date:null};
-  const context=parse(catalog.context_json)||{},families=(context.FamTrat||[]).map(r=>r.record).map(record=>({id:String(record.ID),name:plainText(record.Familia)}));
-  const familyNames=new Map(families.map(family=>[family.id,family.name]));
+  // Tratamiento.Familia references the graphic family number, not FamTrat's
+  // row PK (the archived family is NumFamilia=99 with ID=26 in the source).
+  const context=parse(catalog.context_json)||{},families=(context.FamTrat||[]).map(r=>r.record).map(record=>({
+    id:String(Object.hasOwn(record,'NumFamilia')?(record.NumFamilia??''):(record.ID??'')).trim(),
+    source_id:String(record.ID??''),name:plainText(record.Familia),
+  }));
+  const familyNames=new Map(families.filter(family=>family.id!=='').map(family=>[family.id,family.name]));
   const items=(context.Tratamiento||[]).map(row=>{
     const record=row.record||{};let mapped={};
     try{mapped=require('./eurodent-odontogram').normalizeEurodentCatalogItem(record);}catch(error){if(error.code!=='MODULE_NOT_FOUND')throw error;}
-    return {source_id:String(record.ID),code:plainText(record['Código']),name:plainText(record.Nombre),family_id:String(record.Familia||''),family_name:familyNames.get(String(record.Familia))||null,
+    return {source_id:String(record.ID),code:plainText(record['Código']),name:plainText(record.Nombre),family_id:String(record.Familia??'').trim(),family_name:familyNames.get(String(record.Familia??'').trim())||null,
       graphic:mapped.graphic===true,visual_type:mapped.visual_type||null,hidden:mapped.hidden===true,no_tooth:record.SinPza==='1',all_teeth:record.Todos==='1'};
   });
   return{version:'imported_clinical_catalog/1',read_only:true,provider:'eurodent',source:'Eurodent',source_instance:catalog.source_instance,
