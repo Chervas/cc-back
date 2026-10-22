@@ -57,6 +57,7 @@ const {
   scopePatientCustomFields,
   buildClinicCloudPatientHistory,
 } = require('../lib/cliniccloud-patient-history');
+const { buildExternalPatientHistory, paginateExternalHistory, eurodentEnvelopes, redactImportedHistoryFinancials, buildImportedClinicalCatalog } = require('../lib/external-patient-history');
 
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
@@ -250,6 +251,7 @@ function redactEmbeddedPatient(paciente) {
   delete redacted.ultima_cita;
   delete redacted.camposPersonalizados;
   delete redacted.historialClinicCloud;
+  delete redacted.historialImportado;
   if (Array.isArray(redacted.relaciones)) {
     redacted.relaciones = redacted.relaciones.map((relation) => ({
       ...relation,
@@ -682,6 +684,7 @@ const restrictPacientePayloadToClinics = (paciente, readableClinicIds, { sensiti
   }
   // A precomputed historical projection must not survive a narrower scope.
   delete scoped.historialClinicCloud;
+  delete scoped.historialImportado;
 
   if (Array.isArray(plain.relaciones)) {
     scoped.relaciones = plain.relaciones.map((relation) => ({
@@ -1303,6 +1306,85 @@ exports.getPacienteById = async (req, res) => {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
     res.status(500).json({ message: 'Error retrieving paciente', error: 'patient_read_failed' });
+  }
+};
+
+// Imported clinical archives share the normal patient/clinic sensitive ACL.
+// They never create an encounter and are not exposed as editable custom fields.
+async function importedPatientContext(req) {
+  const clinicId = Number(req.query.clinic_id);
+  if (!Number.isSafeInteger(clinicId) || clinicId <= 0) throw Object.assign(Error('imported_history_clinic_required'), { status: 400 });
+  const paciente = await findPacienteByIdentifier(req.params.id, {
+    include: [{ model: PacienteClinica, as: 'clinicasVinculadas', required: false }],
+  });
+  if (!paciente) throw Object.assign(Error('patient_not_found'), { status: 404 });
+  if (!patientClinicIds(paciente).includes(clinicId)) throw Object.assign(Error('patient_clinic_forbidden'), { status: 403 });
+  const readableClinicIds = await accessibleClinicIds(req, 'patients.view', [clinicId]);
+  if (!readableClinicIds.includes(clinicId) || !await canViewSensitivePatientData(req, [clinicId])) {
+    throw Object.assign(Error('patient_sensitive_data_forbidden'), { status: 403 });
+  }
+  const fields = await PatientCustomField.findAll({
+    where: { paciente_id: paciente.id_paciente, clinica_id: clinicId, source: { [Op.in]: ['cliniccloud','eurodent'] } },
+    attributes: ['field_key','label','value','value_type','source','clinica_id','source_column','last_imported_at'],
+    order: [['id','ASC']], raw: true,
+  });
+  const imported = await sequelize.query(`SELECT r.id,r.clinic_id,r.record_json,r.imported_at
+    FROM PatientImportedSourceRecords r INNER JOIN PatientImportedIdentities i ON i.id=r.identity_id
+      AND i.patient_id=r.patient_id AND i.clinic_id=r.clinic_id
+    WHERE r.patient_id=:patientId AND r.clinic_id=:clinicId ORDER BY r.id`,
+    {replacements:{patientId:paciente.id_paciente,clinicId},type:QueryTypes.SELECT});
+  fields.push(...imported.map(row=>({clinica_id:row.clinic_id,source:'eurodent',field_key:String(row.id),value:row.record_json,last_imported_at:row.imported_at})));
+  const mayViewFinancial=await canUserAccessFeature({actorId:Number(req.userData?.userId),featureKey:'billing.reports.view',clinicId}).catch(()=>false);
+  return { paciente, clinicId, fields, mayViewFinancial };
+}
+exports.getImportedPatientHistory = async (req,res) => {
+  try {
+    const {paciente,clinicId,fields,mayViewFinancial} = await importedPatientContext(req);
+    const payload = paginateExternalHistory(redactImportedHistoryFinancials(buildExternalPatientHistory(fields),{mayViewFinancial}),req.query);
+    auditPatientResponse(req,{clinicIds:[clinicId],patients:[paciente],resultCount:payload.entries.length,includesSensitive:true,
+      checks:['patients.view','patients.sensitive.view'].map(featureKey=>({featureKey,clinicIds:[clinicId]}))});
+    return res.json(payload);
+  } catch (error) {
+    const handled=sendAccessPolicyError(error,res);if(handled)return handled;
+    const status=[400,403,404].includes(error.status)?error.status:500;
+    return res.status(status).json({message:'No se ha podido consultar el histórico importado',error:status===500?'imported_history_read_failed':error.message});
+  }
+};
+exports.getImportedPatientCatalog = async (req,res) => {
+  try{
+    const {paciente,clinicId}=await importedPatientContext(req);
+    const catalogs=await sequelize.query(`SELECT DISTINCT c.* FROM ImportedClinicalCatalogs c
+      INNER JOIN PatientImportedIdentities i ON i.catalog_id=c.id AND i.clinic_id=c.clinic_id
+      WHERE i.patient_id=:patientId AND i.clinic_id=:clinicId ORDER BY c.id DESC`,
+      {replacements:{patientId:paciente.id_paciente,clinicId},type:QueryTypes.SELECT});
+    const payload=buildImportedClinicalCatalog(catalogs);
+    auditPatientResponse(req,{clinicIds:[clinicId],patients:[paciente],resultCount:payload.items.length,includesSensitive:true,
+      checks:['patients.view','patients.sensitive.view'].map(featureKey=>({featureKey,clinicIds:[clinicId]}))});
+    return res.json(payload);
+  }catch(error){
+    const handled=sendAccessPolicyError(error,res);if(handled)return handled;
+    const status=[400,403,404].includes(error.status)?error.status:500;
+    return res.status(status).json({message:'No se ha podido consultar el catálogo importado',error:status===500?'imported_catalog_read_failed':error.message});
+  }
+};
+exports.getImportedPatientOdontogram = async (req,res) => {
+  try {
+    const {paciente,clinicId,fields}=await importedPatientContext(req);
+    const {projectEurodentOdontogram}=require('../lib/eurodent-odontogram');
+    const at=req.query.at;
+    if(at && (!/^\d{4}-\d{2}-\d{2}$/.test(at) || !require('../lib/cliniccloud-patient-history').dateOnly(at))) {
+      throw Object.assign(Error('imported_odontogram_date_invalid'),{status:400});
+    }
+    const envelopes=eurodentEnvelopes(fields).map(item=>item.envelope).filter(row=>!at || !row.record.Fecha
+      || (require('../lib/cliniccloud-patient-history').dateOnly(row.record.Fecha)||'')<=at);
+    const payload=projectEurodentOdontogram(envelopes,{cutoff:at||null,source_instance:envelopes[0]?.source_instance||null});
+    auditPatientResponse(req,{clinicIds:[clinicId],patients:[paciente],resultCount:envelopes.length,includesSensitive:true,
+      checks:['patients.view','patients.sensitive.view'].map(featureKey=>({featureKey,clinicIds:[clinicId]}))});
+    return res.json(payload);
+  }catch(error){
+    const handled=sendAccessPolicyError(error,res);if(handled)return handled;
+    const status=[400,403,404].includes(error.status)?error.status:500;
+    return res.status(status).json({message:'No se ha podido consultar el odontograma importado',error:status===500?'imported_odontogram_read_failed':error.message});
   }
 };
 
@@ -2387,7 +2469,7 @@ exports.deletePaciente = async (req, res) => {
 };
 
 for (const [name, action] of Object.entries({ getAllPacientes: 'patient.list', searchPacientes: 'patient.search', searchPatientContactTargets: 'patient.contact_targets',
-  checkDuplicates: 'patient.duplicate_check', getConsents: 'patient.legacy_consents.read', getPacienteById: 'patient.detail.read', getPacienteActivity: 'patient.activity.read' })) {
+  checkDuplicates: 'patient.duplicate_check', getConsents: 'patient.legacy_consents.read', getPacienteById: 'patient.detail.read', getImportedPatientHistory:'patient.detail.read', getImportedPatientOdontogram:'patient.detail.read', getImportedPatientCatalog:'patient.detail.read', getPacienteActivity: 'patient.activity.read' })) {
   exports[name] = patientReadAudit.wrap(action, exports[name]);
 }
 
