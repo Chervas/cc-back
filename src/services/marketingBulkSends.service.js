@@ -4822,6 +4822,12 @@ async function getReviewActivityReport(scope, options = {}) {
   return require('./reviewActivityReport.service').readReport(db, { clinicIds, locationIds, period: options.period });
 }
 
+async function getAttributedGoogleReviews(scope, options = {}) {
+  const effectiveScope = applyReviewClinicFilter(scope, options);
+  const clinicIds = (effectiveScope?.clinicIds || []).filter(Number.isInteger);
+  return { success: true, ...await require('./googleReviewHistory.service').listAttributedReviews(db, { ...options, clinicIds }) };
+}
+
 async function getGoogleReviewPublicationState({ clinicId, listId, itemId }) {
   const clinic = Number(clinicId);
   if (!Number.isInteger(clinic) || clinic <= 0) return { state: 'unknown', reason: 'invalid_clinic' };
@@ -5052,41 +5058,6 @@ async function getReviewRequestSummary(scope, options = {}) {
   const historicalMatches = await reviewHistory.countHistoricalMatches(db, clinicIds);
   const missingReviews = await reviewHistory.listMissingReviews(db, { clinicIds, locationIds: reviewBusinessLocationIds });
 
-  const [googleReviewsAttributedRow] = await db.sequelize.query(
-    `
-    ${reviewItemScopeCte}
-    SELECT COUNT(DISTINCT r.id) AS total
-    FROM BusinessProfileReviews r
-    WHERE ${googleReviewScopePredicate}
-      AND CAST(r.star_rating AS UNSIGNED) BETWEEN 1 AND 5
-      AND EXISTS (
-        SELECT 1
-        FROM MarketingPatientContactEvents e
-        INNER JOIN MarketingPatientLists l ON l.id = e.list_id
-        INNER JOIN MarketingPatientListItems i ON i.id = e.item_id
-        INNER JOIN review_scope_items si ON si.id = i.id
-        WHERE COALESCE(i.clinica_id, l.clinica_id) IN (:clinicIds)
-          AND l.objective_id = :objectiveId
-          AND (
-            JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
-            OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
-          )
-          AND e.event_type = 'review_rating_followup_sent'
-          AND JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.kind')) = 'review_google_link_followup'
-          AND e.occurred_at <= COALESCE(r.create_time, r.update_time, r.created_at)
-          AND e.occurred_at >= DATE_SUB(COALESCE(r.create_time, r.update_time, r.created_at), INTERVAL 72 HOUR)
-          AND NOT EXISTS (
-            SELECT 1
-            FROM MarketingPatientContactEvents te
-            WHERE te.list_id = e.list_id
-              AND te.item_id = e.item_id
-              AND te.event_type IN ('mass_campaign_test_sent', 'mass_campaign_test_failed')
-          )
-      )
-    `,
-    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID, reviewBusinessLocationIds }, type: QueryTypes.SELECT }
-  );
-
   const recentPrivateRatings = await db.sequelize.query(
     `
     ${reviewRatingsCte}
@@ -5271,7 +5242,7 @@ async function getReviewRequestSummary(scope, options = {}) {
       ratings_5: Number(ratingsRow?.ratings_5 || 0),
       google_reviews_matched: historicalMatches,
       google_review_history: missingReviews,
-      google_reviews_attributed: Number(googleReviewsAttributedRow?.total || 0),
+      google_reviews_attributed: historicalMatches,
       low_rating_reasons: (recentPrivateRatings || [])
         .map((row) => ({
           patient_name: normalizeText(row.patient_name) || 'Paciente',
@@ -11165,6 +11136,7 @@ module.exports = {
   getReviewRequestSummary,
   listReviewImportedLists,
   getMissingGoogleReviews,
+  getAttributedGoogleReviews,
   getReviewQueueSchedule,
   updateReviewQueueSchedule,
   getReviewActivityReport,

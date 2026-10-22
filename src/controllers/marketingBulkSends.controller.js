@@ -180,6 +180,21 @@ exports.getReviewActivityReport = async (req, res) => {
   }
 };
 
+exports.getAttributedGoogleReviews = async (req, res) => {
+  try {
+    const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });
+    await requireReviewHistoryAccess(req, scope);
+    res.set('Cache-Control', 'no-store');
+    return res.json(await marketingBulkSendsService.getAttributedGoogleReviews(scope, {
+      review_group_clinic_ids: req.query.review_group_clinic_ids,
+      limit: req.query.limit, offset: req.query.offset, state: req.query.state,
+      sort_by: req.query.sort_by, sort_direction: req.query.sort_direction, period: req.query.period,
+    }));
+  } catch (error) {
+    return sendError(res, error, 'Error cargando reseñas atribuidas a Clinicaclick');
+  }
+};
+
 exports.getReviewRequestAutomationStatus = async (req, res) => {
   try {
     // Mismo resolver y permisos que el summary, pero el servicio solo lee la

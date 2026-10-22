@@ -108,4 +108,64 @@ async function listMissingReviews(db, { clinicIds, locationIds = [], limit = 10,
     summary: Object.fromEntries(Object.keys(emptySummary).map(key => [key, Number(counts[key] || 0)])) };
 }
 
-module.exports = { countHistoricalMatches, listMissingReviews };
+const ATTRIBUTION_STATES = { all: '1=1', visible: "google_state='visible'", missing: "google_state='missing'", unobserved: "google_state='unobserved'" };
+const ATTRIBUTION_SORTS = { author: 'reviewer_name', patient: 'patient_name', rating: 'star_rating', link: 'link_sent_at', published: 'published_at', confidence: 'match_confidence', state: 'google_state' };
+
+async function listAttributedReviews(db, { clinicIds = [], limit = 10, offset = 0, state = 'all', sort_by = 'published', sort_direction = 'desc', period = 'all', now = new Date() } = {}) {
+  if (!Object.hasOwn(ATTRIBUTION_STATES, state) || !Object.hasOwn(ATTRIBUTION_SORTS, sort_by) || !['asc', 'desc'].includes(sort_direction)) {
+    throw Object.assign(new Error('Invalid attributed review filter or sort'), { status: 400 });
+  }
+  const range = period === 'all' ? null : reportRange(period, now);
+  const rangeInfo = { period, from: range?.from || null, to: range?.to || null };
+  limit = Math.min(50, Math.max(1, Number.parseInt(limit, 10) || 10));
+  offset = Math.min(100000, Math.max(0, Number.parseInt(offset, 10) || 0));
+  if (!clinicIds.length) return { items: [], total: 0, limit, offset, range: rangeInfo, state, undated_total: 0 };
+  // Share the conversion numerator's immutable receipts, not temporal estimates.
+  const cte = `WITH matches AS (${MATCHES}), ranked_matches AS (
+    SELECT matches.*,ROW_NUMBER() OVER (PARTITION BY location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
+      ORDER BY created_at,id) review_rank FROM matches
+  ), ranked_reviews AS (
+    SELECT r.*,ROW_NUMBER() OVER (PARTITION BY business_location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
+      ORDER BY google_missing_at IS NULL DESC,last_seen_at DESC,id DESC) review_rank
+    FROM BusinessProfileReviews r WHERE r.business_location_id IN (SELECT location_id FROM matches)
+  ), attributions AS (
+    SELECT m.id attribution_id,m.clinic_id,
+      COALESCE(r.reviewer_name,NULLIF(JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.reviewer_name')),'null')) reviewer_name,
+      COALESCE(NULLIF(TRIM(CONCAT_WS(' ',p.nombre,p.apellidos)),''),i.name) patient_name,
+      COALESCE(r.star_rating,CAST(JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.star_rating')) AS UNSIGNED)) star_rating,
+      f.occurred_at link_sent_at,
+      COALESCE(r.create_time,CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.review_create_time'))
+        REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$'
+        THEN STR_TO_DATE(LEFT(JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.review_create_time')),19),'%Y-%m-%dT%H:%i:%s') ELSE NULL END) published_at,
+      m.created_at attributed_at,
+      CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.confidence')) REGEXP '^[0-9]+([.][0-9]+)?$'
+        AND CAST(JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.confidence')) AS DECIMAL(8,4)) BETWEEN 0 AND 1
+        THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.confidence')) AS DECIMAL(8,4)) ELSE NULL END match_confidence,
+      CASE WHEN r.id IS NULL THEN 'unobserved' WHEN r.google_missing_at IS NOT NULL THEN 'missing' ELSE 'visible' END google_state
+    FROM ranked_matches m JOIN MarketingPatientContactEvents e ON e.id=m.id
+    JOIN MarketingPatientListItems i ON i.id=e.item_id AND i.list_id=e.list_id
+    LEFT JOIN Pacientes p ON p.id_paciente=COALESCE(e.paciente_id,i.paciente_id)
+    LEFT JOIN ranked_reviews r ON r.review_rank=1 AND r.business_location_id=m.location_id
+      AND BINARY SUBSTRING_INDEX(r.review_name,'/reviews/',-1)=BINARY SUBSTRING_INDEX(m.review_name,'/reviews/',-1)
+    LEFT JOIN MarketingPatientContactEvents f ON f.id=CAST(JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.followup_event_id')) AS UNSIGNED)
+      AND f.list_id=e.list_id AND f.item_id=e.item_id AND f.event_type='review_rating_followup_sent' AND f.channel='whatsapp'
+      AND JSON_UNQUOTE(JSON_EXTRACT(f.payload,'$.kind'))='review_google_link_followup'
+      AND JSON_UNQUOTE(JSON_EXTRACT(f.payload,'$.status'))='sent'
+    WHERE m.review_rank=1 AND m.location_id IS NOT NULL
+  )`;
+  const dateFilter = range ? 'published_at >= :start AND published_at < :end' : '1=1';
+  const options = { replacements: { clinicIds, limit, offset, start: range?.start, end: range?.end }, type: db.Sequelize.QueryTypes.SELECT };
+  const [counts] = await db.sequelize.query(`${cte} SELECT
+    COALESCE(SUM(${dateFilter}),0) total,COALESCE(SUM(published_at IS NULL),0) undated_total
+    FROM attributions WHERE ${ATTRIBUTION_STATES[state]}`, options);
+  const rows = await db.sequelize.query(`${cte} SELECT * FROM attributions
+    WHERE (${ATTRIBUTION_STATES[state]}) AND (${dateFilter})
+    ORDER BY ${ATTRIBUTION_SORTS[sort_by]} IS NULL,${ATTRIBUTION_SORTS[sort_by]} ${sort_direction.toUpperCase()},attribution_id DESC
+    LIMIT :limit OFFSET :offset`, options);
+  return { items: rows.map(row => ({ ...row, attribution_id: Number(row.attribution_id), clinic_id: Number(row.clinic_id),
+    star_rating: Number(row.star_rating) >= 1 && Number(row.star_rating) <= 5 ? Number(row.star_rating) : null,
+    match_confidence: row.match_confidence == null ? null : Number(row.match_confidence),
+  })), total: Number(counts?.total || 0), undated_total: Number(counts?.undated_total || 0), limit, offset, state, range: rangeInfo };
+}
+
+module.exports = { countHistoricalMatches, listMissingReviews, listAttributedReviews };

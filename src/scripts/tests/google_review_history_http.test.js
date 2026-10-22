@@ -18,6 +18,7 @@ function fixture({ allowed = true, valid = true } = {}) {
     '../services/marketingBulkSends.service': {
       getReviewRequestSummary: async (_scope, options) => { reads++; return { summary: {}, options }; },
       getMissingGoogleReviews: async (_scope, options) => { reads++; return { items: [], ...options }; },
+      getAttributedGoogleReviews: async (_scope, options) => { reads++; return { items: [], ...options }; },
       getReviewActivityReport: async (_scope, options) => { reads++; return { ...options }; },
       getReviewQueueSchedule: async () => { reads++; return {success:true}; },
       updateReviewQueueSchedule: async () => { reads++; return {success:true}; },
@@ -35,7 +36,7 @@ function fixture({ allowed = true, valid = true } = {}) {
   return { api: module.exports, req, res, reads: () => reads };
 }
 
-for (const handler of ['getReviewRequestSummary', 'getMissingGoogleReviews', 'getReviewActivityReport', 'getReviewQueueSchedule']) {
+for (const handler of ['getReviewRequestSummary', 'getMissingGoogleReviews', 'getAttributedGoogleReviews', 'getReviewActivityReport', 'getReviewQueueSchedule']) {
   test(handler + ' denies a foreign clinic before any review read', async () => {
     const f = fixture({ allowed: false }); await f.api[handler](f.req, f.res);
     assert.equal(f.res.code, 403); assert.equal(f.reads(), 0);
@@ -54,6 +55,14 @@ test('history routes follow the existing session authentication boundary', () =>
   const source = fs.readFileSync(path.resolve(__dirname, '../../routes/marketing.routes.js'), 'utf8');
   assert(source.indexOf("router.get('/review-requests/missing-reviews'") > source.indexOf('router.use(authMiddleware)'));
   assert(source.indexOf("router.get('/review-requests/activity'") > source.indexOf('router.use(authMiddleware)'));
+  assert(source.indexOf("router.get('/review-requests/attributed-reviews'") > source.indexOf('router.use(authMiddleware)'));
+});
+
+test('attribution filters and sort are forwarded without synchronization or writes', async () => {
+  const f=fixture(); Object.assign(f.req.query,{state:'missing',period:'7d',sort_by:'confidence',sort_direction:'asc'});
+  await f.api.getAttributedGoogleReviews(f.req,f.res);
+  for(const key of ['state','period','sort_by','sort_direction'])assert.equal(f.res.body[key],f.req.query[key]);
+  assert.equal(f.reads(),1);
 });
 
 test('activity forwards only period and the authorized clinic subset', async () => {

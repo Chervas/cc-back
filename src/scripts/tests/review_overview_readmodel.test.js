@@ -54,6 +54,7 @@ for (const scopeType of ['clinic', 'group']) {
     assert.equal(result.summary.possible_patients, null);
     assert.equal(result.summary.google_review_history.summary.total, 4);
     assert.equal(result.summary.google_reviews_matched, 4);
+    assert.equal(result.summary.google_reviews_attributed, 4);
     assert.equal(result.summary.whatsapp_available, true);
     assert.equal(result.summary.approved_template_available, true);
     if (scopeType === 'group') assert.equal(result.summary.clinic_statuses[0].possible_patients, null);

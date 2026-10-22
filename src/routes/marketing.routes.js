@@ -180,6 +180,7 @@ router.delete('/reactivation/lists/:id', marketingReactivationController.removeL
 router.get('/review-requests/summary', marketingBulkSendsController.getReviewRequestSummary);
 router.get('/review-requests/imported-lists', marketingBulkSendsController.listReviewImportedLists);
 router.get('/review-requests/missing-reviews', marketingBulkSendsController.getMissingGoogleReviews);
+router.get('/review-requests/attributed-reviews', marketingBulkSendsController.getAttributedGoogleReviews);
 router.get('/review-requests/activity', marketingBulkSendsController.getReviewActivityReport);
 router.get('/review-requests/automation-status', marketingBulkSendsController.getReviewRequestAutomationStatus);
 router.patch('/review-requests/automation', marketingBulkSendsController.setReviewRequestAutomation);
