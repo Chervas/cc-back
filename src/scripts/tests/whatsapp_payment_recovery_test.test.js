@@ -102,7 +102,7 @@ test('permission is checked before loading any asset and scope mismatch is rejec
   assert.equal(g.calls.length,0);
 });
 test('invalid request IDs and phone input do not reach transport',async()=>{
-  for(const patch of [{requestId:'bad'}, {to:''}, {to:'someone +34 600 000 001'}, {to:'123'}]){
+  for(const patch of [{requestId:'bad'}, {requestId:[input.requestId]}, {to:''}, {to:'someone +34 600 000 001'}, {to:'123'}]){
     const f=fixture();await assert.rejects(f.service.send({...input,...patch}));assert.equal(f.calls.length,0);
   }
 });

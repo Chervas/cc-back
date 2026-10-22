@@ -42,7 +42,7 @@ function createService({ db = require('../../models'), bulk = require('./marketi
   }
   async function previous(input, asset) {
     if (!input.requestId) return null;
-    if (!UUID.test(input.requestId)) fail('payment_test_request_invalid',400);
+    if (typeof input.requestId !== 'string' || !UUID.test(input.requestId)) fail('payment_test_request_invalid',400);
     const list = await db.MarketingPatientList.findOne({where:{clinica_id:input.clinicId,created_by:input.userId,
       source:'whatsapp_payment_recovery_test','criteria.request_id':input.requestId},order:[['id','DESC']]});
     if (!list) return null;
@@ -69,7 +69,7 @@ function createService({ db = require('../../models'), bulk = require('./marketi
     return result(state,await previous(input,state.asset));
   }
   async function send(input) {
-    if (!UUID.test(input.requestId || '')) fail('payment_test_request_invalid',400);
+    if (typeof input.requestId !== 'string' || !UUID.test(input.requestId)) fail('payment_test_request_invalid',400);
     const to = normalizePhoneDigits(input.to);
     if (typeof input.to !== 'string' || input.to.length > 32 || !/^[+0-9 ()-]+$/.test(input.to)
       || !to || !/^\d{10,15}$/.test(to)) fail('payment_test_phone_invalid',400);
