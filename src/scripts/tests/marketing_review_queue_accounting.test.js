@@ -9,19 +9,14 @@ const source = fs.readFileSync(
   'utf8'
 );
 
-const requestedPatientsQuery = source.match(
-  /async function getReviewRequestedPatientIds[\s\S]*?function mapReviewPatientItem/
-)?.[0] || '';
-assert.match(
-  requestedPatientsQuery,
-  /i\.sent_at IS NOT NULL[\s\S]*?OR i\.dispatch_status IN \('queued','sending','sent','delivered','read','replied'\)/,
-  'los envios materializados deben seguir excluyendo al paciente aunque se archive la lista'
-);
-assert.match(
-  requestedPatientsQuery,
-  /l\.status <> 'archived'[\s\S]*?i\.selected = TRUE[\s\S]*?l\.status IN \('ready','sending','sent','completed','scheduled','paused'\)/,
-  'solo una cola no archivada puede reservar destinatarios que aun no se han enviado'
-);
+const { reviewItemBlocksRepeat } = require('../../lib/review-request-history');
+assert(reviewItemBlocksRepeat({sent_at:new Date(),list_status:'archived'}),
+  'archivar una lista no olvida un envio real');
+assert(reviewItemBlocksRepeat({dispatch_status:'accepted',list_status:'archived'}),
+  'una aceptacion pendiente de webhook tambien reserva al destinatario');
+assert(reviewItemBlocksRepeat({status:'ready',selected:true,list_status:'paused'}));
+assert(!reviewItemBlocksRepeat({status:'ready',selected:true,list_status:'archived'}),
+  'una preparacion archivada sin envio no reserva al destinatario');
 
 const activeQueueQuery = source.match(
   /const \[activeQueueRow\][\s\S]*?\{ replacements:/

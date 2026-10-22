@@ -32,6 +32,7 @@ function harness() {
         if (name === '../../models') return db;
         if (name === 'crypto' || name === 'sequelize') return require(name);
         if (name === '../lib/whatsappAppointmentEligibility') return eligibility;
+        if (name === '../lib/bs-privacy-commercial-preferences') return { assertCommercialAllowed: async () => true };
         if (name === './marketingBulkSends.service') return bulk;
         if (name === './marketingEmailDispatch.service') return email || serviceStub;
         if (name.startsWith('../lib/')) return {};

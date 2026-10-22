@@ -2,6 +2,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), vm = require('node:vm');
 const { Op } = require('sequelize');
+const { hasPriorReviewRequest } = require('../../lib/review-request-history');
 function native(file, name, dependencies) {
   const source = fs.readFileSync(require.resolve(file), 'utf8');
   const assignment = source.indexOf('exports.' + name + ' =');
@@ -20,6 +21,7 @@ const asPlainObject = native(file, 'asPlainObject', {});
 const isReview = native(file, 'isReviewRequestList', { asPlainObject,
   isReviewTemplateUsage: value => value === 'solicitud_resena', normalizeKey: value => String(value || '').toLowerCase() });
 const eligible = native(file, 'isReviewImportedListEligible', { asPlainObject, normalizeText, OBJECTIVE_ID: 'mass_sends', isReviewRequestList: isReview });
+const excludePreviouslyRequestedReviews = native(file, 'excludePreviouslyRequestedReviews', { hasPriorReviewRequest });
 const row = patch => ({ id: 41, name: 'TESTONLY imported', objective_id: 'reactivate_patients',
   source: 'imported_file', status: 'draft', clinica_id: 66, criteria: {}, counters: { total: 4 }, ...patch });
 test('selector eligibility accepts imported clinic lists, not campaigns, reviews, manual lists or archived records', () => {
@@ -62,7 +64,8 @@ function audienceFixture(list = row()) {
         { paciente_id: null, clinica_id: 66, name: 'TESTONLY unlinked', status: 'ready' },
       ];
     } },
-    getReviewRequestedPatientIds: async () => new Set([1]), mapReviewItemsFromImportedListBase: map,
+    getReviewRequestHistory: async () => ({ patientIds:new Set([1]),phoneKeys:new Set() }),
+    excludePreviouslyRequestedReviews, mapReviewItemsFromImportedListBase: map,
     prepareReviewItemsForExclusions: async (items, actualScope, options) => { calls.push('exclusions'); assert.equal(actualScope, scope); assert(options.review_exclusion_rules); return items; },
     applyMarketingOptOutExclusions: async items => { calls.push('current_opt_outs'); return items; },
     sortReviewRequestItemsByRecentCare: items => { calls.push('recent_first'); return items; },
@@ -136,7 +139,8 @@ test('owned MySQL proves clinic/group filtering and preserves source lists and r
     const build = native(file, 'buildReviewItemsFromImportedList', { Op, OBJECTIVE_ID: 'mass_sends',
       scopeToWhere, parseReviewImportListId: value => value.review_import_list_id,
       MarketingPatientList: List, MarketingPatientListItem: Item, isReviewImportedListEligible: eligible,
-      getReviewRequestedPatientIds: async () => new Set([1]), mapReviewItemsFromImportedListBase: map,
+      getReviewRequestHistory: async () => ({ patientIds:new Set([1]),phoneKeys:new Set() }),
+      excludePreviouslyRequestedReviews, mapReviewItemsFromImportedListBase: map,
       prepareReviewItemsForExclusions: async items => items, applyMarketingOptOutExclusions: async items => items,
       sortReviewRequestItemsByRecentCare: items => items,
     });

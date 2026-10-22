@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { Op, QueryTypes, Sequelize } = require('sequelize');
 const db = require('../../models');
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
+const { readReviewRequestHistory, hasPriorReviewRequest } = require('../lib/review-request-history');
 const whatsappService = require('./whatsapp.service');
 const whatsappAccountHealthService = require('./whatsappAccountHealth.service');
 const whatsappChannelBindingsService = require('./whatsappChannelBindings.service');
@@ -3368,34 +3369,19 @@ function resolveReviewTreatmentLabel(appointment, source = 'manual_selection') {
 }
 
 async function getReviewRequestedPatientIds(scope) {
-  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
-  if (!clinicIds.length) return new Set();
-  const rows = await db.sequelize.query(
-    `
-    SELECT DISTINCT i.paciente_id AS paciente_id
-    FROM MarketingPatientListItems i
-    INNER JOIN MarketingPatientLists l ON l.id = i.list_id
-    WHERE i.paciente_id IS NOT NULL
-      AND i.clinica_id IN (:clinicIds)
-      AND l.objective_id = :objectiveId
-      AND (
-        JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.review_request')) IN ('true', '1')
-        OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria, '$.template_usage')) = 'solicitud_resena'
-      )
-      AND (
-        i.sent_at IS NOT NULL
-        OR i.dispatch_status IN ('queued','sending','sent','delivered','read','replied')
-        OR (
-          l.status <> 'archived'
-          AND i.selected = TRUE
-          AND i.status = 'ready'
-          AND l.status IN ('ready','sending','sent','completed','scheduled','paused')
-        )
-      )
-    `,
-    { replacements: { clinicIds, objectiveId: OBJECTIVE_ID }, type: QueryTypes.SELECT }
-  );
-  return new Set(rows.map((row) => Number(row.paciente_id)).filter(Number.isFinite));
+  return (await getReviewRequestHistory(scope)).patientIds;
+}
+
+async function getReviewRequestHistory(scope) {
+  return readReviewRequestHistory({ clinicIds: scope?.clinicIds || [],
+    query: (sql, replacements) => db.sequelize.query(sql, { replacements, type: QueryTypes.SELECT }) });
+}
+
+function excludePreviouslyRequestedReviews(items, history) {
+  return items.map(item => hasPriorReviewRequest(history, item) ? {
+    ...item, status: 'excluded_review_already_requested', selected: false, exclusion_reason: 'solicitud_previa',
+    reason: 'Este contacto ya recibió o tiene preparada una solicitud de reseña.',
+  } : item);
 }
 
 function mapReviewPatientItem({ patient, appointment = null, source = 'manual_selection' }) {
@@ -3474,7 +3460,7 @@ function getReviewRuleExclusionReason(item, rules = {}) {
   ) {
     return 'Sin tratamiento asociado';
   }
-  if (rules.no_visit_date && !item?.last_visit_at && !item?.appointment_at) {
+  if (rules.no_visit_date && !item?.last_visit_at && !item?.appointment_at && !resolveLastAttendedAppointmentDate(item)) {
     return 'Sin fecha de atención';
   }
   return null;
@@ -3541,8 +3527,8 @@ async function buildReviewRequestCandidateForAppointment(scope, body = {}) {
   const patientId = Number(patient?.id_paciente || plain.paciente_id || 0);
   if (!patientId) return { item: null, reason: 'patient_not_found' };
 
-  const alreadyRequested = await getReviewRequestedPatientIds(scope);
-  if (alreadyRequested.has(patientId)) {
+  const history = await getReviewRequestHistory(scope);
+  if (hasPriorReviewRequest(history, { paciente_id: patientId, phone: patient.telefono_movil })) {
     return { item: null, reason: 'patient_already_requested' };
   }
 
@@ -3723,7 +3709,7 @@ async function buildReviewItemsFromImportedList(scope, body = {}) {
     throw err;
   }
 
-  const [rows, alreadyRequested] = await Promise.all([
+  const [rows, history] = await Promise.all([
     MarketingPatientListItem.findAll({
       where: { list_id: importedListId, [Op.or]: [
         { clinica_id: { [Op.in]: scope.clinicIds || [] } },
@@ -3731,10 +3717,10 @@ async function buildReviewItemsFromImportedList(scope, body = {}) {
       ] },
       order: [['id', 'ASC']],
     }),
-    getReviewRequestedPatientIds(scope),
+    getReviewRequestHistory(scope),
   ]);
 
-  const items = mapReviewItemsFromImportedListBase(rows, importedList, alreadyRequested).map(item => {
+  const items = excludePreviouslyRequestedReviews(mapReviewItemsFromImportedListBase(rows, importedList, history.patientIds), history).map(item => {
     if (importedList.objective_id !== OBJECTIVE_ID || item.paciente_id || String(item.status).startsWith('excluded')) return item;
     return { ...item, status: 'excluded_no_patient', selected: false, exclusion_reason: 'sin_ficha_paciente',
       reason: 'El contacto importado no está vinculado a una ficha de paciente de la clínica.' };
@@ -3760,7 +3746,8 @@ async function buildItemsForReviewRequest(scope, body = {}) {
 
   const source = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource);
   const limit = clampInteger(body.limit, REVIEW_REQUEST_CANDIDATE_LIMIT, 1, REVIEW_REQUEST_CANDIDATE_LIMIT);
-  const alreadyRequested = await getReviewRequestedPatientIds(scope);
+  const history = await getReviewRequestHistory(scope);
+  const alreadyRequested = history.patientIds;
 
   if (source === 'manual_selection' || !CitaPaciente) {
     const requestedIds = Array.from(alreadyRequested).filter(Number.isInteger);
@@ -3886,7 +3873,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
       };
     });
     return sortReviewRequestItemsByRecentCare(
-      await prepareReviewItemsForExclusions(items, scope, body)
+      await prepareReviewItemsForExclusions(excludePreviouslyRequestedReviews(items, history), scope, body)
     );
   }
 
@@ -3936,7 +3923,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
     if (selected.size >= limit) break;
   }
 
-  const items = applyReviewRequestExclusions(Array.from(selected.values()), body);
+  const items = applyReviewRequestExclusions(excludePreviouslyRequestedReviews(Array.from(selected.values()), history), body);
   return sortReviewRequestItemsByRecentCare(
     await attachLatestAttendedAppointmentDate(items, scope)
   );
