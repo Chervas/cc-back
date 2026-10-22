@@ -7,7 +7,7 @@ test('payment dialog command uses real SQL locks, JSON replay and isolated nativ
 },async()=>withIsolatedCampaignMysql(async({sql,models,report})=>{
   models.MarketingPatientList=require('../../../models/marketingpatientlist')(sql,S.DataTypes);
   models.MarketingPatientListItem=require('../../../models/marketingpatientlistitem')(sql,S.DataTypes);
-  models.Message=sql.define('TestOnlyPaymentMessage',{status:S.STRING,metadata:S.JSON},{tableName:'testonly_payment_messages'});
+  models.Message=sql.define('TestOnlyPaymentMessage',{status:S.STRING,metadata:S.JSON,content:S.TEXT,sent_at:S.DATE},{tableName:'testonly_payment_messages'});
   await models.MarketingPatientList.sync();await models.MarketingPatientListItem.sync();await models.Message.sync();
   const asset={id:1,assetType:'whatsapp_phone_number',phoneNumberId:'123456',wabaId:'TEST-WABA',isActive:true,
     assignmentScope:'clinic',clinicaId:56,additionalData:{payment:{status:'missing_payment_method',last_error_code:131042,last_detected_at:'2030-01-02T09:00:00Z'}}};
@@ -81,6 +81,7 @@ test('payment dialog command uses real SQL locks, JSON replay and isolated nativ
   const actual=await integration.send({...input,requestId:'22222222-2222-4222-8222-222222222222'});
   assert.equal(actual.message_status,'pending');assert.equal(actual.recovered,false);assert.equal(calls,2);
   const stored=await models.Message.findByPk(actual.app_message_id);
+  assert.equal(stored.content,actual.preview);assert.equal(stored.sent_at,null);
   assert.equal(stored.metadata.payment_recovery_probe,true);assert.equal(stored.metadata.kind,'mass_campaign_test');
   assert.equal(await models.MarketingPatientContactEvent.count(),1);
   const diagnostic=await models.MarketingPatientList.findByPk(stored.metadata.list_id);
