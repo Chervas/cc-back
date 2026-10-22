@@ -58,10 +58,14 @@ function paginateExternalHistory(history,query={}) {
   if(filters.from&&!dateOnly(filters.from)||filters.to&&!dateOnly(filters.to)||filters.tooth&&!/^\d{2}$/.test(filters.tooth))throw Object.assign(Error('imported_history_filter_invalid'),{status:400});
   const filterHash=createHash('sha256').update(JSON.stringify(filters)).digest('hex').slice(0,16);let offset=0;
   if(query.cursor) {try {const cursor=JSON.parse(Buffer.from(String(query.cursor),'base64url').toString());if(cursor.filter!==filterHash||!Number.isInteger(cursor.offset)||cursor.offset<0||cursor.offset>1000000)throw Error();offset=cursor.offset;}catch{throw Object.assign(Error('imported_history_cursor_invalid'),{status:400});}}
+  // Navigation covers the complete authorized archive, not just this page or
+  // query. The caller has already removed financial entries the role cannot see.
+  const categoryCounts={};
+  for(const entry of history.entries)categoryCounts[entry.category]=(categoryCounts[entry.category]||0)+1;
   const entries=history.entries.filter(e=>(!filters.category||e.category===filters.category)&&(!filters.from||e.record_date&&e.record_date>=filters.from)&&(!filters.to||e.record_date&&e.record_date<=filters.to)
     &&(!filters.tooth||(e.anatomy?.teeth||[]).map(String).includes(filters.tooth)||e.sections.some(s=>s.items.some(i=>i.label==='Pieza / alcance en origen'&&i.value===filters.tooth)))
     &&(!filters.search||fold([e.title,e.author,...e.sections.flatMap(s=>s.items.map(i=>i.value))].join(' ')).includes(fold(filters.search))));
-  return {...history,entries:entries.slice(offset,offset+limit),total:entries.length,next_cursor:offset+limit<entries.length?Buffer.from(JSON.stringify({offset:offset+limit,filter:filterHash})).toString('base64url'):null};
+  return {...history,category_counts:categoryCounts,entries:entries.slice(offset,offset+limit),total:entries.length,next_cursor:offset+limit<entries.length?Buffer.from(JSON.stringify({offset:offset+limit,filter:filterHash})).toString('base64url'):null};
 }
 module.exports={eurodentEnvelopes,buildExternalPatientHistory,paginateExternalHistory,categoryFor};
 

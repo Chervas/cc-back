@@ -54,6 +54,27 @@ test('financial redaction precedes history totals and source catalogue never exp
   const catalogue=buildImportedClinicalCatalog([{context_json:JSON.stringify({Tratamiento:[{record:{ID:'1',Nombre:'Ficticio',Precio_euro:'999',Familia:'1'}}],FamTrat:[{record:{ID:'1',Familia:'Ficticia'}}],Doctor:[{record:{Nombre:'TESTONLY private doctor'}}],FPago:[{record:{Nombre:'TESTONLY finance'}}]})}]);
   assert.equal(catalogue.items.length,1);assert.doesNotMatch(JSON.stringify(catalogue),/999|private doctor|TESTONLY finance|Precio/);
 });
+test('complete category navigation survives an economic first page and filters without leaking financial categories to a clinical role',()=>{
+  const bundle=makeBundle(),records=[...bundle.patients[0].records];
+  for(let n=1;n<=40;n++)records.push(sourceRow('Factura',{ID:String(1000+n),IDP:'1',Fecha:'2026-10-20',total:'10'}));
+  const history=buildExternalPatientHistory(records.map(row=>({source:'eurodent',clinica_id:67,value:JSON.stringify({version:'eurodent_source_record/1',source_instance:bundle.source_instance,...row})})));
+  const admin=redactImportedHistoryFinancials(history,{mayViewFinancial:true});
+  const first=paginateExternalHistory(admin,{limit:40});
+  assert(first.entries.every(entry=>entry.category==='economic'));
+  assert.deepEqual(first.category_counts,{economic:41,budget:1,pending_work:1,historical:1,prior_state:1,profile:1});
+  const next=paginateExternalHistory(admin,{limit:40,cursor:first.next_cursor});
+  assert(next.entries.some(entry=>entry.category==='historical'));
+  assert.deepEqual(next.category_counts,first.category_counts);
+  for(const query of [{category:'historical'},{search:'anotacion historica'},{tooth:'36'},{from:'2020-01-01',to:'2020-12-31'}]){
+    const filtered=paginateExternalHistory(admin,{...query,limit:1});
+    assert(filtered.total>0);assert.deepEqual(filtered.category_counts,first.category_counts);
+  }
+  const clinical=redactImportedHistoryFinancials(history,{mayViewFinancial:false}),safe=paginateExternalHistory(clinical,{limit:1});
+  assert.deepEqual(safe.category_counts,{budget:1,pending_work:1,historical:1,prior_state:1,profile:1});
+  assert.equal(safe.total,5);assert(!Object.hasOwn(safe.category_counts,'economic'));
+  const hidden=paginateExternalHistory(clinical,{category:'economic'});
+  assert.equal(hidden.total,0);assert.equal(hidden.entries.length,0);assert.deepEqual(hidden.category_counts,safe.category_counts);
+});
 test('new source hold is checked independently of ClinicCloud and fails closed on read failure',async()=>{
   const {patientImportHeld}=require('../../lib/whatsappAppointmentEligibility');let legacy=0;
   const db={PatientImportedIdentity:{findOne:async options=>{assert.equal(options.where.messages_hold,true);return{id:1};}},sequelize:{query:async()=>{legacy++;return[[]];}}};
