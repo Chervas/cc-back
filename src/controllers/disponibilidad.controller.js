@@ -110,7 +110,11 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
     }
     const slots = solutionsForCalendar({ profile, context, date: query.fecha_local, stepMinutes: stepMin,
       limit: Math.min(parseIntSafe(query.limit) > 0 ? parseIntSafe(query.limit) : 500, 500), additionalStaffIds,
-      allowConfirmedOverlap: true,
+      // Calendar shading and day summaries mean genuinely available, not
+      // placeable after an operator accepts a conflict. Keep those exceptions
+      // in unavailable diagnostics and the independent /check confirmation.
+      // Explicit treatment planners retain their own proposal contract.
+      allowConfirmedOverlap: false,
       // A column identifying a member of an ALL team must retain the whole
       // team, never turn it into one chosen professional.
       selections: { [phase.key]: { doctor_id: phase.professionals.mode === 'all' ? null : doctor, installation_id: installation } },

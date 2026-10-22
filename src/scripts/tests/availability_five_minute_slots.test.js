@@ -7,7 +7,8 @@ const { createRequire } = require('node:module');
 const controllerPath = require.resolve('../../controllers/disponibilidad.controller');
 const localRequire = createRequire(controllerPath);
 const { solutionsForCalendar } = localRequire('../services/appointmentBookingAvailability.service');
-const { solveBookingProfile } = localRequire('../lib/booking-profile-solver');
+const { solveBookingProfile, occupancyForSolution } = localRequire('../lib/booking-profile-solver');
+const { attentionVisitOrigin } = localRequire('../lib/booking-attention-origin');
 const { resolveLocalInstant } = localRequire('../lib/voucher-schedule-calendar');
 const day = '2030-01-07', zone = 'Europe/Madrid';
 const instant = time => resolveLocalInstant(day, time + ':00', zone);
@@ -191,28 +192,115 @@ test('equipment rejection spells out visit duration and turnaround separately fr
   assert.match(reason.message, /Fictitious equipment.*45 min.*preparación.*10 min/);
 });
 
-test('ordinary profile grid, mini-calendar and exact check agree on overlap with no configured permissions', async () => {
+test('ordinary profile keeps confirmable overlaps unavailable in grid, slots and day summaries', async () => {
   const f=fixture({staffBusy:true}),phase=f.profile.phases[0];
   f.profile.version=1;delete phase.equipment_requirements;
   const busy={start:instant('12:45'),end:instant('13:30'),appointment_id:1,can_share:true};
   for(const target of [f.context.doctors.get(5),f.context.installations.get(9)]) {
     Object.assign(target,{allow_overlap_confirmation:false,overlap_capacity:1,busy:[busy]});
   }
+  f.context.doctors.get(5).name='Profesional ficticio ocupado';
+  const range={from_local:'12:45',to_local:'13:30'};
+  const explicit=solutionsForCalendar({profile:f.profile,context:f.context,date:day,stepMinutes:5,
+    fromLocal:range.from_local,toLocal:range.to_local,allowConfirmedOverlap:true});
+  assert.equal(explicit.length,1,'the explicit exception proposal contract is not removed');
+  assert.equal(explicit[0].requires_overlap_acknowledgement,true);
   const exact=await f.call('check',{doctor_id:'5',instalacion_id:'9',inicio_local:day+'T12:45',fin_local:day+'T13:30'});
   assert.equal(exact.statusCode,409);assert.equal(exact.body.can_force,false);
   assert.equal(exact.body.can_confirm_restrictions,true);
   assert.match(exact.body.booking_restriction_acknowledgement,/^[a-f0-9]{64}$/);
   assert.equal(exact.body.available,false,'no silent overlap on the exact check');
-  const summary=await f.call('summary',{dates:[day],doctor_id:'5',instalacion_id:'9'});
-  assert.equal(summary.body.by_day[day],true);
+  const flat=await f.call('slots',{...range,fecha_local:day,doctor_id:'5',instalacion_id:'9',include_unavailable:'true'});
+  assert.equal(flat.body.slots.length,0);
+  const flatReason=reasonAt(flat.body.unavailable_intervals,'12:45');
+  assert.equal(flatReason.can_confirm_restrictions,true);
+  assert.match(flatReason.message,/Profesional ficticio ocupado/);
+  const summary=await f.call('summary',{...range,dates:[day],doctor_id:'5',instalacion_id:'9'});
+  assert.equal(summary.body.by_day[day],false,'confirmable is not the same as available');
   for(const mode of ['doctor','installation']) {
-    const query={dates:[day],mode,column_ids:mode==='doctor'?[5]:[9],...(mode==='doctor'?{peer_instalacion_ids:[9]}:{peer_doctor_ids:[5]})};
+    const query={...range,dates:[day],mode,column_ids:mode==='doctor'?[5]:[9],...(mode==='doctor'?{peer_instalacion_ids:[9]}:{peer_doctor_ids:[5]})};
     const grid=await f.call('grid',query),row=grid.body.rows[0];
     const slots=mode==='doctor'?row.slots_by_instalacion[9]:row.slots_by_doctor[5];
-    const overlap=slots.find(slot=>slot.start_local===day+'T12:45');
-    assert(overlap);assert.equal(overlap.requires_overlap_acknowledgement,true);
+    assert.equal(slots.length,0,'both calendar orientations paint occupied starts unavailable');
+    const intervals=mode==='doctor'?row.unavailable_by_instalacion[9]:row.unavailable_by_doctor[5];
+    const reason=reasonAt(intervals,'12:45');
+    assert.equal(reason.can_confirm_restrictions,true,'the explicit exception stays available through the conflict dialog');
+    assert.match(reason.message,/Profesional ficticio ocupado/);
+    const matrixSummary=await f.call('summary',query);
+    assert.equal(matrixSummary.body.by_day[day],false);
     assert.doesNotMatch(JSON.stringify(grid.body),/appointment_id|patient_id|paciente_id/);
   }
+});
+
+test('a busy clinician in another room stays red while an actually free alternative still makes the day available', async () => {
+  const f=fixture({staffBusy:true}),phase=f.profile.phases[0];
+  f.profile.version=1;delete phase.equipment_requirements;
+  phase.professionals.ids=[5,8];
+  f.context.doctors.get(5).name='Profesional ficticio ocupado';
+  f.context.doctors.get(5).busy=[{start:instant('12:45'),end:instant('13:30'),appointment_id:1,can_share:true}];
+  f.context.installations.get(9).busy=[];
+  const query={dates:[day],mode:'installation',column_ids:[9],peer_doctor_ids:[5,8],from_local:'12:45',to_local:'13:30'};
+  const grid=await f.call('grid',query),row=grid.body.rows[0];
+  assert.equal(row.slots_by_doctor[5].length,0);
+  assert.equal(row.slots_by_doctor[8].length,1);
+  assert.match(reasonAt(row.unavailable_by_doctor[5],'12:45').message,/Profesional ficticio ocupado/);
+  assert.equal((await f.call('summary',query)).body.by_day[day],true,'summary remains an OR of genuinely free alternatives');
+});
+
+test('strict grid retains verified v4 same-start 5/15 preparations and protects later continuous INDIBA care', async () => {
+  const f=fixture({duration:30}),window={start:instant('09:30'),end:instant('13:30')};
+  const setup={mode:'start_only',start_minutes:5,start_window_minutes:15};
+  const attended={mode:'start_continuous',start_minutes:5,start_window_minutes:15};
+  const makeProfile=(key,room,machine,policy)=>({version:4,phases:[{key,label:key,start_offset_minutes:0,duration_minutes:30,
+    professionals:{mode:'any',ids:[5],preferred_id:5},installation_ids:[room],equipment_requirements:[{equipment_ids:[machine]}],
+    staff_attention:[policy],preparation_sharing:{mode:'same_start'}}]});
+  Object.assign(f.context.doctors.get(5),{name:'Profesional ficticio compartido',clinic_id:1,busy:[],attention_visits:[]});
+  for(const [room,machine] of [[9,6],[10,7],[11,8],[12,9]]) {
+    f.context.installations.set(room,{name:`Sala ficticia ${room}`,resource_key:`installation:${room}`,windows:[window],busy:[],profesionales_permitidos:[5]});
+    f.context.equipment.set(machine,{id:machine,name:`Equipo ficticio ${machine}`,status:'available',installation_ids:new Set([room]),
+      turnaround_minutes:0,busy:[],attention_policy:{mode:'continuous',patient_preparation_minutes:0}});
+  }
+  let appointmentId=0;
+  const reserve=profile=>{
+    const solution=solveBookingProfile({profile,start:instant('12:00'),...f.context});
+    assert(solution);
+    const id=++appointmentId,occupancies=occupancyForSolution(solution).map(row=>({...row,appointment_id:id}));
+    for(const row of occupancies) {
+      const target=row.resource_kind==='doctor'?f.context.doctors.get(row.doctor_id)
+        :row.resource_kind==='installation'?f.context.installations.get(row.installation_id):f.context.equipment.get(Number(row.resource_key.split(':')[1]));
+      target.busy.push({start:row.start_at,end:row.end_at,appointment_id:id});
+    }
+    const appointment={id_cita:id,clinica_id:1,inicio:solution.start_at,fin:solution.end_at,
+      booking_attention_snapshot:{version:1,profile,phases:solution.phases,capacity_fully_verified:true,attention_requirements_pending:[]}};
+    f.context.doctors.get(5).attention_visits.push(attentionVisitOrigin({appointment,doctorId:5,occupancies}));
+    return solution;
+  };
+  reserve(makeProfile('preso',9,6,setup));
+  reserve(makeProfile('ems',10,7,setup));
+  const indiba=makeProfile('indiba',11,8,attended);
+  Object.assign(f.profile,indiba);
+  const query={dates:[day],mode:'installation',column_ids:[11],context_doctor_id:'5',from_local:'12:00',to_local:'13:00'};
+  const grid=await f.call('grid',query),row=grid.body.rows[0];
+  const shared=row.slots.find(slot=>slot.start_local===day+'T12:00');
+  assert(shared,'two fixed initial preparations leave the third real five-minute preparation available');
+  assert.notEqual(shared.requires_overlap_acknowledgement,true,'clinical sharing does not become an ordinary override');
+  assert.equal(reasonAt(row.unavailable_intervals,'12:00'),undefined);
+  assert(!row.slots.some(slot=>slot.start_local===day+'T12:05'),'a different start cannot borrow the sharing window');
+  assert.equal((await f.call('summary',query)).body.by_day[day],true);
+  const solution=reserve(indiba);
+  assert.deepEqual(solution.phases[0].staff_intervals.map(row=>[row.kind,row.start_at,row.end_at]),[
+    ['start',instant('12:10').toISOString(),instant('12:15').toISOString()],
+    ['continuous',instant('12:15').toISOString(),instant('12:30').toISOString()],
+  ]);
+  Object.assign(f.profile,makeProfile('fourth',12,9,setup));
+  const fourth=await f.call('grid',{...query,column_ids:[12]});
+  assert(!fourth.body.rows[0].slots.some(slot=>slot.start_local===day+'T12:00'),'a fourth preparation cannot invent another five-minute window');
+  const valuation=makeProfile('valuation',12,9,{mode:'continuous',patient_preparation_minutes:0});
+  delete valuation.phases[0].preparation_sharing;
+  Object.assign(f.profile,valuation);
+  const blocked=await f.call('grid',{...query,column_ids:[12]});
+  assert(!blocked.body.rows[0].slots.some(slot=>slot.start_local===day+'T12:15'),'continuous INDIBA care remains occupied after the setup window');
+  assert(reasonAt(blocked.body.rows[0].unavailable_intervals,'12:15'));
 });
 
 test('foreign reservations never disclose their catalog name or other private fields in explanations', async () => {
