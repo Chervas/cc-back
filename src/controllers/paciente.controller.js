@@ -57,7 +57,7 @@ const {
   scopePatientCustomFields,
   buildClinicCloudPatientHistory,
 } = require('../lib/cliniccloud-patient-history');
-const { buildExternalPatientHistory, paginateExternalHistory, eurodentEnvelopes, redactImportedHistoryFinancials, buildImportedClinicalCatalog } = require('../lib/external-patient-history');
+const { buildExternalPatientHistory, paginateExternalHistory, eurodentEnvelopes, redactImportedHistoryFinancials, buildImportedClinicalCatalog, validateImportedHistoryScope } = require('../lib/external-patient-history');
 
 const normalizePhone = (phone) => {
   return normalizePhoneDigits(phone);
@@ -1311,7 +1311,7 @@ exports.getPacienteById = async (req, res) => {
 
 // Imported clinical archives share the normal patient/clinic sensitive ACL.
 // They never create an encounter and are not exposed as editable custom fields.
-async function importedPatientContext(req) {
+async function importedPatientContext(req,{requireFinancial=false}={}) {
   const clinicId = Number(req.query.clinic_id);
   if (!Number.isSafeInteger(clinicId) || clinicId <= 0) throw Object.assign(Error('imported_history_clinic_required'), { status: 400 });
   const paciente = await findPacienteByIdentifier(req.params.id, {
@@ -1323,6 +1323,9 @@ async function importedPatientContext(req) {
   if (!readableClinicIds.includes(clinicId) || !await canViewSensitivePatientData(req, [clinicId])) {
     throw Object.assign(Error('patient_sensitive_data_forbidden'), { status: 403 });
   }
+  const mayViewFinancial=await canUserAccessFeature({actorId:Number(req.userData?.userId),featureKey:'billing.reports.view',clinicId}).catch(()=>false);
+  if(requireFinancial&&!mayViewFinancial)throw Object.assign(Error('imported_history_economy_forbidden'),{status:403,
+    details:{feature_key:'billing.reports.view',clinic_ids:[clinicId]}});
   const fields = await PatientCustomField.findAll({
     where: { paciente_id: paciente.id_paciente, clinica_id: clinicId, source: { [Op.in]: ['cliniccloud','eurodent'] } },
     attributes: ['field_key','label','value','value_type','source','clinica_id','source_column','last_imported_at'],
@@ -1334,15 +1337,15 @@ async function importedPatientContext(req) {
     WHERE r.patient_id=:patientId AND r.clinic_id=:clinicId ORDER BY r.id`,
     {replacements:{patientId:paciente.id_paciente,clinicId},type:QueryTypes.SELECT});
   fields.push(...imported.map(row=>({clinica_id:row.clinic_id,source:'eurodent',field_key:String(row.id),value:row.record_json,last_imported_at:row.imported_at})));
-  const mayViewFinancial=await canUserAccessFeature({actorId:Number(req.userData?.userId),featureKey:'billing.reports.view',clinicId}).catch(()=>false);
   return { paciente, clinicId, fields, mayViewFinancial };
 }
 exports.getImportedPatientHistory = async (req,res) => {
   try {
-    const {paciente,clinicId,fields,mayViewFinancial} = await importedPatientContext(req);
+    const scope=validateImportedHistoryScope(req.query.scope);
+    const {paciente,clinicId,fields,mayViewFinancial} = await importedPatientContext(req,{requireFinancial:scope==='economy'});
     const payload = paginateExternalHistory(redactImportedHistoryFinancials(buildExternalPatientHistory(fields),{mayViewFinancial}),req.query);
     auditPatientResponse(req,{clinicIds:[clinicId],patients:[paciente],resultCount:payload.entries.length,includesSensitive:true,
-      checks:['patients.view','patients.sensitive.view'].map(featureKey=>({featureKey,clinicIds:[clinicId]}))});
+      checks:['patients.view','patients.sensitive.view',...(scope==='economy'?['billing.reports.view']:[])].map(featureKey=>({featureKey,clinicIds:[clinicId]}))});
     return res.json(payload);
   } catch (error) {
     const handled=sendAccessPolicyError(error,res);if(handled)return handled;

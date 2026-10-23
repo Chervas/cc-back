@@ -12,8 +12,8 @@ const matches = (row, where) => Reflect.ownKeys(where).every(key => {
   return value && typeof value === 'object' ? value[require('sequelize').Op.in]?.includes(row[key]) : row[key] === value;
 });
 function fixture() {
-  const clinics = [{ id_clinica: 10, grupoClinicaId: 1, nombre_clinica: 'Principal ficticia' },
-    { id_clinica: 20, grupoClinicaId: 1, nombre_clinica: 'Secundaria ficticia' }, { id_clinica: 30, grupoClinicaId: 2 }];
+  const clinics = [{ id_clinica: 10, grupoClinicaId: 1, nombre_clinica: 'Principal ficticia', configuracion: { disciplinas: ['nutricion'] } },
+    { id_clinica: 20, grupoClinicaId: 1, nombre_clinica: 'Secundaria ficticia', configuracion: { disciplinas: ['nutricion'] } }, { id_clinica: 30, grupoClinicaId: 2 }];
   const patient = { id_paciente: 1, public_id: 'pac_ficticio', clinica_id: 10, clinica: clinics[0], nombre: 'Ficticio', apellidos: 'Nutrición' };
   const state = { rows: [], reports: [], assets: [], calls: [], grants: [10, 20], deniedFeatures: [], links: [{ id: 1, paciente_id: 1, clinica_id: 20 }],
     appointments: [
@@ -129,6 +129,50 @@ test('independent measurement defaults to primary clinic and authenticated autho
   assert.deepEqual(await f.resolve({}), { clinic_id: 10, appointment_id: null, treatment_id: null, professional_id: 7 });
   assert.deepEqual(f.state.calls.filter(c => c.name === 'permission').map(c => [c.clinicId, c.featureKey]),
     [[10, 'patients.view'], [10, 'patients.sensitive.view'], [10, 'nutrition.workspace.view'], [10, 'nutrition.measurements.create']]);
+});
+test('clinical permissions do not enable a new measurement in a dental-only clinic', async () => {
+  const f = fixture();
+  const clinic = await f.db.Clinica.findByPk(20);
+  clinic.configuracion = { disciplinas: ['dental'] };
+  const findClinic = f.db.Clinica.findByPk;
+  let lockedRead;
+  f.db.Clinica.findByPk = async (id, options) => { lockedRead = options; return findClinic(id); };
+  await assert.rejects(f.save({ clinic_id: 20 }), e => e.status === 403 && e.code === 'nutrition_area_not_configured');
+  assert.equal(f.state.rows.length, 0);
+  assert.equal(lockedRead.transaction, f.tx);
+  assert.equal(lockedRead.lock, 'UPDATE');
+  assert(lockedRead.attributes.includes('configuracion'));
+});
+test('removed, missing or malformed areas cannot fall back to a legacy Nutrition value', async () => {
+  for (const config of [null, {}, { disciplinas: [], disciplina: 'nutricion' },
+    { disciplinas: null, disciplina: 'nutricion' }, { disciplinas: 'nutricion', disciplina: 'nutricion' }, '{invalid']) {
+    const f = fixture();
+    (await f.db.Clinica.findByPk(10)).configuracion = config;
+    await assert.rejects(f.save({}), e => e.status === 403 && e.code === 'nutrition_area_not_configured');
+    assert.equal(f.state.rows.length, 0);
+  }
+});
+test('configured Nutrition and its supported legacy alias allow the first measurement', async () => {
+  for (const config of [{ disciplinas: ['dental', 'Nutrición'] }, { disciplinas: [{ code: 'nutricion_clinica' }] },
+    { disciplina: 'nutricion' }, JSON.stringify({ disciplinas: ['nutricion'] })]) {
+    const f = fixture();
+    (await f.db.Clinica.findByPk(10)).configuracion = config;
+    assert.equal((await f.save({})).clinic_id, 10);
+    assert.equal(f.state.rows.length, 1);
+  }
+});
+test('removing Nutrition preserves authorized historical measurement and report reads', async () => {
+  const f = fixture();
+  const measurement = await f.save({ notes: 'Historia conservada' });
+  const original = JSON.stringify(f.state.rows);
+  (await f.db.Clinica.findByPk(10)).configuracion = { disciplinas: ['dental'] };
+  const workspace = await f.service.getPatientNutritionWorkspace('pac_ficticio', { actorUserId: 7, clinicId: 10 });
+  assert.equal(workspace.measurements.length, 1);
+  assert.equal(workspace.latest.id, measurement.id);
+  const report = await f.service.getNutritionMeasurementReport('pac_ficticio', measurement.id, { actorUserId: 7 });
+  assert.equal(report.measurement.id, measurement.id);
+  await assert.rejects(f.save({}), e => e.code === 'nutrition_area_not_configured');
+  assert.equal(JSON.stringify(f.state.rows), original);
 });
 test('a linked secondary-clinic appointment supplies the clinic and treatment', async () => {
   const f = fixture();

@@ -75,6 +75,88 @@ test('complete category navigation survives an economic first page and filters w
   const hidden=paginateExternalHistory(clinical,{category:'economic'});
   assert.equal(hidden.total,0);assert.equal(hidden.entries.length,0);assert.deepEqual(hidden.category_counts,safe.category_counts);
 });
+test('mixed Historial and Hist_Borr rows classify by financial evidence without losing source deletion provenance',()=>{
+  const records=[];
+  for(const table of ['Historial','Hist_Borr']){
+    records.push({...sourceRow(table,{ID:String(records.length+1),Tipolin:'T',Obs:'TESTONLY clinical annotation'}),catalog:{code:'TESTONLY'}});
+    for(const evidence of [{catalog:{code:'COBR'}},{catalog:{code:'0213'}},{record:{Tipolin:'C'}},{record:{Tipolin:'A'}}]){
+      records.push({...sourceRow(table,{ID:String(records.length+1),Tipolin:'T',Precio_euro:'17.25',...evidence.record}),catalog:evidence.catalog||{code:'TESTONLY'}});
+    }
+  }
+  const history=buildExternalPatientHistory(records.map(row=>({source:'eurodent',clinica_id:67,value:{version:'eurodent_source_record/1',source_instance:'testonly-mixed-archive',...row}})));
+  assert.equal(history.entries.filter(entry=>entry.category==='economic').length,8);
+  assert.equal(history.entries.filter(entry=>entry.category==='historical').length,1);
+  assert.equal(history.entries.filter(entry=>entry.category==='deleted_history').length,1);
+  const deleted=history.entries.filter(entry=>entry.source_document.table==='Hist_Borr');
+  assert.equal(deleted.length,5);
+  for(const entry of deleted){
+    assert.equal(entry.source_deleted,true);assert.match(entry.content_note,/eliminado en origen/);
+    assert(entry.source_document.record_id);assert(entry.source_document.row_sha256);
+  }
+  const safe=redactImportedHistoryFinancials(history);
+  assert.equal(safe.entries.length,2);
+  assert.deepEqual(new Set(safe.entries.map(entry=>entry.category)),new Set(['historical','deleted_history']));
+  assert.doesNotMatch(JSON.stringify(safe),/17\.25/);
+});
+test('archive scopes partition authorized categories before navigation counts, filters and pagination, and bind every cursor to its domain',()=>{
+  const bundle=makeBundle(),records=[...bundle.patients[0].records,
+    sourceRow('Comentarios',{ID:'101',Fecha:'2022-01-01',Obs:'TESTONLY archive comment'}),
+    sourceRow('Hist_Borr',{ID:'102',Fecha:'2022-01-01',Tipolin:'T',Obs:'TESTONLY deleted clinical annotation'}),
+    sourceRow('Hist_Borr',{ID:'103',Fecha:'2022-01-01',Tipolin:'C',Precio_euro:'17.25'}),
+    {...sourceRow('Historial',{ID:'104',Fecha:'2022-01-01',Tipolin:'T',Precio_euro:'17.25'}),catalog:{code:'0213'}},
+    sourceRow('Paciente',{ID:'105','NºHist':'TESTONLY second source profile'}),
+  ];
+  const history=buildExternalPatientHistory(records.map(row=>({source:'eurodent',clinica_id:67,value:{version:'eurodent_source_record/1',source_instance:bundle.source_instance,...row}})));
+  const domains={clinical:{historical:1,prior_state:1,pending_work:1,comment:1,deleted_history:1},economy:{budget:1,economic:3},profile:{profile:2}};
+  assert.equal(paginateExternalHistory(history).total,11);
+  for(const [scope,counts] of Object.entries(domains)){
+    const first=paginateExternalHistory(history,{scope,limit:1});
+    assert.deepEqual(first.category_counts,counts);assert.equal(first.total,Object.values(counts).reduce((a,b)=>a+b,0));assert(first.next_cursor);
+    const ids=[first.entries[0].id];let cursor=first.next_cursor;
+    while(cursor){
+      const page=paginateExternalHistory(history,{scope,limit:1,cursor});
+      assert.deepEqual(page.category_counts,counts);assert(page.entries.every(entry=>Object.hasOwn(counts,entry.category)));
+      ids.push(...page.entries.map(entry=>entry.id));cursor=page.next_cursor;
+    }
+    assert.equal(new Set(ids).size,first.total);
+    const otherCategory=scope==='economy'?'historical':'economic';
+    const excluded=paginateExternalHistory(history,{scope,category:otherCategory});
+    assert.equal(excluded.total,0);assert.deepEqual(excluded.category_counts,counts);
+    const searched=paginateExternalHistory(history,{scope,search:'TESTONLY archive comment'});
+    assert.deepEqual(searched.category_counts,counts);
+    for(const otherScope of [...Object.keys(domains).filter(value=>value!==scope),undefined]){
+      assert.throws(()=>paginateExternalHistory(history,{scope:otherScope,limit:1,cursor:first.next_cursor}),error=>error.status===400&&error.message==='imported_history_cursor_invalid');
+    }
+  }
+  const all=paginateExternalHistory(history,{limit:1});
+  assert.throws(()=>paginateExternalHistory(history,{scope:'clinical',cursor:all.next_cursor}),/cursor_invalid/);
+  const safe=paginateExternalHistory(redactImportedHistoryFinancials(history),{scope:'clinical',limit:1});
+  assert.deepEqual(safe.category_counts,domains.clinical);assert.equal(safe.total,5);
+  for(const scope of ['','all','Clinical','budget','__proto__',null,[],{},['clinical','economy']]){
+    assert.throws(()=>paginateExternalHistory(history,{scope}),error=>error.status===400&&error.message==='imported_history_scope_invalid');
+  }
+});
+test('clinical scope removes financial fields before search even for a billing administrator and preserves the original clinical note',()=>{
+  const row=sourceRow('Hist_Borr',{ID:'700',Fecha:'2020-04-08',Tipolin:'T',Precio_euro:'987654.32',Num:'TESTONLY finance reference',Obs:'TESTONLY clinical observation',Obs_fra:'TESTONLY invoice-only remark'});
+  const history=buildExternalPatientHistory([{source:'eurodent',clinica_id:67,value:{version:'eurodent_source_record/1',source_instance:'testonly-clinical-redaction',...row}}]);
+  const original=JSON.stringify(history),admin=redactImportedHistoryFinancials(history,{mayViewFinancial:true});
+  const clinical=paginateExternalHistory(admin,{scope:'clinical'});
+  assert.equal(clinical.total,1);assert.equal(clinical.financial_values_visible,false);
+  assert.equal(clinical.entries[0].category,'deleted_history');assert.equal(clinical.entries[0].source_deleted,true);
+  assert.match(JSON.stringify(clinical),/TESTONLY clinical observation/);
+  assert.doesNotMatch(JSON.stringify(clinical),/987654|finance reference|invoice-only remark|Importe original|Observaciones de factura|Documento en origen/);
+  assert.equal(paginateExternalHistory(admin,{scope:'clinical',search:'987654.32'}).total,0);
+  assert.equal(paginateExternalHistory(admin,{scope:'clinical',search:'invoice-only remark'}).total,0);
+  assert.equal(JSON.stringify(history),original);
+  assert.match(JSON.stringify(paginateExternalHistory(admin)),/987654/);
+  const economy=paginateExternalHistory(admin,{scope:'economy'});
+  assert.equal(economy.total,1);assert.deepEqual(economy.category_counts,{economic:1});
+  assert.equal(economy.entries[0].id,clinical.entries[0].id);
+  assert.equal(economy.entries[0].category,'economic');assert.equal(economy.entries[0].source_category,'deleted_history');
+  assert.equal(economy.entries[0].source_deleted,true);assert.equal(economy.entries[0].source_document.table,'Hist_Borr');
+  assert.match(JSON.stringify(economy),/987654/);assert.match(economy.entries[0].content_note,/no acredita un tratamiento realizado/);
+  assert.equal(paginateExternalHistory(admin,{scope:'economy',search:'987654.32'}).total,1);
+});
 test('new source hold is checked independently of ClinicCloud and fails closed on read failure',async()=>{
   const {patientImportHeld}=require('../../lib/whatsappAppointmentEligibility');let legacy=0;
   const db={PatientImportedIdentity:{findOne:async options=>{assert.equal(options.where.messages_hold,true);return{id:1};}},sequelize:{query:async()=>{legacy++;return[[]];}}};

@@ -13,6 +13,7 @@ const medicalAreaContracts = require('./medicalAreaContracts.service');
 const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { assertUserCanAccessFeature, getAccessibleClinicIdsForFeature } = require('../lib/access-policy');
 const { createNutritionMeasurementContextResolver } = require('./nutritionMeasurementContext.service');
+const { assertNutritionAreaConfigured } = require('../lib/nutrition-area-scope');
 const resolveMeasurementContext = createNutritionMeasurementContextResolver({ db, assertUserCanAccessFeature });
 const { createNutritionReadContextResolver, nutritionSnapshotDependencies, isNutritionSnapshotReadable } = require('./nutritionReadContext.service');
 const resolveReadContext = createNutritionReadContextResolver({ db, assertUserCanAccessFeature, getAccessibleClinicIdsForFeature });
@@ -3120,6 +3121,16 @@ async function findNutritionMeasurementForPatient(patientIdentifier, measurement
   return { patient, measurement, context };
 }
 
+// Writers use the measurement's persisted clinic, after patient/feature access
+// has been checked. A patient or report snapshot is not current area metadata.
+async function assertNutritionClinicWritable(clinicId, transaction) {
+  const clinic = await db.Clinica.findByPk(Number(clinicId), {
+    attributes: ['id_clinica', 'configuracion'],
+    ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {}),
+  });
+  assertNutritionAreaConfigured(clinic);
+}
+
 function decodeClinicalPhotoPayload(payload = {}) {
   const raw = String(payload.data_url || payload.dataUrl || payload.base64 || payload.file_data || payload.fileData || '').trim();
   if (!raw) {
@@ -3150,24 +3161,28 @@ async function addNutritionMeasurementClinicalPhoto(patientIdentifier, measureme
   const { patient, measurement } = await findNutritionMeasurementForPatient(patientIdentifier, measurementIdentifier, {
     actorUserId, featureKey: 'nutrition.measurements.create',
   });
-  const decoded = decodeClinicalPhotoPayload(payload);
-  const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
-    purpose: 'nutrition_clinical_photo',
-    clinicId: measurement.clinic_id || patient.clinica_id,
-    patientId: patient.id_paciente,
-    ownerType: 'patient_nutrition_measurement',
-    ownerId: measurement.id,
-    contentType: decoded.contentType,
-    buffer: decoded.buffer,
-    originalFilename: payload.original_filename || payload.filename || payload.name || null,
-    createdBy: actorUserId,
-    metadata: {
-      caption: payload.caption ? String(payload.caption).trim().slice(0, 500) : null,
-      measurement_id: measurement.id,
-      measured_at: measurement.measured_at,
-      profile_code: measurement.profile_code,
-      formula_version: measurement.formula_version || FORMULA_VERSION,
-    },
+  const asset = await db.sequelize.transaction(async transaction => {
+    await assertNutritionClinicWritable(measurement.clinic_id, transaction);
+    const decoded = decodeClinicalPhotoPayload(payload);
+    return clinicalPrivateStorage.storeClinicalPrivateAsset({
+      purpose: 'nutrition_clinical_photo',
+      clinicId: measurement.clinic_id,
+      patientId: patient.id_paciente,
+      ownerType: 'patient_nutrition_measurement',
+      ownerId: measurement.id,
+      contentType: decoded.contentType,
+      buffer: decoded.buffer,
+      originalFilename: payload.original_filename || payload.filename || payload.name || null,
+      createdBy: actorUserId,
+      transaction,
+      metadata: {
+        caption: payload.caption ? String(payload.caption).trim().slice(0, 500) : null,
+        measurement_id: measurement.id,
+        measured_at: measurement.measured_at,
+        profile_code: measurement.profile_code,
+        formula_version: measurement.formula_version || FORMULA_VERSION,
+      },
+    });
   });
   return clinicalPhotoAssetToJson(asset);
 }
@@ -3474,6 +3489,7 @@ async function persistNutritionMeasurementReportSnapshot(patientIdentifier, meas
   }
   try {
     return await db.sequelize.transaction(async transaction => {
+      await assertNutritionClinicWritable(reportData.measurement.clinic_id, transaction);
       // All canonical active/final writers serialize on this existing row. The
       // report table has no unique-final constraint, so locking only a missing
       // final row would not protect the first concurrent finalization.
@@ -4108,28 +4124,35 @@ async function persistFinalNutritionReportPdf(snapshot, reportData, buffer, file
   if (!db.ClinicalPrivateAsset || !db.PatientNutritionReport) return null;
 
   try {
-    const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
-      purpose: 'nutrition_report_pdf',
-      clinicId: reportData.patient.clinic_id,
-      patientId: reportData.patient.id,
-      ownerType: 'patient_nutrition_report',
-      ownerId: snapshot.id,
-      contentType: 'application/pdf',
-      buffer,
-      originalFilename: filename,
-      createdBy: actorUserId,
-      metadata: {
-        measurement_id: reportData.measurement.id,
-        report_public_id: snapshot.public_id || null,
-        report_type: reportData.report.report_type,
-        formula_version: reportData.report.formula_version || FORMULA_VERSION,
-        snapshot_hash: snapshot.snapshot_hash || null,
-      },
+    return await db.sequelize.transaction(async transaction => {
+      // PDF generation is a read. If the area was removed, return its bytes
+      // without populating a new cache or changing the saved report.
+      await assertNutritionClinicWritable(reportData.measurement.clinic_id, transaction);
+      const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
+        purpose: 'nutrition_report_pdf',
+        clinicId: reportData.patient.clinic_id,
+        patientId: reportData.patient.id,
+        ownerType: 'patient_nutrition_report',
+        ownerId: snapshot.id,
+        contentType: 'application/pdf',
+        buffer,
+        originalFilename: filename,
+        createdBy: actorUserId,
+        transaction,
+        metadata: {
+          measurement_id: reportData.measurement.id,
+          report_public_id: snapshot.public_id || null,
+          report_type: reportData.report.report_type,
+          formula_version: reportData.report.formula_version || FORMULA_VERSION,
+          snapshot_hash: snapshot.snapshot_hash || null,
+        },
+      });
+      snapshot.pdf_asset_id = asset.id;
+      await snapshot.save({ transaction });
+      return asset;
     });
-    snapshot.pdf_asset_id = asset.id;
-    await snapshot.save();
-    return asset;
   } catch (error) {
+    if (error.code === 'nutrition_area_not_configured') return null;
     console.warn('[nutritionWorkspace] private PDF cache skipped', {
       measurement_id: reportData.measurement.id,
       snapshot_id: snapshot.id,

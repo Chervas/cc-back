@@ -28,7 +28,7 @@ test('HTTP finalization forwards only parsed options and authenticated actor, re
 });
 
 test('new report dates use the measurement clinic timezone across Madrid DST and never process timezone',async()=>{
- const f=fixture();f.patient.clinica.configuracion={timezone:'Europe/Madrid'};const measurement=await f.save({measured_at:'2026-09-30T08:00:00Z'}),data=await f.service.getNutritionMeasurementReport('pac_ficticio',measurement.id,{actorUserId:7,compareMeasurementId:null});assert.equal(data.meta.clinic_timezone,'Europe/Madrid');
+ const f=fixture();f.patient.clinica.configuracion={disciplinas:['nutricion'],timezone:'Europe/Madrid'};const measurement=await f.save({measured_at:'2026-09-30T08:00:00Z'}),data=await f.service.getNutritionMeasurementReport('pac_ficticio',measurement.id,{actorUserId:7,compareMeasurementId:null});assert.equal(data.meta.clinic_timezone,'Europe/Madrid');
  for(const[instant,date,time]of [['2026-09-30T08:00:00Z','30/09/2026','10:00'],['2026-12-01T09:00:00Z','01/12/2026','10:00'],['2026-03-29T00:30:00Z','29/03/2026','01:30'],['2026-03-29T01:30:00Z','29/03/2026','03:30'],['2026-10-25T00:30:00Z','25/10/2026','02:30'],['2026-10-25T01:30:00Z','25/10/2026','02:30']]){
   const value=structuredClone(data);value.measurement.measured_at=instant;value.appointment={inicio:instant};value.meta.generated_at=instant;const html=f.service.__testing.buildNutritionReportHtml(value);assert(html.includes('<dt>Medición</dt><dd>'+date+', '+time));assert(html.includes('<dt>Cita</dt><dd>'+date+', '+time));assert(html.includes('Generado el '+date+', '+time));
  }

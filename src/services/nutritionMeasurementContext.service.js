@@ -2,6 +2,7 @@
 
 const { loadScopedTreatment } = require('./treatmentBookingProfile.service');
 const { programAppointmentContext } = require('../lib/program-appointment-context');
+const { assertNutritionAreaConfigured } = require('../lib/nutrition-area-scope');
 
 function invalid(code, message) {
   return Object.assign(new Error(message), { status: 400, code });
@@ -45,8 +46,9 @@ function createNutritionMeasurementContextResolver({ db, assertUserCanAccessFeat
     for (const featureKey of ['patients.view', 'patients.sensitive.view', 'nutrition.workspace.view', 'nutrition.measurements.create']) {
       await assertUserCanAccessFeature({ actorId, featureKey, clinicId });
     }
-    const clinic = await db.Clinica.findByPk(clinicId, { attributes: ['id_clinica', 'grupoClinicaId'], ...lock });
+    const clinic = await db.Clinica.findByPk(clinicId, { attributes: ['id_clinica', 'grupoClinicaId', 'configuracion'], ...lock });
     if (!clinic) throw invalid('nutrition_clinic_invalid', 'La clínica seleccionada no está disponible.');
+    assertNutritionAreaConfigured(clinic);
 
     const treatmentId = requestedTreatmentId || (appointment?.tratamiento_id ? Number(appointment.tratamiento_id) : null);
     if (appointment && treatmentId && Number(appointment.tratamiento_id) !== treatmentId) {
