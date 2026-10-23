@@ -4,6 +4,7 @@ const asyncHandler = require('express-async-handler');
 const nutritionWorkspaceService = require('../services/nutritionWorkspace.service');
 
 function sendNutritionError(error, res) {
+  if (error.status === 404 && error.code === 'nutrition_appointment_not_found') return res.status(404).json({ message: error.message, code: error.code });
   if(error.status===409&&error.code==='nutrition_episode_final')return res.status(409).json({message:error.message,code:error.code});
   if (error.status === 401 || error.message === 'auth_failed') {
     return res.status(401).json({ message: 'Auth failed!' });
@@ -15,7 +16,7 @@ function sendNutritionError(error, res) {
       details: error.details || null,
     });
   }
-  if (error.status === 400 && ['nutrition_clinic_id_invalid','nutrition_history_cursor_invalid','nutrition_report_options_invalid'].includes(error.code)) {
+  if (error.status === 400 && ['nutrition_clinic_id_invalid','nutrition_history_cursor_invalid','nutrition_report_options_invalid','nutrition_appointment_id_invalid'].includes(error.code)) {
     return res.status(400).json({ message: error.message, code: error.code });
   }
   return null;
@@ -48,7 +49,7 @@ function reportOptionsFromRequest(req, strict = false) {
 exports.getPatientNutritionWorkspace = asyncHandler(async (req, res) => {
   try {
     const data = await nutritionWorkspaceService.getPatientNutritionWorkspace(req.params.id, {
-      actorUserId: req.userData?.userId, clinicId: req.query?.clinic_id,before:req.query?.before,measurementId:req.query?.measurement_id,scopeClinicOnly:req.query?.scope_clinic_only==='true',
+      actorUserId: req.userData?.userId, clinicId: req.query?.clinic_id,before:req.query?.before,measurementId:req.query?.measurement_id,scopeClinicOnly:req.query?.scope_clinic_only==='true',appointmentId:req.query?.appointment_id,
     });
     res.json(data);
   } catch (error) {

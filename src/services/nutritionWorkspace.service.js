@@ -15,6 +15,8 @@ const { assertUserCanAccessFeature, getAccessibleClinicIdsForFeature } = require
 const { createNutritionMeasurementContextResolver } = require('./nutritionMeasurementContext.service');
 const { assertNutritionAreaConfigured } = require('../lib/nutrition-area-scope');
 const resolveMeasurementContext = createNutritionMeasurementContextResolver({ db, assertUserCanAccessFeature });
+const { createNutritionAppointmentContextResolver } = require('./nutritionAppointmentContext.service');
+const resolveAppointmentContext = createNutritionAppointmentContextResolver({ db });
 const { createNutritionReadContextResolver, nutritionSnapshotDependencies, isNutritionSnapshotReadable } = require('./nutritionReadContext.service');
 const resolveReadContext = createNutritionReadContextResolver({ db, assertUserCanAccessFeature, getAccessibleClinicIdsForFeature });
 const { resolveClinicTimeZone, DEFAULT_TIME_ZONE } = require('./clinicOpeningHours.service');
@@ -2988,6 +2990,22 @@ async function findPatient(patientIdentifier, transaction = null) {
   });
 }
 
+function nutritionTreatmentToJson(row, { contextOnly = false } = {}) {
+  const plain = row.toJSON ? row.toJSON() : row;
+  let config = plain.clinical_config;
+  if (typeof config === 'string') { try { config = JSON.parse(config); } catch { config = null; } }
+  return {
+    id: plain.id_tratamiento,
+    name: displayNutritionText(plain.nombre) || plain.nombre,
+    category: displayNutritionText(plain.categoria) || plain.categoria,
+    duration_min: plain.duracion_min,
+    price_base: contextOnly ? null : plain.precio_base,
+    // Existing purchased care may retain its old service label. Exposing that
+    // contextual choice does not offer a new tariff or its economic metadata.
+    clinical_config: contextOnly ? (config?.nutrition ? { nutrition: config.nutrition } : {}) : plain.clinical_config || null,
+  };
+}
+
 async function getNutritionTreatments({ clinicId, groupId }) {
   if (!db.Tratamiento || !clinicId) return [];
   const scope = [
@@ -3005,17 +3023,7 @@ async function getNutritionTreatments({ clinicId, groupId }) {
     order: [['nombre', 'ASC']],
     limit: 100,
   });
-  return rows.map((row) => {
-    const plain = row.toJSON();
-    return {
-      id: plain.id_tratamiento,
-      name: displayNutritionText(plain.nombre) || plain.nombre,
-      category: displayNutritionText(plain.categoria) || plain.categoria,
-      duration_min: plain.duracion_min,
-      price_base: plain.precio_base,
-      clinical_config: plain.clinical_config || null,
-    };
-  });
+  return rows.map(row => nutritionTreatmentToJson(row));
 }
 
 async function getPatientNutritionWorkspace(patientIdentifier, options = {}) {
@@ -3030,6 +3038,8 @@ async function getPatientNutritionWorkspace(patientIdentifier, options = {}) {
   const clinicId = context.clinicId;
   const clinic = clinicId === Number(patient.clinica_id) ? patient.clinica : await db.Clinica.findByPk(clinicId);
   const groupId = toIntOrNull(clinic?.grupoClinicaId || clinic?.grupo_clinica_id);
+  const appointmentContext = options.appointmentId === undefined ? null
+    : await resolveAppointmentContext({ patient, clinic, appointmentId: options.appointmentId });
   const nutritionContract = await getNutritionContract(clinicId);
   const profileDefinitions = profileDefinitionsFromContract(nutritionContract);
   const fieldDefinitions = fieldDefinitionsFromContract(nutritionContract);
@@ -3063,8 +3073,13 @@ async function getPatientNutritionWorkspace(patientIdentifier, options = {}) {
   const measurementJsonRows = measurements.map((measurement) => (
     measurementToJson(measurement, photosByMeasurement.get(Number(measurement.id)) || [])
   ));
+  const treatments = await getNutritionTreatments({ clinicId, groupId });
+  for (const treatment of appointmentContext?.treatments || []) {
+    if (!treatments.some(item => Number(item.id) === Number(treatment.id_tratamiento))) treatments.push(nutritionTreatmentToJson(treatment, { contextOnly: true }));
+  }
 
   return {
+    ...(appointmentContext ? { measurement_context: appointmentContext.measurement_context } : {}),
     patient: {
       id: patient.id_paciente,
       public_id: patient.public_id,
@@ -3075,7 +3090,7 @@ async function getPatientNutritionWorkspace(patientIdentifier, options = {}) {
     },
     profiles: profileDefinitions,
     fields: fieldDefinitions,
-    treatments: await getNutritionTreatments({ clinicId, groupId }),
+    treatments,
     latest: measurementJsonRows[0] || null,
     measurements: measurementJsonRows,
     evolution: buildEvolution(measurements),
