@@ -106,6 +106,16 @@ test('authorized economy reads include only financial counts and retain deleted-
   await assert.rejects(audit.revalidate(),error=>error.status===403&&error.details.feature_key==='billing.reports.view');
 });
 
+test('legacy cursors issued before scopes remain valid only for the legacy domain',async()=>{
+  const {invoke}=fixture();
+  const filters={category:'',tooth:'',from:'',to:'',search:''};
+  const filter=require('node:crypto').createHash('sha256').update(JSON.stringify(filters)).digest('hex').slice(0,16);
+  const cursor=Buffer.from(JSON.stringify({offset:1,filter})).toString('base64url');
+  const first=await invoke({limit:'1'},2),next=await invoke({limit:'1',cursor},2);
+  assert.equal(next.status,200);assert.notEqual(next.body.entries[0].id,first.body.entries[0].id);
+  for(const scope of ['clinical','economy','profile'])assert.equal((await invoke({scope,limit:'1',cursor},2)).status,400);
+});
+
 test('invalid scopes fail validation without storage reads and unavailable financial authorization fails closed',async()=>{
   const {state,invoke}=fixture();
   for(const scope of ['','all','Clinical',['clinical','economy'],{domain:'clinical'}]){

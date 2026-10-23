@@ -70,7 +70,7 @@ function paginateExternalHistory(history,query={}) {
   if(scope==='clinical')history=redactImportedHistoryFinancials(history);
   const limit=query.limit==null?40:Number(query.limit);
   if(!Number.isInteger(limit)||limit<1||limit>100)throw Object.assign(Error('imported_history_limit_invalid'),{status:400});
-  const filters={scope,category:query.category||'',tooth:query.tooth||'',from:query.from||'',to:query.to||'',search:String(query.search||'').slice(0,200)};
+  const filters={...(scope?{scope}:{}),category:query.category||'',tooth:query.tooth||'',from:query.from||'',to:query.to||'',search:String(query.search||'').slice(0,200)};
   if(filters.from&&!dateOnly(filters.from)||filters.to&&!dateOnly(filters.to)||filters.tooth&&!/^\d{2}$/.test(filters.tooth))throw Object.assign(Error('imported_history_filter_invalid'),{status:400});
   const filterHash=createHash('sha256').update(JSON.stringify(filters)).digest('hex').slice(0,16);let offset=0;
   if(query.cursor) {try {const cursor=JSON.parse(Buffer.from(String(query.cursor),'base64url').toString());if(cursor.filter!==filterHash||!Number.isInteger(cursor.offset)||cursor.offset<0||cursor.offset>1000000)throw Error();offset=cursor.offset;}catch{throw Object.assign(Error('imported_history_cursor_invalid'),{status:400});}}
