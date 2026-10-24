@@ -7,7 +7,7 @@ const C = require('../../lib/clinical-episode-contract');
 withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const define = (name, fields, tableName, options = {}) => sql.define(name, fields, { tableName, timestamps: false, ...options });
   db.Sequelize = Sequelize;
-  db.Clinica = define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true } }, 'Clinicas');
+  db.Clinica = define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, configuracion: D.JSON }, 'Clinicas');
   db.SequelizeMeta = define('SequelizeMeta', { name: { type: D.STRING, primaryKey: true } }, 'SequelizeMeta');
   db.Paciente = define('Paciente', { id_paciente: { type: D.INTEGER, primaryKey: true }, public_id: D.STRING, clinica_id: D.INTEGER }, 'Pacientes');
   db.PacienteClinica = define('PacienteClinica', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true }, paciente_id: D.INTEGER, clinica_id: D.INTEGER }, 'PacientesClinicas');
@@ -39,8 +39,8 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await db.Usuario.create({ id_usuario: 7, nombre: 'Profesional', apellidos: 'Ficticio' });
   await db.Tratamiento.create({ id_tratamiento: 20, nombre: 'Tratamiento ficticio' });
   await db.CitaPaciente.bulkCreate(Array.from({ length: 20 }, (_, index) => ({ id_cita: 101 + index, clinica_id: 72, paciente_id: 1,
-    doctor_id: 7, tratamiento_id: 20, titulo: 'Reserva ficticia ' + index, inicio: new Date(`2026-10-${String(index + 1).padStart(2, '0')}T10:00:00Z`),
-    fin: new Date(`2026-10-${String(index + 1).padStart(2, '0')}T10:30:00Z`), estado: 'pendiente', voucher_id: 99, es_provisional: false })));
+    doctor_id: 7, tratamiento_id: 20, titulo: 'Reserva ficticia ' + index, inicio: new Date(`2026-10-${String(index >= 1 && index <= 4 ? 2 : index + 1).padStart(2, '0')}T${String(10 + (index >= 1 && index <= 4 ? index : 0)).padStart(2, '0')}:00:00Z`),
+    fin: new Date(`2026-10-${String(index >= 1 && index <= 4 ? 2 : index + 1).padStart(2, '0')}T${String(10 + (index >= 1 && index <= 4 ? index : 0)).padStart(2, '0')}:30:00Z`), estado: 'pendiente', voucher_id: 99, es_provisional: false })));
   await db.CitaPaciente.create({ id_cita: 201, clinica_id: 73, paciente_id: 2, titulo: 'Reserva de otro ámbito', inicio: new Date(), fin: new Date(), estado: 'pendiente' });
   const old = await OldReport.create({ public_id: 'legacy-report', clinic_id: 72, patient_id: 1, appointment_id: 101,
     treatment_id: 20, professional_id: 7, status: 'final', version_number: 1, summary: 'Narrativa histórica exacta', plan: 'Plan histórico',
@@ -61,6 +61,9 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   for (const file of ['appointmentclinicalreport', 'appointmentclinicalreportrevision', 'clinicalepisodeappointment']) {
     const model = require('../../../models/' + file)(sql, D); db[model.name] = model;
   }
+  // This suite verifies only the two original foundation migrations. Later
+  // additive fields have their own full-schema integration suites.
+  for (const field of ['template_snapshot', 'form_data', 'diagnoses']) db.AppointmentClinicalReport.removeAttribute(field);
   const R = db.AppointmentClinicalReport, V = db.AppointmentClinicalReportRevision, L = db.ClinicalEpisodeAppointment;
   const migrated = await R.findByPk(old.id, { raw: true });
   for (const key of Object.keys(legacyBefore)) assert.deepEqual(migrated[key], legacyBefore[key]);
@@ -145,7 +148,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await assert.rejects(service.list({ ...base, query: { status: 'final', cursor: page.next_cursor } }), { code: 'clinical_episode_invalid_cursor' });
   const unchanged = await read(empty.item.id), beforeRows = hash(await L.findAll({ order: [['appointment_id', 'ASC']], raw: true }));
   const createRevision = V.create; V.create = async () => { throw Error('OWNED_REVISION_FAILURE'); };
-  await assert.rejects(save(empty.item.id, { expected_version: unchanged.version, appointment_ids: [107], summary: 'Debe revertirse' }), /OWNED_REVISION_FAILURE/);
+  await assert.rejects(save(empty.item.id, { expected_version: unchanged.version, occurred_at: '2026-10-07T10:00:00Z', appointment_ids: [107], summary: 'Debe revertirse' }), /OWNED_REVISION_FAILURE/);
   V.create = createRevision;
   assert.equal((await read(empty.item.id)).version, unchanged.version); assert.equal((await read(empty.item.id)).summary, null);
   assert.equal(hash(await L.findAll({ order: [['appointment_id', 'ASC']], raw: true })), beforeRows);

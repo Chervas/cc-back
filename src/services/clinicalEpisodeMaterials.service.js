@@ -13,8 +13,17 @@ function createMaterialValidator({ db, canAccess }) {
     if (!Array.isArray(refs) || refs.length > 100) fail('clinical_materials_invalid', 'La selección de materiales no es válida.');
     const result = [], seen = new Set();
     for (const ref of refs) {
-      if (!ref || !['attachment', 'drawing','dental_execution'].includes(ref.kind) || typeof ref.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(ref.id)) fail('clinical_material_invalid', 'Uno de los materiales no es válido.');
-      if(ref.kind==='dental_execution'){
+      if (!ref || !['attachment', 'drawing','dental_execution', 'medication'].includes(ref.kind) || typeof ref.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(ref.id)) fail('clinical_material_invalid', 'Uno de los materiales no es válido.');
+      if (ref.phase !== undefined && (ref.kind !== 'attachment' || !['before', 'after', 'other'].includes(ref.phase))) fail('clinical_material_phase_invalid', 'Selecciona Antes, Después u Otro para una fotografía.');
+      if (ref.kind === 'medication') {
+        if (!positive(ref.version)) fail('clinical_material_version_invalid', 'Selecciona una versión de la medicación.');
+        if (!await canAccess({ actorId, clinicId, featureKey: 'patients.sensitive.view' }) || !await canAccess({ actorId, clinicId, featureKey: 'clinical.reports.view' })) fail('clinical_material_forbidden', 'No tienes permiso para consultar esta medicación.', 403);
+        const medication = await db.PatientClinicalMedication.findOne({ where: { public_id: ref.id, patient_id: patientId }, transaction });
+        const revision = medication && await db.PatientClinicalMedicationRevision.findOne({ where: { medication_id: medication.id, version_number: ref.version }, transaction });
+        if (!revision) fail('clinical_material_not_found', 'La versión de medicación no corresponde a este paciente.', 404);
+        const key = `medication:${ref.id}:${ref.version}`; if (seen.has(key)) continue; seen.add(key);
+        result.push({ kind: 'medication', id: medication.public_id, version: ref.version, title: 'Medicación registrada' });
+      } else if(ref.kind==='dental_execution'){
         if(!positive(ref.version))fail('clinical_material_version_invalid','Selecciona una versión exacta del trabajo dental.');
         if(!await canAccess({actorId,clinicId,featureKey:'clinical.reports.view'})||!await canAccess({actorId,clinicId,featureKey:'patients.sensitive.view'}))fail('clinical_material_forbidden','No tienes permiso para consultar este trabajo.',403);
         const plan=await db.DentalPlan.findOne({where:{public_id:ref.id,patient_id:patientId,clinic_id:clinicId},transaction});
@@ -32,9 +41,14 @@ function createMaterialValidator({ db, canAccess }) {
         if (!asset || !featureKey) fail('clinical_material_not_found', 'El material no está disponible en esta clínica y paciente.', 404);
         if (!await canAccess({ actorId, clinicId, featureKey })) fail('clinical_material_forbidden', 'No tienes permiso para consultar este material.', 403);
         const key = 'attachment:' + asset.public_id;
-        if (seen.has(key)) continue;
+        if (seen.has(key)) {
+          const previous = result.find(item => item.kind === 'attachment' && item.id === asset.public_id);
+          if ((previous.phase || 'other') !== (ref.phase || 'other')) fail('clinical_material_phase_conflict', 'Una misma fotografía no puede ser Antes y Después dentro del mismo episodio.');
+          continue;
+        }
         seen.add(key);
-        result.push({ kind: 'attachment', id: asset.public_id, title: asset.original_filename || 'Archivo del paciente', sha256: asset.sha256 });
+        if (['before', 'after'].includes(ref.phase) && !['image/jpeg', 'image/png', 'image/webp'].includes(asset.content_type)) fail('clinical_material_phase_invalid', 'Antes y Después solo se aplica a fotografías clínicas.');
+        result.push({ kind: 'attachment', id: asset.public_id, title: asset.original_filename || 'Archivo del paciente', sha256: asset.sha256, ...(ref.phase ? { phase: ref.phase } : {}) });
       } else {
         if (!await canAccess({ actorId, clinicId, featureKey: 'patients.sensitive.view' })
           || !await canAccess({ actorId, clinicId, featureKey: 'clinical.reports.view' })) fail('clinical_material_forbidden', 'No tienes permiso para consultar este modelo.', 403);

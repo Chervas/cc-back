@@ -33,6 +33,9 @@ router.get('/:id/dental-plans', require('../controllers/dentalPlans.controller')
 router.post('/:id/dental-plans', require('../controllers/dentalPlans.controller').create);
 router.patch('/:id/clinical-reference', require('../controllers/patientClinicalReference.controller').update);
 router.get('/:id/clinical-reference', require('../controllers/patientClinicalReference.controller').read);
+router.get('/:id/clinical-medication', require('../controllers/patientClinicalMedication.controller').read);
+router.patch('/:id/clinical-medication', require('../controllers/patientClinicalMedication.controller').update);
+router.get('/:id/clinical-material-gallery', require('../controllers/clinicalMaterialGallery.controller').read);
 router.get('/:id/clinical-drawings', require('../controllers/clinicalDrawings.controller').list);
 router.post('/:id/clinical-drawings', require('../controllers/clinicalDrawings.controller').create);
 router.get('/:id/clinical-drawings/:drawingId', require('../controllers/clinicalDrawings.controller').get);

@@ -121,6 +121,17 @@ function normalizePatch(payload, previous = {}, { legacy = false } = {}) {
   }
   if (documentChanged) values.rich_document = document;
   if (!legacy) {
+    if (has(payload, 'diagnoses')) {
+      if (!Array.isArray(payload.diagnoses) || payload.diagnoses.length > 50) throw error(400, 'clinical_diagnoses_invalid', 'Revisa los diagnósticos del episodio.');
+      const seen = new Set();
+      values.diagnoses = payload.diagnoses.map(item => {
+        if (!object(item) || Object.keys(item).some(key => !['id', 'label', 'notes'].includes(key)) || typeof item.id !== 'string'
+          || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(item.id) || seen.has(item.id)) throw error(400, 'clinical_diagnoses_invalid', 'Revisa los diagnósticos del episodio.');
+        seen.add(item.id); const label = text(item.label, 'diagnosis_label', 200);
+        if (!label) throw error(400, 'clinical_diagnoses_invalid', 'Indica el diagnóstico u orientación clínica.');
+        return { id: item.id, label, notes: text(item.notes ?? '', 'diagnosis_notes', 2000) || '' };
+      });
+    }
     if (has(payload, 'title')) values.title = text(payload.title, 'title', 255);
     if (has(payload, 'occurred_at')) values.occurred_at = timestamp(payload.occurred_at);
     if (has(payload, 'template_key')) {
@@ -141,5 +152,5 @@ function decodeCursor(value) {
     return result;
   } catch { throw error(400, 'clinical_episode_invalid_cursor', 'La página solicitada no es válida.'); }
 }
-module.exports = { TEXT_FIELDS, TEMPLATE_KEYS, error, integer, text, timestamp, appointmentIds, idempotencyKey,
+module.exports = { TEXT_FIELDS, TEMPLATE_KEYS, error, integer, text, timestamp, appointmentIds, idempotencyKey, object,
   hash, plainDocument, documentText, safeDocument, richDocument, normalizePatch, encodeCursor, decodeCursor, has };

@@ -77,6 +77,8 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     const apptMap = new Map(appointments.map(row => [Number(row.id_cita), plain(row)]));
     const treatmentMap = new Map(treatments.map(row => [Number(row.id_tratamiento), plain(row)]));
     const professionalMap = new Map(professionals.map(row => [Number(row.id_usuario), plain(row)]));
+    const clinicRows = appointments.length && db.Clinica?.findByPk ? await Promise.all([...new Set(rows.map(row => Number(row.clinic_id)))].map(id => db.Clinica.findByPk(id, { attributes: ['id_clinica', 'configuracion'], transaction }))) : [];
+    const clinics = new Map(clinicRows.filter(Boolean).map(row => [Number(row.id_clinica), row]));
     return rows.map(row => {
       const value = plain(row), treatment = treatmentMap.get(Number(value.treatment_id)), professional = professionalMap.get(Number(value.professional_id));
       const requested = [...new Set([...(value.appointment_id ? [Number(value.appointment_id)] : []), ...links
@@ -86,6 +88,14 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
         && Number(appointment.clinica_id) === Number(value.clinic_id) && Number(appointment.paciente_id) === Number(value.patient_id));
       const primary = related.find(appointment => Number(appointment.id_cita) === Number(value.appointment_id));
       const title = value.title || treatment?.nombre || primary?.titulo || 'Episodio clínico';
+      let linkReview;
+      if (related.length) {
+        const timezone = require('./clinicOpeningHours.service').resolveClinicTimeZone(clinics.get(Number(value.clinic_id)));
+        const civil = date => { const parsed = new Date(date); return date && Number.isFinite(parsed.getTime()) ? new Intl.DateTimeFormat('sv-SE', { timeZone: timezone }).format(parsed) : null; };
+        const day = civil(value.occurred_at || primary?.inicio || value.created_at);
+        const different = related.filter(appointment => !day || civil(appointment.inicio) !== day).map(appointment => Number(appointment.id_cita));
+        if (different.length) linkReview = { required: true, code: 'legacy_cross_day_links', timezone, appointment_ids: different };
+      }
       return {
         id: value.public_id, clinic_id: Number(value.clinic_id), patient_id: Number(value.patient_id),
         appointment_id: primary ? Number(primary.id_cita) : null,
@@ -93,8 +103,9 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
         appointments: related.map(appointment => ({ id: Number(appointment.id_cita), start: appointment.inicio, end: appointment.fin,
           status: appointment.estado, title: appointment.titulo || null, treatment_id: appointment.tratamiento_id ? Number(appointment.tratamiento_id) : null,
           professional_id: appointment.doctor_id ? Number(appointment.doctor_id) : null })),
+        ...(linkReview ? { appointment_link_review: linkReview } : {}),
         title, occurred_at: value.occurred_at || primary?.inicio || value.created_at,
-        template_key: value.template_key || 'general', template_snapshot: value.template_snapshot || null, form_data:value.form_data||null, rich_document: C.richDocument(value), material_refs: value.material_refs || [],
+        template_key: value.template_key || 'general', template_snapshot: value.template_snapshot || null, form_data:value.form_data||null, diagnoses:value.diagnoses||[], rich_document: C.richDocument(value), material_refs: value.material_refs || [],
         treatment_id: value.treatment_id ? Number(value.treatment_id) : null, treatment_name: treatment?.nombre || primary?.titulo || null,
         professional_id: value.professional_id ? Number(value.professional_id) : null,
         professional_name: professional ? [professional.nombre, professional.apellidos].filter(Boolean).join(' ').trim() || null : null,
@@ -106,7 +117,7 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     });
   }
 
-  async function selectedAppointments(ids, { clinicId, patientId, reportId, transaction }) {
+  async function selectedAppointments(ids, { clinicId, patientId, reportId, transaction, existingIds = [], occurredAt }) {
     const rows = [];
     for (const id of [...ids].sort((a, b) => a - b)) {
       const appointment = await loadAppointment(id, transaction, true);
@@ -115,7 +126,15 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
       }
       const existing = await findForAppointment(appointment, transaction, true);
       if (existing && String(existing.id) !== String(reportId)) throw C.error(409, 'clinical_episode_appointment_linked', 'Una de las citas ya tiene un episodio. Abre ese episodio para continuar.', { episode_id: existing.public_id, appointment_id: id });
+      if (!existingIds.includes(id) && ['no_asistio', 'reprogramada'].includes(appointment.estado)) throw C.error(409, 'clinical_episode_attendance_confirmation_required', 'Confirma y corrige la asistencia de esta cita antes de registrar el episodio.', { appointment_id: id, status: appointment.estado });
       rows.push(appointment);
+    }
+    if (rows.some(row => !existingIds.includes(Number(row.id_cita)))) {
+      const clinic = await db.Clinica.findByPk(clinicId, { transaction });
+      const timezone = require('./clinicOpeningHours.service').resolveClinicTimeZone(clinic);
+      const civil = value => { const at = new Date(value); if (!value || !Number.isFinite(at.getTime())) throw C.error(409, 'clinical_episode_appointment_date_invalid', 'Revisa la fecha del episodio y de sus citas.'); return new Intl.DateTimeFormat('sv-SE', { timeZone: timezone }).format(at); };
+      const day = civil(occurredAt || rows[0]?.inicio);
+      if (rows.some(row => !existingIds.includes(Number(row.id_cita)) && civil(row.inicio) !== day)) throw C.error(409, 'clinical_episode_appointment_day_mismatch', 'Solo se pueden añadir citas del mismo día que el episodio, según la hora de la clínica.');
     }
     return ids.map(id => rows.find(row => Number(row.id_cita) === id));
   }
@@ -148,15 +167,15 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
       appointment_id: value.appointment_id ? Number(value.appointment_id) : null, appointment_ids: appointmentIds,
       treatment_id: value.treatment_id ? Number(value.treatment_id) : null, professional_id: value.professional_id ? Number(value.professional_id) : null,
       title: value.title || null, occurred_at: value.occurred_at || null, template_key: value.template_key || 'general', template_snapshot: value.template_snapshot || null,
-      status: value.status, version: Number(value.version_number), form_data:value.form_data||null, rich_document: C.richDocument(value), material_refs: value.material_refs || [],
+      status: value.status, version: Number(value.version_number), form_data:value.form_data||null, diagnoses:value.diagnoses||[], rich_document: C.richDocument(value), material_refs: value.material_refs || [],
       ...Object.fromEntries(C.TEXT_FIELDS.map(key => [key, value[key] || null])), finalized_at: value.finalized_at,
     };
     await Revision.create({ report_id: row.id, version_number: row.version_number, status: row.status,
       snapshot, change_type: changeType, actor_id: actorId, ...receipt }, { transaction });
   }
 
-  async function get({ id, clinicId }) {
-    return { item: (await hydrate([await scopedRow(id, clinicId)]))[0] };
+  async function get({ id, clinicId, transaction }) {
+    return { item: (await hydrate([await scopedRow(id, clinicId, transaction)], transaction))[0] };
   }
 
   async function getForAppointment({ appointmentId, clinicId = null }) {
@@ -213,7 +232,7 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
         if (existing.creation_payload_hash !== requestHash) throw C.error(409, 'clinical_episode_idempotency_conflict', 'Esta solicitud ya creó un episodio con otros datos.', { episode_id: existing.public_id });
         return { item: (await hydrate([existing], transaction))[0], created: false, replayed: true };
       }
-      const appointments = await selectedAppointments(ids, { clinicId, patientId: patient.id_paciente, transaction });
+      const appointments = await selectedAppointments(ids, { clinicId, patientId: patient.id_paciente, transaction, occurredAt: normalized.occurred_at });
       const primary = appointments[0];
       const materials = await materialValues(payload, { patient_id: patient.id_paciente, clinic_id: clinicId }, actorId, transaction);
       const row = await Report.create({
@@ -260,7 +279,7 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     const oldIds = await linkedIds(row, transaction), ids = normalized.appointment_ids;
     delete normalized.appointment_ids;
     if (ids) {
-      await selectedAppointments(ids, { clinicId: Number(row.clinic_id), patientId: row.patient_id, reportId: row.id, transaction });
+      await selectedAppointments(ids, { clinicId: Number(row.clinic_id), patientId: row.patient_id, reportId: row.id, transaction, existingIds: oldIds, occurredAt: normalized.occurred_at || row.occurred_at || row.created_at });
       normalized.appointment_id = ids.includes(Number(row.appointment_id)) ? row.appointment_id : ids[0] || null;
     }
     Object.assign(normalized, await materialValues(payload, row, actorId, transaction));
@@ -269,7 +288,7 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
       && row.template_snapshot.area_key !== normalized.template_key) normalized.template_snapshot = null;
     if(C.has(payload,'form_data')||mode==='finalize')normalized.form_data=await forms.normalize({input:payload.form_data,previous:row.form_data,row:{...plain(row),...normalized},transaction,final:mode==='finalize'});
     const combined = { ...plain(row), ...normalized };
-    if (mode === 'finalize' && !C.TEXT_FIELDS.filter(key => key !== 'private_notes').some(key => combined[key]) && !combined.material_refs?.length&&!F.hasContent(combined.form_data)) {
+    if (mode === 'finalize' && !C.TEXT_FIELDS.filter(key => key !== 'private_notes').some(key => combined[key]) && !combined.material_refs?.length&&!combined.diagnoses?.length&&!F.hasContent(combined.form_data)) {
       throw C.error(400, 'clinical_report_empty', 'Añade contenido clínico o material de esta consulta antes de cerrar el episodio.');
     }
     if(C.has(payload,'clinical_reference_update'))normalized.form_data=await forms.applyReference({input:payload.clinical_reference_update,data:combined.form_data,row,actorId,transaction,idempotencyKey:key});
@@ -305,8 +324,12 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     }
     const rows = await Revision.findAll({ where: filter, order: [['version_number', 'DESC']], limit: limit + 1 });
     const page = rows.slice(0, limit);
+    const authorIds = [...new Set(page.map(row => Number(row.actor_id)).filter(Boolean))];
+    const authors = authorIds.length && db.Usuario ? await db.Usuario.findAll({ where: { id_usuario: { [Op.in]: authorIds } }, attributes: ['id_usuario', 'nombre', 'apellidos'] }) : [];
+    const authorNames = new Map(authors.map(user => [Number(user.id_usuario), [user.nombre, user.apellidos].filter(Boolean).join(' ').trim() || null]));
     return { items: page.map(revision => ({ version: Number(revision.version_number), status: revision.status,
       change_type: revision.change_type, actor_id: revision.actor_id ? Number(revision.actor_id) : null,
+      actor_name: authorNames.get(Number(revision.actor_id)) || null,
       created_at: revision.created_at, snapshot: revision.snapshot })), next_cursor: rows.length > limit
       ? C.encodeCursor({ episode: row.public_id, version: Number(page[page.length - 1].version_number) }) : null };
   }

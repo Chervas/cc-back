@@ -12,7 +12,7 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
  for(const file of ['appointmentclinicalreport','appointmentclinicalreportrevision','clinicalepisodeappointment','clinicalepisodetemplate','clinicalepisodetemplateversion']){const model=require('../../../models/'+file)(sql,D);db[model.name]=model;}
  await sql.sync();await db.Clinica.bulkCreate([{id_clinica:1,nombre_clinica:'Clinica ficticia DEV'},{id_clinica:72,configuracion:{timezone:'Europe/Madrid'}},{id_clinica:73}]);await db.Usuario.create({id_usuario:7,nombre:'Profesional',apellidos:'Ficticio'});
  await db.Paciente.create({id_paciente:11,public_id:'synthetic-patient',clinica_id:72,nombre:'Paciente',apellidos:'Ficticio',fecha_nacimiento:'1980-10-22',alergias:null,medicacion:'Original',antecedentes:'Conservar',peso:82.5});
- await db.PacienteClinica.create({id:1,paciente_id:11,clinica_id:73});await db.CitaPaciente.create({id_cita:1,paciente_id:11,clinica_id:72,inicio:'2026-10-21T10:00:00Z',estado:'en_atencion'});
+ await db.PacienteClinica.create({id:1,paciente_id:11,clinica_id:73});await db.CitaPaciente.create({id_cita:1,paciente_id:11,clinica_id:72,inicio:'2026-10-21T22:30:00Z',estado:'en_atencion'});
  const retained=await db.AppointmentClinicalReport.create({public_id:'retained',clinic_id:72,patient_id:11,status:'final',version_number:1,summary:'Histórico exacto',created_by:7,updated_by:7});
  await db.AppointmentClinicalReportRevision.create({report_id:retained.id,version_number:1,status:'final',snapshot:{summary:'Histórico exacto'},change_type:'created',actor_id:7});
  const before=(await db.AppointmentClinicalReport.findByPk(retained.id)).toJSON();delete before.form_data;await sql.getQueryInterface().removeColumn('AppointmentClinicalReports','form_data');
