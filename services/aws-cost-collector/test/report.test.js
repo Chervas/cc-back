@@ -7,7 +7,7 @@ const config = { accountId: ACCOUNT, roleArn: ROLE, environment: 'prod', month: 
 function fixture() {
   const calls = [];
   const api = {
-    identity: async () => ({ Account: ACCOUNT, Arn: `arn:aws:sts::${ACCOUNT}:assumed-role/clinicaclick-integrations-prod-cost-reader-role/fixture` }),
+    identity: async () => ({ Account: ACCOUNT, Arn: `arn:aws:sts::${ACCOUNT}:assumed-role/clinicaclick-platform-cost-collector-role/fixture` }),
     listTags: async input => { calls.push(['tags', input]); return { CostAllocationTags: ['application', 'component', 'environment'].map(TagKey => ({ TagKey, Status: 'Active' })) }; },
     usage: async input => {
       calls.push(['usage', input]); const ResultsByTime = [];

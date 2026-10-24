@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh isolated DEV cost cache without AWS collection
+
+[Timer]
+OnCalendar=*-*-* 03:50:00 Europe/Madrid
+OnBootSec=3min
+OnUnitActiveSec=5min
+Persistent=true
+RandomizedDelaySec=15s
+Unit=clinicaclick-cost-cache-mirror.service
+
+[Install]
+WantedBy=timers.target

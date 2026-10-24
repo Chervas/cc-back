@@ -80,5 +80,5 @@ test('actual controller returns private closed cache to both technical admins an
     const r = await f.request(actor, '?month=2026-08'); assert.equal(r.status, 200);
     assert.equal(r.headers['cache-control'], 'private, no-store'); assert.equal(r.body.snapshot.amount, '0.2'); assert.equal(r.body.month, '2026-08');
   }
-  assert.equal((await f.request(1, '?month=2025-01')).status, 400); assert.equal(f.reads(), 2);
+  assert.equal((await f.request(1, '?month=2025-01')).status, 400); assert.equal(f.reads(), 4);
 });

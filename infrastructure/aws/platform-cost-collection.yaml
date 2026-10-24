@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Certificate-authenticated, read-only platform cost collection; no application or database permissions.
+Parameters:
+  CertificateAuthorityPem:
+    Type: String
+    Description: Public PEM of the dedicated platform-cost collector CA. Never supply a private key.
+Resources:
+  CostTrustAnchor:
+    Type: AWS::RolesAnywhere::TrustAnchor
+    Properties:
+      Name: clinicaclick-platform-costs
+      Enabled: true
+      Source:
+        SourceType: CERTIFICATE_BUNDLE
+        SourceData:
+          X509CertificateData: !Ref CertificateAuthorityPem
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: integrations}
+        - {Key: environment, Value: prod}
+  CostCollectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: clinicaclick-platform-cost-collector-role
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: rolesanywhere.amazonaws.com}
+            Action: ['sts:AssumeRole', 'sts:SetSourceIdentity', 'sts:TagSession']
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt CostTrustAnchor.TrustAnchorArn
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:PrincipalTag/x509Subject/CN: clinicaclick-platform-cost-collector
+                aws:PrincipalTag/x509Issuer/CN: clinicaclick-platform-costs-root-20261024
+      Policies:
+        - PolicyName: platform-costs-readonly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: BillingReadOnly
+                Effect: Allow
+                Action: ['ce:GetCostAndUsage', 'ce:GetCostForecast', 'ce:ListCostAllocationTags', 'budgets:ViewBudget']
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: us-east-1
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: integrations}
+        - {Key: environment, Value: prod}
+  CostCollectorProfile:
+    Type: AWS::RolesAnywhere::Profile
+    Properties:
+      Name: clinicaclick-platform-costs
+      Enabled: true
+      DurationSeconds: 900
+      AcceptRoleSessionName: false
+      RequireInstanceProperties: false
+      RoleArns: [!GetAtt CostCollectorRole.Arn]
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: integrations}
+        - {Key: environment, Value: prod}
+Outputs:
+  TrustAnchorArn:
+    Value: !GetAtt CostTrustAnchor.TrustAnchorArn
+  ProfileArn:
+    Value: !GetAtt CostCollectorProfile.ProfileArn
+  RoleArn:
+    Value: !GetAtt CostCollectorRole.Arn

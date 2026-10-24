@@ -1,0 +1,24 @@
+[Unit]
+Description=Mirror sanitized AWS cost cache to isolated DEV
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/clinicaclick-cost-cache-mirror/current
+ExecStart=/usr/bin/node /opt/clinicaclick-cost-cache-mirror/current/ops/aws-costs/sync-dev-cache.cjs --sync-dev-cache
+TimeoutStartSec=45
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+MemoryMax=192M
+StandardInput=null

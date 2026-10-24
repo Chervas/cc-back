@@ -14,7 +14,7 @@ test('AWS bootstrap uses only the dedicated assumed role and a fixed read-only c
     async send(cmd) {
       called.push(cmd);
       switch (cmd.name) {
-        case 'identity': return { Account: ACCOUNT, Arn: 'arn:aws:sts::' + ACCOUNT + ':assumed-role/clinicaclick-integrations-prod-cost-reader-role/fixture' };
+        case 'identity': return { Account: ACCOUNT, Arn: 'arn:aws:sts::' + ACCOUNT + ':assumed-role/clinicaclick-platform-cost-collector-role/fixture' };
         case 'tags': return { CostAllocationTags: ['application', 'component', 'environment'].map(TagKey => ({ TagKey, Status: 'Active' })) };
         case 'usage': return { ResultsByTime: [] };
         case 'forecast': return { Total: { Amount: '1', Unit: 'USD' } };
@@ -24,13 +24,9 @@ test('AWS bootstrap uses only the dedicated assumed role and a fixed read-only c
     }
     destroy() { providers.push('destroy'); }
   }
-  const master = async () => ({ fixture: true }); const assumed = async () => ({ fixture: true });
+  const assumed = async () => ({ fixture: true });
   const overrides = {
-    '@aws-sdk/credential-providers': {
-      fromInstanceMetadata: config => { providers.push(['imds', config]); return master; },
-      fromTemporaryCredentials: config => { assert.equal(config.masterCredentials, master); assert.equal(config.params.RoleArn, ROLE);
-        assert.equal(config.params.DurationSeconds, 900); providers.push('assume'); return assumed; },
-    },
+    './credentials': { createCredentialsProcessProvider: () => { providers.push('fixed-process'); return assumed; } },
     '@aws-sdk/client-sts': { STSClient: Client, GetCallerIdentityCommand: command('identity') },
     '@aws-sdk/client-cost-explorer': { CostExplorerClient: Client, GetCostAndUsageCommand: command('usage'),
       GetCostForecastCommand: command('forecast'), ListCostAllocationTagsCommand: command('tags') },
@@ -40,7 +36,8 @@ test('AWS bootstrap uses only the dedicated assumed role and a fixed read-only c
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports,
     require: name => Object.hasOwn(overrides, name) ? overrides[name] : localRequire(name) }, { filename });
   const snapshot = await module.exports.run({ accountId: ACCOUNT, roleArn: ROLE, environment: 'prod', month: new Date().toISOString().slice(0, 7) });
-  assert.equal(snapshot.status, 'pending'); assert.equal(called[0].name, 'identity');
+  assert.equal(snapshot.version, 3); assert.equal(snapshot.account.status, 'pending'); assert.equal(called[0].name, 'identity');
+  assert.equal(providers.filter(value => value === 'fixed-process').length, 1);
   assert(configured.every(config => config.credentials === assumed && config.maxAttempts === 2));
   assert.deepEqual(configured.map(config => config.region), ['eu-west-3', 'us-east-1', 'us-east-1']);
   assert.equal(providers.filter(value => value === 'destroy').length, 3);

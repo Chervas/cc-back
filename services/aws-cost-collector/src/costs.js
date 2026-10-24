@@ -4,6 +4,7 @@
 const { createHash } = require('node:crypto');
 const METRIC = 'UnblendedCost';
 const VERSION = 2;
+const ACCOUNT_VERSION = 1;
 const COMPONENTS = Object.freeze(['application', 'database', 'integrations', 'audit']);
 const ENVIRONMENTS = Object.freeze(['prod', 'staging']);
 const scopeFor = () => ({ components: [...COMPONENTS], application: 'clinicaclick', environments: [...ENVIRONMENTS] });
@@ -28,6 +29,12 @@ function filterFor({ accountId, environment }) {
 function filterDigestFor(config) {
   return createHash('sha256').update(JSON.stringify(filterFor(config))).digest('hex');
 }
+function accountFilterFor(config) {
+  // Validate the same fixed reader scope; do not apply resource tags to account charges.
+  filterFor(config);
+  return { Dimensions: { Key: 'LINKED_ACCOUNT', Values: [config.accountId] } };
+}
+const accountFilterDigestFor = config => createHash('sha256').update(JSON.stringify(accountFilterFor(config))).digest('hex');
 // This partitions the already-reported total; it never estimates or adds another charge.
 // Other migration services (VPCE, Secrets, Logs, transfer) cannot be attributed by SERVICE alone.
 function costClassFor(row) {
@@ -53,13 +60,13 @@ function unitsToAmount(value) {
   const fraction = String(absolute % (10n ** 18n)).padStart(18, '0').replace(/0+$/, '');
   return `${sign}${absolute / (10n ** 18n)}${fraction ? `.${fraction}` : ''}`;
 }
-async function collectCosts({ getCostAndUsage, accountId, environment, from, to, tagsVerified, now = () => new Date() }) {
+async function collectCostRows({ getCostAndUsage, accountId, environment, from, to, tagsVerified, now = () => new Date() }, accountWide) {
   dateKey(from); dateKey(to);
   if (from >= to || (Date.parse(to) - Date.parse(from)) / 86400000 > 62) throw Error('cost_period_invalid');
-  if (tagsVerified !== true) throw Error('cost_tags_unverified');
-  const filter = filterFor({ accountId, environment });
+  if (!accountWide && tagsVerified !== true) throw Error('cost_tags_unverified');
+  const filter = (accountWide ? accountFilterFor : filterFor)({ accountId, environment });
   const base = { TimePeriod: { Start: from, End: to }, Granularity: 'DAILY', Metrics: [METRIC], Filter: filter,
-    GroupBy: [{ Type: 'DIMENSION', Key: 'SERVICE' }, { Type: 'TAG', Key: 'component' }] };
+    GroupBy: [{ Type: 'DIMENSION', Key: 'SERVICE' }, ...(accountWide ? [] : [{ Type: 'TAG', Key: 'component' }])] };
   const seenTokens = new Set(); const groups = new Map(); const days = new Map();
   let next; let pages = 0; let currency; let total = 0n;
   do {
@@ -74,14 +81,15 @@ async function collectCosts({ getCostAndUsage, accountId, environment, from, to,
         const [service, tag] = group.Keys || [];
         const component = typeof tag === 'string' && tag.startsWith('component$') ? tag.slice(10) : '';
         const money = group.Metrics?.[METRIC];
-        if (!COMPONENTS.includes(component) || typeof service !== 'string' || !service || service.length > 200
+        if (!Array.isArray(group.Keys) || group.Keys.length !== (accountWide ? 1 : 2)
+          || (!accountWide && !COMPONENTS.includes(component)) || typeof service !== 'string' || !service || service.length > 200
           || !/^[A-Z]{3}$/.test(money?.Unit)) throw Error('cost_response_invalid');
         if (currency && money.Unit !== currency) throw Error('cost_currency_mismatch');
         currency = money.Unit;
         const key = JSON.stringify([start, service, component]);
         if (groups.has(key)) throw Error('cost_duplicate_group');
         const amount = amountToUnits(money.Amount); total += amount;
-        groups.set(key, { date: start, service, component, amount: unitsToAmount(amount), currency });
+        groups.set(key, { date: start, service, ...(accountWide ? {} : { component }), amount: unitsToAmount(amount), currency });
       }
     }
     next = response.NextPageToken;
@@ -91,16 +99,19 @@ async function collectCosts({ getCostAndUsage, accountId, environment, from, to,
   const allDays = [];
   for (let value = Date.parse(from); value < Date.parse(to); value += 86400000) allDays.push(new Date(value).toISOString().slice(0, 10));
   const missingDays = allDays.filter(day => !days.has(day));
-  return { version: VERSION, source: 'aws_cost_explorer', metric: METRIC, environment: 'platform',
+  return { version: accountWide ? ACCOUNT_VERSION : VERSION, source: 'aws_cost_explorer', metric: METRIC, environment: 'platform',
     period: { from, toExclusive: to }, collectedAt: now().toISOString(),
     status: !currency || missingDays.length ? 'pending' : 'available', currency: currency || null,
     amount: currency && !missingDays.length ? unitsToAmount(total) : null,
     estimated: [...days.values()].some(Boolean), rows: [...groups.values()], missingDays,
-    scope: scopeFor(), componentCoverage: componentCoverage([...groups.values()]),
-    filterDigest: filterDigestFor({ accountId, environment }), pages,
-    coverage: 'tagged_resources_only', coverageStatus: 'observed_partial', excludesAiEstimates: true,
+    ...(accountWide ? { scope: { mode: 'linked_account', allServices: true, resourceTagFilter: false } }
+      : { scope: scopeFor(), componentCoverage: componentCoverage([...groups.values()]) }),
+    filterDigest: (accountWide ? accountFilterDigestFor : filterDigestFor)({ accountId, environment }), pages,
+    coverage: accountWide ? 'linked_account_reported' : 'tagged_resources_only', coverageStatus: 'observed_partial', excludesAiEstimates: true,
   };
 }
+const collectCosts = config => collectCostRows(config, false);
+const collectAccountCosts = config => collectCostRows(config, true);
 function viewCache(record, { now = new Date(), staleAfterMs = 36 * 60 * 60 * 1000 } = {}) {
   if (!record?.snapshot) return { status: 'pending', snapshot: null, lastAttemptAt: record?.lastAttemptAt || null, error: record?.error || null };
   if (record.snapshot.status === 'pending') return { status: 'pending', snapshot: record.snapshot,
@@ -109,4 +120,6 @@ function viewCache(record, { now = new Date(), staleAfterMs = 36 * 60 * 60 * 100
   return { status: record.error || !Number.isFinite(age) || age < 0 || age > staleAfterMs ? 'stale' : record.snapshot.status,
     snapshot: record.snapshot, lastAttemptAt: record.lastAttemptAt || null, error: record.error || null };
 }
-module.exports = { VERSION, COMPONENTS, ENVIRONMENTS, scopeFor, componentCoverage, filterDigestFor, costClassFor, costBreakdownFor, collectCosts, filterFor, amountToUnits, unitsToAmount, viewCache };
+module.exports = { VERSION, ACCOUNT_VERSION, COMPONENTS, ENVIRONMENTS, scopeFor, componentCoverage, filterDigestFor,
+  accountFilterFor, accountFilterDigestFor, costClassFor, costBreakdownFor, collectCosts, collectAccountCosts,
+  filterFor, amountToUnits, unitsToAmount, viewCache };

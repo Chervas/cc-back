@@ -2,8 +2,8 @@
 require('../../../services/aws-cost-collector/test/offline-guard.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createService, projectSnapshot, monthsAt, invokeCollector, keyFor } = require('../../services/awsInfrastructureCosts.service');
-const { snapshot } = require('./fixtures/aws_costs.fixture');
+const { createService, projectSnapshot, projectAccountSnapshot, projectCollection, reconcile, monthsAt, invokeCollector, keyFor, accountKeyFor } = require('../../services/awsInfrastructureCosts.service');
+const { snapshot, accountSnapshot, report, COLLECTION_ID } = require('./fixtures/aws_costs.fixture');
 const now = () => new Date('2026-09-12T04:00:00Z');
 test('child process receives no app environment, uses fixed script and closed stdin, never a shell', async () => {
   const fs = require('node:fs'); const path = require('node:path'); const vm = require('node:vm');
@@ -15,19 +15,17 @@ test('child process receives no app environment, uses fixed script and closed st
     require: name => name === 'node:child_process' ? { execFile: (binary, args, options, callback) => {
       invocation = { binary, args, options };
       return { stdin: { on: () => {}, end: input => {
-        invocation.input = JSON.parse(input); callback(null, JSON.stringify({ ok: true, snapshot: snapshot() }));
+        invocation.input = JSON.parse(input); callback(null, JSON.stringify({ ok: true, snapshot: report() }));
       } } };
     } } : localRequire(name) }, { filename });
   const result = await module.exports.invokeCollector({ nodeBinary: process.execPath }, '2026-09');
-  assert.equal(result.amount, '0.2'); assert.equal(invocation.binary, process.execPath);
+  assert.equal(result.attributed.amount, '0.2'); assert.equal(result.account.amount, '1'); assert.equal(invocation.binary, process.execPath);
   assert.equal(invocation.args.length, 1); assert(invocation.args[0].endsWith('/services/aws-cost-collector/src/main.js'));
   assert.equal(invocation.options.shell, undefined);
-  assert.deepEqual(Object.keys(invocation.options.env).sort(), ['AWS_CONFIG_FILE', 'AWS_EC2_METADATA_SERVICE_ENDPOINT',
-    'AWS_EC2_METADATA_V1_DISABLED', 'AWS_SHARED_CREDENTIALS_FILE', 'PATH', 'TZ']);
-  assert.equal(invocation.options.env.AWS_EC2_METADATA_V1_DISABLED, 'true');
+  assert.deepEqual(Object.keys(invocation.options.env).sort(), ['AWS_CONFIG_FILE', 'AWS_EC2_METADATA_DISABLED', 'AWS_SHARED_CREDENTIALS_FILE', 'PATH', 'TZ']);
+  assert.equal(invocation.options.env.AWS_EC2_METADATA_DISABLED, 'true');
   assert.equal(invocation.options.env.AWS_CONFIG_FILE, '/dev/null');
   assert.equal(invocation.options.env.AWS_SHARED_CREDENTIALS_FILE, '/dev/null');
-  assert.equal(invocation.options.env.AWS_EC2_METADATA_SERVICE_ENDPOINT, 'http://169.254.169.254');
   assert.deepEqual(Object.keys(invocation.input).sort(), ['accountId', 'environment', 'month', 'roleArn']);
   assert.equal(JSON.stringify(invocation).includes('SECRET_SENTINEL'), false);
 });
@@ -39,7 +37,7 @@ test('cache endpoint enforces technical administrator before any storage read an
   for (const userId of [1, 44]) { const result = await service.getOverview({ userId }); assert.equal(result.status, 'available'); assert.equal(result.snapshot.services[0].amount, '0.2'); }
   assert.equal(collects, 0);
   await assert.rejects(service.getOverview({ userId: 1, month: '2025-01' }), error => error.status === 400);
-  assert.equal(reads, 2);
+  assert.equal(reads, 4);
 });
 test('disabled daily job neither reads cache nor spawns AWS process', async () => {
   const forbidden = () => { throw Error('must not execute'); };
@@ -66,21 +64,22 @@ test('collector errors and pending refreshes preserve last good snapshot, withou
   for (const fail of [true, false]) {
     const saved = []; let calls = 0;
     const service = createService({ now, config: () => ({ enabled: true }), collect: async (_config, month) => {
-      calls++; if (fail) throw Error('SDK_SECRET_SENTINEL'); return snapshot(month, { status: 'pending', amount: null });
+      calls++; if (fail) throw Error('SDK_SECRET_SENTINEL'); return report(month, { status: 'pending', amount: null });
     }, repository: { acquire: async () => 'lease', read: async () => ({ snapshot: snapshot() }),
       finish: async (...args) => { saved.push(args); return true; } } });
     const result = await service.runDaily(); assert.equal(result.retryable, false); assert.equal(calls, 2);
-    assert.equal(saved.length, 2); assert(saved.every(args => args[2] === null));
+    assert.equal(saved.length, 4); assert(saved.every(args => args[2] === null));
     assert.equal(saved[0][3], fail ? 'cost_aws_unavailable' : 'cost_data_pending');
     assert.equal(JSON.stringify(result).includes('SDK_SECRET_SENTINEL'), false);
   }
 });
 test('lease conflict skips collection and superseded worker cannot report a saved result', async () => {
   let collects = 0;
-  const service = createService({ now, config: () => ({ enabled: true }), collect: async (_config, month) => { collects++; return snapshot(month); },
+  const service = createService({ now, config: () => ({ enabled: true }), collect: async (_config, month) => { collects++; return report(month); },
     repository: { acquire: async key => key.endsWith('09') ? null : 'lost', read: async () => null, finish: async () => false } });
   const result = await service.runDaily(); assert.equal(collects, 1);
-  assert.deepEqual(result.periods.map(row => row.reason), ['refresh_in_progress', 'lease_lost']);
+  assert.equal(result.periods[0].reason, 'refresh_in_progress_or_daily_budget_reserved'); assert.equal(result.periods[1].status, 'skipped');
+  assert.deepEqual(result.periods[1].scopes, { account: 'lease_lost', attributed: 'lease_lost' });
 });
 test('closed projection removes extra secrets and rejects inconsistent totals, ranges and currencies', () => {
   assert.equal(JSON.stringify(projectSnapshot(snapshot('2026-09', { token: 'SECRET_SENTINEL' }), '2026-09')).includes('SECRET_SENTINEL'), false);
@@ -93,7 +92,7 @@ test('closed projection removes extra secrets and rejects inconsistent totals, r
 test('scope v2 isolates its cache and rejects legacy or different coverage',async()=>{
   const requested=[];const service=createService({now,repository:{read:async key=>{requested.push(key);return null;}}});
   const overview=await service.getOverview({userId:1});
-  assert.deepEqual(requested,[keyFor('2026-09')]);assert.match(requested[0],/^aws:infrastructure:v2:[a-f0-9]{64}:2026-09$/);assert(requested[0].length<=96);
+  assert.deepEqual(requested,[keyFor('2026-09'),accountKeyFor('2026-09')]);assert.match(requested[0],/^aws:infrastructure:v2:[a-f0-9]{64}:2026-09$/);assert(requested.every(key=>key.length<=96));
   assert.equal(overview.snapshot,null);assert(overview.componentCoverage.every(item=>item.status==='pending'));
   for(const patch of [{version:1},{scope:{application:'clinicaclick',components:['integrations','audit'],environments:['prod']}},
     {scope:{...snapshot().scope,environments:['prod']}}, {scope:{...snapshot().scope,application:'other'}}])
@@ -128,12 +127,12 @@ test('legacy caches are not read or overwritten and bad digest cannot populate t
   ]);
   const original = JSON.stringify([...legacy]); const reads = []; const writes = [];
   const service = createService({ now, config: () => ({ enabled: true }),
-    collect: async (_config, month) => snapshot(month, { filterDigest: '0'.repeat(64) }),
+    collect: async (_config, month) => report(month, { filterDigest: '0'.repeat(64) }),
     repository: { read: async key => { reads.push(key); return legacy.get(key) || null; }, acquire: async () => 'lease',
       finish: async (key, _lease, value) => { writes.push([key, value]); return true; } } });
   assert.equal((await service.getOverview({ userId: 1 })).snapshot, null);
   const result = await service.runDaily(); assert.equal(result.status, 'failed');
-  assert.equal(writes.length, 2); assert(writes.every(([key, value]) => key === keyFor(key.slice(-7)) && value === null));
+  assert.equal(writes.length, 4); assert(writes.every(([key, value]) => [keyFor(key.slice(-7)), accountKeyFor(key.slice(-7))].includes(key) && value === null));
   assert.equal(JSON.stringify([...legacy]), original); assert(reads.every(key => !legacy.has(key)));
   const corruptRead = createService({ now, repository: { read: async () => ({ snapshot: snapshot('2026-09', { filterDigest: '0'.repeat(64) }) }) } });
   const rejected = await corruptRead.getOverview({ userId: 1 });
@@ -163,4 +162,41 @@ test('unknown services and absent DMS are not invented temporal charges or confi
   assert.equal(value.costBreakdown.some(row => row.costClass === 'dms_temporary'), false);
   const pending = projectSnapshot(snapshot('2026-09', { status: 'pending', amount: null, rows: [] }), '2026-09');
   assert.deepEqual(pending.costBreakdown, []); assert.equal(pending.amount, null);
+});
+test('account and attribution use separate keys and a same-collection exact signed reconciliation', async () => {
+  const result = projectCollection(report(), '2026-09');
+  const overview = await createService({ now, repository: { read: async key => ({ snapshot:
+    key === accountKeyFor('2026-09') ? result.account : result.attributed }) } }).getOverview({ userId: 1 });
+  assert.notEqual(keyFor('2026-09'), accountKeyFor('2026-09')); assert.notEqual(result.account.filterDigest, result.attributed.filterDigest);
+  assert.equal(overview.account.snapshot.amount, '1'); assert.equal(overview.snapshot.amount, '0.2');
+  assert.equal(overview.reconciliation.amount, '0.8'); assert.equal(overview.reconciliation.status, 'available');
+  assert.equal(overview.reconciliation.services.find(row => row.service === 'Amazon VPC').unallocatedAmount, '0.8');
+  const credited = reconcile({ status: 'available', snapshot: { ...result.account, amount: '-0.1' } },
+    { status: 'available', snapshot: result.attributed });
+  assert.equal(credited.amount, '-0.3');
+});
+test('missing attribution, different batches or periods never invent zero unallocated cost', () => {
+  const result = projectCollection(report(), '2026-09');
+  for (const tagged of [null, snapshot(), { ...result.attributed, collectionId: '60773ab9-e901-41fa-8e31-e5a1c6eb4a24' },
+    { ...result.attributed, period: { from: '2026-09-01', toExclusive: '2026-09-04' } }]) {
+    assert.equal(reconcile({ status: 'available', snapshot: result.account }, { status: 'available', snapshot: tagged }).amount, null);
+  }
+});
+test('account projection rejects tampered totals, scope, duplicate groups and request budgets and removes extras', () => {
+  const value = projectAccountSnapshot(accountSnapshot('2026-09', { secret: 'PRIVATE_SENTINEL' }), '2026-09');
+  assert.equal(JSON.stringify(value).includes('PRIVATE_SENTINEL'), false);
+  for (const patch of [{ amount: '99' }, { filterDigest: '0'.repeat(64) }, { scope: { mode: 'all_accounts' } },
+    { rows: [...accountSnapshot().rows, accountSnapshot().rows[0]] },
+    { collection: { ...accountSnapshot().collection, ceLogicalCalls: 6 } }]) {
+    assert.throws(() => projectAccountSnapshot(accountSnapshot('2026-09', patch), '2026-09'), /cost_snapshot_invalid/);
+  }
+});
+test('account data can be saved when tags are unverified without replacing prior good attribution', async () => {
+  const writes = [];
+  const service = createService({ now, config: () => ({ enabled: true }), collect: async (_config, month) => ({
+    ...report(month), attributed: null, attributionError: 'cost_tags_unverified' }),
+    repository: { acquire: async () => 'lease', read: async () => ({ snapshot: snapshot() }), finish: async (...args) => { writes.push(args); return true; } } });
+  await service.runDaily();
+  assert.equal(writes.filter(([key, , value]) => key.startsWith('aws:account:') && value?.status === 'available').length, 2);
+  assert(writes.filter(([key]) => key.startsWith('aws:infrastructure:')).every(([, , value, code]) => value === null && code === 'cost_tags_unverified'));
 });

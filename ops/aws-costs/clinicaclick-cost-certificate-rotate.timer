@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily local rotation check for the purpose-only platform-cost certificate
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+AccuracySec=1m
+Unit=clinicaclick-cost-certificate-rotate.service
+
+[Install]
+WantedBy=timers.target

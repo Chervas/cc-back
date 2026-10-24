@@ -1,21 +1,18 @@
 'use strict';
 
-const { configFor, collectReport, safeError } = require('./report');
+const { configFor, collectReconciledReport, safeError, SDK_MAX_ATTEMPTS } = require('./report');
+const { createCredentialsProcessProvider } = require('./credentials');
 async function run(config) {
   configFor(config);
-  const { fromInstanceMetadata, fromTemporaryCredentials } = require('@aws-sdk/credential-providers');
   const { STSClient, GetCallerIdentityCommand } = require('@aws-sdk/client-sts');
   const { CostExplorerClient, GetCostAndUsageCommand, GetCostForecastCommand, ListCostAllocationTagsCommand } = require('@aws-sdk/client-cost-explorer');
   const { BudgetsClient, DescribeBudgetCommand } = require('@aws-sdk/client-budgets');
-  const masterCredentials = fromInstanceMetadata({ timeout: 1500, maxRetries: 1 });
-  const credentials = fromTemporaryCredentials({ masterCredentials,
-    params: { RoleArn: config.roleArn, RoleSessionName: 'clinicaclick-cost-collector', DurationSeconds: 900 },
-    clientConfig: { region: 'eu-west-3', maxAttempts: 2 } });
-  const sts = new STSClient({ region: 'eu-west-3', credentials, maxAttempts: 2 });
-  const ce = new CostExplorerClient({ region: 'us-east-1', credentials, maxAttempts: 2 });
-  const budgets = new BudgetsClient({ region: 'us-east-1', credentials, maxAttempts: 2 });
+  const credentials = createCredentialsProcessProvider();
+  const sts = new STSClient({ region: 'eu-west-3', credentials, maxAttempts: SDK_MAX_ATTEMPTS });
+  const ce = new CostExplorerClient({ region: 'us-east-1', credentials, maxAttempts: SDK_MAX_ATTEMPTS });
+  const budgets = new BudgetsClient({ region: 'us-east-1', credentials, maxAttempts: SDK_MAX_ATTEMPTS });
   try {
-    return await collectReport(config, {
+    return await collectReconciledReport(config, {
       identity: () => sts.send(new GetCallerIdentityCommand({})),
       listTags: input => ce.send(new ListCostAllocationTagsCommand(input)),
       usage: input => ce.send(new GetCostAndUsageCommand(input)),
