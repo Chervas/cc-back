@@ -47,9 +47,21 @@ test('dispatch re-reads the appointment and rejects obsolete work without creati
   let current = appointment(NOW + 120 * MINUTE);
   let currentTemplate = template();
   let executions = 0;
+  t.mock.method(db.CitaPaciente, 'findAll', async ({ where }) => {
+    assert.equal(where.clinica_id, current.clinica_id);
+    assert.equal(where.paciente_id, current.paciente_id); return [current];
+  });
+  t.mock.method(db.AppointmentReminderSequence, 'findOne', async ({ where }) => {
+    assert.equal(where.clinic_id, current.clinica_id);
+    assert.equal(where.patient_id, current.paciente_id); return null;
+  });
   t.mock.method(db.CitaPaciente, 'findByPk', async () => current);
   t.mock.method(db.Clinica, 'findByPk', async () => ({ id_clinica: 990002, configuracion: { timezone: 'UTC' } }));
   t.mock.method(db.AutomationFlowTemplateV2, 'findOne', async () => currentTemplate);
+  t.mock.method(db.AutomationFlowTemplateV2, 'findAll', async ({ where }) => {
+    assert.equal(where.trigger_type, 'appointment_reminder_window');
+    return currentTemplate ? [currentTemplate] : [];
+  });
   t.mock.method(db.FlowExecutionV2, 'create', async () => { executions++; throw Error('UNEXPECTED_EXECUTION'); });
   const payload = { appointment_id: 990001, trigger_type: 'appointment_reminder_window', template_key: currentTemplate.template_key };
   for (const status of ['cancelada', 'cambio_solicitado', 'no_asistio']) {

@@ -16,6 +16,30 @@ const whatsappService = require('../../services/whatsapp.service');
 
 const read = (relativePath) => fs.readFileSync(path.resolve(__dirname, '../..', relativePath), 'utf8');
 
+// A single persisted legacy Message, with no concurrent worker in this case.
+// Keep the genuine prepareMessageForDispatch transaction/lock/reload path;
+// provide only its exact row and prove commit precedes queue publication.
+function persistedMessageFixture(message) {
+  const originalFind = db.Message.findByPk, originalTransaction = db.sequelize.transaction;
+  const originalReload = message.reload;
+  let committed = false; let active;
+  db.Message.findByPk = async (id, options = {}) => {
+    assert.equal(id, message.id);
+    if (options.transaction) { assert.equal(options.transaction, active); assert.equal(options.lock, active.LOCK.UPDATE); }
+    return message;
+  };
+  db.sequelize.transaction = async (options, work) => {
+    assert.equal(options.isolationLevel, 'READ COMMITTED');
+    active = { LOCK: { UPDATE: 'TEST_ONLY_ROW_LOCK' } }; committed = false;
+    const result = await work(active); committed = true; return result;
+  };
+  message.reload = async ({ transaction }) => { assert.equal(transaction, active); return message; };
+  return { assertCommitted: () => assert.equal(committed, true, 'row update commits before publishing the job'), restore() {
+    db.Message.findByPk = originalFind; db.sequelize.transaction = originalTransaction;
+    if (originalReload) message.reload = originalReload; else delete message.reload;
+  } };
+}
+
 async function testQuietHoursUsesDurableJobRequest() {
   const originalEnqueue = jobRequestsService.enqueueUniqueJobRequest;
   let captured = null;
@@ -155,9 +179,11 @@ async function testQuietHoursHandlerWaitsAndDispatchesIdempotentTransportJob() {
     },
   };
   let queueCall = null;
+  let persistedRow;
 
   try {
     db.Message.findByPk = async () => fakeMessage;
+    persistedRow = persistedMessageFixture(fakeMessage);
     db.Conversation.findByPk = async () => ({ id: 601, clinic_id: 55 });
     whatsappService.getClinicConfig = async () => {
       clinicConfigReads += 1;
@@ -168,6 +194,7 @@ async function testQuietHoursHandlerWaitsAndDispatchesIdempotentTransportJob() {
       };
     };
     queues.outboundWhatsApp.add = async (...args) => {
+      persistedRow.assertCommitted();
       assert.equal(fakeMessage.status, 'pending');
       assert.equal(fakeMessage.metadata.automation_transport_job_id, 'automation-whatsapp-501');
       queueCall = args;
@@ -206,6 +233,7 @@ async function testQuietHoursHandlerWaitsAndDispatchesIdempotentTransportJob() {
     assert.equal(updates.at(-1).metadata.quiet_hours_transport_job_id, 'automation-whatsapp-501');
     assert.equal(clinicConfigReads, 0, 'las credenciales se resuelven en el worker, no en el productor');
   } finally {
+    persistedRow?.restore();
     db.Message.findByPk = originals.messageFind;
     db.Conversation.findByPk = originals.conversationFind;
     whatsappService.getClinicConfig = originals.getClinicConfig;
@@ -242,9 +270,11 @@ async function testImmediateTransportPersistsBeforePublishAndKeepsImageSnapshot(
       persisted = true;
     },
   };
+  const persistedRow = persistedMessageFixture(msg);
 
   try {
     queues.outboundWhatsApp.add = async (...args) => {
+      persistedRow.assertCommitted();
       assert.equal(persisted, true, 'el Message debe quedar durable antes de publicar a Redis');
       assert.equal(msg.metadata.immediate_transport_job_id, 'automation-whatsapp-502');
       queueCall = args;
@@ -265,6 +295,7 @@ async function testImmediateTransportPersistsBeforePublishAndKeepsImageSnapshot(
     assert.equal(queueCall[1].retryOnFailure, true);
     assert.equal(Object.hasOwn(queueCall[1], 'clinicConfig'), false);
   } finally {
+    persistedRow.restore();
     queues.outboundWhatsApp.add = originalQueueAdd;
   }
 }
@@ -429,6 +460,7 @@ async function testReplayRecoversImmediateEnqueueFailureWithSameSnapshot() {
       this.metadata = patch.metadata ?? this.metadata;
     },
   };
+  const persistedRow = persistedMessageFixture(message);
 
   try {
     db.Conversation.findByPk = async () => ({
@@ -437,6 +469,7 @@ async function testReplayRecoversImmediateEnqueueFailureWithSameSnapshot() {
       async update() {},
     });
     queues.outboundWhatsApp.add = async (_name, payload, options) => {
+      persistedRow.assertCommitted();
       queuePayload = payload;
       return { id: options.jobId };
     };
@@ -450,6 +483,7 @@ async function testReplayRecoversImmediateEnqueueFailureWithSameSnapshot() {
     assert.deepEqual(queuePayload.templateComponents, imageComponents);
     assert.equal(message.metadata.enqueue_error, null);
   } finally {
+    persistedRow.restore();
     db.Conversation.findByPk = originals.conversationFind;
     queues.outboundWhatsApp.add = originals.queueAdd;
   }
@@ -614,15 +648,25 @@ async function closeQueues() {
   await Promise.all(queueList.map((queue) => queue.close()));
 }
 
+async function legacyMessageRouting(messageId, work) {
+  const original = db.AppointmentVisitCommunication.findOne;
+  db.AppointmentVisitCommunication.findOne = async ({ where }) => {
+    assert.equal(where.message_id, messageId);
+    return null; // This exact persisted fixture message has no managed-visit binding.
+  };
+  try { return await work(); }
+  finally { db.AppointmentVisitCommunication.findOne = original; }
+}
+
 async function run() {
   await testQuietHoursUsesDurableJobRequest();
   testOutsideSendWindowDiscardSkipsMaterialization();
   await testDelayedTemplateSyncUsesDurableJobRequestWithoutToken();
-  await testQuietHoursHandlerWaitsAndDispatchesIdempotentTransportJob();
-  await testImmediateTransportPersistsBeforePublishAndKeepsImageSnapshot();
+  await legacyMessageRouting(501, testQuietHoursHandlerWaitsAndDispatchesIdempotentTransportJob);
+  await legacyMessageRouting(502, testImmediateTransportPersistsBeforePublishAndKeepsImageSnapshot);
   await testReplayMaterializationUsesOneGlobalDeliveryKey();
-  await testReplayRestoresQuietHoursWithoutEarlyBullDispatch();
-  await testReplayRecoversImmediateEnqueueFailureWithSameSnapshot();
+  await legacyMessageRouting(8802, testReplayRestoresQuietHoursWithoutEarlyBullDispatch);
+  await legacyMessageRouting(8804, testReplayRecoversImmediateEnqueueFailureWithSameSnapshot);
   testFlowHandoffRetryIsBoundedAndUsesExistingJobLane();
   await testScheduledSenderRejectsWabaSnapshotDrift();
   await testRuntimeRevalidatesClinicAccessPublicMediaAsset();

@@ -18,6 +18,23 @@ const originalVisitRead = db.AppointmentVisitMember.findByPk;
 db.AppointmentPatientLinkMember.findByPk = async () => null;
 db.AppointmentVisitMember.findByPk = async () => null;
 
+// These cases have one real fixture reservation on the patient/day and no
+// prior daily-sequence receipt. Exercise genuine inspectAppointment against
+// those scoped rows rather than falling through to an unmocked SQL lookup.
+function standaloneDay(t, current) {
+  t.mock.method(db.CitaPaciente, 'findByPk', async id => {
+    const row = current(); assert.equal(Number(id), row.id_cita); return row;
+  });
+  t.mock.method(db.CitaPaciente, 'findAll', async ({ where }) => {
+    const row = current(); assert.equal(where.clinica_id, row.clinica_id);
+    assert.equal(where.paciente_id, row.paciente_id); return [row];
+  });
+  t.mock.method(db.AppointmentReminderSequence, 'findOne', async ({ where }) => {
+    const row = current(); assert.equal(where.clinic_id, row.clinica_id);
+    assert.equal(where.patient_id, row.paciente_id); return null;
+  });
+}
+
 test.after(async () => {
   db.AppointmentPatientLinkMember.findByPk = originalLinkRead;
   db.AppointmentVisitMember.findByPk = originalVisitRead;
@@ -123,7 +140,7 @@ test('la ventana del recordatorio excluye reservas del mismo día y genera una c
   assert.match(key, /schedule:appointment_reminder_window:same_day:custom:08:00:/);
 });
 
-test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async () => {
+test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async t => {
   const originals = {
     executionFind: db.FlowExecutionV2.findOne,
     executionCreate: db.FlowExecutionV2.create,
@@ -134,6 +151,16 @@ test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async
     createExecution: runtimeStop.createExecution,
   };
   const cita = futureAppointment();
+  standaloneDay(t, () => cita);
+  // Daily-claim concurrency has its own sequence tests. This handoff case
+  // owns exactly this reservation/stage/execution, including the retry.
+  const sequences = require('../../services/appointmentReminderSequence.service');
+  const sequence = sequences.current();
+  t.mock.method(sequences, 'current', () => ({ ...sequence, claimExecution: async input => {
+    assert.equal(input.appointment.id_cita, cita.id_cita);
+    assert.equal(input.executionId, 12001); assert.equal(input.scheduleMoment, 'same_day');
+    return { allowed: true, execution_id: 12001 };
+  } }));
   const template = reminderTemplate({ exclude_if_booked_same_day: false });
   const executions = new Map();
   const queued = [];
@@ -191,7 +218,7 @@ test('enqueueExecutionForTemplate deduplica por cita, versión y ventana', async
   }
 });
 
-test('disabled=true en bindings de tratamiento corta automatizaciones inmediatas y programadas', async () => {
+test('disabled=true en bindings de tratamiento corta automatizaciones inmediatas y programadas', async t => {
   const originals = {
     treatmentFind: db.Tratamiento.findByPk,
     clinicFind: db.Clinica.findByPk,
@@ -202,6 +229,8 @@ test('disabled=true en bindings de tratamiento corta automatizaciones inmediatas
   };
   let templateFindCalls = 0;
   let templateFindAllCalls = 0;
+  let currentAppointment;
+  standaloneDay(t, () => currentAppointment);
 
   try {
     db.Tratamiento.findByPk = async () => ({
@@ -244,11 +273,12 @@ test('disabled=true en bindings de tratamiento corta automatizaciones inmediatas
     assert.equal(immediate.skipped, true);
     assert.equal(immediate.reason, 'no_template_for_event');
 
-    const scheduled = await appointmentRuntime.syncScheduledTriggersForCita({
+    currentAppointment = {
       ...futureAppointment(),
       tratamiento_id: 44101,
       estado: 'info_confirmada',
-    });
+    };
+    const scheduled = await appointmentRuntime.syncScheduledTriggersForCita(currentAppointment);
     assert.deepEqual(scheduled.scheduled_jobs, []);
     assert.deepEqual(scheduled.cancelled_jobs, []);
     assert.equal(templateFindCalls, 0);
@@ -263,7 +293,7 @@ test('disabled=true en bindings de tratamiento corta automatizaciones inmediatas
   }
 });
 
-test('la resincronización conserva el job idéntico, sustituye el reprogramado y cancela la cita', async () => {
+test('la resincronización conserva el job idéntico, sustituye el reprogramado y cancela la cita', async t => {
   const originals = {
     clinicFind: db.Clinica.findByPk,
     templateFindAll: db.AutomationFlowTemplateV2.findAll,
@@ -275,6 +305,8 @@ test('la resincronización conserva el job idéntico, sustituye el reprogramado 
   const jobs = [];
   const cancellations = [];
   let nextId = 14001;
+  let currentAppointment;
+  standaloneDay(t, () => currentAppointment);
 
   try {
     db.Clinica.findByPk = async () => ({
@@ -308,6 +340,7 @@ test('la resincronización conserva el job idéntico, sustituye el reprogramado 
     };
 
     const cita = futureAppointment();
+    currentAppointment = cita;
     const first = await appointmentRuntime.syncScheduledTriggersForCita(cita);
     assert.equal(first.scheduled_jobs.length, 1);
     assert.equal(first.cancelled_jobs.length, 0);
@@ -322,6 +355,7 @@ test('la resincronización conserva el job idéntico, sustituye el reprogramado 
       inicio: new Date(cita.inicio.getTime() + DAY_MS),
       fin: new Date(cita.fin.getTime() + DAY_MS),
     };
+    currentAppointment = rescheduled;
     const changed = await appointmentRuntime.syncScheduledTriggersForCita(rescheduled);
     assert.equal(changed.cancelled_jobs.length, 1);
     assert.equal(changed.scheduled_jobs.length, 1);
@@ -329,10 +363,11 @@ test('la resincronización conserva el job idéntico, sustituye el reprogramado 
     assert.notEqual(jobs[0].payload.window_identifier, jobs[1].payload.window_identifier);
     assert.equal(cancellations[0].errorMessage, 'superseded_by_appointment_resync');
 
-    const cancelled = await appointmentRuntime.syncScheduledTriggersForCita({
+    currentAppointment = {
       ...rescheduled,
       estado: 'cancelada',
-    });
+    };
+    const cancelled = await appointmentRuntime.syncScheduledTriggersForCita(currentAppointment);
     assert.equal(cancelled.reason, 'inactive_appointment_status');
     assert.deepEqual(cancelled.scheduled_jobs, []);
     assert.deepEqual(cancelled.cancelled_jobs, [jobs[1].id]);
@@ -346,7 +381,7 @@ test('la resincronización conserva el job idéntico, sustituye el reprogramado 
   }
 });
 
-test('el disparo omite citas canceladas y recordatorios que siguen sin confirmar', async () => {
+test('el disparo omite citas canceladas y recordatorios que siguen sin confirmar', async t => {
   const originals = {
     appointmentFind: db.CitaPaciente.findByPk,
     clinicFind: db.Clinica.findByPk,
@@ -355,6 +390,7 @@ test('el disparo omite citas canceladas y recordatorios que siguen sin confirmar
   };
   let currentAppointment = futureAppointment({ status: 'cancelada' });
   let executionCreates = 0;
+  standaloneDay(t, () => currentAppointment);
 
   try {
     db.CitaPaciente.findByPk = async () => currentAppointment;
