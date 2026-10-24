@@ -169,6 +169,7 @@ async function run(argv) {
     }
   } finally { if (journalFd !== undefined) fs.closeSync(journalFd); if (opened) publicDatabase.close(connection); else await connection.end(); }
 }
+module.exports = { run, parse, sourceInfo, applyPlan };
 if (require.main === module) run(process.argv.slice(2)).then(result => {
   process.stdout.write(JSON.stringify(result) + '\n');
   if (result.compatible === false) process.exitCode = 2;
@@ -176,4 +177,3 @@ if (require.main === module) run(process.argv.slice(2)).then(result => {
   const reason = /^(?:schema|rds_schema)_[a-z_]+$/.test(error.message) ? error.message : 'schema_operation_failed';
   process.stderr.write(JSON.stringify({ status: 'failed', reason }) + '\n'); process.exitCode = 1;
 });
-module.exports = { run, parse, sourceInfo, applyPlan };

@@ -27,6 +27,47 @@ const legacy = require('../security-schema-release');
 
 const NAME = '20261024120000-create-schema-release-fixture.js';
 const OLD = '20200101000000-unselected-historical-fixture.js';
+test('actual legacy CLI publishes exports before the circular RDS delegation; old ordering reproduces refusal', async () => {
+  const vm = require('node:vm'); const { createRequire } = require('node:module');
+  const entry = path.resolve(__dirname, '../security-schema-release.js');
+  const delegate = path.resolve(__dirname, '../security-rds-schema-migrate.js');
+  const source = fs.readFileSync(entry, 'utf8'); const exportLine = 'module.exports = { run, parse, sourceInfo, applyPlan };\n';
+  assert.equal(source.split(exportLine).length, 2);
+  async function executeMain(entrySource) {
+    const cache = new Map(); const out = [], err = []; let received, plans = 0;
+    const main = { exports: {} }; cache.set(entry, main);
+    const fakeProcess = { argv: ['TEST_ONLY_node', entry, 'plan-rds', '--source', path.resolve(__dirname, '../../..'), '--migration', NAME],
+      stdout: { write: x => out.push(x) }, stderr: { write: x => err.push(x) }, exitCode: 0 };
+    function evaluate(filename, text, module) {
+      const local = id => {
+        if (filename === delegate && id === '../lib/rdsSchemaMigration') return {
+          safeCode: C.safeCode, createRunner({ sourceInfo }) {
+            received = sourceInfo; assert.equal(typeof sourceInfo, 'function');
+            return { plan: async () => { plans++; return { status: 'TEST_ONLY_PLAN', compatible: true }; } };
+          } };
+        const resolved = createRequire(filename).resolve(id);
+        if (cache.has(resolved)) return cache.get(resolved).exports;
+        if (resolved === delegate) {
+          const next = { exports: {} }; cache.set(resolved, next);
+          evaluate(resolved, fs.readFileSync(resolved, 'utf8'), next); return next.exports;
+        }
+        return createRequire(filename)(id);
+      };
+      local.main = main;
+      vm.runInThisContext('(function(require,module,exports,__filename,__dirname,process){\n'
+        + text.replace(/^#![^\n]*\n/, '') + '\n})', { filename })(local, module, module.exports, filename, path.dirname(filename), fakeProcess);
+    }
+    evaluate(entry, entrySource, main);
+    await new Promise(resolve => setImmediate(resolve));
+    return { code: fakeProcess.exitCode, out: out.join(''), err: err.join(''), received, plans, exports: main.exports };
+  }
+  const previous = await executeMain(source.replace(exportLine, '') + exportLine);
+  assert.equal(previous.code, 1); assert.equal(previous.plans, 0); assert.equal(previous.received, undefined);
+  const current = await executeMain(source);
+  assert.equal(current.code, 0); assert.equal(current.err, ''); assert.equal(current.plans, 1);
+  assert.equal(current.received, current.exports.sourceInfo); assert.equal(JSON.parse(current.out).status, 'TEST_ONLY_PLAN');
+  for (const name of ['run', 'parse', 'sourceInfo', 'applyPlan']) assert.equal(typeof current.exports[name], 'function');
+});
 function fixture(t, up = "await q.createTable('SchemaReleaseFixture', { id: { type: S.INTEGER, primaryKey: true }, label: S.STRING(40) });") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-rds-schema-pure-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
