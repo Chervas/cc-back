@@ -160,6 +160,7 @@ Resources:
         sql_mode: 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'
         require_secure_transport: 'ON'
         performance_schema: '1'
+        innodb_buffer_pool_size: '4294967296'
         event_scheduler: 'OFF'
         # RDS administrators lack SUPER; recreating the two existing guard
         # triggers requires this dynamic setting when binary logging is on.
