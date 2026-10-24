@@ -10,6 +10,7 @@ const { execFileSync } = require('node:child_process');
 const { snapshot, compare, digest, validatePlan, effectiveContract } = require('../lib/securitySchemaContract');
 const { observedEnvironment } = require('./security-email-login-metadata');
 const { configuration } = require('./security-database-metadata');
+const publicDatabase = require('../lib/schemaReleaseDatabase');
 const SOURCE = path.resolve(__dirname, '../..');
 const DEV_DATABASE = 'clinicaclick_dev_isolated';
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -57,7 +58,7 @@ function parse(argv) {
   const seen = new Set();
   while (argv.length) {
     const key = argv.shift(); const value = argv.shift();
-    if (!value || !['--source','--runtime','--out','--migration','--plan'].includes(key) || key !== '--migration' && seen.has(key)) fail('schema_arguments_invalid');
+    if (!value || !['--source','--runtime','--out','--migration','--plan','--binding','--binding-sha'].includes(key) || key !== '--migration' && seen.has(key)) fail('schema_arguments_invalid');
     seen.add(key);
     if (key === '--migration') options.migrations.push(value); else options[key.slice(2)] = value;
   }
@@ -65,7 +66,9 @@ function parse(argv) {
     || action !== 'check' && options.runtime !== 'dev'
     || action === 'apply-dev' && (!options.plan || options.migrations.length)
     || action === 'plan-dev' && (!options.migrations.length || options.plan)
-    || action === 'check' && (options.plan || options.migrations.length)) fail('schema_arguments_invalid');
+    || action === 'check' && (options.plan || options.migrations.length)
+    || options.runtime === 'dev' && (options.binding || options['binding-sha'])
+    || options.runtime !== 'dev' && (!options.binding || !options['binding-sha'] || !/^[a-f0-9]{64}$/.test(options['binding-sha']))) fail('schema_arguments_invalid');
   options.source = fs.realpathSync(options.source);
   return { action, ...options };
 }
@@ -109,20 +112,23 @@ async function run(argv) {
   const info = sourceInfo(options.source, options.action !== 'check');
   const env = environment(options.runtime);
   info.contract = effectiveContract(info.contract, env);
-  const connection = await require('mysql2/promise').createConnection(configuration(env));
+  const binding = options.runtime === 'dev' ? null : publicDatabase.readBinding(options.binding, options['binding-sha'], options.runtime);
+  const opened = binding ? await publicDatabase.connectCheck(env, binding, options.runtime) : null;
+  const connection = opened ? opened.connection : await require('mysql2/promise').createConnection(configuration(env));
   const query = async (sql, values = []) => (await connection.query({ sql, values, timeout: 30000 }))[0];
   let journalFd;
   try {
     if (options.action !== 'apply-dev') {
       await query('SET TRANSACTION READ ONLY'); await connection.beginTransaction();
       const before = await snapshot(query); await connection.commit();
+      if (binding) publicDatabase.validateBinding(binding, options.runtime);
       const compatibility = compare(before, info.contract);
       if (options.action === 'check') {
         const report = { status: compatibility.compatible ? 'compatible' : 'incompatible', runtime: options.runtime,
           revision: info.revision, contractDigest: info.contractDigest, snapshotDigest: digest(before),
           settings: settings(env), checkedTables: Object.keys(info.contract.tables).length,
-          disabledFeatureGroups: info.contract.disabledFeatureGroups || [], ...compatibility };
-        writeJson(options.out, report); return report;
+          disabledFeatureGroups: info.contract.disabledFeatureGroups || [], ...(opened ? { transportProof: opened.proof } : {}), ...compatibility };
+        writeJson(options.out, report); if (binding) publicDatabase.validateBinding(binding, options.runtime); return report;
       }
       const plan = { version: 1, runtime: 'dev', database: DEV_DATABASE, revision: info.revision,
         contractDigest: info.contractDigest, beforeDigest: digest(before), before, compatibility,
@@ -145,7 +151,7 @@ async function run(argv) {
       journal({ status: 'dev_schema_failed_preserve_partial', instruction: 'Keep DEV stopped; inspect schema and journal before a new explicit plan. No automatic retry.' });
       fail('schema_apply_failed_inspect_journal');
     }
-  } finally { if (journalFd !== undefined) fs.closeSync(journalFd); await connection.end(); }
+  } finally { if (journalFd !== undefined) fs.closeSync(journalFd); if (opened) publicDatabase.close(connection); else await connection.end(); }
 }
 if (require.main === module) run(process.argv.slice(2)).then(result => {
   process.stdout.write(JSON.stringify(result) + '\n');
