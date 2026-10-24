@@ -58,15 +58,18 @@ function parse(argv) {
   const seen = new Set();
   while (argv.length) {
     const key = argv.shift(); const value = argv.shift();
-    if (!value || !['--source','--runtime','--out','--migration','--plan','--binding','--binding-sha'].includes(key) || key !== '--migration' && seen.has(key)) fail('schema_arguments_invalid');
+    if (!value || !['--source','--runtime','--out','--migration','--plan','--binding','--binding-sha','--require-migration'].includes(key) || !['--migration','--require-migration'].includes(key) && seen.has(key)) fail('schema_arguments_invalid');
     seen.add(key);
-    if (key === '--migration') options.migrations.push(value); else options[key.slice(2)] = value;
+    if (key === '--migration') options.migrations.push(value);
+    else if (key === '--require-migration') (options.requiredMigrations ||= []).push(value);
+    else options[key.slice(2)] = value;
   }
   if (!['dev','staging','gateway'].includes(options.runtime) || !options.out || !path.isAbsolute(options.out)
     || action !== 'check' && options.runtime !== 'dev'
     || action === 'apply-dev' && (!options.plan || options.migrations.length)
     || action === 'plan-dev' && (!options.migrations.length || options.plan)
     || action === 'check' && (options.plan || options.migrations.length)
+    || action !== 'check' && options.requiredMigrations?.length
     || options.runtime === 'dev' && (options.binding || options['binding-sha'])
     || options.runtime !== 'dev' && (!options.binding || !options['binding-sha'] || !/^[a-f0-9]{64}$/.test(options['binding-sha']))) fail('schema_arguments_invalid');
   options.source = fs.realpathSync(options.source);
@@ -108,6 +111,12 @@ async function applyPlan({ connection, plan, info, loadMigration, journal }) {
   } finally { await query("SELECT RELEASE_LOCK('clinicaclick_dev_schema_release')"); }
 }
 async function run(argv) {
+  if (['check-rds', 'preflight-rds'].includes(argv[0])) {
+    return require('./security-rds-schema-check').run(argv);
+  }
+  if (['plan-rds', 'apply-rds', 'verify-rds', 'release-rds'].includes(argv[0])) {
+    return require('./security-rds-schema-migrate').run(argv);
+  }
   const options = parse([...argv]);
   const info = sourceInfo(options.source, options.action !== 'check');
   const env = environment(options.runtime);
@@ -123,6 +132,13 @@ async function run(argv) {
       const before = await snapshot(query); await connection.commit();
       if (binding) publicDatabase.validateBinding(binding, options.runtime);
       const compatibility = compare(before, info.contract);
+      for (const name of options.requiredMigrations || []) {
+        if (!/^[0-9]{14}-[a-z0-9-]+\.js$/.test(name) || !info.migrations[name]) fail('schema_required_migration_invalid');
+        if (!before.migrations.includes(name)) {
+          compatibility.compatible = false;
+          if (!compatibility.missingMigrations.includes(name)) compatibility.missingMigrations.push(name);
+        }
+      }
       if (options.action === 'check') {
         const report = { status: compatibility.compatible ? 'compatible' : 'incompatible', runtime: options.runtime,
           revision: info.revision, contractDigest: info.contractDigest, snapshotDigest: digest(before),
@@ -157,7 +173,7 @@ if (require.main === module) run(process.argv.slice(2)).then(result => {
   process.stdout.write(JSON.stringify(result) + '\n');
   if (result.compatible === false) process.exitCode = 2;
 }).catch(error => {
-  const reason = /^schema_[a-z_]+$/.test(error.message) ? error.message : 'schema_operation_failed';
+  const reason = /^(?:schema|rds_schema)_[a-z_]+$/.test(error.message) ? error.message : 'schema_operation_failed';
   process.stderr.write(JSON.stringify({ status: 'failed', reason }) + '\n'); process.exitCode = 1;
 });
 module.exports = { run, parse, sourceInfo, applyPlan };
