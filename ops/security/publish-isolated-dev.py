@@ -16,6 +16,7 @@ def within(path, parent):
  except ValueError:return False
 def main():
  assert os.geteuid()==0 and len(sys.argv)==1
+ os.umask(0o022)
  assert pathlib.Path('/etc/clinicaclick-dev/runtime.env').is_file()
  git=['git','-c','safe.directory='+str(SOURCE),'-C',str(SOURCE)]
  assert not run(git+['status','--porcelain']).strip(), 'Commit DEV changes before publishing'
