@@ -128,7 +128,7 @@ function applyCommand(previous, command, ctx) {
   }
   if (command.type === 'lab.create') {
     const order = command.order; if (!object(order)) fail('lab_invalid','Revisa el pedido de laboratorio.');
-    state.lab_orders.push({ id: ctx.newId(), title: text(order.title,180,true), laboratory: text(order.laboratory,180,true), instructions: text(order.instructions,5000), ...relations(order),
+    state.lab_orders.push({ id: ctx.newId(), title: text(order.title,180,true), laboratory: text(order.laboratory,180,true), supplier_id: order.supplier_id ? id(order.supplier_id) : null, instructions: text(order.instructions,5000), ...relations(order),
       request_session_id: order.request_session_id ? id(order.request_session_id) : null, needed_session_id: order.needed_session_id ? id(order.needed_session_id) : null,
       appointment_id: order.appointment_id == null ? null : integer(order.appointment_id), request_before: date(order.request_before,true), needed_on: date(order.needed_on,true), expected_delivery_on: date(order.expected_delivery_on,true),
       evidence_ids: ids(order.evidence_ids), status: 'draft', events: [{ type: 'created', actor_id: ctx.actorId, at: ctx.at }], created_by: ctx.actorId, created_at: ctx.at });
@@ -137,7 +137,9 @@ function applyCommand(previous, command, ctx) {
     const order = find(state.lab_orders,command.id,'lab'), patch=command.patch;
     if (order.status !== 'draft' || !object(patch)) fail('lab_state','Sólo se edita un pedido todavía en borrador.',409);
     if(!ctx.clinical&&['targets','act_ids','session_ids','appointment_ids','request_session_id','needed_session_id','appointment_id'].some(key=>Object.hasOwn(patch,key)))fail('clinical_forbidden','El profesional debe revisar el alcance clínico del pedido.',403);
-    for (const key of Object.keys(patch)) if (!['title','laboratory','instructions','targets','act_ids','session_ids','appointment_ids','request_session_id','needed_session_id','appointment_id','request_before','needed_on','expected_delivery_on'].includes(key)) fail('lab_field_invalid','El estado del pedido requiere su propia acción.');
+    for (const key of Object.keys(patch)) if (!['title','laboratory','supplier_id','instructions','targets','act_ids','session_ids','appointment_ids','request_session_id','needed_session_id','appointment_id','request_before','needed_on','expected_delivery_on'].includes(key)) fail('lab_field_invalid','El estado del pedido requiere su propia acción.');
+    if (Object.hasOwn(patch,'supplier_id')) order.supplier_id = patch.supplier_id ? id(patch.supplier_id) : null;
+    else if (patch.laboratory !== undefined && patch.laboratory !== order.laboratory) order.supplier_id = null;
     for(const key of ['title','laboratory']) if(patch[key]!==undefined)order[key]=text(patch[key],180,true);
     if(patch.instructions!==undefined)order.instructions=text(patch.instructions,5000);
     Object.assign(order,relations({...order,...patch}));

@@ -4,7 +4,7 @@ function createController({getService=()=>service.current()}={}){
   const input=req=>{
     for(const key of ['clinic_id','patient_id'])if(req.query[key]!==undefined&&req.body?.[key]!==undefined&&String(req.query[key])!==String(req.body[key]))require('../lib/dental-supporting-tools-contract').fail('scope_mismatch','Selecciona el mismo paciente y clínica en esta acción.');
     return{planId:req.params.planId,clinicId:req.query.clinic_id??req.body?.clinic_id,patientIdentifier:req.query.patient_id??req.body?.patient_id,actorId:req.userData?.userId,
-    version:req.query.version,payload:req.body,assetId:req.params.assetId,page:req.query.page,cursor:req.query.cursor,limit:req.query.limit,status:req.query.status};};
+    version:req.query.version,payload:req.body,assetId:req.params.assetId,page:req.query.page,cursor:req.query.cursor,limit:req.query.limit,status:req.query.status,q:req.query.q};};
   const handler=action=>async(req,res)=>{res.set('Cache-Control','private, no-store');try{await action(req,res);}catch(error){const pending=['ER_NO_SUCH_TABLE','ER_BAD_FIELD_ERROR'].includes(error.original?.code||error.parent?.code);const status=pending?503:([400,401,403,404,409,413,428,503].includes(error.statusCode)?error.statusCode:500);return res.status(status).json({error:{code:pending?'dental_tools_schema_pending':status===500?'dental_tools_unavailable':error.code,message:status===500?'No se pudo acceder a las herramientas dentales.':pending?'Las herramientas dentales están pendientes de habilitación técnica.':error.message}});}};
   return{
     read:handler(async(req,res)=>res.json(await getService().read(input(req)))),

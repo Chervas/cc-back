@@ -1,0 +1,18 @@
+'use strict';
+const router = require('express').Router();
+const controller = require('../controllers/clinicSupplies.controller');
+router.use(require('./auth.middleware'));
+router.get('/overview', controller.overview);
+router.get('/suppliers', controller.suppliers);
+router.post('/suppliers', controller.createSupplier);
+router.patch('/suppliers/:id', controller.updateSupplier);
+router.get('/products', controller.products);
+router.post('/products', controller.createProduct);
+router.patch('/products/:id', controller.updateProduct);
+router.get('/products/:id/movements', controller.movements);
+router.post('/products/:id/movements', controller.movement);
+router.get('/orders', controller.orders);
+router.post('/orders', controller.createOrder);
+router.patch('/orders/:id', controller.updateOrder);
+router.post('/orders/:id/receipts', controller.receipt);
+module.exports = router;

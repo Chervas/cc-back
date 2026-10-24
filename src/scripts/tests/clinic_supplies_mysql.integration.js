@@ -1,0 +1,113 @@
+'use strict';
+const assert = require('node:assert/strict');
+const { DataTypes: D, Sequelize } = require('sequelize');
+const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
+
+withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
+  const q = sql.getQueryInterface();
+  // This suite owns its empty, socket-only MySQL. Apply only the explicit test prerequisites and selected migration; no sync or host database.
+  await q.createTable('Clinicas', { id_clinica: { type: D.INTEGER, primaryKey: true }, configuracion: D.JSON });
+  await q.createTable('UsuarioClinicas', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true }, id_usuario: D.INTEGER, id_clinica: D.INTEGER, estado_invitacion: D.STRING(24) });
+  db.Clinica = sql.define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, configuracion: D.JSON }, { tableName: 'Clinicas', timestamps: false });
+  db.UsuarioClinica = sql.define('UsuarioClinica', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true }, id_usuario: D.INTEGER, id_clinica: D.INTEGER, estado_invitacion: D.STRING(24) }, { tableName: 'UsuarioClinicas', timestamps: false });
+  await db.Clinica.bulkCreate([{ id_clinica: 72, configuracion: { timezone: 'Europe/Madrid' } }, { id_clinica: 73, configuracion: {} }]);
+  await db.UsuarioClinica.bulkCreate([{ id_usuario: 7, id_clinica: 72, estado_invitacion: 'aceptada' }, { id_usuario: 8, id_clinica: 72, estado_invitacion: 'aceptada' }, { id_usuario: 10, id_clinica: 72, estado_invitacion: 'pendiente' }, { id_usuario: 11, id_clinica: 72, estado_invitacion: 'aceptada' }]);
+  const migration = require('../../../migrations/20261024190000-create-clinic-supplies');
+  await migration.up(q, Sequelize);
+  for (const file of ['clinicsupplier', 'clinicstockproduct', 'clinicmaterialorder', 'clinicmaterialorderline', 'clinicstockmovement', 'clinicsupplycommand']) { const model = require('../../../models/' + file)(sql, D); db[model.name] = model; }
+  for (const model of Object.values(db)) if (model.associate) model.associate(db);
+  assert((await q.showIndex('ClinicSupplyCommands')).some(index => index.unique && index.name === 'clinic_supply_command_key'));
+  assert((await q.getForeignKeyReferencesForTable('ClinicMaterialOrderLines')).some(key => key.referencedTableName === 'ClinicStockProducts'));
+  await assert.rejects(migration.down(), /history_preserved/);
+  report.checks.push('Selected additive six-table migration applies on owned MySQL, FK and unique idempotency constraints exist; destructive rollback refused.');
+
+  const { createClinicSuppliesService } = require('../../services/clinicSupplies.service');
+  const service = createClinicSuppliesService({ db, canAccess: async ({ actorId, featureKey }) => actorId === 7 || actorId === 8 && featureKey === 'appointments.view', isGlobalAdmin: () => false, now: () => new Date('2026-10-24T10:00:00Z') });
+  const scope = { actorId: 7, clinicId: 72 };
+  let key = 0;
+  const payload = values => ({ idempotency_key: 'owned-supply-' + (++key), ...values });
+  const empty = await service.overview(scope);
+  assert.equal(empty.suppliers.length, 0); assert.equal(empty.today, '2026-10-24'); assert.equal(empty.timezone, 'Europe/Madrid');
+  await assert.rejects(service.overview({ ...scope, clinicId: 73 }), { code: 'forbidden' });
+  await assert.rejects(service.overview({ ...scope, actorId: 9 }), { code: 'forbidden' });
+  await assert.rejects(service.overview({ ...scope, actorId: 10 }), { code: 'forbidden' });
+  await assert.rejects(service.overview({ ...scope, actorId: 11 }), { code: 'forbidden' });
+  await assert.rejects(service.createSupplier({ ...scope, actorId: 8, payload: payload({ supplier: { name: 'Should not create', type: 'other' } }) }), { code: 'forbidden' });
+  assert.equal((await service.overview({ ...scope, actorId: 8 })).capabilities.manage, false);
+  report.checks.push('Membership is enforced independently of feature authorization; wrong clinic, no membership, pending invitation, denied role and read-only write are rejected.');
+
+  const supplierRequest = payload({ supplier: { name: 'Proveedor ficticio QA', type: 'distributor', contact_name: 'Recepción', email: 'qa@example.test' } });
+  const first = await service.createSupplier({ ...scope, payload: supplierRequest }), supplier = first.item;
+  assert.equal((await service.createSupplier({ ...scope, payload: supplierRequest })).replayed, true);
+  assert.equal(await db.ClinicSupplier.count(), 1);
+  await assert.rejects(service.createSupplier({ ...scope, payload: { ...supplierRequest, supplier: { ...supplierRequest.supplier, name: 'Different' } } }), { code: 'idempotency_conflict' });
+  const product = (await service.createProduct({ ...scope, payload: payload({ product: { name: 'Guantes ficticios', unit: 'cajas', supplier_id: supplier.id, minimum_quantity: 2 } }) })).item;
+  const product2 = (await service.createProduct({ ...scope, payload: payload({ product: { name: 'Material auxiliar ficticio', unit: 'unidades', minimum_quantity: 1 } }) })).item;
+  await assert.rejects(service.createProduct({ ...scope, payload: payload({ product: { name: 'Foreign', unit: 'unidades', supplier_id: require('node:crypto').randomUUID() } }) }), { code: 'supplier_not_found' });
+  await assert.rejects(service.createProduct({ ...scope, payload: payload({ product: { name: 'Bad', unit: 'cajas', quantity: 100 } }) }), { code: 'fields_invalid' });
+  assert.equal(product.quantity, 0);
+  const foreignSupplier = await db.ClinicSupplier.create({ ...supplier, id: require('node:crypto').randomUUID(), clinic_id: 73, created_by: 7, updated_by: 7 });
+  await assert.rejects(service.updateSupplier({ ...scope, id: foreignSupplier.id, payload: payload({ expected_version: 1, supplier: { name: 'Foreign edited' } }) }), { code: 'supplier_not_found' });
+
+  const createOrder = async (lines, extra = {}) => (await service.createOrder({ ...scope, payload: payload({ order: { supplier_id: supplier.id, status: 'ordered', expected_on: '2026-10-23', lines, ...extra } }) })).item;
+  let order = await createOrder([{ product_id: product.id, quantity: 3 }, { product_id: product2.id, quantity: 2 }]);
+  assert.equal((await service.overview(scope)).summary.overdue, 1);
+  assert.equal((await service.overview(scope)).summary.expected, 1, 'awaiting delivery includes overdue orders');
+  const undated = await createOrder([{ product_id: product2.id, quantity: 1 }], { expected_on: null });
+  assert.equal((await service.overview(scope)).summary.expected, 2, 'awaiting delivery includes unconfirmed dates');
+  await service.updateOrder({ ...scope, id: undated.id, payload: payload({ expected_version: undated.version, order: { status: 'cancelled' } }) });
+  assert.equal((await service.overview(scope)).products.find(item => item.id === product.id).on_order_quantity, 3);
+  const line = order.lines.find(line => line.product_id === product.id), line2 = order.lines.find(line => line.product_id === product2.id);
+  const reception = payload({ expected_version: 1, lines: [{ id: line.id, quantity: 1 }] });
+  const concurrent = await Promise.all([service.receipt({ ...scope, id: order.id, payload: reception }), service.receipt({ ...scope, id: order.id, payload: reception })]);
+  assert.equal(concurrent.filter(result => result.replayed).length, 1);
+  assert.equal(Number((await db.ClinicStockProduct.findByPk(product.id)).quantity), 1);
+  assert.equal(await db.ClinicStockMovement.count(), 1);
+  order = concurrent[0].item; assert.equal(order.status, 'partial'); assert.equal(order.version, 2);
+  await assert.rejects(service.receipt({ ...scope, id: order.id, payload: payload({ expected_version: 2, lines: [{ id: line.id, quantity: 3 }] }) }), { code: 'receipt_exceeds' });
+  await assert.rejects(service.receipt({ ...scope, id: order.id, payload: payload({ expected_version: 2, lines: [{ id: line.id, quantity: 1 }, { id: line.id, quantity: 1 }] }) }), { code: 'duplicate_line' });
+  await assert.rejects(service.receipt({ ...scope, id: order.id, payload: payload({ expected_version: 2, lines: [{ id: require('node:crypto').randomUUID(), quantity: 1 }] }) }), { code: 'receipt_scope' });
+  await assert.rejects(service.receipt({ ...scope, id: order.id, payload: payload({ expected_version: 1, lines: [{ id: line.id, quantity: 1 }] }) }), { code: 'version_conflict' });
+  await assert.rejects(service.updateOrder({ ...scope, id: order.id, payload: payload({ expected_version: 2, order: { status: 'cancelled' } }) }), { code: 'received_order_cancel' });
+  report.checks.push('Concurrent identical partial receipts credit stock once; repeated keys replay. Over-receipt, duplicate/foreign lines, stale revision and erasing a partial delivery are rejected.');
+
+  const originalJournal = db.ClinicSupplyCommand.create.bind(db.ClinicSupplyCommand);
+  db.ClinicSupplyCommand.create = async () => { throw Error('owned-journal-failure'); };
+  const receipt2 = payload({ expected_version: 2, lines: [{ id: line.id, quantity: 2 }, { id: line2.id, quantity: 2 }] });
+  await assert.rejects(service.receipt({ ...scope, id: order.id, payload: receipt2 }), /owned-journal-failure/);
+  db.ClinicSupplyCommand.create = originalJournal;
+  assert.equal(Number((await db.ClinicStockProduct.findByPk(product.id)).quantity), 1);
+  assert.equal(Number((await db.ClinicStockProduct.findByPk(product2.id)).quantity), 0);
+  assert.equal((await db.ClinicMaterialOrder.findByPk(order.id)).status, 'partial');
+  assert.equal(Number((await db.ClinicMaterialOrderLine.findByPk(line.id)).received_quantity), 1);
+  assert.equal(await db.ClinicStockMovement.count(), 1);
+  order = (await service.receipt({ ...scope, id: order.id, payload: receipt2 })).item;
+  assert.equal(order.status, 'received');
+  assert.equal(Number((await db.ClinicStockProduct.findByPk(product.id)).quantity), 3);
+  assert.equal(Number((await db.ClinicStockProduct.findByPk(product2.id)).quantity), 2);
+  assert.equal((await service.overview(scope)).products.find(item => item.id === product.id).on_order_quantity, 0);
+  report.checks.push('Forced journal failure rolls back order status/version, all received quantities, products and movement rows in one SQL transaction; retry completes exactly once.');
+
+  let current = await db.ClinicStockProduct.findByPk(product.id);
+  const races = await Promise.allSettled([1, 2].map(() => service.movement({ ...scope, id: product.id, payload: payload({ expected_version: Number(current.version), kind: 'exit', quantity: 1, reason: 'Uso ficticio QA' }) })));
+  assert.equal(races.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(races.find(result => result.status === 'rejected').reason.code, 'version_conflict');
+  current = await db.ClinicStockProduct.findByPk(product.id);
+  await assert.rejects(service.movement({ ...scope, id: product.id, payload: payload({ expected_version: Number(current.version), kind: 'exit', quantity: 3, reason: 'Too much' }) }), { code: 'stock_out_of_range' });
+  await assert.rejects(service.updateProduct({ ...scope, id: product.id, payload: payload({ expected_version: Number(current.version), product: { unit: 'unidades' } }) }), { code: 'unit_locked' });
+  let counted = (await service.movement({ ...scope, id: product.id, payload: payload({ expected_version: Number(current.version), kind: 'count', quantity: 0.1, reason: 'Recuento ficticio' }) })).item;
+  counted = (await service.movement({ ...scope, id: product.id, payload: payload({ expected_version: counted.version, kind: 'entry', quantity: 0.2, reason: 'Entrada ficticia' }) })).item;
+  assert.equal(counted.quantity, 0.3);
+  const movements = await service.movements({ ...scope, id: product.id });
+  assert(movements.items.some(item => item.kind === 'receipt' && item.order_id === order.id));
+  const immutable = await db.ClinicStockMovement.findOne(); await assert.rejects(immutable.update({ quantity: 999 }), /immutable/); await assert.rejects(immutable.destroy(), /immutable/);
+  const immutableCommand = await db.ClinicSupplyCommand.findOne(); await assert.rejects(immutableCommand.update({ result: {} }), /immutable/);
+  report.checks.push('Competing stock writes enforce CAS, quantities never go negative, used units cannot change, count plus decimal entry is exact, and actor/order-linked movement and command journals are immutable.');
+
+  const cappedProducts = Array.from({ length: 501 }, (_, index) => ({ id: require('node:crypto').randomUUID(), clinic_id: 72, name: 'Producto ficticio lote ' + index, unit: 'unidades', location: '', supplier_id: null, quantity: 0, minimum_quantity: 1, active: true, version: 1, created_by: 7, updated_by: 7 }));
+  await db.ClinicStockProduct.bulkCreate(cappedProducts);
+  const overview = await service.overview(scope);
+  assert.equal(overview.products.length, 500); assert.equal(overview.truncated.products, true); assert.equal(overview.summary.low_stock, 502);
+  assert(!overview.suppliers.some(item => item.id === foreignSupplier.id));
+  report.checks.push('Overview is clinic-isolated, bounded lists explicitly flag truncation, while global counters include rows beyond the first 500. No invoices, payments, patient records or providers are contacted.');
+}).catch(error => { console.error(error); process.exitCode = 1; });

@@ -1,6 +1,6 @@
 'use strict';
 const crypto=require('node:crypto');
-const {Op}=require('sequelize');
+const {Op,QueryTypes}=require('sequelize');
 const C=require('../lib/dental-supporting-tools-contract');
 const plain=value=>value?.toJSON?value.toJSON():value;
 const parse=value=>typeof value==='string'?JSON.parse(value):value;
@@ -93,6 +93,18 @@ function createDentalSupportingToolsService({db,canAccess,resolveRole,storeAsset
       if(row){const replay=await Revision.findOne({where:{tool_id:row.id,command_key:payload.idempotency_key},transaction});if(replay){if(replay.command_hash!==mutationHash)C.fail('idempotency_conflict','Esta solicitud ya se utilizó para otra acción.',409);return{item:visible(replay.snapshot,ctx),capabilities:ctx.capabilities,replayed:true};}}
       if(Number(row?.version_number||0)!==payload.expected_version)C.fail('version_conflict','Las herramientas han cambiado. Tu borrador se conserva; vuelve a cargar antes de guardar.',409);
       const previous=parse(row?.state)||C.emptyState();let command=payload.command;
+      // Resolve a newly selected supplier inside the same transaction as the
+      // tools revision. Keep the recorded name as a historical snapshot;
+      // archiving a supplier later must not block unrelated clinical commands.
+      if(command?.type==='lab.create'||command?.type==='lab.update'){
+        const key=command.type==='lab.create'?'order':'patch',source=command[key];
+        if(C.object(source)&&Object.hasOwn(source,'supplier_id')&&source.supplier_id!==null){
+          const supplierId=C.id(source.supplier_id);
+          const supplier=await db.ClinicSupplier.findOne({where:{id:supplierId,clinic_id:ctx.clinicId,active:true},transaction});
+          if(!supplier)C.fail('supplier_scope','Selecciona un proveedor activo de esta clínica.',404);
+          command={...command,[key]:{...source,supplier_id:supplier.id,laboratory:supplier.name}};
+        }
+      }
       if(upload){
         if(!C.object(payload.evidence)||payload.evidence.kind==='physical')C.fail('evidence_invalid','Indica el tipo de prueba clínica.');
         // Validate the whole non-file command before storing bytes. The asset
@@ -156,19 +168,76 @@ function createDentalSupportingToolsService({db,canAccess,resolveRole,storeAsset
     if(!await can({actorId,clinicId,featureKey:'clinical.reports.view'})&&!await can({actorId,clinicId,featureKey:'appointments.manage'}))C.fail('forbidden','No tienes permiso para la bandeja de laboratorio.',403);
     const limit=input.limit===undefined?50:scopeInteger(input.limit);if(limit>100)C.fail('limit','Solicita como máximo 100 pedidos.');
     const status=input.status||'pending';if(!['all','pending','draft','requested','received','approved','rejected'].includes(status))C.fail('option_invalid','Selecciona un estado de laboratorio válido.');
-    let cursor={row:0,offset:0};if(input.cursor){try{cursor=JSON.parse(Buffer.from(input.cursor,'base64url').toString('utf8'));if(cursor.clinic!==clinicId||cursor.status!==status||!Number.isSafeInteger(cursor.row)||cursor.row<1||!Number.isSafeInteger(cursor.offset)||cursor.offset<0||cursor.offset>1000)throw Error('cursor');}catch{C.fail('cursor_invalid','La página de laboratorio no es válida.');}}
-    const rows=await Row.findAll({where:{clinic_id:clinicId,...(cursor.row?{id:{[Op.gte]:cursor.row}}:{})},order:[['id','ASC']],limit:21});
-    const items=[];let next=null;
-    for(const row of rows){const plan=await db.DentalPlan.findOne({where:{id:row.plan_id,clinic_id:clinicId,patient_id:row.patient_id}});if(!plan)continue;const patient=await db.Paciente.findByPk(row.patient_id,{attributes:['id_paciente','public_id','clinica_id','nombre','apellidos']});if(!patient)continue;
-      const member=Number(patient.clinica_id)===clinicId||db.PacienteClinica&&await db.PacienteClinica.findOne({where:{paciente_id:row.patient_id,clinica_id:clinicId}});if(!member)continue;
-      const orders=(parse(row.state)||C.emptyState()).lab_orders;for(let i=Number(row.id)===cursor.row?cursor.offset:0;i<orders.length;i++){
-        const order=orders[i];if(status==='pending'?order.status==='approved':status!=='all'&&order.status!==status)continue;
-        if(items.length===limit){next={clinic:clinicId,status,row:Number(row.id),offset:i};break;}
-        items.push({...C.clone(order),plan_id:plan.public_id,plan_title:parse(plan.state)?.title||null,patient_id:Number(row.patient_id),patient_public_id:patient.public_id,patient_name:[patient.nombre,patient.apellidos].filter(Boolean).join(' ').trim(),tools_version:Number(row.version_number)});
-      }if(next)break;
+    const query=C.text(input.q,180).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('es').replace(/\s+/g,' ').trim();
+    const clinic=await db.Clinica.findByPk(clinicId,{attributes:['id_clinica','configuracion']});
+    if(!clinic)C.fail('clinic_not_found','La clínica no está disponible.',404);
+    const timezone=require('./clinicOpeningHours.service').resolveClinicTimeZone(clinic);
+    const parts=new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(now());
+    const civil=Object.fromEntries(parts.filter(part=>part.type!=='literal').map(part=>[part.type,part.value]));
+    const today=`${civil.year}-${civil.month}-${civil.day}`,queryHash=C.hash(query);
+    let cursor=null;
+    if(input.cursor){try{
+      if(typeof input.cursor!=='string'||input.cursor.length>2048||!/^[A-Za-z0-9_-]+$/.test(input.cursor))throw Error('cursor');
+      cursor=JSON.parse(Buffer.from(input.cursor,'base64url').toString('utf8'));
+      if(cursor.clinic!==clinicId||cursor.status!==status||cursor.q!==queryHash||cursor.today!==today||!Number.isSafeInteger(cursor.priority)||cursor.priority<0||cursor.priority>2||!Number.isSafeInteger(cursor.state)||cursor.state<0||cursor.state>4||!Number.isSafeInteger(cursor.row)||cursor.row<1||!Number.isSafeInteger(cursor.position)||cursor.position<1||cursor.position>1000)throw Error('cursor');
+      C.date(cursor.date);
+    }catch{C.fail('cursor_invalid','La página de laboratorio no corresponde a estos filtros.');}}
+    // Expand all orders in SQL before counting, filtering and paging. A clinic
+    // may have many plans: first loading a few tools rows hides urgent orders.
+    const quote=model=>db.sequelize.getQueryInterface().queryGenerator.quoteTable(model.getTableName());
+    const membership=db.PacienteClinica?`OR EXISTS (SELECT 1 FROM ${quote(db.PacienteClinica)} membership WHERE membership.paciente_id=patient.id_paciente AND membership.clinica_id=:clinicId)`:'';
+    const source=`SELECT tools.id AS tools_row, orders.position, tools.version_number AS tools_version,
+      plan.public_id AS plan_id, NULLIF(JSON_UNQUOTE(JSON_EXTRACT(plan.state,'$.title')),'null') AS plan_title,
+      patient.id_paciente AS patient_id, patient.public_id AS patient_public_id,
+      TRIM(CONCAT_WS(' ',patient.nombre,patient.apellidos)) AS patient_name,
+      orders.order_id AS id, orders.title, orders.laboratory, orders.supplier_id, orders.status,
+      orders.request_before,orders.requested_on,orders.expected_delivery_on,orders.needed_on,orders.received_on,orders.appointment_id,
+      JSON_EXTRACT(tools.state,CONCAT('$.lab_orders[',orders.position-1,'].act_ids')) AS act_ids,
+      CASE WHEN orders.status='requested' AND orders.expected_delivery_on < :today THEN 0 WHEN orders.status='approved' THEN 2 ELSE 1 END AS priority,
+      COALESCE(CASE WHEN orders.status='draft' THEN COALESCE(orders.request_before,orders.needed_on,orders.expected_delivery_on)
+        WHEN orders.status='requested' THEN COALESCE(orders.expected_delivery_on,orders.needed_on)
+        ELSE COALESCE(orders.needed_on,orders.expected_delivery_on) END,'9999-12-31') AS urgent_on,
+      CASE orders.status WHEN 'rejected' THEN 0 WHEN 'received' THEN 1 WHEN 'draft' THEN 2 WHEN 'requested' THEN 3 ELSE 4 END AS state_rank
+      FROM ${quote(Row)} tools
+      INNER JOIN ${quote(db.DentalPlan)} plan ON plan.id=tools.plan_id AND plan.clinic_id=tools.clinic_id AND plan.patient_id=tools.patient_id
+      INNER JOIN ${quote(db.Paciente)} patient ON patient.id_paciente=tools.patient_id
+      CROSS JOIN JSON_TABLE(tools.state,'$.lab_orders[*]' COLUMNS(
+        position FOR ORDINALITY,order_id VARCHAR(80) PATH '$.id' NULL ON EMPTY NULL ON ERROR,
+        title VARCHAR(180) PATH '$.title' NULL ON EMPTY NULL ON ERROR,laboratory VARCHAR(180) PATH '$.laboratory' NULL ON EMPTY NULL ON ERROR,supplier_id VARCHAR(80) PATH '$.supplier_id' NULL ON EMPTY NULL ON ERROR,
+        status VARCHAR(20) PATH '$.status' NULL ON EMPTY NULL ON ERROR,
+        request_before VARCHAR(10) PATH '$.request_before' NULL ON EMPTY NULL ON ERROR,requested_on VARCHAR(10) PATH '$.requested_on' NULL ON EMPTY NULL ON ERROR,
+        expected_delivery_on VARCHAR(10) PATH '$.expected_delivery_on' NULL ON EMPTY NULL ON ERROR,needed_on VARCHAR(10) PATH '$.needed_on' NULL ON EMPTY NULL ON ERROR,
+        received_on VARCHAR(10) PATH '$.received_on' NULL ON EMPTY NULL ON ERROR,appointment_id BIGINT PATH '$.appointment_id' NULL ON EMPTY NULL ON ERROR
+      )) orders
+      WHERE tools.clinic_id=:clinicId AND (patient.clinica_id=:clinicId ${membership})
+        AND orders.order_id IS NOT NULL AND orders.status IN ('draft','requested','received','approved','rejected')`;
+    const replacements={clinicId,today,limit:limit+1};
+    const filters=[];
+    if(status==='pending')filters.push("status<>'approved'");else if(status!=='all'){filters.push('status=:status');replacements.status=status;}
+    for(const [index,word]of(query?query.split(' '):[]).entries()){
+      filters.push(`CONVERT(CONCAT_WS(' ',patient_name,title,laboratory,plan_title) USING utf8mb4) COLLATE utf8mb4_0900_ai_ci LIKE :word${index} ESCAPE '!'`);
+      replacements[`word${index}`]='%'+word.replace(/[!%_]/g,char=>'!'+char)+'%';
     }
-    if(!next&&rows.length===21)next={clinic:clinicId,status,row:Number(rows[rows.length-1].id)+1,offset:0};
-    return{items,next_cursor:next?Buffer.from(JSON.stringify(next)).toString('base64url'):null};
+    const filtered=filters.length?filters.map(value=>`(${value})`).join(' AND '):'1=1';
+    return db.sequelize.transaction({isolationLevel:'REPEATABLE READ',readOnly:true},async transaction=>{
+      const [counts]=await db.sequelize.query(`SELECT COUNT(*) AS total,
+        COALESCE(SUM(status='draft'),0) AS draft,COALESCE(SUM(status='requested'),0) AS requested,
+        COALESCE(SUM(status='received'),0) AS received,COALESCE(SUM(status='approved'),0) AS approved,
+        COALESCE(SUM(status='rejected'),0) AS rejected,COALESCE(SUM(priority=0),0) AS overdue,
+        COALESCE(SUM(${filtered}),0) AS filtered_total FROM (${source}) clinic_orders`,{replacements,type:QueryTypes.SELECT,transaction});
+      let after='';
+      if(cursor){after=' AND (priority,urgent_on,state_rank,tools_row,position)>(:afterPriority,:afterDate,:afterState,:afterRow,:afterPosition)';Object.assign(replacements,{afterPriority:cursor.priority,afterDate:cursor.date,afterState:cursor.state,afterRow:cursor.row,afterPosition:cursor.position});}
+      const rows=await db.sequelize.query(`SELECT * FROM (${source}) clinic_orders WHERE ${filtered}${after}
+        ORDER BY priority ASC,urgent_on ASC,state_rank ASC,tools_row ASC,position ASC LIMIT :limit`,{replacements,type:QueryTypes.SELECT,transaction});
+      const page=rows.slice(0,limit),items=page.map(row=>({id:row.id,plan_id:row.plan_id,plan_title:row.plan_title,
+        patient_id:Number(row.patient_id),patient_public_id:row.patient_public_id,patient_name:row.patient_name,
+        title:row.title,laboratory:row.laboratory,status:row.status,tools_version:Number(row.tools_version),...(row.supplier_id?{supplier_id:row.supplier_id}:{}),
+        act_ids:parse(row.act_ids)||[],...Object.fromEntries(['request_before','requested_on','expected_delivery_on','needed_on','received_on'].filter(key=>row[key]).map(key=>[key,row[key]])),
+        ...(row.appointment_id?{appointment_id:Number(row.appointment_id)}:{})}));
+      const last=page.at(-1),next=rows.length>limit?{clinic:clinicId,status,q:queryHash,today,priority:Number(last.priority),date:last.urgent_on,state:Number(last.state_rank),row:Number(last.tools_row),position:Number(last.position)}:null;
+      const {filtered_total,...summary}=Object.fromEntries(Object.entries(counts).map(([key,value])=>[key,Number(value)]));
+      return{items,next_cursor:next?Buffer.from(JSON.stringify(next)).toString('base64url'):null,summary,filtered_total,today,timezone};
+    });
   }
   return{read,command:input=>mutate(input),upload:input=>mutate(input,true),revisions,asset,preview,patientAssets,laboratory,getPlanToolState};
 }
