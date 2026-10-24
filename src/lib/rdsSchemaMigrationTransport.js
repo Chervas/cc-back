@@ -122,7 +122,10 @@ function createAws({ profile = 'clinicaclick-prov-temp', execute = promisify(exe
     const result = await call(['rds', 'create-db-snapshot', '--db-instance-identifier', scope.dbId, '--db-snapshot-identifier', snapshotId]);
     need(result.DBSnapshot?.DBSnapshotIdentifier === snapshotId && result.DBSnapshot.DBInstanceIdentifier === scope.dbId, 'rds_schema_backup_response_unknown');
     journal({ event: 'backup_create_ack', snapshotId });
-    const deadline = now() + 30 * 60 * 1000;
+    // A real 100-GiB snapshot took 46 minutes on 2026-10-24. The application
+    // keeps running during this wait; DDL still requires an available snapshot
+    // and a fresh identity/schema/session check after it finishes.
+    const deadline = now() + 90 * 60 * 1000;
     while (now() < deadline) {
       const value = await call(['rds', 'describe-db-snapshots', '--db-snapshot-identifier', snapshotId]);
       const snapshot = value.DBSnapshots?.[0];

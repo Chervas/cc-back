@@ -483,6 +483,8 @@ const shouldStartNotificationCron = !shouldStartCron && (
     notificationCronOwner === 'true'
     || (notificationCronOwner === undefined && process.env.JOB_RUNTIME_NAMESPACE === 'dev')
 );
+const selectedNotificationJobs = require('./lib/infrastructureNotificationProtocol')
+  .selectedStartupJobs(shouldStartNotificationCron, process.env);
 if (shouldStartWorker) {
     jobScheduler.start()
       .then((report) => {
@@ -517,11 +519,11 @@ if (!IS_GATEWAY_RUNTIME && shouldStartCron) {
       console.error('❌ Error al iniciar jobs automáticamente:', error);
     }
   }, 5000);
-} else if (!IS_GATEWAY_RUNTIME && shouldStartNotificationCron) {
+} else if (!IS_GATEWAY_RUNTIME && selectedNotificationJobs.length) {
   setTimeout(async () => {
     try {
       await metaSyncJobs.initialize();
-      const report = metaSyncJobs.startSelected(['systemNotificationCheck']);
+      const report = metaSyncJobs.startSelected(selectedNotificationJobs);
       console.log(`✅ Cron selectivo de alertas iniciado (${report.startedJobsCount} job)`);
     } catch (error) {
       console.error('❌ No se pudo iniciar el cron selectivo de alertas:', error.message);

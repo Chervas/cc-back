@@ -17,6 +17,9 @@ const {
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 
 const ADMIN_ONLY_EVENTS = new Set([
+  'infrastructure.rds_event',
+  'infrastructure.rds_alarm',
+  'infrastructure.rds_recovered',
   'system.notification_test',
   'users.new_registration',
   'email_provider_disabled',

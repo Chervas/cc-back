@@ -454,6 +454,7 @@ class MetaSyncJobs {
         platformAuditReconciliation: '*/5 * * * *',
         platformAuditMonitor: '*/5 * * * *',
         awsInfrastructureCosts: '40 3 * * *',
+        infrastructureNotifications: '* * * * *',
         metricsSync: process.env.JOBS_METRICS_SCHEDULE || '0 2 * * *',
         tokenValidation: process.env.JOBS_TOKEN_VALIDATION_SCHEDULE || '0 */6 * * *',
         dataCleanup: process.env.JOBS_CLEANUP_SCHEDULE || '0 3 * * 0',
@@ -650,6 +651,9 @@ class MetaSyncJobs {
       throw new Error(`Job periódico '${jobName}' no definido en el catálogo`);
     }
     if (definition.enabledEnv && process.env[definition.enabledEnv] !== 'true') {
+      return { status: 'disabled', queued: false, job_type: definition.type };
+    }
+    if (definition.runtimeNamespaces && !definition.runtimeNamespaces.includes(jobRequestsService.getCurrentRuntimeNamespace())) {
       return { status: 'disabled', queued: false, job_type: definition.type };
     }
 
@@ -4455,6 +4459,10 @@ try {
 
   async executeAwsInfrastructureCosts() {
     return require('../services/awsInfrastructureCosts.service').runDaily();
+  }
+
+  async executeInfrastructureNotifications() {
+    return require('../services/infrastructureNotifications.service').runJob();
   }
 
   async executePlatformAuditDelivery() {

@@ -28,6 +28,24 @@ const WHATSAPP_PROVIDER_STATUSES = new Set(['sent', 'delivered', 'read', 'failed
 
 const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
   {
+    key: 'infrastructure.rds_event', category: 'system', severity: 'info',
+    label: 'AWS RDS: evento operativo significativo',
+    description: 'Eventos de disponibilidad, failover, errores, almacenamiento o mantenimiento; se omite ruido de backups.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
+    key: 'infrastructure.rds_alarm', category: 'system', severity: 'warning',
+    label: 'AWS RDS: alarma de infraestructura',
+    description: 'CPU, almacenamiento, memoria o conexiones de la base de datos requieren revisión.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
+    key: 'infrastructure.rds_recovered', category: 'system', severity: 'info',
+    label: 'AWS RDS: condición recuperada',
+    description: 'La alarma de infraestructura previamente observada ha vuelto a OK.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
     key: 'system.host_storage_warning', category: 'system', severity: 'warning',
     label: 'Servidor: disco al 80%',
     description: 'El disco compartido de CRM, DEV y MySQL ha alcanzado el 80% de uso.',
@@ -1003,6 +1021,7 @@ async function queueNotification({
   payload = {},
   force = false,
   channelsOverride = null,
+  allowedChannels = null,
   metadata = {},
   runtimeNamespace = null,
   transaction = null,
@@ -1015,7 +1034,8 @@ async function queueNotification({
   }
   const setting = await ensureSettings();
   const content = buildNotificationContent(eventKey, payload);
-  const channels = enabledChannelsForEvent(setting, eventKey, channelsOverride);
+  const channels = enabledChannelsForEvent(setting, eventKey, channelsOverride)
+    .filter(channel => !Array.isArray(allowedChannels) || allowedChannels.includes(channel));
   const created = [];
   const skipped = [];
   const dispatchRuntimeNamespace = resolveDispatchRuntimeNamespace(runtimeNamespace);

@@ -17,6 +17,19 @@
         "20260919200000-create-business-profile-mutation-journal.js",
         "20260919210000-create-business-profile-cache-coordination.js"
       ]
+    },
+    "infrastructure_notifications": {
+      "enabledWhenAll": {
+        "INFRASTRUCTURE_NOTIFICATIONS_ENABLED": "true",
+        "JOB_RUNTIME_NAMESPACE": "staging"
+      },
+      "tables": [
+        "InfrastructureNotificationReceipts",
+        "InfrastructureNotificationStates"
+      ],
+      "migrations": [
+        "20261024160000-create-infrastructure-notification-receipts.js"
+      ]
     }
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
@@ -4339,6 +4352,263 @@
       "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
       "columns": [{"COLUMN_NAME":"price_profile","COLUMN_TYPE":"json","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}],
       "indexes": []
+    },
+    "InfrastructureNotificationReceipts": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_unicode_ci",
+      "columns": [
+        {
+          "COLUMN_NAME": "receipt_key",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "topic_arn",
+          "COLUMN_TYPE": "varchar(255)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "sns_message_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "payload_sha256",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "resource_arn",
+          "COLUMN_TYPE": "varchar(512)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "delivery_test_nonce",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "source_kind",
+          "COLUMN_TYPE": "varchar(24)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "event_id",
+          "COLUMN_TYPE": "varchar(40)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "event_category",
+          "COLUMN_TYPE": "varchar(32)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state_changed_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "outcome",
+          "COLUMN_TYPE": "varchar(16)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "received_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "processed_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "notification_result",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "receipt_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "delivery_test_nonce",
+          "columns": [
+            {
+              "INDEX_NAME": "delivery_test_nonce",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "delivery_test_nonce",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "InfrastructureNotificationStates": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_unicode_ci",
+      "columns": [
+        {
+          "COLUMN_NAME": "alarm_key",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "alarm_arn",
+          "COLUMN_TYPE": "varchar(512)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "varchar(24)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state_changed_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "last_receipt_key",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_unicode_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updated_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "alarm_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
     }
   },
   "migrations": [
@@ -4391,6 +4661,7 @@
     {"name": "20260919210000-create-business-profile-cache-coordination.js", "sha256": "d05ec2f4efb1deea3a9c8a5aeb889d5202d0bcd45f915458f2f709adc34e6825"},
     {"name": "20260922153000-create-whatsapp-phone-activations.js", "sha256": "243e65409413549b47a1befc2570d1f2164235324592b93465ff12c2ad003d12"},
     {"name": "20260925113000-whatsapp-activation-history.js", "sha256": "44befbf80817e894c95cbc0429c221f671b9e77cab13b7ec52bf768ceddcb0bc"},
-    {"name": "20261004180000-program-commercial-price-profile.js", "sha256": "c25968779c302bcf22504d39668718f4f55e836f42e0485af7d987a0a65e37e5"}
+    {"name": "20261004180000-program-commercial-price-profile.js", "sha256": "c25968779c302bcf22504d39668718f4f55e836f42e0485af7d987a0a65e37e5"},
+    {"name": "20261024160000-create-infrastructure-notification-receipts.js", "sha256": "d2994a3db213b0e9378cab35458033dfde8c77ba2986c3984e984d3c76627984"}
   ]
 }

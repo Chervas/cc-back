@@ -1,0 +1,28 @@
+[Unit]
+Description=Rotate the dedicated local platform-alerts IAM Roles Anywhere certificate
+ConditionPathExists=/etc/clinicaclick-costs/authority/ca.pem
+ConditionPathExists=/etc/clinicaclick-costs/authority/ca-key.pem
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/libexec/clinicaclick-infrastructure-alert-rotate-certificate --rotate-if-needed
+TimeoutStartSec=90
+NoNewPrivileges=true
+PrivateNetwork=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/clinicaclick-alerts
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=CAP_CHOWN
+StandardOutput=journal
+StandardError=journal

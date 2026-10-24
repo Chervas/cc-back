@@ -34,7 +34,10 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 53, 'the canonical scheduler retains existing jobs and the gated AWS cost/audit/session/revocation/OAuth/enrollment jobs');
+  assert.equal(definitions.length, 54, 'the canonical scheduler retains existing jobs and the staging-only infrastructure notification ingest');
+  assert.deepEqual(SCHEDULED_JOB_DEFINITIONS.infrastructureNotifications.runtimeNamespaces, ['staging']);
+  assert.equal(SCHEDULED_JOB_DEFINITIONS.infrastructureNotifications.maxAttempts, 1);
+  assert.equal(metaSyncJobs.config.schedules.infrastructureNotifications, '* * * * *');
   assert.deepEqual(catalogNames, configuredNames);
   assert.equal(new Set(types).size, types.length, 'scheduled job types must be unique');
   for (const jobName of [

@@ -39,6 +39,9 @@ const NOTIFICATION_CATEGORIES = [
 ];
 
 const NOTIFICATION_EVENTS = [
+  { event: 'infrastructure.rds_event', category: 'system', label: 'AWS RDS: evento operativo significativo', level: 'info' },
+  { event: 'infrastructure.rds_alarm', category: 'system', label: 'AWS RDS: alarma de infraestructura', level: 'warning' },
+  { event: 'infrastructure.rds_recovered', category: 'system', label: 'AWS RDS: condición recuperada', level: 'info' },
   {
     event: 'ads.sync_error',
     category: 'ads',
@@ -242,6 +245,9 @@ const USER_NOTIFICATION_PRESENTATION_PREFERENCES = Object.freeze([
 ]);
 
 const DEFAULT_NOTIFICATION_PREFERENCES = [
+  { role: 'admin', subrole: null, event: 'infrastructure.rds_event', enabled: true },
+  { role: 'admin', subrole: null, event: 'infrastructure.rds_alarm', enabled: true },
+  { role: 'admin', subrole: null, event: 'infrastructure.rds_recovered', enabled: true },
   { role: 'personaldeclinica', subrole: 'Doctores', event: 'ads.sync_error', enabled: true },
   { role: 'personaldeclinica', subrole: 'Doctores', event: 'ads.new_lead', enabled: true },
   { role: 'personaldeclinica', subrole: 'Doctores', event: 'ads.health_issue', enabled: true },

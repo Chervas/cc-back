@@ -247,6 +247,42 @@ test('production AWS binding admits only the existing physical DBI even at the s
   await assert.rejects(aws.inspect(), /rds_not_ready/);
 });
 
+test('snapshot wait accepts a 46-minute backup once and remains bounded at 90 minutes', async () => {
+  for (const availableAfterMs of [46 * 60000, Infinity]) {
+    let clock = Date.parse('2026-10-24T14:00:00Z');
+    const started = clock; const requests = []; const journal = [];
+    const db = { DBInstanceIdentifier: T.DB_ID, DBInstanceStatus: 'available', Engine: 'mysql', EngineVersion: '8.4.11',
+      Endpoint: { Address: T.HOST, Port: 3306 }, DbiResourceId: T.PRIMARY_DBI, MultiAZ: true, BackupRetentionPeriod: 15,
+      StorageEncrypted: true, PendingModifiedValues: {}, DBParameterGroups: [{ ParameterApplyStatus: 'in-sync' }],
+      MasterUserSecret: { SecretStatus: 'active', SecretArn: 'arn:aws:secretsmanager:eu-west-3:137819318729:secret:TEST_ONLY' } };
+    const snapshotId = 'cc-schema-' + 'a'.repeat(32);
+    const aws = T.createAws({ now: () => clock, pause: async ms => { clock += ms; }, execute: async (_binary, args) => {
+      requests.push(args);
+      if (args.includes('export-credentials')) return { stdout: JSON.stringify({ AccessKeyId: 'TEST_ONLY', SecretAccessKey: 'TEST_ONLY',
+        SessionToken: 'TEST_ONLY', Expiration: new Date(clock + 3600000).toISOString() }) };
+      if (args.includes('get-caller-identity')) return { stdout: JSON.stringify({ Account: '137819318729', Arn: 'arn:aws:sts::137819318729:assumed-role/TEST_ONLY/session' }) };
+      if (args.includes('create-db-snapshot')) return { stdout: JSON.stringify({ DBSnapshot: { DBSnapshotIdentifier: snapshotId, DBInstanceIdentifier: T.DB_ID } }) };
+      if (args.includes('describe-db-snapshots')) return { stdout: JSON.stringify({ DBSnapshots: [{ DBSnapshotIdentifier: snapshotId,
+        DBInstanceIdentifier: T.DB_ID, DbiResourceId: T.PRIMARY_DBI, Encrypted: true, Engine: 'mysql', EngineVersion: '8.4.11',
+        SnapshotCreateTime: new Date(started).toISOString(), Status: clock - started >= availableAfterMs ? 'available' : 'creating' }] }) };
+      if (args.includes('describe-db-instances')) return { stdout: JSON.stringify({ DBInstances: [db] }) };
+      throw Error('TEST_ONLY_unexpected_aws');
+    } });
+    const result = aws.backup({ operationNonce: 'a'.repeat(32), journal: event => journal.push(event) });
+    if (Number.isFinite(availableAfterMs)) {
+      assert.equal((await result).status, 'available');
+      assert.equal(clock - started, availableAfterMs);
+      assert.equal(journal.filter(x => x.event === 'backup_available').length, 1);
+    } else {
+      await assert.rejects(result, /backup_timeout/);
+      assert.equal(clock - started, 90 * 60000);
+      assert.equal(journal.some(x => x.event === 'backup_available'), false);
+    }
+    assert.equal(requests.filter(args => args.includes('create-db-snapshot')).length, 1);
+    assert.equal(requests.some(args => args.includes('get-secret-value')), false);
+  }
+});
+
 test('owned session prepares exact strict modes from weak QA defaults; wrong readback or warnings refuse', async () => {
   for (const outcome of ['accepted', 'wrong_readback', 'mode_warning']) {
     const calls = []; let modes = 'IGNORE_SPACE,NO_ENGINE_SUBSTITUTION'; let last;

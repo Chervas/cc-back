@@ -1,0 +1,8 @@
+{
+  "schema": "clinicaclick-alerts-roles-anywhere/1",
+  "trustAnchorArn": "PENDING_EXISTING_PURPOSE_CA_TRUST_ANCHOR_ARN_FROM_ROOT",
+  "profileArn": "PENDING_NEW_CLINICACLICK_PLATFORM_ALERTS_PROFILE_ARN_FROM_CFN",
+  "roleArn": "arn:aws:iam::137819318729:role/clinicaclick-platform-alerts-role",
+  "region": "eu-west-3",
+  "durationSeconds": 900
+}

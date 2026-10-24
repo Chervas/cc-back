@@ -1,0 +1,13 @@
+{
+  "name": "@clinicaclick/infrastructure-alert-collector",
+  "version": "0.1.0",
+  "private": true,
+  "engines": { "node": ">=24 <25" },
+  "files": ["src", "README.md"],
+  "scripts": { "test": "node --require ./test/offline-guard.cjs --test test/*.test.js" },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "3.1131.0",
+    "@aws-sdk/client-sts": "3.1131.0",
+    "@smithy/node-http-handler": "4.12.1"
+  }
+}

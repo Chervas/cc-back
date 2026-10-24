@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily local rotation check for the purpose-only platform-alerts certificate
+
+[Timer]
+OnCalendar=*-*-* 03:27:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+AccuracySec=1m
+Unit=clinicaclick-infrastructure-alert-certificate-rotate.service
+
+[Install]
+WantedBy=timers.target

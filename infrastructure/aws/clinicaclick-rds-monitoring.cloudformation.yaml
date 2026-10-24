@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Notifications for the existing Clinicaclick RDS instance only. Creates one
+  durable SNS-to-SQS channel, four metric alarms and an RDS event subscription.
+  A dedicated certificate role consumes only this queue. No direct email,
+  database modification, application deployment or host-disk changes.
+
+Metadata:
+  OperatorReview:
+    ExpectedAccount: '137819318729'
+    ExpectedRegion: eu-west-3
+    ConfirmBeforeExecution:
+      - The existing purpose CA trust anchor belongs to this account and region.
+      - The change set contains only these thirteen resource additions.
+      - Test the existing SystemNotifications channels after durable ingestion.
+      - Alarm and recovery actions only notify; no restart, scaling or repair.
+    EventScope: All RDS event categories for this one existing DB instance only.
+    OfficialReferences:
+      - https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_Events.GrantingPermissions.html
+      - https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_Events.Subscribing.html
+      - https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Notify_Users_Alarm_Changes.html
+
+Parameters:
+  TrustAnchorArn:
+    Type: String
+    AllowedPattern: '^arn:aws:rolesanywhere:eu-west-3:137819318729:trust-anchor/[0-9a-f-]{36}$'
+    Description: Existing cost-purpose CA trust anchor; no new CA or cost-role permission changes.
+  DBInstanceId:
+    Type: String
+    Default: clinicaclick-mysql
+    AllowedValues:
+      - clinicaclick-mysql
+    Description: Existing primary DB identifier; this stack cannot select another DB.
+
+Resources:
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${DBInstanceId}-staging-operations-alerts'
+      DisplayName: Clinicaclick RDS
+      FifoTopic: false
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+
+  AlertsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlertsTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OnlyOwnFourCloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertsTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn:
+                  - !Sub 'arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${DBInstanceId}-staging-cpu-high'
+                  - !Sub 'arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${DBInstanceId}-staging-storage-low'
+                  - !Sub 'arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${DBInstanceId}-staging-memory-low'
+                  - !Sub 'arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${DBInstanceId}-staging-connections-high'
+          - Sid: OnlyOwnExistingRdsInstanceEvents
+            Effect: Allow
+            Principal:
+              Service: events.rds.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertsTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:${DBInstanceId}'
+
+  AlertsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${DBInstanceId}-staging-operations-alerts-dlq'
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      RedriveAllowPolicy:
+        redrivePermission: byQueue
+        sourceQueueArns:
+          - !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${DBInstanceId}-staging-operations-alerts'
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+
+  AlertsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${DBInstanceId}-staging-operations-alerts'
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 120
+      ReceiveMessageWaitTimeSeconds: 5
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AlertsDeadLetterQueue.Arn
+        maxReceiveCount: 10
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+
+  AlertsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref AlertsQueue]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OnlyOwnMonitoringTopicCanSend
+            Effect: Allow
+            Principal: {Service: sns.amazonaws.com}
+            Action: sqs:SendMessage
+            Resource: !GetAtt AlertsQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref AlertsTopic
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  AlertsQueueSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: AlertsQueuePolicy
+    Properties:
+      Protocol: sqs
+      Endpoint: !GetAtt AlertsQueue.Arn
+      TopicArn: !Ref AlertsTopic
+      RawMessageDelivery: false
+
+  AlertsConsumerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: clinicaclick-platform-alerts-role
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: rolesanywhere.amazonaws.com}
+            Action: ['sts:AssumeRole', 'sts:SetSourceIdentity', 'sts:TagSession']
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref TrustAnchorArn
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:PrincipalTag/x509Subject/CN: clinicaclick-platform-alerts
+                aws:PrincipalTag/x509Issuer/CN: clinicaclick-platform-costs-root-20261024
+      Policies:
+        - PolicyName: consume-only-own-infrastructure-alerts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']
+                Resource: !GetAtt AlertsQueue.Arn
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref AWS::Region
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+
+  AlertsConsumerProfile:
+    Type: AWS::RolesAnywhere::Profile
+    Properties:
+      Name: clinicaclick-platform-alerts
+      Enabled: true
+      DurationSeconds: 900
+      AcceptRoleSessionName: false
+      RequireInstanceProperties: false
+      RoleArns: [!GetAtt AlertsConsumerRole.Arn]
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+
+  CpuHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: AlertsTopicPolicy
+    Properties:
+      AlarmName: !Sub '${DBInstanceId}-staging-cpu-high'
+      AlarmDescription: CPU average above 85 percent in three consecutive five-minute periods; notification only.
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstanceId
+      Statistic: Average
+      Unit: Percent
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: missing
+      ActionsEnabled: true
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+      InsufficientDataActions: []
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+
+  StorageLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: AlertsTopicPolicy
+    Properties:
+      AlarmName: !Sub '${DBInstanceId}-staging-storage-low'
+      AlarmDescription: Free storage average below 20 GiB in three consecutive five-minute periods; notification only.
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstanceId
+      Statistic: Average
+      Unit: Bytes
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 21474836480
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: missing
+      ActionsEnabled: true
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+      InsufficientDataActions: []
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+
+  MemoryLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: AlertsTopicPolicy
+    Properties:
+      AlarmName: !Sub '${DBInstanceId}-staging-memory-low'
+      AlarmDescription: Freeable memory average below 512 MiB in three consecutive five-minute periods; notification only.
+      Namespace: AWS/RDS
+      MetricName: FreeableMemory
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstanceId
+      Statistic: Average
+      Unit: Bytes
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 536870912
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: missing
+      ActionsEnabled: true
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+      InsufficientDataActions: []
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+
+  ConnectionsHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: AlertsTopicPolicy
+    Properties:
+      AlarmName: !Sub '${DBInstanceId}-staging-connections-high'
+      AlarmDescription: Database connections average above 200 in three consecutive five-minute periods; notification only.
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstanceId
+      Statistic: Average
+      Unit: Count
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 200
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: missing
+      ActionsEnabled: true
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+      InsufficientDataActions: []
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+
+  ExistingInstanceEventSubscription:
+    Type: AWS::RDS::EventSubscription
+    DependsOn: AlertsTopicPolicy
+    Properties:
+      SubscriptionName: !Sub '${DBInstanceId}-staging-operations-events'
+      Enabled: true
+      SnsTopicArn: !Ref AlertsTopic
+      SourceType: db-instance
+      SourceIds:
+        - !Ref DBInstanceId
+      # No guessed EventCategories: all categories, restricted to the one DB.
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+
+Outputs:
+  AlertsTopicArn:
+    Description: Durable ingestion only; notifications use the existing CRM channels.
+    Value: !Ref AlertsTopic
+  AlertsQueueUrl:
+    Value: !Ref AlertsQueue
+  AlertsQueueArn:
+    Value: !GetAtt AlertsQueue.Arn
+  AlertsDeadLetterQueueArn:
+    Value: !GetAtt AlertsDeadLetterQueue.Arn
+  AlertsConsumerRoleArn:
+    Value: !GetAtt AlertsConsumerRole.Arn
+  AlertsConsumerProfileArn:
+    Value: !GetAtt AlertsConsumerProfile.ProfileArn
+  RdsEventSubscriptionName:
+    Value: !Ref ExistingInstanceEventSubscription
+  CpuHighAlarmName:
+    Value: !Ref CpuHighAlarm
+  StorageLowAlarmName:
+    Value: !Ref StorageLowAlarm
+  MemoryLowAlarmName:
+    Value: !Ref MemoryLowAlarm
+  ConnectionsHighAlarmName:
+    Value: !Ref ConnectionsHighAlarm

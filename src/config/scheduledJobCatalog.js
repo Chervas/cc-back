@@ -72,6 +72,11 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     enabledEnv: 'AWS_INFRA_COSTS_ENABLED', timezone: 'Europe/Madrid',
     usesIntegrationLease: false, reportedFailureRetryable: false,
   }),
+  infrastructureNotifications: Object.freeze({
+    type: 'infrastructure_notifications_ingest', priority: 'normal', executorMethod: 'executeInfrastructureNotifications',
+    enabledEnv: 'INFRASTRUCTURE_NOTIFICATIONS_ENABLED', runtimeNamespaces: Object.freeze(['staging']),
+    timezone: 'Europe/Madrid', usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
   metricsSync: Object.freeze({ type: 'meta_metrics_daily', priority: 'normal', executorMethod: 'executeMetricsSync' }),
   tokenValidation: Object.freeze({ type: 'meta_token_validation', priority: 'normal', executorMethod: 'executeTokenValidation' }),
   dataCleanup: Object.freeze({ type: 'system_data_cleanup', priority: 'low', executorMethod: 'executeDataCleanup' }),
