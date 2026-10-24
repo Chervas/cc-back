@@ -18,11 +18,11 @@ CURRENT = BASE / 'current'
 SELF = Path('/usr/local/libexec/clinicaclick-cost-credentials')
 HELPER = Path('/usr/local/libexec/aws_signing_helper-1.8.5')
 HELPER_SHA256 = 'beec9ed1c492d93db809890f16713e3556353294b823c2184ad4e891f1b2b54d'
-LOADER = Path('/snap/core22/2955/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2')
+LIBRARY = Path('/opt/clinicaclick-cost-credential-runtime/aws-helper-1.8.5')
+LOADER = LIBRARY / 'ld-linux-x86-64.so.2'
 LOADER_SHA256 = '8d06f393f4a93bcf9b81145a259524d66a95522a646bf8d7e05b6ffdf2e63dcc'
-LIBRARY = LOADER.parent
-CURRENT_LOADER = Path('/snap/core22/current/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2')
-CURRENT_LIBRARY = Path('/snap/core22/current/lib/x86_64-linux-gnu')
+LIBC_SHA256 = 'e01b1ce7be2987f3b8560e26d0df2623f9dd5cec17be923ae28a785bc0d32d50'
+RESOLV_SHA256 = 'c0724375581c0303a3ea8bcf1d5cfce6b63eca7b99313c6598a721b414634751'
 ROLE = 'arn:aws:iam::137819318729:role/clinicaclick-platform-cost-collector-role'
 CN = 'clinicaclick-platform-cost-collector'
 ISSUER = 'clinicaclick-platform-costs-root-20261024'
@@ -130,11 +130,12 @@ def certificate_info(cert_fd, run=subprocess.run):
 
 
 def pinned_runtime():
-    # Fail closed after a snap revision change until Root reviews the replacement.
-    require(CURRENT_LOADER.resolve(strict=True) == LOADER and CURRENT_LIBRARY.resolve(strict=True) == LIBRARY)
+    # Versioned Root-installed closure; no dependency on Snap paths or revisions.
     directories(LIBRARY)
-    require(os.statvfs(LIBRARY).f_flag & os.ST_RDONLY)
-    for p, digest, bound in [(HELPER, HELPER_SHA256, 32 * 1024 * 1024), (LOADER, LOADER_SHA256, 4 * 1024 * 1024)]:
+    for p, digest, bound in [(HELPER, HELPER_SHA256, 32 * 1024 * 1024),
+                             (LOADER, LOADER_SHA256, 4 * 1024 * 1024),
+                             (LIBRARY / 'libc.so.6', LIBC_SHA256, 4 * 1024 * 1024),
+                             (LIBRARY / 'libresolv.so.2', RESOLV_SHA256, 1024 * 1024)]:
         directories(p.parent)
         s = p.lstat()
         require(stat.S_ISREG(s.st_mode) and s.st_uid == 0 and not s.st_mode & 0o022
@@ -181,7 +182,7 @@ def credentials(run=subprocess.run):
     _version, cert_fd, key_fd = open_identity()
     try:
         certificate_info(cert_fd, run)
-        args = [str(LOADER), '--library-path', str(LIBRARY), str(HELPER), 'credential-process',
+        args = [str(LOADER), '--inhibit-cache', '--library-path', str(LIBRARY), str(HELPER), 'credential-process',
                 '--certificate', '/proc/self/fd/' + str(cert_fd), '--private-key', '/proc/self/fd/' + str(key_fd),
                 '--trust-anchor-arn', cfg['trustAnchorArn'], '--profile-arn', cfg['profileArn'],
                 '--role-arn', ROLE, '--region', REGION, '--session-duration', str(SESSION_SECONDS)]

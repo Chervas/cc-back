@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import hashlib
 import stat
 import subprocess
 import signal
@@ -260,8 +261,8 @@ class FixtureCase(unittest.TestCase):
             if args[0] == '/usr/bin/openssl':
                 return REAL_RUN(args, **kwargs)
             calls.append((args, kwargs))
-            self.assertEqual(args[:4], [str(C.LOADER), '--library-path', str(C.LIBRARY), str(C.HELPER)])
-            self.assertEqual(args[4], 'credential-process')
+            self.assertEqual(args[:5], [str(C.LOADER), '--inhibit-cache', '--library-path', str(C.LIBRARY), str(C.HELPER)])
+            self.assertEqual(args[5], 'credential-process')
             self.assertEqual(args[-2:], ['--session-duration', '900'])
             self.assertEqual(kwargs['env'], C.CHILD_ENV)
             self.assertEqual(len(kwargs['pass_fds']), 2)
@@ -281,6 +282,60 @@ class FixtureCase(unittest.TestCase):
             self.assertEqual(C.main(), 1)
         self.assertEqual(out.getvalue(), '')
         self.assertEqual(err.getvalue(), 'cost_credentials_unavailable\n')
+
+    def runtime_fixture(self):
+        library = self.root / 'runtime'
+        library.mkdir(mode=0o755)
+        values = {'LIBRARY': library, 'LOADER': library / 'ld-linux-x86-64.so.2',
+                  'HELPER': library / 'helper'}
+        for name, key, mode in [('helper', 'HELPER_SHA256', 0o755), ('ld-linux-x86-64.so.2', 'LOADER_SHA256', 0o555),
+                                ('libc.so.6', 'LIBC_SHA256', 0o444), ('libresolv.so.2', 'RESOLV_SHA256', 0o444)]:
+            raw = ('synthetic-runtime-' + name).encode()
+            self.write(library / name, raw, mode)
+            values[key] = hashlib.sha256(raw).hexdigest()
+        return library, values
+
+    def test_fixed_runtime_pins_all_libraries_without_snap_dependency(self):
+        library, values = self.runtime_fixture()
+        with patch.multiple(C, **values), patch.object(C.os, 'statvfs', side_effect=AssertionError('no Snap mount check')):
+            C.pinned_runtime()
+        self.assertNotIn('/snap/', Path(C.__file__).read_text())
+
+    def test_fixed_runtime_changed_missing_writable_or_symlink_library_refused(self):
+        library, values = self.runtime_fixture()
+        libc = library / 'libc.so.6'
+        original = libc.read_bytes()
+        with patch.multiple(C, **values):
+            self.write(libc, b'changed', 0o444)
+            with self.assertRaises(ValueError): C.pinned_runtime()
+            self.write(libc, original, 0o664)
+            with self.assertRaises(ValueError): C.pinned_runtime()
+            libc.unlink()
+            with self.assertRaises(FileNotFoundError): C.pinned_runtime()
+            libc.symlink_to('libresolv.so.2')
+            with self.assertRaises(ValueError): C.pinned_runtime()
+
+    @unittest.skipUnless(Path('/snap/core22/2955/usr/lib/x86_64-linux-gnu/libc.so.6').exists()
+                         and C.HELPER.exists(), 'Optional ELF fixture requires the original public build inputs')
+    def test_copied_public_elf_closure_resolves_without_snap_paths(self):
+        # Diagnostic loader --list only; helper entrypoint/AWS/credentials are not executed.
+        source = Path('/snap/core22/2955/usr/lib/x86_64-linux-gnu')
+        library = self.root / 'public-elf-fixture'
+        library.mkdir(mode=0o755)
+        for name, digest in [('ld-linux-x86-64.so.2', C.LOADER_SHA256), ('libc.so.6', C.LIBC_SHA256),
+                             ('libresolv.so.2', C.RESOLV_SHA256)]:
+            raw = (source / name).read_bytes()
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), digest)
+            self.write(library / name, raw, 0o555 if name.startswith('ld-') else 0o444)
+        result = REAL_RUN([str(library / 'ld-linux-x86-64.so.2'), '--inhibit-cache', '--library-path',
+                           str(library), '--list', str(C.HELPER)], stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=C.CHILD_ENV, timeout=3)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, b'')
+        text = result.stdout.decode()
+        self.assertNotIn('/snap/', text)
+        for name in ['libc.so.6', 'libresolv.so.2', 'ld-linux-x86-64.so.2']:
+            self.assertIn(str(library / name), text)
 
     def test_sigterm_closes_owned_subprocess(self):
         pidfile = self.root / 'fixture-child-pid'
