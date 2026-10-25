@@ -3,6 +3,8 @@
 const crypto = require('node:crypto');
 const TEXT_FIELDS = Object.freeze(['reason', 'summary', 'findings', 'interventions', 'outcome', 'plan', 'next_steps', 'private_notes']);
 const TEMPLATE_KEYS = Object.freeze(['general', 'estetica', 'capilar', 'nutricion', 'dental']);
+const CUSTOM_SECTION_KEY = /^custom_[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const isSectionKey = key => TEXT_FIELDS.includes(key) || typeof key === 'string' && CUSTOM_SECTION_KEY.test(key);
 const has = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 function error(statusCode, code, message, details) {
@@ -90,8 +92,19 @@ function safeDocument(value) {
 }
 function richDocument(row = {}) {
   const saved = row.rich_document;
-  return { version: 1, sections: Object.fromEntries(TEXT_FIELDS.map(key => [key,
-    saved?.version === 1 && saved.sections?.[key] ? saved.sections[key] : plainDocument(row[key])])) };
+  const sections = Object.fromEntries(TEXT_FIELDS.map(key => [key,
+    saved?.version === 1 && saved.sections?.[key] ? saved.sections[key] : plainDocument(row[key])]));
+  const labels = {};
+  if (saved?.version === 1 && object(saved.sections)) for (const [key, section] of Object.entries(saved.sections)) {
+    if (CUSTOM_SECTION_KEY.test(key)) sections[key] = section;
+  }
+  for (const field of row.template_snapshot?.fields || []) {
+    if (CUSTOM_SECTION_KEY.test(field.key) && sections[field.key] && typeof field.label === 'string') labels[field.key] = field.label;
+  }
+  if (saved?.version === 1 && object(saved.labels)) for (const [key, label] of Object.entries(saved.labels)) {
+    if (CUSTOM_SECTION_KEY.test(key) && sections[key] && typeof label === 'string') labels[key] = label;
+  }
+  return { version: 1, sections, ...(Object.keys(labels).length ? { labels } : {}) };
 }
 function normalizePatch(payload, previous = {}, { legacy = false } = {}) {
   if (!object(payload)) throw error(400, 'clinical_episode_invalid_payload', 'Los datos del episodio no son válidos.');
@@ -99,14 +112,24 @@ function normalizePatch(payload, previous = {}, { legacy = false } = {}) {
   let documentChanged = false;
   if (has(payload, 'rich_document')) {
     if (!object(payload.rich_document) || payload.rich_document.version !== 1 || !object(payload.rich_document.sections)
-      || Object.keys(payload.rich_document).some(key => !['version', 'sections'].includes(key))) throw error(400, 'clinical_episode_invalid_document', 'El documento clínico no es válido.');
+      || Object.keys(payload.rich_document).some(key => !['version', 'sections', 'labels'].includes(key))) throw error(400, 'clinical_episode_invalid_document', 'El documento clínico no es válido.');
+    const customKeys = Object.keys(payload.rich_document.sections).filter(key => CUSTOM_SECTION_KEY.test(key));
+    if (customKeys.length > 160) throw error(400, 'clinical_episode_invalid_document', 'El documento contiene demasiados apartados propios.');
     for (const [key, section] of Object.entries(payload.rich_document.sections)) {
-      if (!TEXT_FIELDS.includes(key)) throw error(400, 'clinical_episode_invalid_document', 'Hay una sección no permitida.');
+      if (!isSectionKey(key)) throw error(400, 'clinical_episode_invalid_document', 'Hay una sección no permitida.');
       const normalized = safeDocument(section), extracted = text(documentText(normalized), key, key === 'reason' ? 500 : 20000);
       if (has(payload, key) && text(payload[key], key, key === 'reason' ? 500 : 20000) !== extracted) throw error(400, 'clinical_episode_document_conflict', 'El texto y su formato no coinciden.', { field: key });
       document.sections[key] = normalized;
-      values[key] = extracted;
+      if (TEXT_FIELDS.includes(key)) values[key] = extracted;
       documentChanged = true;
+    }
+    if (has(payload.rich_document, 'labels')) {
+      if (!object(payload.rich_document.labels) || Object.keys(payload.rich_document.labels).length > 160) throw error(400, 'clinical_episode_invalid_document', 'Revisa los títulos de los apartados.');
+      for (const [key, value] of Object.entries(payload.rich_document.labels)) {
+        const label = text(value, 'section_label', 120);
+        if (!CUSTOM_SECTION_KEY.test(key) || !document.sections[key] || !label) throw error(400, 'clinical_episode_invalid_document', 'Revisa los títulos de los apartados.');
+        document.labels ||= {}; document.labels[key] = label;
+      }
     }
   }
   for (const key of TEXT_FIELDS) {
@@ -119,7 +142,10 @@ function normalizePatch(payload, previous = {}, { legacy = false } = {}) {
       documentChanged = true;
     }
   }
-  if (documentChanged) values.rich_document = document;
+  if (documentChanged) {
+    if (Object.keys(document.sections).filter(key => CUSTOM_SECTION_KEY.test(key)).length > 160 || Buffer.byteLength(JSON.stringify(document), 'utf8') > 1500000) throw error(413, 'clinical_episode_document_too_large', 'El documento es demasiado extenso.');
+    values.rich_document = document;
+  }
   if (!legacy) {
     if (has(payload, 'diagnoses')) {
       if (!Array.isArray(payload.diagnoses) || payload.diagnoses.length > 50) throw error(400, 'clinical_diagnoses_invalid', 'Revisa los diagnósticos del episodio.');
@@ -133,6 +159,7 @@ function normalizePatch(payload, previous = {}, { legacy = false } = {}) {
       });
     }
     if (has(payload, 'title')) values.title = text(payload.title, 'title', 255);
+    if (has(payload, 'professional_id')) values.professional_id = integer(payload.professional_id, 'professional_id');
     if (has(payload, 'occurred_at')) values.occurred_at = timestamp(payload.occurred_at);
     if (has(payload, 'template_key')) {
       if (!TEMPLATE_KEYS.includes(payload.template_key)) throw error(400, 'clinical_episode_invalid_template', 'Selecciona una plantilla válida.');
@@ -152,5 +179,5 @@ function decodeCursor(value) {
     return result;
   } catch { throw error(400, 'clinical_episode_invalid_cursor', 'La página solicitada no es válida.'); }
 }
-module.exports = { TEXT_FIELDS, TEMPLATE_KEYS, error, integer, text, timestamp, appointmentIds, idempotencyKey, object,
+module.exports = { TEXT_FIELDS, TEMPLATE_KEYS, CUSTOM_SECTION_KEY, isSectionKey, error, integer, text, timestamp, appointmentIds, idempotencyKey, object,
   hash, plainDocument, documentText, safeDocument, richDocument, normalizePatch, encodeCursor, decodeCursor, has };

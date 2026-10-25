@@ -154,10 +154,73 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     const validator = validateMaterialRefs || require('./clinicalEpisodeMaterials.service').validateMaterialRefs;
     return { material_refs: await validator({ refs: payload.material_refs, patientId: Number(row.patient_id), clinicId: Number(row.clinic_id), actorId, transaction }) };
   }
-  async function templateValues(payload, clinicId, transaction) {
+  async function templateValues(payload, clinicId, transaction, previous = {}) {
     if (!C.has(payload, 'template_ref')) return {};
-    const snapshot = await require('./clinicalEpisodeTemplates.service').createClinicalEpisodeTemplateService({ db }).resolveReference(payload.template_ref, clinicId, transaction);
+    const snapshot = await require('./clinicalEpisodeTemplates.service').createClinicalEpisodeTemplateService({ db }).resolveReference(payload.template_ref, clinicId, transaction,
+      { allowArchivedId: previous.template_snapshot?.id });
     return { template_snapshot: snapshot, ...(snapshot ? { template_key: snapshot.area_key } : {}) };
+  }
+
+  function narrativeValues(normalized, previous, selectedTemplate) {
+    if (!normalized.rich_document && selectedTemplate === undefined) return {};
+    const document = C.richDocument({ ...previous, ...normalized });
+    const fields = [...(previous.template_snapshot?.fields || []), ...(selectedTemplate?.fields || [])];
+    const retained = C.richDocument(previous), labels = { ...(retained.labels || {}) };
+    for (const field of fields) if (C.CUSTOM_SECTION_KEY.test(field.key)) labels[field.key] = field.label;
+    for (const key of Object.keys(document.sections).filter(key => C.CUSTOM_SECTION_KEY.test(key))) {
+      if (!retained.sections[key] && !fields.some(field => field.key === key)) throw C.error(400, 'clinical_episode_invalid_document', 'El apartado propio no está definido en la plantilla del episodio.');
+      if (!labels[key]) throw C.error(400, 'clinical_episode_invalid_document', 'El apartado propio necesita un título de su plantilla.');
+    }
+    // Labels come from immutable template snapshots, never an arbitrary client
+    // label. Orphaned text remains readable after changing templates.
+    document.labels = Object.fromEntries(Object.keys(document.sections).filter(key => C.CUSTOM_SECTION_KEY.test(key)).map(key => [key, labels[key]]));
+    if (!Object.keys(document.labels).length) delete document.labels;
+    return { rich_document: document };
+  }
+
+  async function validateProfessional(id, clinicId, transaction) {
+    if (id === undefined) return;
+    const professionalId = C.integer(id, 'professional_id');
+    if (!db.Usuario || !db.UsuarioClinica || !db.DoctorClinica) throw C.error(503, 'clinical_episode_professional_unavailable', 'No se pudo comprobar el profesional de esta clínica.');
+    const lock = transaction ? { lock: transaction.LOCK.SHARE } : {};
+    const [user, membership, doctor] = await Promise.all([
+      db.Usuario.findByPk(professionalId, { attributes: ['id_usuario', 'estado_cuenta'], transaction, ...lock }),
+      db.UsuarioClinica.findOne({ where: { id_usuario: professionalId, id_clinica: clinicId,
+        rol_clinica: { [Op.in]: ['personaldeclinica', 'propietario', 'agencia'] }, subrol_clinica: 'Doctores',
+        [Op.or]: [{ estado_invitacion: 'aceptada' }, { estado_invitacion: null }] }, transaction, ...lock }),
+      db.DoctorClinica.findOne({ where: { doctor_id: professionalId, clinica_id: clinicId, activo: true }, transaction, ...lock }),
+    ]);
+    if (!user || user.estado_cuenta !== 'activo' || !membership || !doctor) throw C.error(400, 'clinical_episode_professional_invalid', 'Selecciona un profesional activo de esta clínica.');
+  }
+
+  async function professionals({ id, clinicId }) {
+    const row = await scopedRow(id, clinicId);
+    clinicId = Number(row.clinic_id);
+    if (!db.Usuario || !db.UsuarioClinica || !db.DoctorClinica) throw C.error(503, 'clinical_episode_professional_unavailable', 'No se pudieron consultar los profesionales de esta clínica.');
+    const doctors = await db.DoctorClinica.findAll({ where: { clinica_id: clinicId, activo: true }, attributes: ['doctor_id'], limit: 1001, order: [['doctor_id', 'ASC']] });
+    if (doctors.length > 1000) throw C.error(400, 'clinical_episode_professional_limit', 'La clínica tiene demasiados profesionales para esta selección.');
+    const ids = [...new Set(doctors.map(doctor => Number(doctor.doctor_id)))];
+    if (!ids.length) return { items: [] };
+    const [memberships, users] = await Promise.all([
+      db.UsuarioClinica.findAll({ where: { id_usuario: { [Op.in]: ids }, id_clinica: clinicId,
+        rol_clinica: { [Op.in]: ['personaldeclinica', 'propietario', 'agencia'] }, subrol_clinica: 'Doctores',
+        [Op.or]: [{ estado_invitacion: 'aceptada' }, { estado_invitacion: null }] }, attributes: ['id_usuario'] }),
+      db.Usuario.findAll({ where: { id_usuario: { [Op.in]: ids }, estado_cuenta: 'activo' }, attributes: ['id_usuario', 'nombre', 'apellidos'] }),
+    ]);
+    const members = new Set(memberships.map(member => Number(member.id_usuario)));
+    return { items: users.filter(user => members.has(Number(user.id_usuario))).map(user => ({ id: Number(user.id_usuario),
+      name: [user.nombre, user.apellidos].filter(Boolean).join(' ').trim() || `Profesional ${user.id_usuario}` })).sort((a, b) => a.name.localeCompare(b.name, 'es')) };
+  }
+
+  function confirmFutureAppointments(appointments, payload) {
+    if (payload.future_appointment_confirmed === true) return;
+    const { careState } = require('../lib/appointment-care');
+    const future = appointments.filter(appointment => {
+      const start = new Date(appointment.inicio).getTime();
+      const care = careState(appointment, now());
+      return Number.isFinite(start) && start > now().getTime() && !care?.started_at && !care?.completed_at;
+    });
+    if (future.length) throw C.error(409, 'clinical_episode_future_appointment_confirmation_required', 'Esta cita es futura y todavía no se ha iniciado la atención. Confirma si quieres preparar un borrador anticipado; esto no registra asistencia ni inicia la cita.', { appointment_ids: future.map(appointment => Number(appointment.id_cita)) });
   }
 
   async function revision(row, actorId, changeType, transaction, receipt = {}) {
@@ -233,14 +296,18 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
         return { item: (await hydrate([existing], transaction))[0], created: false, replayed: true };
       }
       const appointments = await selectedAppointments(ids, { clinicId, patientId: patient.id_paciente, transaction, occurredAt: normalized.occurred_at });
+      confirmFutureAppointments(appointments, payload);
+      await validateProfessional(normalized.professional_id, clinicId, transaction);
       const primary = appointments[0];
       const materials = await materialValues(payload, { patient_id: patient.id_paciente, clinic_id: clinicId }, actorId, transaction);
+      const template = await templateValues(payload, clinicId, transaction);
+      const narrative = narrativeValues(normalized, {}, template.template_snapshot);
       const row = await Report.create({
         public_id: crypto.randomUUID(), clinic_id: clinicId, patient_id: patient.id_paciente,
         appointment_id: primary?.id_cita || null, treatment_id: primary?.tratamiento_id || null,
         professional_id: primary?.doctor_id || actorId, title: primary?.titulo || 'Episodio clínico',
         occurred_at: primary?.inicio || now(), template_key: 'general',
-        ...normalized, ...materials, ...await templateValues(payload, clinicId, transaction), creation_key: creationKey, creation_payload_hash: requestHash,
+        ...normalized, ...materials, ...template, ...narrative, creation_key: creationKey, creation_payload_hash: requestHash,
         status: 'draft', version_number: 1, created_by: actorId, updated_by: actorId,
       }, { transaction });
       if(C.has(payload,'form_data')||C.has(payload,'clinical_reference_update')){
@@ -283,12 +350,18 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
       normalized.appointment_id = ids.includes(Number(row.appointment_id)) ? row.appointment_id : ids[0] || null;
     }
     Object.assign(normalized, await materialValues(payload, row, actorId, transaction));
-    if (!legacy) Object.assign(normalized, await templateValues(payload, Number(row.clinic_id), transaction));
+    if (!legacy) {
+      if (normalized.professional_id !== undefined && normalized.professional_id !== Number(row.professional_id)) await validateProfessional(normalized.professional_id, Number(row.clinic_id), transaction);
+      const selected = await templateValues(payload, Number(row.clinic_id), transaction, plain(row));
+      Object.assign(normalized, selected, narrativeValues(normalized, plain(row), selected.template_snapshot));
+    } else Object.assign(normalized, narrativeValues(normalized, plain(row), undefined));
     if (!legacy && !C.has(payload, 'template_ref') && normalized.template_key && row.template_snapshot
       && row.template_snapshot.area_key !== normalized.template_key) normalized.template_snapshot = null;
     if(C.has(payload,'form_data')||mode==='finalize')normalized.form_data=await forms.normalize({input:payload.form_data,previous:row.form_data,row:{...plain(row),...normalized},transaction,final:mode==='finalize'});
     const combined = { ...plain(row), ...normalized };
-    if (mode === 'finalize' && !C.TEXT_FIELDS.filter(key => key !== 'private_notes').some(key => combined[key]) && !combined.material_refs?.length&&!combined.diagnoses?.length&&!F.hasContent(combined.form_data)) {
+    if (mode === 'finalize' && !C.TEXT_FIELDS.filter(key => key !== 'private_notes').some(key => combined[key])
+      && !Object.entries(C.richDocument(combined).sections).some(([key, value]) => C.CUSTOM_SECTION_KEY.test(key) && C.documentText(value).trim())
+      && !combined.material_refs?.length&&!combined.diagnoses?.length&&!F.hasContent(combined.form_data)) {
       throw C.error(400, 'clinical_report_empty', 'Añade contenido clínico o material de esta consulta antes de cerrar el episodio.');
     }
     if(C.has(payload,'clinical_reference_update'))normalized.form_data=await forms.applyReference({input:payload.clinical_reference_update,data:combined.form_data,row,actorId,transaction,idempotencyKey:key});
@@ -360,7 +433,9 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
       let row = await findForAppointment(appointment, transaction, true);
       if (row) return (await updateRow({ row, actorId, payload, mode: finalize ? 'finalize' : payload.reopen ? 'reopen' : 'save', transaction, legacy: true })).item;
       assertCurrentVersion(requireExpectedVersion(payload), null);
+      confirmFutureAppointments([appointment], payload);
       const values = C.normalizePatch(payload, {}, { legacy: true });
+      Object.assign(values, narrativeValues(values, {}, undefined));
       if (!C.TEXT_FIELDS.some(key => values[key])) throw C.error(400, 'clinical_report_empty', 'Añade al menos un dato clínico al informe.');
       if (finalize && !C.TEXT_FIELDS.filter(key => key !== 'private_notes').some(key => values[key])) throw C.error(400, 'clinical_report_empty', 'Añade contenido clínico antes de cerrar el informe.');
       row = await Report.create({ public_id: crypto.randomUUID(), clinic_id: appointment.clinica_id, patient_id: appointment.paciente_id,
@@ -378,9 +453,9 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     const rows = await Report.findAll({ where: { clinic_id: Number(clinicId), patient_id: patient.id_paciente }, order: [['updated_at', 'DESC'], ['id', 'DESC']] });
     return hydrate(rows);
   }
-  return { get, getForAppointment, list, create, save, saveInTransaction, revisions, getLegacy, saveLegacy, listLegacy };
+  return { get, getForAppointment, list, create, save, saveInTransaction, revisions, professionals, getLegacy, saveLegacy, listLegacy };
 }
 
 const lazy = () => createClinicalEpisodeService({ db: require('../../models') });
-module.exports = { createClinicalEpisodeService, ...Object.fromEntries(['get', 'getForAppointment', 'list', 'create', 'save', 'revisions', 'getLegacy', 'saveLegacy', 'listLegacy']
+module.exports = { createClinicalEpisodeService, ...Object.fromEntries(['get', 'getForAppointment', 'list', 'create', 'save', 'revisions', 'professionals', 'getLegacy', 'saveLegacy', 'listLegacy']
   .map(name => [name, (...args) => lazy()[name](...args)])) };

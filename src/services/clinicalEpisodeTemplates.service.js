@@ -1,9 +1,10 @@
 'use strict';
-const crypto = require('node:crypto'), { Op } = require('sequelize');
+const crypto = require('node:crypto'), { Op, literal } = require('sequelize');
 const C = require('../lib/clinical-episode-contract'), T = require('../lib/clinical-template-contract');
 function createClinicalEpisodeTemplateService({ db } = {}) {
   const Template = db.ClinicalEpisodeTemplate, Version = db.ClinicalEpisodeTemplateVersion;
   async function scoped(id, clinicId, transaction, lock = false) {
+    if (typeof id === 'string' && id.startsWith('builtin:')) throw C.error(409, 'clinical_template_system_immutable', 'Las plantillas de sistema se pueden personalizar como una copia independiente.');
     if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(id)) throw C.error(404, 'clinical_template_not_found', 'Plantilla no encontrada.');
     const row = await Template.findOne({ where: { public_id: id, clinic_id: C.integer(clinicId, 'clinic_id') }, transaction, ...(lock ? { lock: transaction.LOCK.UPDATE } : {}) });
     if (!row) throw C.error(404, 'clinical_template_not_found', 'Plantilla no encontrada.'); return row;
@@ -39,7 +40,11 @@ function createClinicalEpisodeTemplateService({ db } = {}) {
     if (limit > 100) throw C.error(400, 'clinical_template_limit', 'Solicita como máximo 100 plantillas.');
     const cursor = C.decodeCursor(query.cursor);
     if (cursor && Number(cursor.clinic) !== clinicId) throw C.error(400, 'clinical_template_cursor', 'La página no corresponde a esta clínica.');
-    const rows = await Template.findAll({ where: { clinic_id: clinicId, ...(cursor ? { id: { [Op.lt]: C.integer(cursor.id, 'cursor') } } : {}) }, order: [['id', 'DESC']], limit: limit + 1 });
+    // Archiving is another immutable version, not a destructive delete or a
+    // schema migration. Filter before pagination so archived rows cannot hide
+    // usable templates behind an empty page.
+    const active = literal("NOT EXISTS (SELECT 1 FROM `ClinicalEpisodeTemplateVersions` AS `archivedRevision` WHERE `archivedRevision`.`template_id` = `ClinicalEpisodeTemplate`.`id` AND `archivedRevision`.`version_number` = `ClinicalEpisodeTemplate`.`current_version` AND JSON_UNQUOTE(JSON_EXTRACT(`archivedRevision`.`snapshot`, '$.archived')) = 'true')");
+    const rows = await Template.findAll({ where: { clinic_id: clinicId, [Op.and]: [active], ...(cursor ? { id: { [Op.lt]: C.integer(cursor.id, 'cursor') } } : {}) }, order: [['id', 'DESC']], limit: limit + 1 });
     const page = rows.slice(0, limit), revisions = page.length ? await Version.findAll({ where: { [Op.or]: page.map(row => ({ template_id: row.id, version_number: row.current_version })) } }) : [];
     const origins = await catalogOrigins(page.map(row => row.id), clinicId);
     return { items: [...(!cursor ? T.builtins() : []), ...page.map(row => serialize(revisions.find(item => Number(item.template_id) === Number(row.id)), origins.get(Number(row.id))))],
@@ -69,11 +74,31 @@ function createClinicalEpisodeTemplateService({ db } = {}) {
     return db.sequelize.transaction(async transaction => {
       const row = await scoped(id, clinicId, transaction, true);
       if (Number(row.current_version) !== expected) throw C.error(409, 'clinical_template_version_conflict', 'La plantilla ha cambiado. Tu texto se conserva; revisa la última versión.');
+      const current = await Version.findOne({ where: { template_id: row.id, version_number: row.current_version }, transaction });
+      if (current?.snapshot?.archived === true) throw C.error(409, 'clinical_template_archived', 'Esta plantilla está retirada de la biblioteca. Puedes conservar sus episodios y crear una copia nueva.');
       const version = expected + 1, snapshot = { id: row.public_id, clinic_id: Number(row.clinic_id), version, ...values, builtin: false };
       const revision = await Version.create({ template_id: row.id, version_number: version, snapshot, sha256: C.hash(snapshot), actor_id: actorId }, { transaction });
       await row.update({ current_version: version, updated_by: actorId }, { transaction });
       const origins = await catalogOrigins([row.id], Number(row.clinic_id), transaction);
       return { item: serialize(revision, origins.get(Number(row.id))) };
+    });
+  }
+  async function archive({ id, clinicId, actorId, payload }) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).some(key => !['expected_version', 'acknowledged'].includes(key))) throw C.error(400, 'clinical_template_invalid', 'Revisa la solicitud de retirada.');
+    if (payload.acknowledged !== true) throw C.error(428, 'clinical_template_archive_acknowledgement_required', 'Confirma que la plantilla dejará de aparecer en la biblioteca, conservando los episodios de los pacientes.');
+    const expected = payload.expected_version == null ? null : C.integer(payload.expected_version, 'expected_version');
+    if (!expected) throw C.error(428, 'clinical_template_version_required', 'Vuelve a cargar la plantilla antes de retirarla.');
+    actorId = C.integer(actorId, 'actor_id');
+    return db.sequelize.transaction(async transaction => {
+      const row = await scoped(id, clinicId, transaction, true);
+      if (Number(row.current_version) !== expected) throw C.error(409, 'clinical_template_version_conflict', 'La plantilla ha cambiado. Revisa la última versión antes de retirarla.');
+      const current = await Version.findOne({ where: { template_id: row.id, version_number: expected }, transaction });
+      if (!current) throw C.error(404, 'clinical_template_version_not_found', 'Versión de plantilla no encontrada.');
+      if (current.snapshot.archived === true) return { item: serialize(current), archived: true, replayed: true };
+      const version = expected + 1, snapshot = { ...current.snapshot, version, archived: true };
+      const revision = await Version.create({ template_id: row.id, version_number: version, snapshot, sha256: C.hash(snapshot), actor_id: actorId }, { transaction });
+      await row.update({ current_version: version, updated_by: actorId }, { transaction });
+      return { item: serialize(revision), archived: true, replayed: false };
     });
   }
   async function versions({ id, clinicId, query = {} }) {
@@ -84,14 +109,28 @@ function createClinicalEpisodeTemplateService({ db } = {}) {
     const origins = await catalogOrigins([row.id], Number(row.clinic_id));
     return { items: rows.slice(0, 25).map(revision => serialize(revision, origins.get(Number(row.id)))), next_cursor: rows.length > 25 ? C.encodeCursor({ id, version: Number(rows[24].version_number) }) : null };
   }
-  async function resolveReference(ref, clinicId, transaction) {
+  async function resolveReference(ref, clinicId, transaction, { allowArchivedId } = {}) {
     if (ref === null) return null;
-    if (!ref || typeof ref !== 'object' || Array.isArray(ref) || Object.keys(ref).some(key => !['id', 'version'].includes(key))) throw C.error(400, 'clinical_template_reference_invalid', 'Selecciona una versión válida de la plantilla.');
-    return (await get({ id: ref.id, clinicId, version: C.integer(ref.version, 'version'), transaction, includeCatalogOrigin: false })).item;
+    if (!ref || typeof ref !== 'object' || Array.isArray(ref) || typeof ref.id !== 'string' || Object.keys(ref).some(key => !['id', 'version'].includes(key))) throw C.error(400, 'clinical_template_reference_invalid', 'Selecciona una versión válida de la plantilla.');
+    const version = C.integer(ref.version, 'version');
+    if (ref.id.startsWith('builtin:')) return (await get({ id: ref.id, clinicId, version, transaction, includeCatalogOrigin: false })).item;
+    // Use the locking read itself, not a subsequent consistent read. A create
+    // transaction may already have a REPEATABLE READ snapshot from its replay
+    // check while another transaction commits an archive before this lock.
+    const row = await scoped(ref.id, clinicId, transaction, !!transaction);
+    const options = { transaction, ...(transaction ? { lock: transaction.LOCK.SHARE } : {}) };
+    const current = await Version.findOne({ where: { template_id: row.id, version_number: row.current_version }, ...options });
+    if (!current) throw C.error(404, 'clinical_template_version_not_found', 'Versión de plantilla no encontrada.');
+    if (current.snapshot.archived === true && allowArchivedId !== ref.id) throw C.error(409, 'clinical_template_archived', 'Esta plantilla ya no está disponible para nuevas consultas. Los episodios existentes se conservan.');
+    const revision = Number(row.current_version) === version ? current : await Version.findOne({ where: { template_id: row.id, version_number: version }, ...options });
+    if (!revision) throw C.error(404, 'clinical_template_version_not_found', 'Versión de plantilla no encontrada.');
+    const item = serialize(revision);
+    if (item.archived === true) throw C.error(409, 'clinical_template_archived', 'Usa la versión guardada en el episodio; esta revisión corresponde a la retirada de la plantilla.');
+    return item;
   }
-  return { list, get, create, save, versions, resolveReference };
+  return { list, get, create, save, archive, versions, resolveReference };
 }
 let service;
-module.exports = { createClinicalEpisodeTemplateService, ...Object.fromEntries(['list', 'get', 'create', 'save', 'versions', 'resolveReference'].map(method => [method, (...args) => {
+module.exports = { createClinicalEpisodeTemplateService, ...Object.fromEntries(['list', 'get', 'create', 'save', 'archive', 'versions', 'resolveReference'].map(method => [method, (...args) => {
   service ||= createClinicalEpisodeTemplateService({ db: require('../../models') }); return service[method](...args);
 }])) };

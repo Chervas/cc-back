@@ -7,4 +7,5 @@ router.patch('/:id', controller.save);
 router.post('/:id/finalize', controller.finalize);
 router.post('/:id/reopen', controller.reopen);
 router.get('/:id/revisions', controller.revisions);
+router.get('/:id/professionals', controller.professionals);
 module.exports = router;

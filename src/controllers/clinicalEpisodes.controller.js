@@ -44,6 +44,7 @@ function createClinicalEpisodesController({ episodes = service,
     finalize: handler(async (req, res) => res.json(await episodes.save({ ...await context(req, true), id: req.params.id, payload: req.body, mode: 'finalize' }))),
     reopen: handler(async (req, res) => res.json(await episodes.save({ ...await context(req, true), id: req.params.id, payload: req.body, mode: 'reopen' }))),
     revisions: handler(async (req, res) => res.json(await episodes.revisions({ ...await context(req), id: req.params.id, query: req.query }))),
+    professionals: handler(async (req, res) => res.json(await episodes.professionals({ ...await context(req, true), id: req.params.id }))),
     getForAppointment: handler(async (req, res) => {
       const appointmentId = C.integer(req.params.id, 'appointment_id');
       if (!req.userData?.userId) throw C.error(401, 'unauthenticated', 'Usuario no autenticado.');

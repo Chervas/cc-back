@@ -9,6 +9,6 @@ function createClinicalEpisodeTemplatesController({ templates = require('../serv
     const result = await templates[method]({ id: req.params.id, clinicId, actorId, version: req.query.version, query: req.query, payload: req.body });
     res.status(result.created ? 201 : 200).json(result);
   });
-  return { list: handler('list'), get: handler('get'), create: handler('create', true), save: handler('save', true), versions: handler('versions') };
+  return { list: handler('list'), get: handler('get'), create: handler('create', true), save: handler('save', true), archive: handler('archive', true), versions: handler('versions') };
 }
 module.exports = { ...createClinicalEpisodeTemplatesController(), createClinicalEpisodeTemplatesController };

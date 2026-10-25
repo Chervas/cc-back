@@ -40,3 +40,14 @@ test('auth, CAS, not-found and schema failures are JSON without leaking SQL or p
   const controller = createClinicalEpisodesController({ canAccess: () => { throw Error('AUTH_MUST_WIN'); } });
   const res = response(); await controller.get(req({ userData: null }), res); assert.equal(res.code, 401);
 });
+
+test('clinical professional options require clinical manage with the same exact clinic, independently from agenda permission', async () => {
+  const calls = [], controller = createClinicalEpisodesController({ canAccess: async input => { calls.push(input); return input.featureKey !== 'appointments.view'; },
+    episodes: { professionals: async input => ({ items: [{ id: input.actorId, name: 'Profesional ficticio' }] }) } });
+  const result = response(); await controller.professionals(req(), result);
+  assert.equal(result.code, 200); assert.equal(result.body.items[0].id, 7);
+  assert(calls.some(call => call.featureKey === 'clinical.reports.manage')); assert(!calls.some(call => call.featureKey === 'appointments.view'));
+  const denied = createClinicalEpisodesController({ canAccess: async input => input.featureKey !== 'clinical.reports.manage',
+    episodes: { professionals: () => { throw Error('OPTIONS_QUERY_FORBIDDEN'); } } });
+  const forbidden = response(); await denied.professionals(req(), forbidden); assert.equal(forbidden.code, 403);
+});
