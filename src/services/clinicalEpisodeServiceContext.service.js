@@ -138,6 +138,6 @@ function createService({ db, canAccess = input => require('../lib/access-policy'
     const page = items.slice(0, limit), nextId = items.length > limit ? page.at(-1).id : after;
     return { items: page, next_cursor: !exhausted || items.length > limit ? C.encodeCursor({ scope, id: nextId }) : null };
   }
-  return { values, treatmentOptions, resolve, candidates };
+  return { values, treatmentOptions, treatment, resolve, candidates };
 }
 module.exports = { createService, reference, identity, same, area };

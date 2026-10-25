@@ -14,6 +14,7 @@ module.exports = (sequelize, DataTypes) => {
     occurred_at: DataTypes.DATE,
     template_key: DataTypes.STRING(40),
     template_snapshot: DataTypes.JSON,
+    template_default_origin: DataTypes.JSON,
     form_data: DataTypes.JSON,
     diagnoses: DataTypes.JSON,
     service_ref: DataTypes.JSON,

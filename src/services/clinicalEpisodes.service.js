@@ -108,7 +108,8 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
           professional_id: appointment.doctor_id ? Number(appointment.doctor_id) : null })),
         ...(linkReview ? { appointment_link_review: linkReview } : {}),
         title, occurred_at: value.occurred_at || primary?.inicio || value.created_at,
-        template_key: value.template_key || 'general', template_snapshot: value.template_snapshot || null, form_data:value.form_data||null, diagnoses:value.diagnoses||[], rich_document: C.richDocument(value), material_refs: value.material_refs || [],
+        template_key: value.template_key || 'general', template_snapshot: value.template_snapshot || null, template_default_origin: value.template_default_origin || null,
+        form_data:value.form_data||null, diagnoses:value.diagnoses||[], rich_document: C.richDocument(value), material_refs: value.material_refs || [],
         treatment_id: value.treatment_id ? Number(value.treatment_id) : null, treatment_name: treatment?.nombre || primary?.titulo || null,
         service_ref: require('./clinicalEpisodeServiceContext.service').identity(value.service_ref), service_title: value.service_ref?.title || null, service_area_key: value.service_ref?.area_key || null,
         professional_id: value.professional_id ? Number(value.professional_id) : null,
@@ -235,6 +236,7 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
       treatment_id: value.treatment_id ? Number(value.treatment_id) : null, professional_id: value.professional_id ? Number(value.professional_id) : null,
       service_ref: value.service_ref || null,
       title: value.title || null, occurred_at: value.occurred_at || null, template_key: value.template_key || 'general', template_snapshot: value.template_snapshot || null,
+      template_default_origin: value.template_default_origin || null,
       status: value.status, version: Number(value.version_number), form_data:value.form_data||null, diagnoses:value.diagnoses||[], rich_document: C.richDocument(value), material_refs: value.material_refs || [],
       consumables: (await require('../lib/clinical-episode-consumables').snapshots(db, [row], transaction)).get(String(row.id)) || [],
       ...Object.fromEntries(C.TEXT_FIELDS.map(key => [key, value[key] || null])), finalized_at: value.finalized_at,
@@ -290,9 +292,14 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     clinicId = C.integer(clinicId, 'clinic_id'); actorId = C.integer(actorId, 'actor_id');
     const expected = requireExpectedVersion(payload);
     if (expected !== 0) throw C.error(409, 'clinical_report_version_conflict', 'El episodio nuevo debe comenzar en la versión inicial.', { expected_version: expected, current_version: 0 });
+    if (C.has(payload,'use_template_default') && typeof payload.use_template_default !== 'boolean') throw C.error(400,'clinical_template_default_invalid','Revisa la elección de plantilla.');
+    if (C.has(payload,'template_default_origin')) throw C.error(400,'clinical_template_default_invalid','El origen de la plantilla lo registra el sistema.');
+    if (payload.use_template_default === true && payload.template_ref != null && (!C.object(payload.template_ref)
+      || Object.keys(payload.template_ref).some(key => !['id','version'].includes(key)) || typeof payload.template_ref.id !== 'string')) throw C.error(400,'clinical_template_reference_invalid','Selecciona una versión válida de la plantilla.');
     const key = C.idempotencyKey(payload.idempotency_key, true), normalized = C.normalizePatch(payload), ids = normalized.appointment_ids || [];
     delete normalized.appointment_ids;
-    const requestHash = C.hash({ values: normalized, appointment_ids: ids, material_refs: payload.material_refs || [], template_ref: payload.template_ref,form_data:payload.form_data,clinical_reference_update:payload.clinical_reference_update });
+    const requestHash = C.hash({ values: normalized, appointment_ids: ids, material_refs: payload.material_refs || [], template_ref: payload.template_ref,form_data:payload.form_data,clinical_reference_update:payload.clinical_reference_update,
+      ...(C.has(payload,'use_template_default') ? {use_template_default:payload.use_template_default} : {}) });
     return db.sequelize.transaction(async transaction => {
       const patient = await patientInClinic(patientIdentifier, clinicId, transaction, true);
       const creationKey = C.hash([clinicId, Number(patient.id_paciente), key]);
@@ -306,9 +313,33 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
       await validateProfessional(normalized.professional_id, clinicId, transaction);
       const primary = appointments[0];
       const materials = await materialValues(payload, { patient_id: patient.id_paciente, clinic_id: clinicId }, actorId, transaction);
-      const template = await templateValues(payload, clinicId, transaction);
-      const narrative = narrativeValues(normalized, {}, template.template_snapshot);
       const serviceContext = serviceContextSupported ? await services.values({ payload, primary, appointments, patientId: patient.id_paciente, clinicId, actorId, transaction, creating: true }) : {};
+      let template, formInput=payload.form_data;
+      if (payload.use_template_default === true) {
+        const resolved=await require('./clinicalTemplateDefaults.service').createService({db,...(canAccess?{canAccess}:{})}).resolveInitial({clinicId,patientId:Number(patient.id_paciente),actorId,payload,appointments,serviceContext,transaction});
+        if (!resolved.item && payload.template_ref) throw C.error(409,resolved.reason==='not_first'?'clinical_template_default_not_first':'clinical_template_default_changed',
+          'La recomendación de plantilla ha cambiado. Actualiza la consulta o elige una plantilla manualmente.',{applied:false,reason:resolved.reason});
+        if (resolved.item) {
+          const chosen=resolved.item;
+          if (payload.template_ref && (payload.template_ref.id!==chosen.template_ref.id || C.integer(payload.template_ref.version)!==chosen.template_ref.version)) throw C.error(409,'clinical_template_default_changed',
+            'La preferencia de primera consulta ha cambiado. Revísala antes de crear el episodio.',{applied:false});
+          template={template_snapshot:chosen.template,template_key:chosen.template.area_key,template_default_origin:{preference_id:chosen.preference_id,preference_version:chosen.preference_version,
+            treatment_id:chosen.treatment_id,template_ref:chosen.template_ref,scope:chosen.scope,service_ref:chosen.service_ref,
+            criterion:chosen.scope==='service'?'first_episode_for_service':'first_episode_for_patient_clinic_treatment'}};
+          const base=C.richDocument({rich_document:chosen.template.rich_document}), sections={...base.sections};
+          for (const field of Object.keys(sections)) {
+            if (C.has(payload.rich_document?.sections||{},field)) sections[field]=normalized.rich_document.sections[field];
+            else if (C.has(payload,field) && C.TEXT_FIELDS.includes(field)) sections[field]=C.plainDocument(normalized[field]);
+          }
+          // Extra sections explicitly supplied by the doctor are validated by
+          // narrativeValues against this immutable template as usual.
+          for (const field of Object.keys(payload.rich_document?.sections||{})) sections[field]=normalized.rich_document.sections[field];
+          Object.assign(normalized,C.normalizePatch({rich_document:{...base,sections}}));
+          if (formInput===undefined && chosen.template.form_schema) formInput={version:1,instances:[{id:crypto.randomUUID(),template_ref:chosen.template_ref,answers:{}}]};
+        }
+      }
+      template ||= await templateValues(payload, clinicId, transaction);
+      const narrative = narrativeValues(normalized, {}, template.template_snapshot);
       const row = await Report.create({
         public_id: crypto.randomUUID(), clinic_id: clinicId, patient_id: patient.id_paciente,
         appointment_id: primary?.id_cita || null, treatment_id: primary?.tratamiento_id || null,
@@ -317,8 +348,8 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
         ...normalized, ...materials, ...template, ...narrative, ...serviceContext, creation_key: creationKey, creation_payload_hash: requestHash,
         status: 'draft', version_number: 1, created_by: actorId, updated_by: actorId,
       }, { transaction });
-      if(C.has(payload,'form_data')||C.has(payload,'clinical_reference_update')){
-        let data=await forms.normalize({input:payload.form_data,previous:null,row,transaction});
+      if(formInput!==undefined||C.has(payload,'clinical_reference_update')){
+        let data=await forms.normalize({input:formInput,previous:null,row,transaction});
         data=await forms.applyReference({input:payload.clinical_reference_update,data,row,actorId,transaction,idempotencyKey:key,nextVersion:1});
         await row.update({form_data:data},{transaction});
       }

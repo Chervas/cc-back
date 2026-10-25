@@ -316,6 +316,7 @@ app.use('/api/dental-plans',require('./routes/dentalPlans.routes'));
 app.use('/api/dental-plans',require('./routes/dentalSupportingTools.routes'));
 app.use('/api/clinic-supplies', require('./routes/clinicSupplies.routes'));
 app.use('/api/clinical-episode-templates', require('./routes/clinicalEpisodeTemplates.routes'));
+app.use('/api/clinical-episode-template-defaults', require('./routes/clinicalTemplateDefaults.routes'));
 app.use('/api/clinical-template-catalog', require('./routes/clinicalTemplateCatalog.routes'));
 app.use('/api/patient-follow-ups', patientFollowUpsRoutes);
 app.use('/api/treatment-programs', treatmentProgramsRoutes);
