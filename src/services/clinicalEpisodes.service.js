@@ -12,6 +12,8 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
   const { AppointmentClinicalReport: Report, AppointmentClinicalReportRevision: Revision,
     ClinicalEpisodeAppointment: Link, CitaPaciente: Appointment, Paciente: Patient } = db;
   const forms=require('./clinicalEpisodeForms.service').createClinicalEpisodeFormsService({db,now,...(canAccess?{canAccess}:{})});
+  const services = require('./clinicalEpisodeServiceContext.service').createService({ db, ...(canAccess ? { canAccess } : {}) });
+  const serviceContextSupported = !Report.rawAttributes || Object.hasOwn(Report.rawAttributes, 'service_ref');
 
   async function patientInClinic(identifier, clinicId, transaction, lock = false) {
     const raw = String(identifier ?? '');
@@ -79,6 +81,7 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     const professionalMap = new Map(professionals.map(row => [Number(row.id_usuario), plain(row)]));
     const clinicRows = appointments.length && db.Clinica?.findByPk ? await Promise.all([...new Set(rows.map(row => Number(row.clinic_id)))].map(id => db.Clinica.findByPk(id, { attributes: ['id_clinica', 'configuracion'], transaction }))) : [];
     const clinics = new Map(clinicRows.filter(Boolean).map(row => [Number(row.id_clinica), row]));
+    const consumables = await require('../lib/clinical-episode-consumables').snapshots(db, rows, transaction);
     return rows.map(row => {
       const value = plain(row), treatment = treatmentMap.get(Number(value.treatment_id)), professional = professionalMap.get(Number(value.professional_id));
       const requested = [...new Set([...(value.appointment_id ? [Number(value.appointment_id)] : []), ...links
@@ -107,10 +110,11 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
         title, occurred_at: value.occurred_at || primary?.inicio || value.created_at,
         template_key: value.template_key || 'general', template_snapshot: value.template_snapshot || null, form_data:value.form_data||null, diagnoses:value.diagnoses||[], rich_document: C.richDocument(value), material_refs: value.material_refs || [],
         treatment_id: value.treatment_id ? Number(value.treatment_id) : null, treatment_name: treatment?.nombre || primary?.titulo || null,
+        service_ref: require('./clinicalEpisodeServiceContext.service').identity(value.service_ref), service_title: value.service_ref?.title || null, service_area_key: value.service_ref?.area_key || null,
         professional_id: value.professional_id ? Number(value.professional_id) : null,
         professional_name: professional ? [professional.nombre, professional.apellidos].filter(Boolean).join(' ').trim() || null : null,
         appointment_start: primary?.inicio || null, appointment_end: primary?.fin || null, appointment_status: primary?.estado || null,
-        status: value.status, version: Number(value.version_number),
+        status: value.status, version: Number(value.version_number), consumables: consumables.get(String(value.id)) || [],
         ...Object.fromEntries(C.TEXT_FIELDS.map(key => [key, value[key] || null])),
         finalized_at: value.finalized_at || null, created_at: value.created_at, updated_at: value.updated_at,
       };
@@ -229,8 +233,10 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
       public_id: value.public_id, clinic_id: Number(value.clinic_id), patient_id: Number(value.patient_id),
       appointment_id: value.appointment_id ? Number(value.appointment_id) : null, appointment_ids: appointmentIds,
       treatment_id: value.treatment_id ? Number(value.treatment_id) : null, professional_id: value.professional_id ? Number(value.professional_id) : null,
+      service_ref: value.service_ref || null,
       title: value.title || null, occurred_at: value.occurred_at || null, template_key: value.template_key || 'general', template_snapshot: value.template_snapshot || null,
       status: value.status, version: Number(value.version_number), form_data:value.form_data||null, diagnoses:value.diagnoses||[], rich_document: C.richDocument(value), material_refs: value.material_refs || [],
+      consumables: (await require('../lib/clinical-episode-consumables').snapshots(db, [row], transaction)).get(String(row.id)) || [],
       ...Object.fromEntries(C.TEXT_FIELDS.map(key => [key, value[key] || null])), finalized_at: value.finalized_at,
     };
     await Revision.create({ report_id: row.id, version_number: row.version_number, status: row.status,
@@ -302,12 +308,13 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
       const materials = await materialValues(payload, { patient_id: patient.id_paciente, clinic_id: clinicId }, actorId, transaction);
       const template = await templateValues(payload, clinicId, transaction);
       const narrative = narrativeValues(normalized, {}, template.template_snapshot);
+      const serviceContext = serviceContextSupported ? await services.values({ payload, primary, appointments, patientId: patient.id_paciente, clinicId, actorId, transaction, creating: true }) : {};
       const row = await Report.create({
         public_id: crypto.randomUUID(), clinic_id: clinicId, patient_id: patient.id_paciente,
         appointment_id: primary?.id_cita || null, treatment_id: primary?.tratamiento_id || null,
         professional_id: primary?.doctor_id || actorId, title: primary?.titulo || 'Episodio clínico',
         occurred_at: primary?.inicio || now(), template_key: 'general',
-        ...normalized, ...materials, ...template, ...narrative, creation_key: creationKey, creation_payload_hash: requestHash,
+        ...normalized, ...materials, ...template, ...narrative, ...serviceContext, creation_key: creationKey, creation_payload_hash: requestHash,
         status: 'draft', version_number: 1, created_by: actorId, updated_by: actorId,
       }, { transaction });
       if(C.has(payload,'form_data')||C.has(payload,'clinical_reference_update')){
@@ -344,10 +351,22 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
       return { item: (await hydrate([row], transaction))[0], replayed: true };
     }
     const oldIds = await linkedIds(row, transaction), ids = normalized.appointment_ids;
+    let contextAppointments;
     delete normalized.appointment_ids;
     if (ids) {
-      await selectedAppointments(ids, { clinicId: Number(row.clinic_id), patientId: row.patient_id, reportId: row.id, transaction, existingIds: oldIds, occurredAt: normalized.occurred_at || row.occurred_at || row.created_at });
+      contextAppointments = await selectedAppointments(ids, { clinicId: Number(row.clinic_id), patientId: row.patient_id, reportId: row.id, transaction, existingIds: oldIds, occurredAt: normalized.occurred_at || row.occurred_at || row.created_at });
       normalized.appointment_id = ids.includes(Number(row.appointment_id)) ? row.appointment_id : ids[0] || null;
+    }
+    if (!legacy && serviceContextSupported) {
+      const contextPayload = { ...payload };
+      if (ids && JSON.stringify([...oldIds].sort((a, b) => a - b)) === JSON.stringify([...ids].sort((a, b) => a - b))) delete contextPayload.appointment_ids;
+      const contextChanged = C.has(contextPayload, 'service_ref') || C.has(contextPayload, 'treatment_id') || C.has(contextPayload, 'appointment_ids');
+      if (contextChanged) {
+        const primaryId = normalized.appointment_id === undefined ? row.appointment_id : normalized.appointment_id;
+        const primary = primaryId ? await loadAppointment(primaryId, transaction) : null;
+        contextAppointments ||= oldIds.length ? await Appointment.findAll({ where: { id_cita: { [Op.in]: oldIds }, clinica_id: row.clinic_id, paciente_id: row.patient_id }, transaction }) : [];
+        Object.assign(normalized, await services.values({ payload: contextPayload, previous: plain(row), primary, appointments: contextAppointments, patientId: Number(row.patient_id), clinicId: Number(row.clinic_id), actorId, transaction }));
+      }
     }
     Object.assign(normalized, await materialValues(payload, row, actorId, transaction));
     if (!legacy) {
@@ -453,9 +472,9 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
     const rows = await Report.findAll({ where: { clinic_id: Number(clinicId), patient_id: patient.id_paciente }, order: [['updated_at', 'DESC'], ['id', 'DESC']] });
     return hydrate(rows);
   }
-  return { get, getForAppointment, list, create, save, saveInTransaction, revisions, professionals, getLegacy, saveLegacy, listLegacy };
+  return { get, getForAppointment, list, create, save, saveInTransaction, revisions, professionals, treatmentOptions: services.treatmentOptions, getLegacy, saveLegacy, listLegacy };
 }
 
 const lazy = () => createClinicalEpisodeService({ db: require('../../models') });
-module.exports = { createClinicalEpisodeService, ...Object.fromEntries(['get', 'getForAppointment', 'list', 'create', 'save', 'revisions', 'professionals', 'getLegacy', 'saveLegacy', 'listLegacy']
+module.exports = { createClinicalEpisodeService, ...Object.fromEntries(['get', 'getForAppointment', 'list', 'create', 'save', 'revisions', 'professionals', 'treatmentOptions', 'getLegacy', 'saveLegacy', 'listLegacy']
   .map(name => [name, (...args) => lazy()[name](...args)])) };

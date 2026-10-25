@@ -84,13 +84,14 @@ function createClinicSuppliesService({ db, canAccess, isGlobalAdmin, now = () =>
     return supplier;
   }
   function expected(row, payload) { if (Number(row.version) !== C.version(payload.expected_version)) C.fail('version_conflict', 'El registro ha cambiado. Actualízalo antes de guardar.', 409); }
-  async function mutate(input, type, action) {
+  async function mutate(input, type, action, authorize) {
     const payload = input.payload;
     if (!C.object(payload)) C.fail('payload_invalid', 'Revisa los datos de esta acción.');
     const key = C.commandKey(payload.idempotency_key);
     const hash = C.hash({ type, id: input.id || null, payload: Object.fromEntries(Object.entries(payload).filter(([field]) => !['clinic_id', 'idempotency_key'].includes(field))) });
     return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
       const ctx = await context(input, transaction, true);
+      if (authorize) await authorize(ctx, transaction);
       const previous = await db.ClinicSupplyCommand.findOne({ where: { clinic_id: ctx.clinicId, command_key: key }, transaction });
       if (previous) {
         if (previous.command_hash !== hash || Number(previous.actor_id) !== ctx.actorId) C.fail('idempotency_conflict', 'Esta solicitud ya corresponde a otra acción.', 409);
@@ -106,6 +107,17 @@ function createClinicSuppliesService({ db, canAccess, isGlobalAdmin, now = () =>
     const row = await requireSupplier(input.id, ctx, transaction, false); expected(row, payload);
     await row.update({ ...C.supplier(payload.supplier), version: Number(row.version) + 1, updated_by: ctx.actorId }, { transaction }); return supplierDto(row);
   }); }
+  // Internal integration surface: clinical consumption keeps the same clinic
+  // lock, authorization, command journal, stock arithmetic and movement writer.
+  const episodeCommand = (input, authorize, action) => mutate(input, 'episode.consumables', action, authorize);
+  async function episodeStock(ctx, transaction, { productId, expectedVersion, delta, kind, reason, allowInactive = false }) {
+    if (!transaction || !Number.isSafeInteger(delta) || !delta || !['episode_use', 'episode_return'].includes(kind)) C.fail('quantity_invalid', 'Indica una cantidad válida.');
+    const product = await scope(db.ClinicStockProduct, ctx, productId, transaction, true);
+    if (!product || !product.active && !allowInactive) C.fail('product_not_found', 'Selecciona un producto activo de esta clínica.', 404);
+    expected(product, { expected_version: expectedVersion });
+    const movement = await recordStock(ctx, transaction, product, delta, kind, reason);
+    return { product, movement };
+  }
   async function createProduct(input) { return mutate(input, 'product.create', async (ctx, transaction, payload) => {
     const values = C.product(payload.product, true);
     if (values.supplier_id) await requireSupplier(values.supplier_id, ctx, transaction);
@@ -201,7 +213,8 @@ function createClinicSuppliesService({ db, canAccess, isGlobalAdmin, now = () =>
     await row.update({ status: complete ? 'received' : 'partial', version: Number(row.version) + 1, updated_by: ctx.actorId }, { transaction });
     return orderDto(row, ctx, transaction);
   }); }
-  return { overview, list, createSupplier, updateSupplier, createProduct, updateProduct, movement, movements, createOrder, updateOrder, receipt };
+  return { overview, list, createSupplier, updateSupplier, createProduct, updateProduct, movement, movements, createOrder, updateOrder, receipt,
+    episodeCommand, episodeStock, readContext: input => context(input) };
 }
 
 let singleton;

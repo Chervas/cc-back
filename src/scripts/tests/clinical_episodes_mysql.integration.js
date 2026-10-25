@@ -63,7 +63,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   }
   // This suite verifies only the two original foundation migrations. Later
   // additive fields have their own full-schema integration suites.
-  for (const field of ['template_snapshot', 'form_data', 'diagnoses']) db.AppointmentClinicalReport.removeAttribute(field);
+  for (const field of ['template_snapshot', 'form_data', 'diagnoses', 'service_ref']) db.AppointmentClinicalReport.removeAttribute(field);
   const R = db.AppointmentClinicalReport, V = db.AppointmentClinicalReportRevision, L = db.ClinicalEpisodeAppointment;
   const migrated = await R.findByPk(old.id, { raw: true });
   for (const key of Object.keys(legacyBefore)) assert.deepEqual(migrated[key], legacyBefore[key]);
@@ -180,7 +180,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const drawingPayload = { expected_version: 0, idempotency_key: 'drawing-owned-first', title: 'Modelo facial', template_key: 'facial', document };
   const createdDrawing = await drawingService.create({ ...base, payload: drawingPayload });
   assert.equal(createdDrawing.created, true); assert.equal(createdDrawing.item.version, 1); assert.equal(createdDrawing.item.template_version, 1);
-  await assert.rejects(drawingService.create({ ...base, payload: { ...drawingPayload, idempotency_key: 'drawing-template-v2', template_version: 2 } }), { code: 'clinical_drawing_template_version_invalid' });
+  await assert.rejects(drawingService.create({ ...base, payload: { ...drawingPayload, idempotency_key: 'drawing-template-v3', template_version: 3 } }), { code: 'clinical_drawing_template_version_invalid' });
   await assert.rejects(drawingService.create({ ...base, payload: { ...drawingPayload, idempotency_key: 'drawing-template-text', template_version: '1' } }), { code: 'clinical_drawing_template_version_invalid' });
   assert.equal((await drawingService.create({ ...base, payload: drawingPayload })).created, false);
   await assert.rejects(drawingService.create({ ...base, payload: { ...drawingPayload, title: 'Otro título' } }), { code: 'clinical_drawing_idempotency_conflict' });
@@ -229,5 +229,12 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   report.checks.push('Drawing migration idempotent; facial/capilar/photo/PDF geometry, source and photo clinic ACL, immutable source, CAS races, archive/restore and version pagination.');
   report.checks.push('Episode pins drawing revision and attachment checksum; editing/archiving a model never upgrades a closed episode; revision failure rolls back model changes.');
   report.checks.push('Selective release verifier compares actual old/new columns, indexes, FK rules, table collations, triggers and exactly two migration receipts; no unrelated metadata change.');
-  report.checks.push('Immutable anatomical template_version=1 is stored in model, revision snapshots, DTO and episode pinned material reference; unimplemented v2 or coercion rejected.');
+  const v2Model = await drawingService.create({ ...base, payload: { ...drawingPayload, idempotency_key: 'drawing-template-v2', template_version: 2 } });
+  assert.equal(v2Model.item.template_version, 2);
+  const v2Saved = await drawingService.save({ ...base, id: v2Model.item.id, payload: { expected_version: 1, template_version: 2, title: 'Modelo anatómico versión 2 conservada' } });
+  assert.equal(v2Saved.item.template_version, 2); assert.equal((await drawingService.get({ ...base, id: v2Model.item.id, version: 1 })).item.template_version, 2);
+  await assert.rejects(drawingService.save({ ...base, id: v2Model.item.id, payload: { expected_version: 2, template_version: 1 } }), { code: 'clinical_drawing_source_immutable' });
+  assert.equal((await drawingService.get({ ...base, id: drawId, version: 1 })).item.template_version, 1);
+  await assert.rejects(drawingService.create({ ...base, payload: { ...drawingPayload, idempotency_key: 'drawing-template-v2', template_version: 1 } }), { code: 'clinical_drawing_idempotency_conflict' });
+  report.checks.push('Anatomical template_version 1 and 2 are stored exactly in model, revision snapshots, DTO and episode pinned reference; same-version edits preserve the chosen anatomy, historical v1 never upgrades and unsupported versions/coercion/downgrades reject.');
 }).catch(error => { console.error(error); process.exitCode = 1; });

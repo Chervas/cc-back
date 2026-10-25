@@ -121,7 +121,8 @@ function createService({ db, canAccess, readAsset = asset => require('./clinical
     const payload = input.payload;
     if (typeof payload.idempotency_key !== 'string' || !/^[a-zA-Z0-9_-]{8,80}$/.test(payload.idempotency_key)) fail('clinical_drawing_idempotency_required', 'Vuelve a abrir la nueva anotación.');
     if (!Object.hasOwn(VIEWS, payload.template_key)) fail('clinical_drawing_template_invalid', 'Selecciona un modelo válido.');
-    if (payload.template_version !== undefined && payload.template_version !== 1) fail('clinical_drawing_template_version_invalid', 'La versión del modelo anatómico no está disponible.');
+    if (payload.template_version !== undefined && ![1, 2].includes(payload.template_version)) fail('clinical_drawing_template_version_invalid', 'La versión del modelo anatómico no está disponible.');
+    const templateVersion = payload.template_version ?? 1;
     const document = validateDrawingDocument(payload.document, payload.template_key), normalizedTitle = title(payload.title);
     return db.sequelize.transaction(async transaction => {
       const ctx = await context(input, transaction, true);
@@ -132,14 +133,14 @@ function createService({ db, canAccess, readAsset = asset => require('./clinical
       } else if (payload.source_asset_id) fail('clinical_drawing_source_invalid', 'Un modelo anatómico no sustituye a una prueba.');
       await validatePhotos(document, ctx, transaction);
       await validateSourceDocument(document, asset, ctx, transaction);
-      const creationHash = hash({ title: normalizedTitle, template_key: payload.template_key, template_version: 1, source: asset?.public_id || null, document });
+      const creationHash = hash({ title: normalizedTitle, template_key: payload.template_key, template_version: templateVersion, source: asset?.public_id || null, document });
       const existing = await db.ClinicalDrawing.findOne({ where: { clinic_id: ctx.clinicId, patient_id: ctx.patientId, idempotency_key: payload.idempotency_key }, transaction });
       if (existing) {
         if (existing.creation_hash !== creationHash) fail('clinical_drawing_idempotency_conflict', 'Esta solicitud ya creó otro modelo. Ábrelo desde la biblioteca.', 409);
         return { item: await serialize(existing, transaction), created: false };
       }
       const row = await db.ClinicalDrawing.create({ public_id: crypto.randomUUID(), clinic_id: ctx.clinicId, patient_id: ctx.patientId,
-        source_asset_id: asset?.id || null, template_key: payload.template_key, template_version: 1, title: normalizedTitle, document,
+        source_asset_id: asset?.id || null, template_key: payload.template_key, template_version: templateVersion, title: normalizedTitle, document,
         version_number: 1, status: 'active', idempotency_key: payload.idempotency_key, creation_hash: creationHash,
         created_by: ctx.actorId, updated_by: ctx.actorId }, { transaction });
       await revision(row, ctx.actorId, 'created', transaction);
@@ -166,7 +167,8 @@ function createService({ db, canAccess, readAsset = asset => require('./clinical
         if (!['active', 'archived'].includes(payload.status)) fail('clinical_drawing_status_invalid', 'El estado no es válido.');
         values.status = payload.status;
       }
-      if (payload.template_key !== undefined || payload.template_version !== undefined || payload.source_asset_id !== undefined) fail('clinical_drawing_source_immutable', 'La prueba original y el tipo de modelo se conservan. Crea otro para cambiarlos.');
+      if (payload.template_key !== undefined || payload.template_version !== undefined && payload.template_version !== Number(row.template_version || 1)
+        || payload.source_asset_id !== undefined) fail('clinical_drawing_source_immutable', 'La prueba original y el tipo de modelo se conservan. Crea otro para cambiarlos.');
       if (row.status === 'archived' && values.status !== 'active') fail('clinical_drawing_archived', 'Restaura el modelo antes de modificarlo.', 409);
       await row.update(values, { transaction });
       await revision(row, ctx.actorId, payload.status === 'archived' ? 'archived' : payload.status === 'active' ? 'restored' : 'edited', transaction);

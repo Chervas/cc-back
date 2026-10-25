@@ -160,6 +160,8 @@ function normalizePatch(payload, previous = {}, { legacy = false } = {}) {
     }
     if (has(payload, 'title')) values.title = text(payload.title, 'title', 255);
     if (has(payload, 'professional_id')) values.professional_id = integer(payload.professional_id, 'professional_id');
+    if (has(payload, 'treatment_id')) values.treatment_id = payload.treatment_id === null ? null : integer(payload.treatment_id, 'treatment_id');
+    if (has(payload, 'service_ref')) values.service_ref = require('../services/clinicalEpisodeServiceContext.service').reference(payload.service_ref);
     if (has(payload, 'occurred_at')) values.occurred_at = timestamp(payload.occurred_at);
     if (has(payload, 'template_key')) {
       if (!TEMPLATE_KEYS.includes(payload.template_key)) throw error(400, 'clinical_episode_invalid_template', 'Selecciona una plantilla válida.');

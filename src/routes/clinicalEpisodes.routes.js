@@ -1,6 +1,7 @@
 'use strict';
 const router = require('express').Router();
 const controller = require('../controllers/clinicalEpisodes.controller');
+const consumables = require('../controllers/clinicalEpisodeConsumables.controller');
 router.use(require('./auth.middleware'));
 router.get('/:id', controller.get);
 router.patch('/:id', controller.save);
@@ -8,4 +9,7 @@ router.post('/:id/finalize', controller.finalize);
 router.post('/:id/reopen', controller.reopen);
 router.get('/:id/revisions', controller.revisions);
 router.get('/:id/professionals', controller.professionals);
+router.get('/:id/consumables/products', consumables.products);
+router.get('/:id/consumables', consumables.read);
+router.post('/:id/consumables', consumables.save);
 module.exports = router;
