@@ -1,0 +1,357 @@
+{
+  "description": "Minimal metadata-only parent keys and legacy ENUMs for the eight selected 20261025 migrations. Contains no rows, identities, credentials or clinical text.",
+  "defaults": {
+    "DEFAULT_CHARACTER_SET_NAME": "utf8mb4",
+    "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"
+  },
+  "tables": [
+    {
+      "TABLE_NAME": "AppointmentClinicalReports",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    },
+    {
+      "TABLE_NAME": "CitasPacientes",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    },
+    {
+      "TABLE_NAME": "ClinicalPrivateAssets",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    },
+    {
+      "TABLE_NAME": "Clinicas",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    },
+    {
+      "TABLE_NAME": "EconomicBudgetEvents",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    },
+    {
+      "TABLE_NAME": "EconomicBudgets",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    },
+    {
+      "TABLE_NAME": "EconomicPayments",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    },
+    {
+      "TABLE_NAME": "Pacientes",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    },
+    {
+      "TABLE_NAME": "PatientFiscalDocuments",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    },
+    {
+      "TABLE_NAME": "PatientVoucherMovements",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    },
+    {
+      "TABLE_NAME": "PatientWalletEntries",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    },
+    {
+      "TABLE_NAME": "Tratamientos",
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci"
+    }
+  ],
+  "columns": [
+    {
+      "TABLE_NAME": "AppointmentClinicalReports",
+      "COLUMN_NAME": "id",
+      "COLUMN_TYPE": "bigint unsigned",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "CitasPacientes",
+      "COLUMN_NAME": "id_cita",
+      "COLUMN_TYPE": "int",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "ClinicalPrivateAssets",
+      "COLUMN_NAME": "id",
+      "COLUMN_TYPE": "int",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "Clinicas",
+      "COLUMN_NAME": "id_clinica",
+      "COLUMN_TYPE": "int",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "EconomicBudgetEvents",
+      "COLUMN_NAME": "id",
+      "COLUMN_TYPE": "bigint unsigned",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "EconomicBudgetEvents",
+      "COLUMN_NAME": "event_type",
+      "COLUMN_TYPE": "enum('created','edited','presented','accepted','partially_accepted','rejected','expired','duplicated','superseded','signature_request_created','signature_request_sent','signature_request_failed','signature_request_expired','signature_request_viewed','signature_request_signed','appointment_linked')",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "",
+      "CHARACTER_SET_NAME": "utf8mb4",
+      "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "EconomicBudgets",
+      "COLUMN_NAME": "id",
+      "COLUMN_TYPE": "bigint unsigned",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "EconomicPayments",
+      "COLUMN_NAME": "id",
+      "COLUMN_TYPE": "bigint unsigned",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "EconomicPayments",
+      "COLUMN_NAME": "method",
+      "COLUMN_TYPE": "enum('cash','card','transfer','bizum','financing','insurance','other')",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "",
+      "CHARACTER_SET_NAME": "utf8mb4",
+      "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "Pacientes",
+      "COLUMN_NAME": "id_paciente",
+      "COLUMN_TYPE": "int",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "PatientFiscalDocuments",
+      "COLUMN_NAME": "id",
+      "COLUMN_TYPE": "bigint unsigned",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "PatientVoucherMovements",
+      "COLUMN_NAME": "id",
+      "COLUMN_TYPE": "bigint unsigned",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "PatientVoucherMovements",
+      "COLUMN_NAME": "movement_type",
+      "COLUMN_TYPE": "enum('activation','consumption','refund','adjustment','expiry')",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "",
+      "CHARACTER_SET_NAME": "utf8mb4",
+      "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "PatientWalletEntries",
+      "COLUMN_NAME": "id",
+      "COLUMN_TYPE": "bigint unsigned",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "PatientWalletEntries",
+      "COLUMN_NAME": "entry_type",
+      "COLUMN_TYPE": "enum('deposit','overpayment','allocation','refund','adjustment')",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "",
+      "CHARACTER_SET_NAME": "utf8mb4",
+      "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+      "GENERATION_EXPRESSION": ""
+    },
+    {
+      "TABLE_NAME": "Tratamientos",
+      "COLUMN_NAME": "id_tratamiento",
+      "COLUMN_TYPE": "int",
+      "IS_NULLABLE": "NO",
+      "COLUMN_DEFAULT": null,
+      "EXTRA": "auto_increment",
+      "CHARACTER_SET_NAME": null,
+      "COLLATION_NAME": null,
+      "GENERATION_EXPRESSION": ""
+    }
+  ],
+  "indexes": [
+    {
+      "TABLE_NAME": "AppointmentClinicalReports",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    },
+    {
+      "TABLE_NAME": "CitasPacientes",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id_cita",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    },
+    {
+      "TABLE_NAME": "ClinicalPrivateAssets",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    },
+    {
+      "TABLE_NAME": "Clinicas",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id_clinica",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    },
+    {
+      "TABLE_NAME": "EconomicBudgetEvents",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    },
+    {
+      "TABLE_NAME": "EconomicBudgets",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    },
+    {
+      "TABLE_NAME": "EconomicPayments",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    },
+    {
+      "TABLE_NAME": "Pacientes",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id_paciente",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    },
+    {
+      "TABLE_NAME": "PatientFiscalDocuments",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    },
+    {
+      "TABLE_NAME": "PatientVoucherMovements",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    },
+    {
+      "TABLE_NAME": "PatientWalletEntries",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    },
+    {
+      "TABLE_NAME": "Tratamientos",
+      "INDEX_NAME": "PRIMARY",
+      "NON_UNIQUE": 0,
+      "SEQ_IN_INDEX": 1,
+      "COLUMN_NAME": "id_tratamiento",
+      "SUB_PART": null,
+      "INDEX_TYPE": "BTREE"
+    }
+  ]
+}

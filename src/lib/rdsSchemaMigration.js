@@ -8,9 +8,15 @@ const { snapshot, digest, compare } = require('./securitySchemaContract');
 const P = require('./rdsSchemaMigrationPolicy');
 const T = require('./rdsSchemaMigrationTransport');
 const E = require('./mysqlEnumExtension');
+const W = require('./rdsSchemaWarningPolicy');
+const R = require('./rdsSchemaFirstCreateReconciliation');
 const STATE = '/var/lib/clinicaclick-rds-schema-release';
 const SAFE = /^rds_schema_[a-z_]+$/;
 const safeCode = error => SAFE.test(error?.message || '') ? error.message : 'rds_schema_operation_failed';
+function safeResultRef(value) {
+  return value && typeof value.path === 'string' && /^\/var\/lib\/clinicaclick-rds-schema-release\/runs\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/result\.json$/.test(value.path)
+    && /^[a-f0-9]{64}$/.test(value.sha256 || '') ? { path: value.path, sha256: value.sha256 } : null;
+}
 
 function privateDirectory(dir, owner = 0) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -26,7 +32,7 @@ function writePrivate(file, value) {
   try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
   return { path: file, sha256: P.sha(bytes) };
 }
-function readPrivate(file, owner = 0) {
+function readPrivate(file, owner = 0, parse = JSON.parse) {
   privateDirectory(path.dirname(file), owner);
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
@@ -35,21 +41,47 @@ function readPrivate(file, owner = 0) {
       && before.size > 0 && before.size <= 32 * 1024 * 1024, 'rds_schema_private_file');
     const bytes = fs.readFileSync(fd); const after = fs.fstatSync(fd); const named = fs.lstatSync(file);
     P.need(['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs', 'uid', 'mode', 'nlink'].every(key => before[key] === after[key] && before[key] === named[key]), 'rds_schema_file_changed');
-    return { value: JSON.parse(bytes), reference: { path: file, sha256: P.sha(bytes) } };
+    return { value: parse(bytes), reference: { path: file, sha256: P.sha(bytes) } };
   } finally { fs.closeSync(fd); }
 }
 function createStore(root = STATE, owner = 0) {
   privateDirectory(root, owner); privateDirectory(root + '/claims', owner); privateDirectory(root + '/runs', owner);
   return {
     owner, root,
-    start(planRef) {
-      P.need(!fs.existsSync(root + '/active.json'), 'rds_schema_previous_attempt_requires_reconciliation');
+    pending(runDirectory) {
+      const active = readPrivate(root + '/active.json', owner);
+      P.need(active.value.directory === runDirectory && path.dirname(runDirectory) === root + '/runs'
+        && active.value.operationNonce === path.basename(runDirectory), 'rds_schema_reconciliation_active_mismatch');
+      const result = readPrivate(runDirectory + '/result.json', owner);
+      const plan = readPrivate(result.value.planRef?.path, owner);
+      P.need(digest(result.value.planRef) === digest(plan.reference) && digest(active.value.planRef) === digest(plan.reference)
+        && result.value.operationNonce === active.value.operationNonce, 'rds_schema_reconciliation_plan_binding');
+      const claim = readPrivate(root + '/claims/' + plan.reference.sha256 + '.json', owner);
+      P.need(digest(claim.value.planRef) === digest(plan.reference) && claim.value.operationNonce === active.value.operationNonce,
+        'rds_schema_reconciliation_claim_binding');
+      const journal = readPrivate(runDirectory + '/journal.jsonl', owner, bytes => bytes.toString().trim().split('\n').map(JSON.parse));
+      return { active, result, plan, journal };
+    },
+    start(planRef, continuation) {
+      if (continuation) {
+        const active = readPrivate(root + '/active.json', owner);
+        P.need(digest(active.reference) === digest(continuation.active.reference), 'rds_schema_reconciliation_active_mismatch');
+      } else P.need(!fs.existsSync(root + '/active.json'), 'rds_schema_previous_attempt_requires_reconciliation');
       const operationNonce = randomUUID(); const directory = root + '/runs/' + operationNonce;
+      if (continuation) writePrivate(continuation.active.value.directory + '/continuation-claim.json',
+        { operationNonce, planRef, priorActiveRef: continuation.active.reference });
       privateDirectory(directory, owner);
       // The claim is permanent even for a known pre-DDL refusal. Make a new plan.
       P.need(!fs.existsSync(root + '/claims/' + planRef.sha256 + '.json'), 'rds_schema_plan_already_consumed');
       writePrivate(root + '/claims/' + planRef.sha256 + '.json', { operationNonce, planRef });
-      writePrivate(root + '/active.json', { operationNonce, planRef, directory });
+      if (continuation) {
+        const active = readPrivate(root + '/active.json', owner);
+        P.need(digest(active.reference) === digest(continuation.active.reference), 'rds_schema_reconciliation_active_mismatch');
+        const next = root + '/active-next-' + operationNonce + '.json';
+        writePrivate(next, { operationNonce, planRef, directory, priorOperationNonce: continuation.active.value.operationNonce });
+        fs.renameSync(next, root + '/active.json');
+        const fd = fs.openSync(root, fs.constants.O_RDONLY); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      } else writePrivate(root + '/active.json', { operationNonce, planRef, directory });
       const fd = fs.openSync(directory + '/journal.jsonl', 'wx', 0o600);
       let writesDispatched = 0; let backupRequested = false; let backupKnown = false;
       const journal = event => {
@@ -67,7 +99,7 @@ function createStore(root = STATE, owner = 0) {
           const resultRef = writePrivate(directory + '/result.json', { ...result, operationNonce, writesDispatched });
           // Failure after a dispatched SQL write or uncertain snapshot request
           // blocks all later applies, including newly generated plans.
-          if (accepted || writesDispatched === 0 && (!backupRequested || backupKnown)
+          if (accepted || !continuation && writesDispatched === 0 && (!backupRequested || backupKnown)
             && (!result.transportOpened || result.closure?.physicalCloseObserved === true)) {
             const active = readPrivate(root + '/active.json', owner);
             P.need(active.value.operationNonce === operationNonce, 'rds_schema_ledger_changed');
@@ -85,7 +117,7 @@ async function schemaSnapshot(admin) {
 
 // Gate the real mysql2 dispatch used by Sequelize, not a mirror SQL generator.
 // The same physical connection owns the lock, all DDL and SequelizeMeta writes.
-function migrationInterface({ admin, aws, journal, migrationName, Sequelize = require('sequelize'), ddlTimeoutMs = 300000 }) {
+function migrationInterface({ admin, aws, journal, migrationName, continuation, Sequelize = require('sequelize'), ddlTimeoutMs = 300000 }) {
   const raw = admin.raw; const originals = { query: raw.query, execute: raw.execute };
   let tail = Promise.resolve(); let closed = false; let poisoned = false;
   for (const method of ['query', 'execute']) {
@@ -97,7 +129,16 @@ function migrationInterface({ admin, aws, journal, migrationName, Sequelize = re
       try { P.need(!closed && typeof callback === 'function', 'rds_schema_query_interface_required'); kind = P.statementKind(sql, values, admin.identity?.database || T.DATABASE); }
       catch (error) { queueMicrotask(() => callback(error)); return emitter; }
       const task = tail.then(async () => {
+        P.need(!poisoned, 'rds_schema_prior_statement_failed');
         const isDdl = kind === 'ddl' || kind === 'enum_extension';
+        if (continuation?.pending) {
+          P.need(isDdl && migrationName === continuation.proof.migration && P.sha(sql) === continuation.proof.sqlSha256,
+            'rds_schema_reconciliation_prefix_changed');
+          continuation.pending = false;
+          journal({ event: 'statement_reconciled', migration: migrationName, kind: 'ddl', sqlSha256: P.sha(sql),
+            originalResultRef: continuation.resultRef, proof: continuation.proof });
+          return { result: { affectedRows: 0, warningStatus: 0 }, fields: undefined };
+        }
         const target = kind === 'enum_extension' ? E.statement(sql) : null;
         const metadata = () => new Promise((resolve, reject) => {
           originals.query.call(raw, { sql: E.metadataSql, timeout: 30000 }, [target.table, target.name], (error, rows) => {
@@ -105,7 +146,6 @@ function migrationInterface({ admin, aws, journal, migrationName, Sequelize = re
             try { resolve(E.column(rows[0])); } catch (caught) { reject(caught); }
           });
         });
-        P.need(!poisoned, 'rds_schema_prior_statement_failed');
         aws.assertFresh((isDdl ? ddlTimeoutMs : 30000) + 30000);
         if (target) E.validate(await metadata(), target);
         return new Promise((resolve, reject) => {
@@ -117,12 +157,20 @@ function migrationInterface({ admin, aws, journal, migrationName, Sequelize = re
           originals[method].call(raw, { sql, timeout: isDdl ? ddlTimeoutMs : 30000 }, values, (error, result, fields) => {
             if (error) { reject(Error('rds_schema_statement_outcome_requires_reconciliation')); return; }
             originals.query.call(raw, { sql: 'SHOW WARNINGS', timeout: 5000 }, async (warningError, warnings) => {
-              if (warningError || !Array.isArray(warnings) || warnings.length || Number(result?.warningStatus || 0) !== 0) {
+              const warningCount = Number(result?.warningStatus || 0);
+              if (warningError || !Array.isArray(warnings) || warnings.length || warningCount !== 0) {
+                try { journal({ event: 'statement_diagnostics', migration: migrationName, sqlSha256: P.sha(sql), kind: isDdl ? 'ddl' : 'metadata',
+                  warningReadFailed: !!warningError || !Array.isArray(warnings), warningStatus: warningCount,
+                  diagnostics: W.diagnostics(warnings), policy: W.NAME }); }
+                catch (caught) { reject(caught); return; }
+              }
+              if (warningError || !W.accepted({ sql, kind, engineVersion: admin.identity?.engineVersion, rows: warnings, warningStatus: warningCount })) {
                 reject(Error('rds_schema_statement_warnings_require_reconciliation')); return;
               }
               try {
                 if (target) E.validate(target, await metadata(), false);
-                if (isDdl) journal({ event: 'statement_ack', migration: migrationName, sqlSha256: P.sha(sql), kind: 'ddl', warnings: 0 });
+                if (isDdl) journal({ event: 'statement_ack', migration: migrationName, sqlSha256: P.sha(sql), kind: 'ddl', warnings: warnings.length,
+                  ...(warnings.length ? { warningPolicy: W.NAME } : {}) });
               } catch (caught) { reject(caught); return; }
               resolve({ result, fields });
             });
@@ -151,6 +199,20 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
     const admin = await connect({ aws, db, secret }); return { aws, admin };
   }
   function infoFor(source) { P.need(operatorUid() === 0, 'rds_schema_root_required'); return sourceInfo(source, true); }
+  async function continuationState({ source, info, store, runDirectory, before, identity }) {
+    const pending = store.pending(runDirectory), original = pending.plan.value;
+    const selected = original.selected.map(row => row.name), moduleFiles = P.migrationFiles(source, selected);
+    P.need(info.contractDigest === original.contractDigest && digest(moduleFiles) === digest(original.moduleFiles)
+      && original.selected.every(row => !row.alreadyApplied && info.migrations[row.name] === row.sha256)
+      && digest(original.toApply) === digest(selected), 'rds_schema_reconciliation_source_changed');
+    const proof = await R.validate({ source, originalPlan: original, observed: before, identity,
+      result: pending.result.value, journal: pending.journal.value });
+    const descriptor = { schema: 'clinicaclick-rds-first-create-continuation/1', priorRunDirectory: runDirectory,
+      priorOperationNonce: pending.active.value.operationNonce, priorSourceRevision: original.sourceRevision,
+      priorContractDigest: original.contractDigest, priorPlanRef: pending.plan.reference, priorResultRef: pending.result.reference,
+      priorJournalRef: pending.journal.reference, priorActiveRef: pending.active.reference, proof };
+    return { pending, descriptor, selected, moduleFiles };
+  }
   return {
     async plan({ source, selected = [], profile = 'clinicaclick-prov-temp', out }) {
       const info = infoFor(source); const moduleFiles = P.migrationFiles(source, selected);
@@ -163,6 +225,24 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         toApply: plan.toApply, unselectedPendingCount: plan.unselectedPending.length, compatibilityBefore: plan.compatibilityBefore,
         statementPolicy: plan.policy, closure, instruction: 'Review selected migration code at this Git SHA; approve this exact plan SHA. Unselected history is never applied.' };
     },
+    async reconcile({ source, runDirectory, out }) {
+      const info = infoFor(source), store = storeFactory(), pending = store.pending(runDirectory);
+      const { admin } = await open(pending.plan.value.awsProfile); let plan; let closure;
+      try {
+        const lock = await admin.query("SELECT GET_LOCK('clinicaclick_rds_schema_release',0) AS acquired");
+        P.need(String(lock[0]?.acquired) === '1', 'rds_schema_migration_busy');
+        const before = await schemaSnapshot(admin);
+        const state = await continuationState({ source, info, store, runDirectory, before, identity: admin.identity });
+        plan = P.buildPlan({ info, before, identity: admin.identity, selected: state.selected, moduleFiles: state.moduleFiles,
+          profile: pending.plan.value.awsProfile, at: now(), continuation: state.descriptor });
+      } finally { closure = await admin.close(); }
+      const dir = out ? path.dirname(out) : '/home/ubuntu/qa-evidence/rds-schema-continuation-' + randomUUID();
+      privateDirectory(dir, fileOwner); const planRef = writePrivate(out || dir + '/plan.json', plan);
+      return { status: 'rds_schema_continuation_plan_ready', planRef, sourceRevision: info.revision,
+        originalSourceRevision: plan.continuation.priorSourceRevision, continuation: plan.continuation, selected: plan.selected,
+        toApply: plan.toApply, statementPolicy: plan.policy, closure, mutations: false,
+        instruction: 'Review this exact continuation plan SHA. The original warning is unknown; one CREATE is reconciled from exact metadata, never replayed or acknowledged retroactively.' };
+    },
     async apply({ source, planFile, approvePlan }) {
       const info = infoFor(source); const { value: plan, reference: planRef } = readPrivate(planFile, fileOwner);
       P.need(approvePlan === planRef.sha256, 'rds_schema_explicit_plan_approval_required');
@@ -171,7 +251,16 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         && digest(moduleFiles) === digest(plan.moduleFiles), 'rds_schema_plan_stale');
       P.need(Number.isSafeInteger(plan.createdAtEpochMs) && plan.createdAtEpochMs <= now()
         && now() - plan.createdAtEpochMs <= 900000 && Array.isArray(plan.toApply) && plan.toApply.length > 0, 'rds_schema_plan_expired_or_empty');
-      const run = storeFactory().start(planRef); let admin; let backup; let result; let error; let closure;
+      const store = storeFactory(); let continuation;
+      if (plan.continuation) {
+        P.need(plan.continuation.schema === 'clinicaclick-rds-first-create-continuation/1', 'rds_schema_reconciliation_plan_binding');
+        continuation = await continuationState({ source, info, store, runDirectory: plan.continuation.priorRunDirectory,
+          before: plan.before, identity: plan.identity });
+        P.need(digest(continuation.descriptor) === digest(plan.continuation)
+          && digest(continuation.selected) === digest(plan.selected.map(row => row.name)), 'rds_schema_reconciliation_plan_binding');
+      }
+      const resumed = continuation ? { pending: true, proof: continuation.descriptor.proof, resultRef: continuation.pending.result.reference } : null;
+      const run = store.start(planRef, continuation?.pending); let admin; let backup; let result; let error; let closure;
       try {
         const aws = awsFactory({ profile: plan.awsProfile }); await aws.inspect();
         backup = await aws.backup({ operationNonce: run.operationNonce, journal: run.journal });
@@ -180,6 +269,8 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         P.need(String(lock[0]?.acquired) === '1', 'rds_schema_migration_busy');
         const before = await schemaSnapshot(admin);
         P.validatePlan(plan, { info, before, identity: admin.identity, moduleFiles, at: now() });
+        if (continuation) await R.validate({ source, originalPlan: continuation.pending.plan.value, observed: before, identity: admin.identity,
+          result: continuation.pending.result.value, journal: continuation.pending.journal.value });
         P.need(backup.status === 'available' && backup.physicalDbId === admin.identity.physicalDbId
           && Date.parse(backup.createdAt) >= plan.createdAtEpochMs, 'rds_schema_backup_not_bound_to_plan');
         if (aws.ensureFresh) await aws.ensureFresh(15 * 60 * 1000);
@@ -200,8 +291,9 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         const Sequelize = require('sequelize'); const completed = [];
         for (const name of plan.toApply) {
           const loaded = P.loadMigration(source, name, plan.moduleFiles, Sequelize);
-          const bridge = migrationInterface({ admin, aws: ddlAws, journal: run.journal, migrationName: name, Sequelize });
+          const bridge = migrationInterface({ admin, aws: ddlAws, journal: run.journal, migrationName: name, continuation: resumed, Sequelize });
           try { await loaded.migration.up(bridge.queryInterface, loaded.facade); } finally { await bridge.restore(); }
+          P.need(!resumed?.pending, 'rds_schema_reconciliation_prefix_not_consumed');
           const sql = 'INSERT INTO SequelizeMeta (name) VALUES (?)';
           aws.assertFresh(60000); run.journal({ event: 'statement_request', migration: name, kind: 'sequelize_meta', sqlSha256: P.sha(sql) });
           const inserted = await admin.query(sql, [name]);
@@ -213,6 +305,7 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         P.need(compatibility.compatible && plan.toApply.every(name => after.migrations.includes(name)), 'rds_schema_postcheck_incompatible');
         result = { status: 'rds_schema_applied_and_verified', sourceRevision: info.revision, planRef, completed,
           afterDigest: digest(after), after, compatibility, identity: admin.identity, backup,
+          ...(continuation ? { continuation: plan.continuation, reconciledStatements: 1 } : {}),
           releaseGate: { revision: info.revision, requiredMigrations: completed, stagingPromotion: 'fast-forward-only',
             applicationCrudPreflightStillRequired: true, preflightArgs: completed.flatMap(name => ['--require-migration', name]),
             gitOrServicesChangedByTool: false } };
@@ -224,6 +317,7 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
       if (error) {
         const resultRef = run.finish({ status: 'rds_schema_failed_preserve_partial', reason: safeCode(error), planRef,
           backup: backup || null, closure: closure || null, transportOpened: Boolean(admin) || error.transportOpened === true,
+          ...(continuation ? { continuation: plan.continuation } : {}),
           automaticReplayAllowed: false }, false);
         throw Object.assign(Error(safeCode(error)), { resultRef });
       }
@@ -246,4 +340,4 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
   };
 }
 
-module.exports = { STATE, safeCode, privateDirectory, writePrivate, readPrivate, createStore, schemaSnapshot, migrationInterface, createRunner };
+module.exports = { STATE, safeCode, safeResultRef, privateDirectory, writePrivate, readPrivate, createStore, schemaSnapshot, migrationInterface, createRunner };

@@ -41,7 +41,7 @@ function migrationFiles(source, names) {
   return [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
-function buildPlan({ info, before, identity, selected, moduleFiles, profile, at }) {
+function buildPlan({ info, before, identity, selected, moduleFiles, profile, at, continuation }) {
   need(Array.isArray(selected) && selected.length <= 20 && new Set(selected).size === selected.length, 'rds_schema_selection_invalid');
   for (const name of selected) need(NAME.test(name) && /^[a-f0-9]{64}$/.test(info.migrations[name] || ''), 'rds_schema_migration_name');
   const pending = selected.filter(name => !before.migrations.includes(name));
@@ -50,10 +50,11 @@ function buildPlan({ info, before, identity, selected, moduleFiles, profile, at 
     identity, beforeDigest: digest(before), before, moduleFiles,
     selected: selected.map(name => ({ name, sha256: info.migrations[name], alreadyApplied: before.migrations.includes(name) })),
     toApply: pending, unselectedPending: Object.keys(info.migrations).filter(name => !before.migrations.includes(name) && !selected.includes(name)).sort(),
-    compatibilityBefore: compare(before, info.contract),
+    compatibilityBefore: compare(before, info.contract), ...(continuation ? { continuation } : {}),
     policy: { schemaOnly: true, clinicalRowDml: false, dcl: false, automaticHistoricalMigrations: false,
       destructiveDdl: false, maxDdlPhaseMs: 600000, maxStatementMs: 300000,
       enumMemberAppendOnly: true,
+      warningPolicy: 'mysql-8.4.11-tinyint1-display-width/1',
       bootstrapSequelizeMeta: !before.tables.some(table => table.TABLE_NAME === 'SequelizeMeta'),
       mysqlDdlIsAtomic: false, unknownRequiresManualReconciliation: true } };
 }
@@ -65,7 +66,7 @@ function validatePlan(plan, { info, before, identity, moduleFiles, at }) {
     && plan.beforeDigest === digest(before) && digest(plan.identity) === digest(identity)
     && digest(plan.moduleFiles) === digest(moduleFiles), 'rds_schema_plan_stale');
   const rebuilt = buildPlan({ info, before, identity, selected: plan.selected.map(item => item.name),
-    moduleFiles, profile: plan.awsProfile, at: plan.createdAtEpochMs });
+    moduleFiles, profile: plan.awsProfile, at: plan.createdAtEpochMs, continuation: plan.continuation });
   need(digest(plan) === digest(rebuilt) && plan.toApply.length > 0, 'rds_schema_plan_invalid_or_empty');
 }
 

@@ -192,6 +192,11 @@ test('DDL warning refuses ACK and migration recording; a prewrite close failure 
   f.state.warnings = [{ Level: 'Warning', Code: 1, Message: 'TEST_ONLY_DO_NOT_PERSIST' }];
   await assert.rejects(f.runner.apply({ source: f.source, planFile: plan.planRef.path, approvePlan: plan.planRef.sha256 }), /warnings_require_reconciliation/);
   assert.deepEqual(f.state.migrations, []); assert.equal(fs.existsSync(f.root + '/ledger/active.json'), true);
+  const active = JSON.parse(fs.readFileSync(f.root + '/ledger/active.json'));
+  const diagnosticBytes = fs.readFileSync(active.directory + '/journal.jsonl', 'utf8');
+  const diagnostic = diagnosticBytes.trim().split('\n').map(JSON.parse).find(row => row.event === 'statement_diagnostics');
+  assert.equal(diagnostic.diagnostics[0].code, 1); assert.equal(diagnosticBytes.includes('TEST_ONLY_DO_NOT_PERSIST'), false);
+  assert.match(diagnostic.diagnostics[0].messageSha256, /^[a-f0-9]{64}$/);
   const other = fixture(t); const otherPlan = await other.runner.plan({ source: other.source, selected: [NAME], out: other.root + '/plan/plan.json' });
   other.state.tables.push({ TABLE_NAME: 'ConcurrentShape' }); other.state.closeFailure = true;
   await assert.rejects(other.runner.apply({ source: other.source, planFile: otherPlan.planRef.path, approvePlan: otherPlan.planRef.sha256 }), /plan_stale/);

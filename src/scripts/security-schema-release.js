@@ -114,7 +114,7 @@ async function run(argv) {
   if (['check-rds', 'preflight-rds'].includes(argv[0])) {
     return require('./security-rds-schema-check').run(argv);
   }
-  if (['plan-rds', 'apply-rds', 'verify-rds', 'release-rds'].includes(argv[0])) {
+  if (['plan-rds', 'apply-rds', 'verify-rds', 'release-rds', 'reconcile-rds'].includes(argv[0])) {
     return require('./security-rds-schema-migrate').run(argv);
   }
   const options = parse([...argv]);
@@ -175,5 +175,6 @@ if (require.main === module) run(process.argv.slice(2)).then(result => {
   if (result.compatible === false) process.exitCode = 2;
 }).catch(error => {
   const reason = /^(?:schema|rds_schema)_[a-z_]+$/.test(error.message) ? error.message : 'schema_operation_failed';
-  process.stderr.write(JSON.stringify({ status: 'failed', reason }) + '\n'); process.exitCode = 1;
+  const resultRef = require('../lib/rdsSchemaMigration').safeResultRef(error.resultRef);
+  process.stderr.write(JSON.stringify({ status: 'failed', reason, ...(resultRef ? { resultRef } : {}) }) + '\n'); process.exitCode = 1;
 });

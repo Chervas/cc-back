@@ -4,13 +4,13 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const { createInterface } = require('node:readline/promises');
-const { createRunner, safeCode } = require('../lib/rdsSchemaMigration');
+const { createRunner, safeCode, safeResultRef } = require('../lib/rdsSchemaMigration');
 const { need } = require('../lib/rdsSchemaMigrationPolicy');
 const SOURCE = path.resolve(__dirname, '../..');
 
 function parse(argv) {
   const action = String(argv.shift() || '').replace(/-rds$/, '');
-  need(['plan', 'apply', 'verify', 'release'].includes(action), 'rds_schema_arguments_invalid');
+  need(['plan', 'apply', 'verify', 'release', 'reconcile'].includes(action), 'rds_schema_arguments_invalid');
   const options = { action, source: SOURCE, selected: [], profile: 'clinicaclick-prov-temp' }; const seen = new Set();
   while (argv.length) {
     const key = argv.shift(); const value = argv.shift();
@@ -24,7 +24,8 @@ function parse(argv) {
   need(path.isAbsolute(options.source) && (!options.out || path.isAbsolute(options.out)), 'rds_schema_arguments_invalid');
   need(action === 'plan' || action === 'release' ? !options.planFile && !options.approvePlan && !options.runDirectory
     : action === 'apply' ? options.planFile && /^[a-f0-9]{64}$/.test(options.approvePlan || '') && !options.runDirectory && !options.selected.length && !options.out
-      : options.runDirectory && !options.planFile && !options.approvePlan && !options.selected.length && !options.out, 'rds_schema_arguments_invalid');
+      : options.runDirectory && !options.planFile && !options.approvePlan && !options.selected.length
+        && (action === 'reconcile' || !options.out), 'rds_schema_arguments_invalid');
   if (options.planFile) need(path.isAbsolute(options.planFile), 'rds_schema_arguments_invalid');
   if (options.runDirectory) need(path.isAbsolute(options.runDirectory), 'rds_schema_arguments_invalid');
   options.source = fs.realpathSync(options.source); return options;
@@ -36,6 +37,7 @@ async function run(argv, dependencies = {}) {
   if (options.action === 'plan') return runner.plan(options);
   if (options.action === 'apply') return runner.apply(options);
   if (options.action === 'verify') return runner.verify(options);
+  if (options.action === 'reconcile') return runner.reconcile(options);
   need(options.selected.length > 0, 'rds_schema_selection_required');
   const plan = await runner.plan(options);
   need(plan.toApply.length > 0, 'rds_schema_no_selected_pending_migrations');
@@ -54,7 +56,8 @@ async function run(argv, dependencies = {}) {
 if (require.main === module) run(process.argv.slice(2)).then(result => {
   process.stdout.write(JSON.stringify(result) + '\n');
 }).catch(error => {
-  process.stderr.write(JSON.stringify({ status: 'failed', reason: safeCode(error), ...(error.resultRef ? { resultRef: error.resultRef } : {}) }) + '\n');
+  const resultRef = safeResultRef(error.resultRef);
+  process.stderr.write(JSON.stringify({ status: 'failed', reason: safeCode(error), ...(resultRef ? { resultRef } : {}) }) + '\n');
   process.exitCode = 1;
 });
 module.exports = { parse, run };
