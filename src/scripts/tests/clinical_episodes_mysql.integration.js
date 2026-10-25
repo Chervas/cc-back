@@ -180,7 +180,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const drawingPayload = { expected_version: 0, idempotency_key: 'drawing-owned-first', title: 'Modelo facial', template_key: 'facial', document };
   const createdDrawing = await drawingService.create({ ...base, payload: drawingPayload });
   assert.equal(createdDrawing.created, true); assert.equal(createdDrawing.item.version, 1); assert.equal(createdDrawing.item.template_version, 1);
-  await assert.rejects(drawingService.create({ ...base, payload: { ...drawingPayload, idempotency_key: 'drawing-template-v3', template_version: 3 } }), { code: 'clinical_drawing_template_version_invalid' });
+  await assert.rejects(drawingService.create({ ...base, payload: { ...drawingPayload, idempotency_key: 'drawing-template-v4', template_version: 4 } }), { code: 'clinical_drawing_template_version_invalid' });
   await assert.rejects(drawingService.create({ ...base, payload: { ...drawingPayload, idempotency_key: 'drawing-template-text', template_version: '1' } }), { code: 'clinical_drawing_template_version_invalid' });
   assert.equal((await drawingService.create({ ...base, payload: drawingPayload })).created, false);
   await assert.rejects(drawingService.create({ ...base, payload: { ...drawingPayload, title: 'Otro título' } }), { code: 'clinical_drawing_idempotency_conflict' });
@@ -236,5 +236,13 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await assert.rejects(drawingService.save({ ...base, id: v2Model.item.id, payload: { expected_version: 2, template_version: 1 } }), { code: 'clinical_drawing_source_immutable' });
   assert.equal((await drawingService.get({ ...base, id: drawId, version: 1 })).item.template_version, 1);
   await assert.rejects(drawingService.create({ ...base, payload: { ...drawingPayload, idempotency_key: 'drawing-template-v2', template_version: 1 } }), { code: 'clinical_drawing_idempotency_conflict' });
-  report.checks.push('Anatomical template_version 1 and 2 are stored exactly in model, revision snapshots, DTO and episode pinned reference; same-version edits preserve the chosen anatomy, historical v1 never upgrades and unsupported versions/coercion/downgrades reject.');
+  const femaleModel = await drawingService.create({ ...base, payload: { ...drawingPayload, idempotency_key: 'drawing-template-female', template_version: 3 } });
+  assert.equal(femaleModel.item.template_version, 3);
+  await drawingService.save({ ...base, id: femaleModel.item.id, payload: { expected_version: 1, title: 'Modelo femenino conservado' } });
+  assert.equal((await drawingService.get({ ...base, id: femaleModel.item.id, version: 1 })).item.template_version, 3);
+  assert.equal((await drawingService.get({ ...base, id: femaleModel.item.id })).item.template_version, 3);
+  await assert.rejects(drawingService.save({ ...base, id: femaleModel.item.id, payload: { expected_version: 2, template_version: 2 } }), { code: 'clinical_drawing_source_immutable' });
+  for (const invalid of [0, 4, '3', null]) await assert.rejects(drawingService.create({ ...base, payload: { ...drawingPayload, idempotency_key: 'drawing-invalid-variant', template_version: invalid } }), { code: 'clinical_drawing_template_version_invalid' });
+  await assert.rejects(drawingService.create({ ...base, payload: { ...pdfPayload, idempotency_key: 'drawing-image-invalid-variant', template_version: 3 } }), { code: 'clinical_drawing_template_version_invalid' });
+  report.checks.push('Anatomical template_version 1, 2 masculine and 3 feminine are stored exactly in model, revision snapshots, DTO and episode pinned reference; same-version edits preserve the chosen anatomy, historical v1 never upgrades and unsupported versions/coercion/downgrades reject.');
 }).catch(error => { console.error(error); process.exitCode = 1; });

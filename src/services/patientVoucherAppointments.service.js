@@ -102,6 +102,14 @@ function selectionsForSeries(payload, profile, count, doctorId, installationId) 
 }
 
 async function loadVoucher(publicId, transaction = null, lock = false, identityOnly = false) {
+  if (lock && transaction) {
+    const located = await PatientVoucher.findOne({ where: { public_id: clean(publicId, 36) }, attributes: ['patient_id'] });
+    if (!located) throw domainError(404, 'voucher_not_found', 'Bono no encontrado.');
+    // Fiscal, cancellation and reservation writers share patient-first order.
+    // Locate before locking the purchase to avoid patient/voucher lock cycles.
+    const patient = await db.Paciente.findByPk(located.patient_id, { attributes: ['id_paciente'], transaction, lock: transaction.LOCK.UPDATE });
+    if (!patient) throw domainError(404, 'voucher_patient_not_found', 'Paciente no encontrado.');
+  }
   const voucher = await PatientVoucher.findOne({
     where: { public_id: clean(publicId, 36) },
     transaction,
@@ -122,14 +130,18 @@ async function loadVoucher(publicId, transaction = null, lock = false, identityO
 
 async function resources({ publicId }) {
   const voucher = await loadVoucher(publicId);
+  return resourcesForClinic(voucher.clinic_id);
+}
+
+async function resourcesForClinic(clinicId) {
   const [doctorLinks, installations] = await Promise.all([
     DoctorClinica.findAll({
-      where: { clinica_id: voucher.clinic_id, activo: true, recibe_citas: true },
+      where: { clinica_id: clinicId, activo: true, recibe_citas: true },
       attributes: ['doctor_id'],
       order: [['doctor_id', 'ASC']],
     }),
     Instalacion.findAll({
-      where: { clinica_id: voucher.clinic_id, activo: true },
+      where: { clinica_id: clinicId, activo: true },
       attributes: ['id', 'nombre', 'tipo', 'default_duracion_minutos'],
       order: [['orden_visualizacion', 'ASC'], ['nombre', 'ASC']],
     }),
@@ -157,8 +169,8 @@ async function resources({ publicId }) {
   };
 }
 
-async function buildPlan({ publicId, payload, transaction = null, lockVoucher = false, sealPlan = false }) {
-  const voucher = await loadVoucher(publicId, transaction, lockVoucher);
+async function buildPlan({ publicId, payload, transaction = null, lockVoucher = false, sealPlan = false, planningSource = null }) {
+  const voucher = planningSource ? planningSource.record : await loadVoucher(publicId, transaction, lockVoucher);
   const clinic = await db.Clinica.findByPk(voucher.clinic_id, {
     attributes: ['id_clinica', 'configuracion', 'grupoClinicaId', 'equipment_booking_enabled'], transaction,
   });
@@ -185,8 +197,8 @@ async function buildPlan({ publicId, payload, transaction = null, lockVoucher = 
   }
   await assertTreatmentBookingVisibility({ db, treatment, transaction,
     appointmentValues: { clinica_id: voucher.clinic_id, paciente_id: voucher.patient_id,
-      tratamiento_id: voucher.treatment_id, voucher_id: voucher.id, fin: startAt } });
-  const linkedAppointments = await CitaPaciente.findAll({
+      tratamiento_id: voucher.treatment_id, ...(planningSource ? {} : { voucher_id: voucher.id }), fin: startAt } });
+  const linkedAppointments = planningSource ? [] : await CitaPaciente.findAll({
     where: {
       voucher_id: voucher.id,
       ...activeAppointmentWhere(Op),
@@ -209,10 +221,11 @@ async function buildPlan({ publicId, payload, transaction = null, lockVoucher = 
   const consumedAppointmentIds = new Set(
     consumedMovements.map((movement) => Number(movement.appointment_id)),
   );
-  const reservedUnits = linkedAppointmentIds.filter(
+  const reservedUnits = planningSource ? planningSource.reservedUnits : linkedAppointmentIds.filter(
     (appointmentId) => !consumedAppointmentIds.has(appointmentId),
   ).length;
-  const availableToSchedule = Math.max(0, Math.floor(Number(voucher.available_units)) - reservedUnits);
+  const availableToSchedule = planningSource ? planningSource.availableToSchedule
+    : Math.max(0, Math.floor(Number(voucher.available_units)) - reservedUnits);
   const count = positiveInteger(payload.count) || availableToSchedule;
   const maxCount = Math.min(30, availableToSchedule);
   if ((payload.count != null && !positiveInteger(payload.count)) || count <= 0 || count > maxCount) {
@@ -287,7 +300,7 @@ async function buildPlan({ publicId, payload, transaction = null, lockVoucher = 
     result = await inspectSeries({ db, slots, clinicId: Number(voucher.clinic_id), doctorId, installationId,
       doctor, installation, timeZone, transaction });
   }
-  if (voucher.expires_at) {
+  if (!planningSource && voucher.expires_at) {
     const expires = new Date(voucher.expires_at);
     result.forEach((slot) => {
       if (new Date(slot.end_at) > expires) slot.conflicts.push({
@@ -297,14 +310,14 @@ async function buildPlan({ publicId, payload, transaction = null, lockVoucher = 
     });
   }
   return {
-    voucher: {
+    ...(planningSource ? { budget_concept: planningSource.budgetConcept } : { voucher: {
       id: voucher.public_id,
       name: voucher.name,
       available_units: Number(voucher.available_units),
       available_to_schedule: availableToSchedule,
       reserved_units: reservedUnits,
       unit_label: voucher.unit_label,
-    },
+    } }),
     configuration: {
       count,
       interval_days: intervalDays,
@@ -316,7 +329,8 @@ async function buildPlan({ publicId, payload, transaction = null, lockVoucher = 
     appointments: result,
     has_conflicts: result.some((slot) => slot.conflicts.length),
     treatment,
-    rawVoucher: voucher,
+    rawVoucher: planningSource ? null : voucher,
+    rawSource: voucher,
     selectionsBySequence,
     durationSelection,
     bookingProfile,
@@ -325,7 +339,7 @@ async function buildPlan({ publicId, payload, transaction = null, lockVoucher = 
 }
 
 function serializePlan(plan) {
-  const { rawVoucher, treatment, selectionsBySequence, durationSelection, bookingProfile, physicalTemplate, ...serializable } = plan;
+  const { rawVoucher, rawSource, treatment, selectionsBySequence, durationSelection, bookingProfile, physicalTemplate, ...serializable } = plan;
   return {
     ...serializable,
     treatment: treatment ? {
@@ -372,7 +386,7 @@ async function preview(input) {
   });
 }
 
-async function persistPlan({ plan, actorId, payload, transaction, durable = false, prepared = null }) {
+async function persistPlan({ plan, actorId, payload, transaction, durable = false, prepared = null, afterPersist = null, birthRequestKey = null }) {
     if (plan.has_conflicts) {
       throw domainError(409, 'voucher_schedule_conflicts', 'Hay conflictos en la serie. Ajusta las fechas antes de confirmar.', {
         appointments: plan.appointments,
@@ -381,36 +395,41 @@ async function persistPlan({ plan, actorId, payload, transaction, durable = fals
     const appointments = [];
     const managed = durable && plan.bookingProfile?.version === 4
       ? require('./appointmentVisitManaged.service').current() : null;
-    const clinic = managed ? await db.Clinica.findByPk(plan.rawVoucher.clinic_id, { transaction }) : null;
+    const source = plan.rawSource || plan.rawVoucher;
+    const clinic = managed ? await db.Clinica.findByPk(source.clinic_id, { transaction }) : null;
     for (const slot of plan.appointments) {
       const values = {
-        clinica_id: plan.rawVoucher.clinic_id,
-        paciente_id: plan.rawVoucher.patient_id,
+        clinica_id: source.clinic_id,
+        paciente_id: source.patient_id,
         doctor_id: plan.configuration.doctor_id,
         instalacion_id: plan.configuration.installation_id,
-        tratamiento_id: plan.rawVoucher.treatment_id,
-        voucher_id: plan.rawVoucher.id,
+        tratamiento_id: source.treatment_id,
+        voucher_id: plan.rawVoucher?.id || null,
         created_by: actorId,
         updated_by: actorId,
-        titulo: plan.treatment?.nombre || plan.rawVoucher.name,
-        nota: `Sesión ${slot.sequence} de ${plan.configuration.count} · ${plan.rawVoucher.name}`,
-        motivo: 'Sesión planificada desde bono',
+        titulo: plan.treatment?.nombre || source.name,
+        nota: `Sesión ${slot.sequence} de ${plan.configuration.count} · ${source.name}`,
+        motivo: plan.rawVoucher ? 'Sesión planificada desde bono' : 'Sesión planificada desde presupuesto',
         tipo_cita: 'continuacion',
         estado: 'pendiente',
         inicio: slot.start_at,
         fin: slot.end_at,
       };
-      const visitBirth = managed ? await managed.prepareVoucherBirth({ values, clinic, actorId, profile: plan.bookingProfile,
+      const visitBirth = managed && !plan.rawVoucher ? await managed.prepareBirth({ values, clinic, actorId,
+        profile: plan.bookingProfile, requestKey: birthRequestKey(slot.sequence) })
+        : managed ? await managed.prepareVoucherBirth({ values, clinic, actorId, profile: plan.bookingProfile,
         parentRequestKey: prepared.request_key, parentRequestSha256: prepared.request_sha256,
         sequence: slot.sequence, slotPlanSha256: slot.booking_plan_sha256, transaction }) : null;
-      appointments.push(bookingCapabilities().simple
+      const appointment = bookingCapabilities().simple
         ? await mutateAppointmentBooking({ db, appointmentValues: values, transaction,
           selections: plan.selectionsBySequence.get(slot.sequence), priorityAcknowledged: payload.booking_priority_acknowledged === true,
           durationSelection: plan.durationSelection,
           ...(visitBirth ? { visitBirth } : {}),
           ...(durable && slot.booking_plan_sha256 ? { expectedPlanSha256: slot.booking_plan_sha256 } : {}),
           persist: ({ values: resolved, existing, transaction: tx, sealedBirth }) => sealedBirth ? existing : CitaPaciente.create(resolved, { transaction: tx }) })
-        : await CitaPaciente.create(values, { transaction }));
+        : await CitaPaciente.create(values, { transaction });
+      if (afterPersist) await afterPersist(appointment, transaction);
+      appointments.push(appointment);
     }
     return appointments;
 }
@@ -491,4 +510,7 @@ module.exports = {
   resources,
   preview,
   create,
+  // Shared native series coordinator. The budget adapter supplies a canonical
+  // budget-line origin and capacity; it never manufactures a PatientVoucher.
+  seriesCoordinator: { resourcesForClinic, buildPlan, serializePlan, persistPlan, normalizedSelections, assertReplayRuntime },
 };

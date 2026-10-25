@@ -249,6 +249,15 @@ exports.previewBudgetAcceptance = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
+exports.updateFinancingStatus = asyncHandler(async (req, res) => {
+  await requireBudgetFeature(req, 'patients.edit');
+  const result = await require('../services/economicFinancing.service').update({
+    publicId: req.params.budgetId, actorId: actorId(req), payload: req.body,
+  });
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json(result);
+});
+
 exports.createBudgetSignatureRequest = asyncHandler(async (req, res) => {
   await requireBudgetFeature(req, 'patients.edit');
   const request = await economics.createBudgetSignatureRequest({
@@ -275,6 +284,7 @@ exports.signPublicBudgetSignatureRequest = asyncHandler(async (req, res) => {
 });
 
 exports.createPayment = asyncHandler(async (req, res) => {
+  require('../lib/economic-concept-ledger').key(req.body?.idempotency_key);
   await requireBudgetFeature(req, 'patients.edit');
   const payment = await economics.createPayment({
     publicId: req.params.budgetId,
@@ -284,6 +294,30 @@ exports.createPayment = asyncHandler(async (req, res) => {
   await require('../services/appointmentPaymentSummary.service').notify(req.params.budgetId).catch(() => {});
   res.status(201).json(payment);
 });
+
+exports.previewConceptPayment = asyncHandler(async (req, res) => {
+  await requireBudgetFeature(req, 'patients.edit');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json(await require('../services/economicConcepts.service').paymentPreview({ publicId: req.params.budgetId, actorId: actorId(req), payload: req.body }));
+});
+exports.previewConceptCancellation = asyncHandler(async (req, res) => {
+  await requireBudgetFeature(req, 'patients.edit');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json(await require('../services/economicConcepts.service').cancellationPreview({ publicId: req.params.budgetId, lineKey: req.params.lineKey, actorId: actorId(req), payload: req.body }));
+});
+exports.cancelConcept = asyncHandler(async (req, res) => {
+  await requireBudgetFeature(req, 'patients.edit');
+  const result = await require('../services/economicConcepts.service').cancel({ publicId: req.params.budgetId, lineKey: req.params.lineKey, actorId: actorId(req), payload: req.body });
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.status(result.replayed ? 200 : 201).json(result);
+});
+for (const [name, method, feature] of [['conceptAppointmentResources', 'resources', 'appointments.view'], ['previewConceptAppointments', 'preview', 'appointments.manage'], ['createConceptAppointments', 'create', 'appointments.manage']]) {
+  exports[name] = asyncHandler(async (req, res) => {
+    await requireBudgetFeature(req, feature);
+    const result = await require('../services/budgetConceptAppointments.service')[method]({ publicId: req.params.budgetId, lineKey: req.params.lineKey, actorId: actorId(req), payload: req.body || {} });
+    res.setHeader('Cache-Control', 'private, no-store'); res.status(method === 'create' && !result.replayed ? 201 : 200).json(result);
+  });
+}
 
 exports.createWalletDeposit = asyncHandler(async (req, res) => {
   const clinicId = await requireClinicFeature(

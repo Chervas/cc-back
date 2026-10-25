@@ -14,6 +14,8 @@ module.exports = (sequelize, DataTypes) => {
     series: { type: DataTypes.STRING(30), allowNull: false },
     number: { type: DataTypes.STRING(60), allowNull: false },
     status: { type: DataTypes.STRING(20), allowNull: false, defaultValue: 'draft' },
+    version_number: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 1 },
+    rectifies_document_id: DataTypes.BIGINT.UNSIGNED,
     issue_date: { type: DataTypes.DATE, allowNull: false },
     due_date: DataTypes.DATE,
     issuer_snapshot: { type: DataTypes.JSON, allowNull: false },

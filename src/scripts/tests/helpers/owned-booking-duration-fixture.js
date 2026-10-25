@@ -24,7 +24,7 @@ async function createOwnedBookingDurationFixture({ sql, models: db, registerOwne
   const define = (name, tableName, fields) => db[name] = sql.define(name, fields, { tableName, timestamps: false });
   define('Clinica', 'Clinicas', { id_clinica: { type: D.INTEGER, primaryKey: true }, grupoClinicaId: D.INTEGER,
     nombre_clinica: D.STRING, configuracion: D.JSON, equipment_booking_enabled: D.BOOLEAN });
-  define('Usuario', 'Usuarios', { id_usuario: { type: D.INTEGER, primaryKey: true }, nombre: D.STRING, apellidos: D.STRING });
+  define('Usuario', 'Usuarios', { id_usuario: { type: D.INTEGER, primaryKey: true }, nombre: D.STRING, apellidos: D.STRING, avatar: D.STRING });
   define('Paciente', 'Pacientes', { id_paciente: { type: D.INTEGER, primaryKey: true },
     ...(includePatientScope ? { clinica_id: D.INTEGER } : {}) });
   if (includePatientScope) db.PacienteClinica = require('../../../../models/pacienteclinica')(sql, D);

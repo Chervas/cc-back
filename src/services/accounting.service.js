@@ -445,7 +445,7 @@ async function cashForDate(
 ) {
   const start = localDateTimeToUtc(businessDate, '00:00:00', timeZone);
   const end = localDateTimeToUtc(nextDate(businessDate), '00:00:00', timeZone);
-  const [payments, expenses, movements] = await Promise.all([
+  const [payments, expenses, movements, refunds] = await Promise.all([
     EconomicPayment.findAll({
       where: {
         clinic_id: clinicId,
@@ -473,6 +473,7 @@ async function cashForDate(
       attributes: ['id', 'public_id', 'movement_type', 'amount', 'method'],
       transaction,
     }),
+    db.EconomicConceptAdjustment ? db.EconomicConceptAdjustment.findAll({ where: { clinic_id: clinicId, refund_amount: { [Op.gt]: 0 }, created_at: { [Op.gte]: start, [Op.lt]: end } }, attributes: ['id','refund_amount','refund_method'], transaction }) : [],
   ]);
   const cashPayments = payments.filter((row) => row.method === 'cash');
   const cashMovements = movements.filter((row) => row.method === 'cash');
@@ -488,12 +489,14 @@ async function cashForDate(
     .filter((row) => row.movement_type === 'adjustment')
     .reduce((sum, row) => sum + Number(row.amount), 0));
   const cashReceipts = money(patientReceipts + manualIncome);
-  const cashOutflows = money(expenseOutflows + manualOutflows);
+  const patientRefunds = money(refunds.filter(row => row.refund_method === 'cash').reduce((sum, row) => sum + Number(row.refund_amount), 0));
+  const cashOutflows = money(expenseOutflows + manualOutflows + patientRefunds);
   const tenderReconciliation = {};
   for (const payment of payments) {
     const method = payment.method || 'other';
     tenderReconciliation[method] = money((tenderReconciliation[method] || 0) + Number(payment.amount));
   }
+  for (const refund of refunds) tenderReconciliation[refund.refund_method || 'other'] = money((tenderReconciliation[refund.refund_method || 'other'] || 0) - Number(refund.refund_amount));
   return {
     business_date: businessDate,
     opening_cash: money(openingCash),
@@ -501,6 +504,7 @@ async function cashForDate(
     manual_income: manualIncome,
     expense_outflows: expenseOutflows,
     manual_outflows: manualOutflows,
+    patient_refunds: patientRefunds,
     adjustments,
     cash_receipts: cashReceipts,
     cash_outflows: cashOutflows,
@@ -510,6 +514,7 @@ async function cashForDate(
       payments: payments.map((row) => row.public_id),
       expenses: expenses.map((row) => row.public_id),
       movements: movements.map((row) => row.public_id),
+      concept_refunds: refunds.map(row => row.id),
     },
   };
 }
@@ -538,6 +543,7 @@ async function getWorkspace({
     currentSession,
     payrollPeriods,
     payrollDocuments,
+    conceptRefunds,
   ] = await Promise.all([
     PatientFiscalDocument.findAll({
       where: { clinic_id: clinicId, ...(portalMode ? { status: 'issued' } : {}), issue_date: { [Op.gte]: period.from, [Op.lt]: period.toExclusive } },
@@ -596,6 +602,7 @@ async function getWorkspace({
         order: [['period_month', 'DESC'], ['created_at', 'DESC']],
       })
       : Promise.resolve([]),
+    db.EconomicConceptAdjustment ? db.EconomicConceptAdjustment.findAll({ where: { clinic_id: clinicId, refund_amount: { [Op.gt]: 0 }, created_at: { [Op.gte]: period.from, [Op.lt]: period.toExclusive } }, attributes: ['id','clinic_id','patient_id','budget_id','line_key','refund_amount','refund_method','reason','created_at','actor_id'], order: [['created_at','DESC']] }) : [],
   ]);
   const assetMap = new Map(assets.map((asset) => [String(asset.id), asset]));
   const currentCash = await cashForDate(
@@ -606,13 +613,14 @@ async function getWorkspace({
   );
   const issuedDocuments = documents.filter((document) => document.status === 'issued');
   const activeExpenses = expenses.filter((expense) => expense.status !== 'cancelled');
-  const salesTotal = money(issuedDocuments.reduce((sum, document) => sum + Number(document.totals?.total || 0), 0));
+  const salesTotal = money(issuedDocuments.filter(row => row.document_type !== 'receipt').reduce((sum, document) => sum + Number(document.totals?.total || 0), 0));
   const expensesTotal = money(activeExpenses.reduce((sum, expense) => sum + Number(expense.total), 0));
   const payrollTotal = money(payrollPeriods.reduce(
     (sum, payroll) => sum + Number(payroll.total_personnel_cost),
     0,
   ));
-  const collectedTotal = money(payments.reduce((sum, payment) => sum + Number(payment.amount), 0));
+  const refundTotal = money(conceptRefunds.reduce((sum, row) => sum + Number(row.refund_amount), 0));
+  const collectedTotal = money(payments.reduce((sum, payment) => sum + Number(payment.amount), 0) - refundTotal);
   const daily = new Map();
   const dayKey = (value) => {
     const parsed = new Date(value);
@@ -631,7 +639,7 @@ async function getWorkspace({
     }
     return daily.get(key);
   };
-  for (const document of issuedDocuments) {
+  for (const document of issuedDocuments.filter(row => row.document_type !== 'receipt')) {
     ensureDay(document.issue_date).sales = money(
       ensureDay(document.issue_date).sales + Number(document.totals?.total || 0),
     );
@@ -656,6 +664,10 @@ async function getWorkspace({
       (paymentMethods[payment.method || 'other'] || 0) + Number(payment.amount),
     );
   }
+  for (const refund of conceptRefunds) {
+    ensureDay(refund.created_at).collected = money(ensureDay(refund.created_at).collected - Number(refund.refund_amount));
+    paymentMethods[refund.refund_method || 'other'] = money((paymentMethods[refund.refund_method || 'other'] || 0) - Number(refund.refund_amount));
+  }
   const expenseCategories = {};
   for (const expense of activeExpenses) {
     expenseCategories[expense.category || 'Otros'] = money(
@@ -671,6 +683,7 @@ async function getWorkspace({
       payroll_total: payrollTotal,
       result: money(salesTotal - expensesTotal - payrollTotal),
       collected_total: collectedTotal,
+      patient_refunds_total: refundTotal,
       pending_expenses: activeExpenses.filter((expense) => expense.status === 'pending').length,
       issued_documents: issuedDocuments.length,
     },
@@ -690,7 +703,7 @@ async function getWorkspace({
     cash: portalMode ? null : {
       session: serializeCashSession(currentSession),
       current: currentCash,
-      movements: movements.map(serializeMovement),
+      movements: [...movements.map(serializeMovement), ...conceptRefunds.map(row => serializeMovement({ public_id: row.id, clinic_id: row.clinic_id, movement_type: 'expense', amount: row.refund_amount, method: row.refund_method, description: 'Devolución al paciente: ' + row.reason, source_type: 'concept_refund', source_id: row.id, occurred_at: row.created_at, created_by: row.actor_id, created_at: row.created_at }))].sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at)),
       closures: closures.map(serializeClosure),
     },
     analytics: {
@@ -868,7 +881,7 @@ async function getCashWorkspace({ clinicId, query = {} }) {
   );
   const start = localDateTimeToUtc(businessDate, '00:00:00', clinic.time_zone);
   const end = localDateTimeToUtc(nextDate(businessDate), '00:00:00', clinic.time_zone);
-  const [session, closure, lastClosure, movements, recentClosures] = await Promise.all([
+  const [session, closure, lastClosure, movements, recentClosures, conceptRefunds] = await Promise.all([
     AccountingCashSession.findOne({
       where: { clinic_id: clinicId, business_date: businessDate },
     }),
@@ -892,6 +905,7 @@ async function getCashWorkspace({ clinicId, query = {} }) {
       order: [['business_date', 'DESC']],
       limit: 14,
     }),
+    db.EconomicConceptAdjustment ? db.EconomicConceptAdjustment.findAll({ where: { clinic_id: clinicId, refund_amount: { [Op.gt]: 0 }, created_at: { [Op.gte]: start, [Op.lt]: end } }, attributes: ['id','clinic_id','refund_amount','refund_method','reason','created_at','actor_id'] }) : [],
   ]);
   const suggestedOpeningCash = money(lastClosure?.actual_cash);
   const openingCash = money(session?.opening_cash ?? closure?.opening_cash ?? suggestedOpeningCash);
@@ -911,7 +925,7 @@ async function getCashWorkspace({ clinicId, query = {} }) {
     suggested_opening_cash: suggestedOpeningCash,
     session: serializeCashSession(session),
     current,
-    movements: movements.map(serializeMovement),
+    movements: [...movements.map(serializeMovement), ...conceptRefunds.map(row => serializeMovement({ public_id: row.id, clinic_id: row.clinic_id, movement_type: 'expense', amount: row.refund_amount, method: row.refund_method, description: 'Devolución al paciente: ' + row.reason, source_type: 'concept_refund', source_id: row.id, occurred_at: row.created_at, created_by: row.actor_id, created_at: row.created_at }))].sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at)),
     closure: closure ? serializeClosure(closure) : null,
     recent_closures: recentClosures.map(serializeClosure),
   };
@@ -1376,7 +1390,7 @@ async function exportCsv({ clinicId, query = {}, portalMode = false }) {
   const rows = [
     ['tipo', 'fecha', 'numero', 'tercero', 'nif', 'base', 'impuestos', 'retencion', 'total', 'estado'],
     ...workspace.issued_documents.map((document) => [
-      'emitida',
+      document.document_type === 'receipt' ? 'recibo' : document.document_type === 'credit_note' ? 'rectificativa' : 'emitida',
       String(document.issue_date).slice(0, 10),
       document.number,
       document.recipient?.legal_name || document.recipient?.name,

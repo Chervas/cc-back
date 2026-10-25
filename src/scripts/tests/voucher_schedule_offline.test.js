@@ -110,6 +110,7 @@ function loadService({ reserved = [], conflict = false, expiresAt = null, source
   const f = fixture({ appointments: conflict ? [{ doctor_id: 5, inicio: '2030-01-07T09:00:00Z', fin: '2030-01-07T09:30:00Z' }] : [] });
   const occupancy = f.input.db.CitaPaciente.findAll;
   const db = Object.assign(f.input.db, {
+    Paciente: { findByPk: async id => ({ id_paciente: id }) },
     sequelize: { transaction: async (callback) => callback(transaction) },
     PatientVoucher: { findOne: async () => ({ id: 1, public_id: 'offline', clinic_id: 72, patient_id: 1, treatment_id: 3, status: 'active', available_units: 2, expires_at: expiresAt, source_system: sourceSystem }) },
     PatientVoucherMovement: { findAll: async () => [] },

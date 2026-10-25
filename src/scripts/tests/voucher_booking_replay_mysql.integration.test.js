@@ -18,7 +18,7 @@ test('simple voucher durable request: actual HTTP -> native SQL receipt, replay,
         const voucher = await f.voucher(), body = f.payload();
         const baseline = await f.counts();
         const missing = await f.request(voucher, 'appointment-plan', f.payload({ duration_minutes: undefined }));
-        assert.equal(missing.status, 422); assert.equal(missing.body.code, 'booking_duration_required');
+        assert.equal(missing.status, 422, JSON.stringify(missing.body)); assert.equal(missing.body.code, 'booking_duration_required');
         assert.equal((await f.request(voucher, 'appointments', body)).status, 400);
         assert.deepEqual(await f.counts(), baseline);
         report.checks.push('Duración NULL sin elección explícita y create sin identidad:422/400 reales, cero citas/ocupación/ledger; no default30');

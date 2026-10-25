@@ -9,6 +9,8 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   db.Clinica = define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, configuracion: D.JSON }, 'Clinicas');
   db.Paciente = define('Paciente', { id_paciente: { type: D.INTEGER, primaryKey: true }, public_id: D.STRING, clinica_id: D.INTEGER, nombre: D.STRING, apellidos: D.STRING, medicacion: D.TEXT }, 'Pacientes');
   db.PacienteClinica = define('PacienteClinica', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true }, paciente_id: D.INTEGER, clinica_id: D.INTEGER }, 'PacienteClinicas');
+  db.PatientVoucher = define('PatientVoucher', { id: { type: D.INTEGER, primaryKey: true }, public_id: D.STRING, patient_id: D.INTEGER, clinic_id: D.INTEGER,
+    name: D.STRING, treatment_id: D.INTEGER, program_snapshot: D.JSON }, 'PatientVouchers');
   db.Usuario = define('Usuario', { id_usuario: { type: D.INTEGER, primaryKey: true }, nombre: D.STRING, apellidos: D.STRING }, 'Usuarios');
   db.CitaPaciente = define('CitaPaciente', { id_cita: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER, paciente_id: D.INTEGER, doctor_id: D.INTEGER,
     tratamiento_id: D.INTEGER, titulo: D.STRING, inicio: D.DATE, fin: D.DATE, estado: D.STRING, es_provisional: D.BOOLEAN, voucher_id: D.INTEGER, import_metadata: D.JSON,
@@ -111,6 +113,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   report.checks.push('Gallery unions only explicitly scoped episode image refs; before/after roles survive revision and are never inferred from chronology. Foreign episode, PDF roles and internal storage disclosure are rejected.');
 
   const careRows = [{ id_cita: 201, estado: 'no_asistio' }, { id_cita: 202, estado: 'reprogramada' }, { id_cita: 203, estado: 'no_asistio' }, { id_cita: 204, estado: 'no_asistio', inicio: '2026-11-01T10:00:00Z', fin: '2026-11-01T10:30:00Z' }, { id_cita: 205, estado: 'pendiente' }, { id_cita: 206, estado: 'no_asistio', arrived_at: '2026-10-20T10:00:00Z', care_schedule_start: '2026-10-20T10:00:00Z' }];
+  await db.PatientVoucher.create({ id: 99, public_id: 'owned-care-voucher', patient_id: 11, clinic_id: 72, name: 'Bono ficticio de atención' });
   await db.CitaPaciente.bulkCreate(careRows.map(row => ({ clinica_id: 72, paciente_id: 11, doctor_id: 7, inicio: '2026-10-20T10:00:00Z', fin: '2026-10-20T10:30:00Z', voucher_id: 99, ...row })));
   const corrections = require('../../services/clinicalAttendanceCorrection.service').createClinicalAttendanceCorrectionService({ db, canAccess, now: () => new Date('2026-10-30T10:00:00Z') });
   const correction = (id, extra = {}) => ({ appointmentId: id, clinicId: 72, actorId: 7, payload: command({ confirmed: true, expected_status: 'no_asistio', expected_start: '2026-10-20T10:00:00Z', expected_end: '2026-10-20T10:30:00Z', reason: 'Corrección explícita ficticia por el profesional', ...extra }) });

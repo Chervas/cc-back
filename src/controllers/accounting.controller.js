@@ -268,20 +268,26 @@ exports.exportPortalCsv = asyncHandler(async (req, res) => {
   res.send(`\uFEFF${csv}`);
 });
 
+exports.listPayrollEmployees = asyncHandler(async (req, res) => {
+  const resolvedClinicId = await requireFeature(req, 'accounting.payroll.manage');
+  res.json({items: await accountingIngestion.employees(resolvedClinicId)});
+});
+
 exports.listIngestion = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
-  if (String(req.query.document_kind || '').toLowerCase() === 'payroll') {
+  const documentKind = String(req.query.document_kind || 'expense').trim().toLowerCase();
+  if (documentKind === 'payroll') {
     await requireFeature(req, 'accounting.payroll.view');
   }
   res.json(await accountingIngestion.list({
     clinicId: resolvedClinicId,
-    documentKind: req.query.document_kind,
+    documentKind,
   }));
 });
 
 exports.enqueueIngestion = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'accounting.ocr.manage');
-  const documentKind = String(req.body.document_kind || 'expense').toLowerCase();
+  const documentKind = String(req.body.document_kind || 'expense').trim().toLowerCase();
   if (documentKind === 'payroll') await requireFeature(req, 'accounting.payroll.manage');
   const result = await accountingIngestion.enqueue({
     clinicId: resolvedClinicId,
@@ -303,6 +309,7 @@ exports.processIngestion = asyncHandler(async (req, res) => {
   res.json(await accountingIngestion.process({
     publicId: req.params.jobId,
     clinicId: resolvedClinicId,
+    mode: req.body.mode || 'automatic',
   }));
 });
 
@@ -313,6 +320,8 @@ exports.acceptIngestion = asyncHandler(async (req, res) => {
     clinicId: resolvedClinicId,
   }) === 'payroll') {
     await requireFeature(req, 'accounting.payroll.manage');
+  } else {
+    await requireFeature(req, 'accounting.expenses.manage');
   }
   res.json(await accountingIngestion.accept({
     publicId: req.params.jobId,

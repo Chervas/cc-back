@@ -48,7 +48,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await ingestion.enqueue(retryInput); assert.equal(await db.ClinicalPrivateAsset.count(), 3); assert.equal(await db.AccountingIngestionJob.count(), 3);
   report.checks.push('Foreign clinic admission remains independent; interrupted job insert recovers the same stored original on retry without a second asset.');
   const job = await db.AccountingIngestionJob.findOne({ where: { public_id: admitted[0].id } }); await job.update({ status: 'review' });
-  const payload = { supplier_name: 'Synthetic supplier', document_number: 'SYNTHETIC-001', issue_date: '2026-10-21', category: 'Otros',
+  const payload = { currency: 'EUR', supplier_name: 'Synthetic supplier', document_number: 'SYNTHETIC-001', issue_date: '2026-10-21', category: 'Otros',
     status: 'pending', payment_method: 'transfer', taxable_base: 10, tax_amount: 2.1, withholding_amount: 0, total: 12.1 };
   db.AccountingIngestionJob.addHook('beforeUpdate', 'owned-accept-failure', value => { if (value.status === 'accepted') throw Error('OWNED_ACCEPT_FAILURE'); });
   await assert.rejects(ingestion.accept({ publicId: job.public_id, clinicId: 72, actorId: 5, payload }), /OWNED_ACCEPT_FAILURE/);

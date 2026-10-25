@@ -10,6 +10,7 @@ const economicPrices = require('../lib/economicPriceProfile');
 const commercialPolicy = require('../lib/economic-commercial-policy');
 const budgetAmounts = require('../lib/economicBudgetAcceptance');
 const fiscalPrices = require('../lib/economicFiscalPriceSource');
+const economicFinancing = require('../lib/economicFinancing');
 const treatmentPrograms = require('./treatmentPrograms.service');
 
 const {
@@ -1091,6 +1092,14 @@ async function createBudget({ patientIdentifier, clinicId, actorId, payload }) {
 }
 
 async function loadBudgetByPublicId(publicId, transaction = null) {
+  if (transaction) {
+    // All money/entitlement writers share patient -> budget order. The locator
+    // is outside the transaction so waiting for that lock cannot establish an
+    // older REPEATABLE READ snapshot before another writer commits.
+    const located = await EconomicBudget.findOne({ where: { public_id: cleanString(publicId, 36) }, attributes: ['id', 'patient_id'] });
+    if (!located) throw domainError(404, 'budget_not_found', 'Presupuesto no encontrado.');
+    await Paciente.findByPk(located.patient_id, { attributes: ['id_paciente'], transaction, lock: transaction.LOCK.UPDATE });
+  }
   const budget = await EconomicBudget.findOne({
     where: { public_id: cleanString(publicId, 36) },
     transaction,
@@ -2309,6 +2318,12 @@ function paymentAppliedToBudget(payment) {
     .reduce((sum, item) => sum + numberValue(item.amount), 0));
 }
 
+async function conceptAdjustments(budgetId, transaction) {
+  const rows = db.EconomicConceptAdjustment ? await db.EconomicConceptAdjustment.findAll({ where: { budget_id: budgetId }, transaction }) : [];
+  return { rows, cancelled: roundMoney(rows.reduce((sum, row) => sum + numberValue(row.cancelled_amount), 0)),
+    released: roundMoney(rows.reduce((sum, row) => sum + numberValue(row.refund_amount) + numberValue(row.credited_amount), 0)) };
+}
+
 async function createPayment({ publicId, actorId, payload }) {
   return sequelize.transaction(async (transaction) => {
     const budget = await loadBudgetByPublicId(publicId, transaction);
@@ -2317,6 +2332,18 @@ async function createPayment({ publicId, actorId, payload }) {
       transaction,
       lock: transaction.LOCK.UPDATE,
     });
+    const ledger = require('../lib/economic-concept-ledger');
+    const requestKey = payload.idempotency_key ? ledger.key(payload.idempotency_key) : null, requestHash = ledger.hash(payload);
+    if (requestKey) {
+      const prior = await EconomicBudgetEvent.findOne({ where: { budget_id: budget.id, event_type: 'payment_recorded', metadata: { request_key: requestKey } } });
+      if (prior) {
+        const receipt = parseJson(prior.metadata, {});
+        if (receipt.request_hash !== requestHash || Number(prior.actor_id) !== Number(actorId)) throw domainError(409, 'economic_request_conflict', 'La solicitud ya se utilizó para otro cobro.');
+        return { ...receipt.payment, replayed: true };
+      }
+    }
+    if (db.EconomicFundingPart && !Number.isSafeInteger(payload.expected_version)) throw domainError(428, 'budget_version_required', 'Vuelve a consultar el presupuesto antes de registrar el cobro.', { applied: false });
+    if (payload.expected_version !== undefined && Number(payload.expected_version) !== Number(budget.current_version)) throw domainError(409, 'budget_version_conflict', 'El presupuesto ha cambiado. Revisa sus conceptos.', { applied: false });
     if (!['accepted', 'partially_accepted', 'presented'].includes(budget.status)) {
       throw domainError(409, 'budget_not_payable', 'El presupuesto todavía no admite cobros.');
     }
@@ -2334,7 +2361,7 @@ async function createPayment({ publicId, actorId, payload }) {
       throw domainError(400, 'payment_allocations_required', 'Indica a qué se aplica el cobro.');
     }
     const allocationTotal = roundMoney(allocations.reduce((sum, item) => sum + item.amount, 0));
-    if (Math.abs(allocationTotal - amount) > 0.01) {
+    if (ledger.cents(allocationTotal) !== ledger.cents(amount)) {
       throw domainError(400, 'payment_allocation_total_mismatch', 'La aplicación del cobro debe sumar el importe recibido.');
     }
     if (allocations.some((item) => !['budget', 'budget_line', 'wallet'].includes(item.target_type))) {
@@ -2358,7 +2385,17 @@ async function createPayment({ publicId, actorId, payload }) {
       }),
     ]);
     const versionLines = parseJson(version?.lines, []);
-    const linesByKey = new Map(versionLines.map((line) => [String(line.key), line]));
+    const adjustments = await conceptAdjustments(budget.id, transaction);
+    const acceptedEvents = db.EconomicFundingPart ? await EconomicBudgetEvent.findAll({ where: { budget_id: budget.id }, order: [['id', 'ASC']], transaction }) : [];
+    const acceptedLines = db.EconomicFundingPart ? ledger.acceptedLines(budget, version, acceptedEvents) : versionLines;
+    const linesByKey = new Map(acceptedLines.map((line) => [String(line.key), line]));
+    if (db.EconomicFundingPart) {
+      const state = await require('./economicFunding.service').createService({ db }).load({ clinicId: budget.clinic_id, patientId: budget.patient_id, transaction, persist: true });
+      const unassigned = state.parts.some(part => String(part.budget_id) === String(budget.id) && !part.line_key && ledger.cents(part.amount) > require('./economicFunding.service').createService({ db }).released(state, part.funding_key));
+      if (payload.generic === true && (!unassigned || allocations.some(row => row.target_type !== 'budget' || row.line_key))) throw domainError(400, 'payment_generic_not_required', 'El cobro genérico sólo está disponible para presupuestos con cobros históricos sin atribución.');
+      if (acceptedLines.length > 1 && allocations.some(row => row.target_type === 'budget') && !(payload.generic === true && unassigned)) throw domainError(400, 'payment_concepts_required', 'Selecciona los conceptos a los que corresponde este nuevo cobro. Los cobros anteriores sin asignar se conservan.');
+      if (unassigned && allocations.some(row => row.target_type === 'budget_line')) throw domainError(409, 'payment_attribution_review_required', 'Hay cobros anteriores sin atribución. Usa un cobro genérico explícito o revisa su aplicación antes de cobrar por conceptos.');
+    }
     const requestedByLine = new Map();
     for (const allocation of allocations.filter((item) => item.target_type === 'budget_line')) {
       if (!allocation.line_key || !linesByKey.has(String(allocation.line_key))) {
@@ -2382,9 +2419,10 @@ async function createPayment({ publicId, actorId, payload }) {
       }
     }
     for (const [lineKey, requested] of requestedByLine) {
-      const lineTotal = numberValue(linesByKey.get(lineKey)?.total);
-      const previous = previouslyAppliedByLine.get(lineKey) || 0;
-      if (roundMoney(previous + requested) > lineTotal + 0.01) {
+      const lineAdjustments = adjustments.rows.filter(row => row.line_key === lineKey);
+      const lineTotal = roundMoney(numberValue(linesByKey.get(lineKey)?.contracted_amount ?? linesByKey.get(lineKey)?.total) - lineAdjustments.reduce((sum, row) => sum + numberValue(row.cancelled_amount), 0));
+      const previous = Math.max(0, roundMoney((previouslyAppliedByLine.get(lineKey) || 0) - lineAdjustments.reduce((sum, row) => sum + numberValue(row.refund_amount) + numberValue(row.credited_amount), 0)));
+      if (ledger.cents(roundMoney(previous + requested)) > ledger.cents(lineTotal)) {
         throw domainError(
           400,
           'payment_exceeds_budget_line_pending',
@@ -2393,13 +2431,13 @@ async function createPayment({ publicId, actorId, payload }) {
         );
       }
     }
-    const payable = budgetAmounts.payableAmount(budget, version);
+    const payable = Math.max(0, roundMoney(budgetAmounts.payableAmount(budget, version) - adjustments.cancelled));
     const previouslyApplied = roundMoney(
       previousPayments.reduce((sum, item) => sum + paymentAppliedToBudget(item), 0)
-      + appliedWalletEntries.reduce((sum, item) => sum + Math.abs(numberValue(item.amount)), 0)
+      + appliedWalletEntries.reduce((sum, item) => sum + Math.abs(numberValue(item.amount)), 0) - adjustments.released
     );
     const pending = roundMoney(Math.max(0, payable - previouslyApplied));
-    if (budgetApplication > pending + 0.01) {
+    if (ledger.cents(budgetApplication) > ledger.cents(pending)) {
       throw domainError(
         400,
         'payment_exceeds_budget_pending',
@@ -2441,7 +2479,11 @@ async function createPayment({ publicId, actorId, payload }) {
     if (roundMoney(previouslyApplied + budgetApplication) >= payable) {
       await activateVouchers({ budget, rule: 'on_full_payment', actorId, transaction });
     }
-    return serializePayment(payment, budget.public_id);
+    if (db.EconomicFundingPart) await require('./economicFunding.service').createService({ db }).load({ clinicId: budget.clinic_id, patientId: budget.patient_id, transaction, persist: true });
+    const dto = serializePayment(payment, budget.public_id);
+    if (requestKey) await EconomicBudgetEvent.create({ budget_id: budget.id, version_number: budget.current_version, event_type: 'payment_recorded', from_status: budget.status, to_status: budget.status,
+      metadata: { request_key: requestKey, request_hash: requestHash, payment: dto }, actor_id: actorId, created_at: new Date() }, { transaction });
+    return { ...dto, replayed: false };
   });
 }
 
@@ -2502,6 +2544,9 @@ async function createWalletDeposit({ patientIdentifier, clinicId, actorId, paylo
 
 async function voidPayment({ publicId, actorId, payload }) {
   return sequelize.transaction(async (transaction) => {
+    const located = await EconomicPayment.findOne({ where: { public_id: cleanString(publicId, 36) }, attributes: ['id', 'patient_id'] });
+    if (!located) throw domainError(404, 'payment_not_found', 'Cobro no encontrado.');
+    await Paciente.findByPk(located.patient_id, { attributes: ['id_paciente'], transaction, lock: transaction.LOCK.UPDATE });
     const payment = await EconomicPayment.findOne({
       where: { public_id: cleanString(publicId, 36) },
       transaction,
@@ -2515,6 +2560,22 @@ async function voidPayment({ publicId, actorId, payload }) {
     });
     if (payment.status !== 'confirmed') {
       throw domainError(409, 'payment_not_voidable', 'El cobro ya no está confirmado.');
+    }
+    if (db.EconomicFiscalCoverage) {
+      const coverage = await db.EconomicFiscalCoverage.findAll({ where: { payment_id: payment.id, document_type: { [Op.in]: ['invoice', 'credit_note'] }, status: 'issued' }, transaction });
+      if (coverage.reduce((sum, row) => sum + numberValue(row.amount), 0) > 0.001) throw domainError(409, 'payment_fiscal_rectification_required', 'Este cobro tiene una factura emitida. Corrige el concepto con su rectificativa; no se anula el documento histórico.');
+    }
+    if (db.EconomicConceptAdjustment) {
+      const changes = await db.EconomicConceptAdjustment.findAll({ where: { clinic_id: payment.clinic_id, patient_id: payment.patient_id }, transaction });
+      if (changes.some(row => parseJson(row.funding_allocations, []).some(part => Number(part.payment_id) === Number(payment.id) && numberValue(part.amount) > 0))) throw domainError(409, 'payment_settled_concept_locked', 'Parte del cobro ya se ha devuelto o convertido en saldo mediante una corrección. Conserva el cobro y su historial.');
+      const historical = await PatientFiscalDocument.findAll({ where: { clinic_id: payment.clinic_id, patient_id: payment.patient_id, status: 'issued', document_type: { [Op.in]: ['invoice', 'receipt'] }, [Op.or]: [{ payment_id: payment.id }, ...(payment.budget_id ? [{ budget_id: payment.budget_id }] : [])] }, transaction });
+      if (historical.length) throw domainError(409, 'payment_fiscal_rectification_required', 'Este cobro conserva documentación fiscal emitida. Corrige el concepto y conserva los documentos históricos.');
+    }
+    const sourceWallet = await PatientWalletEntry.findAll({ where: { payment_id: payment.id, clinic_id: payment.clinic_id, patient_id: payment.patient_id, status: 'confirmed' }, transaction });
+    if (sourceWallet.length) {
+      const currentBalance = await walletBalance({ clinicId: payment.clinic_id, patientId: payment.patient_id, transaction });
+      const removed = sourceWallet.reduce((sum, row) => sum + numberValue(row.amount), 0);
+      if (roundMoney(currentBalance - removed) < 0) throw domainError(409, 'payment_wallet_already_applied', 'El anticipo ya se ha utilizado. Conserva el ingreso y revisa su aplicación antes de anularlo.');
     }
     const reason = cleanString(payload.reason, 500);
     if (!reason) throw domainError(400, 'payment_void_reason_required', 'Indica el motivo de la anulación.');
@@ -2580,13 +2641,14 @@ async function applyWallet({ publicId, actorId, payload }) {
         transaction,
       }),
     ]);
-    const payable = budgetAmounts.payableAmount(budget, version);
+    const adjustments = await conceptAdjustments(budget.id, transaction);
+    const payable = Math.max(0, roundMoney(budgetAmounts.payableAmount(budget, version) - adjustments.cancelled));
     const alreadyApplied = roundMoney(
       confirmedPayments.reduce((sum, item) => sum + paymentAppliedToBudget(item), 0)
-      + previousAllocations.reduce((sum, item) => sum + Math.abs(numberValue(item.amount)), 0)
+      + previousAllocations.reduce((sum, item) => sum + Math.abs(numberValue(item.amount)), 0) - adjustments.released
     );
     const pending = roundMoney(Math.max(0, payable - alreadyApplied));
-    if (amount > pending + 0.01) {
+    if (Math.round(amount * 100) > Math.round(pending * 100)) {
       throw domainError(400, 'wallet_allocation_exceeds_pending', 'El saldo aplicado supera lo pendiente.', {
         pending,
       });
@@ -3115,13 +3177,18 @@ async function fiscalPriceProjection({ budget, version, payment, payload, docume
 }
 
 async function nextFiscalNumber({ clinicId, documentType, series, transaction }) {
-  await Clinica.findByPk(clinicId, {
-    attributes: ['id_clinica'],
-    transaction,
-    lock: transaction.LOCK.UPDATE,
-  });
   const year = new Date().getFullYear();
   const numberPrefix = `${series}-${year}-`;
+  let counter = null;
+  if (db.EconomicFiscalCounter) {
+    // A dedicated row avoids upgrading the clinic FK shared lock held by
+    // funding/document inserts from concurrent patients. This counter and the
+    // document commit or roll back together; existing numbers seed it safely.
+    await sequelize.query('INSERT INTO EconomicFiscalCounters (clinic_id, document_type, series, fiscal_year, sequence_number) VALUES (:clinicId, :documentType, :series, :year, 0) ON DUPLICATE KEY UPDATE sequence_number = sequence_number', {
+      replacements: { clinicId, documentType, series, year }, transaction,
+    });
+    counter = await db.EconomicFiscalCounter.findOne({ where: { clinic_id: clinicId, document_type: documentType, series, fiscal_year: year }, transaction, lock: transaction.LOCK.UPDATE });
+  } else await Clinica.findByPk(clinicId, { attributes: ['id_clinica'], transaction, lock: transaction.LOCK.UPDATE });
   const existingDocuments = await PatientFiscalDocument.findAll({
     where: {
       clinic_id: clinicId,
@@ -3131,12 +3198,15 @@ async function nextFiscalNumber({ clinicId, documentType, series, transaction })
     },
     attributes: ['number'],
     transaction,
+    ...(counter ? {} : { lock: transaction.LOCK.SHARE }),
   });
   const lastSequence = existingDocuments.reduce((max, existingDocument) => {
     const sequence = Number.parseInt(String(existingDocument.number).slice(numberPrefix.length), 10);
     return Number.isInteger(sequence) ? Math.max(max, sequence) : max;
   }, 0);
-  return `${numberPrefix}${String(lastSequence + 1).padStart(4, '0')}`;
+  const sequence = Math.max(lastSequence, Number(counter?.sequence_number || 0)) + 1;
+  if (counter) await counter.update({ sequence_number: sequence }, { transaction });
+  return `${numberPrefix}${String(sequence).padStart(4, '0')}`;
 }
 
 function assertFiscalParties({ documentType, status, issuer, recipient }) {
@@ -3204,7 +3274,7 @@ async function loadFiscalSource({ patient, clinicId, payload, transaction }) {
   return { sourceType, budget, payment, version };
 }
 
-async function previewPatientFiscalDocument({ patientIdentifier, clinicId, payload }) {
+async function legacyPreviewPatientFiscalDocument({ patientIdentifier, clinicId, payload }) {
   return sequelize.transaction(async transaction => {
     const { patient } = await loadContext(patientIdentifier, clinicId);
     let document = null, budget, payment, version;
@@ -3239,7 +3309,7 @@ async function previewPatientFiscalDocument({ patientIdentifier, clinicId, paylo
   });
 }
 
-async function createPatientFiscalDocument({
+async function legacyCreatePatientFiscalDocument({
   patientIdentifier,
   clinicId,
   actorId,
@@ -3363,7 +3433,7 @@ async function createPatientFiscalDocument({
   });
 }
 
-async function createFiscalDocument({ publicId, actorId, payload }) {
+async function legacyCreateFiscalDocument({ publicId, actorId, payload }) {
   return sequelize.transaction(async transaction => {
     const budget = await loadBudgetByPublicId(publicId, transaction);
     return createPatientFiscalDocument({
@@ -3373,7 +3443,7 @@ async function createFiscalDocument({ publicId, actorId, payload }) {
   });
 }
 
-async function updateFiscalDocument({ publicId, actorId, payload }) {
+async function legacyUpdateFiscalDocument({ publicId, actorId, payload }) {
   return sequelize.transaction(async (transaction) => {
     const located = await PatientFiscalDocument.findOne({
       where: { public_id: cleanString(publicId, 36) }, attributes: ['id', 'budget_id'], transaction,
@@ -3585,6 +3655,7 @@ function serializeBudget(budget, version, events, payments, walletApplied = 0, s
       paid,
       pending: roundMoney(Math.max(0, payable - paid)),
     },
+    financing_summary: economicFinancing.summary(budget, version, events, payments),
   };
 }
 
@@ -3657,6 +3728,7 @@ function serializeFiscalDocument(document, budgetPublicId = null) {
     id: document.public_id,
     budget_id: budgetPublicId,
     document_type: document.document_type,
+    version: Number(document.version_number || 1),
     series: document.series,
     number: document.number,
     status: document.status,
@@ -3803,7 +3875,7 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
   const walletAvailable = roundMoney(walletEntries
     .filter((entry) => entry.status === 'confirmed')
     .reduce((sum, entry) => sum + numberValue(entry.amount), 0));
-  return {
+  const result = {
     patient: mapPatientSnapshot(patient),
     clinic: await mapClinicSnapshot(clinic),
     budgets: serializedBudgets,
@@ -3830,7 +3902,24 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
       label: 'Preparado para integración futura',
     },
   };
+  return db.EconomicFundingPart ? require('./economicConcepts.service').createService({ db }).workspace({ workspace: result, clinicId: resolvedClinicId, patientId: patient.id_paciente }) : result;
 }
+
+let fundedFiscal;
+function fiscalCoverageService() {
+  fundedFiscal ||= require('./economicFiscalCoverage.service').createService({ db, helpers: {
+    loadContext, serializeFiscalDocument, normalizeFiscalParty, mapClinicSnapshot, mapPatientSnapshot, assertFiscalParties, resolveTemplate, nextFiscalNumber, dateOrNull,
+  } });
+  return fundedFiscal;
+}
+async function previewPatientFiscalDocument(input) { return fiscalCoverageService().preview(input); }
+async function createPatientFiscalDocument(input) { return fiscalCoverageService().save(input); }
+async function createFiscalDocument({ publicId, actorId, payload }) {
+  const budget = await loadBudgetByPublicId(publicId);
+  return createPatientFiscalDocument({ patientIdentifier: budget.patient_id, clinicId: budget.clinic_id, actorId, payload: { ...payload, source_type: 'budget', source_id: budget.public_id } });
+}
+async function updateFiscalDocument({ publicId, actorId, payload }) { return fiscalCoverageService().save({ id: publicId, actorId, payload }); }
+async function rectifyEconomicCancellation(input) { return fiscalCoverageService().rectify(input); }
 
 module.exports = {
   domainError,
@@ -3861,4 +3950,5 @@ module.exports = {
   createPatientFiscalDocument,
   previewPatientFiscalDocument,
   updateFiscalDocument,
+  rectifyEconomicCancellation,
 };

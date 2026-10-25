@@ -53,7 +53,7 @@ test('successful list and binary stay private and use only authenticated actor',
     const file = await fetch(origin + '/patients/OWNED-FICTITIOUS/attachments/OWNED-ASSET');
     assert.equal(file.status, 200); privateHeaders(file); assert.equal(file.headers.get('content-type'), 'application/pdf');
     assert.equal(await file.text(), 'FICTITIOUS_BINARY');
-    assert.deepEqual(Array.from(state.args[0]), ['OWNED-FICTITIOUS', 7]);
+    assert.deepEqual(JSON.parse(JSON.stringify(Array.from(state.args[0]))), ['OWNED-FICTITIOUS', 7, { clinic_id: '72' }]);
     assert.deepEqual(Array.from(state.args[1]), ['OWNED-FICTITIOUS', 'OWNED-ASSET', 7]);
     assert.equal(state.globalErrors, 0);
   });

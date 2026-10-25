@@ -3,11 +3,12 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const parse = value => { if (typeof value !== 'string') return value || {}; try { return JSON.parse(value); } catch (_) { return {}; } };
 const round = value => Math.round(value * 100) / 100;
-function pendingAmount(budget, payments, wallet) {
+function pendingAmount(budget, payments, wallet, adjustments = []) {
   const paid = payments.filter(row => row.status === 'confirmed').reduce((sum, row) => sum + (parse(row.application).allocations || [])
     .filter(item => ['budget', 'budget_line'].includes(item.target_type)).reduce((n, item) => n + Number(item.amount || 0), 0), 0);
   const balance = wallet.filter(row => row.status === 'confirmed' && Number(row.amount) < 0).reduce((sum, row) => sum + Math.abs(Number(row.amount)), 0);
-  return Math.max(0, round(Number(budget.accepted_amount || 0) - paid - balance));
+  const cancelled = adjustments.reduce((sum, row) => sum + Number(row.cancelled_amount || 0), 0), released = adjustments.reduce((sum, row) => sum + Number(row.refund_amount || 0) + Number(row.credited_amount || 0), 0);
+  return Math.max(0, round(Number(budget.accepted_amount || 0) - cancelled - paid - balance + released));
 }
 async function attach(appointments, models = db) {
   if (!appointments.length) return;
@@ -21,11 +22,12 @@ async function attach(appointments, models = db) {
   ]);
   const budgetIds = [...new Set([...links.map(row => row.budget_id), ...vouchers.map(row => row.budget_id)].filter(Boolean))];
   if (!budgetIds.length) return;
-  const [budgets, payments, wallet, events] = await Promise.all([
+  const [budgets, payments, wallet, events, adjustments] = await Promise.all([
     models.EconomicBudget.findAll({ where:{ id:{ [Op.in]:budgetIds }, status:{ [Op.in]:['accepted','partially_accepted'] } }, raw:true }),
     models.EconomicPayment.findAll({ where:{ budget_id:{ [Op.in]:budgetIds }, status:'confirmed' }, attributes:['budget_id','status','application'], raw:true }),
     models.PatientWalletEntry.findAll({ where:{ budget_id:{ [Op.in]:budgetIds }, status:'confirmed' }, attributes:['budget_id','status','amount'], raw:true }),
     models.EconomicBudgetEvent.findAll({ where:{ budget_id:{ [Op.in]:budgetIds }, event_type:{ [Op.in]:['accepted','partially_accepted'] } }, order:[['id','DESC']], raw:true }),
+    models.EconomicConceptAdjustment ? models.EconomicConceptAdjustment.findAll({ where:{ budget_id:{ [Op.in]:budgetIds } }, attributes:['budget_id','cancelled_amount','refund_amount','credited_amount'], raw:true }) : [],
   ]);
   for (let index=0; index<rows.length; index++) {
     const row=rows[index], link=links.find(item => Number(parse(item.metadata).appointment_id) === Number(row.id_cita));
@@ -33,7 +35,7 @@ async function attach(appointments, models = db) {
     const budget=budgets.find(item => Number(item.id) === Number(link?.budget_id || voucher?.budget_id)
       && Number(item.clinic_id) === Number(row.clinica_id) && String(item.patient_id) === String(row.paciente_id));
     if (!budget || (link && Number(parse(link.metadata).budget_version) !== Number(budget.current_version))) continue;
-    const pending = pendingAmount(budget, payments.filter(item => Number(item.budget_id) === Number(budget.id)), wallet.filter(item => Number(item.budget_id) === Number(budget.id)));
+    const pending = pendingAmount(budget, payments.filter(item => Number(item.budget_id) === Number(budget.id)), wallet.filter(item => Number(item.budget_id) === Number(budget.id)), adjustments.filter(item => Number(item.budget_id) === Number(budget.id)));
     const summary={ budget_id:budget.public_id, pending, status:pending > 0 ? 'pending' : 'settled',
       method:parse(events.find(item => Number(item.budget_id) === Number(budget.id))?.metadata).collection_method || null };
     if (appointments[index].setDataValue) appointments[index].setDataValue('payment_summary',summary);

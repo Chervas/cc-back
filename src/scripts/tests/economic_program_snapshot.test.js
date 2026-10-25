@@ -22,6 +22,7 @@ test('backend resolves the purchased program relation without duplicating its cl
   const serialize = serviceFunction('serializeBudget', {
     require: id => { assert.equal(id, './budgetAppointmentLinks.service'); return { linksFromEvents: () => [] }; },
     budgetAmounts: require('../../lib/economicBudgetAcceptance'),
+    economicFinancing: require('../../lib/economicFinancing'),
     roundMoney: value => value, numberValue: value => Number(value) || 0, paymentAppliedToBudget: () => 0,
     serializeVersion: () => ({ lines: [{ key: 'program', product_type: 'pack' }, { key: 'individual', product_type: 'treatment' }], totals: { total: 620 } }),
     economicPrograms: { integrationCapabilities: () => ({}), programPlans: () => [] },

@@ -55,6 +55,7 @@ async function createOwnedVoucherReplayFixture(input) {
     '../../models': db,
     '../services/patientEconomics.service': { domainError: service.domainError },
     '../services/economicDocumentPdf.service': {}, '../services/patientProgramBooking.service': {},
+    '../services/accountingFirms.service': { isPortalUser: async () => false },
     '../services/patientVoucherAppointments.service': Object.fromEntries(Object.entries(service).map(([name, fn]) => [name,
       (...args) => { state.serviceCalls.push({ name, actor: args[0]?.actorId }); return fn(...args); }])),
     '../lib/access-policy': { getAccessibleClinicIdsForFeature: async context => {

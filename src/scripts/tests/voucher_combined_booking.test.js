@@ -48,6 +48,7 @@ function fixture({ profile = relative(), duration = 90, expiresAt = null, reserv
   const forbiddenEconomicWrite = async () => { throw Error('Booking cannot change a purchase, activation, price, budget or movement'); };
   const rows = transaction => [...state.appointments, ...(transaction?.pendingAppointments || [])];
   const db = {
+    Paciente: { findByPk: async id => ({ id_paciente: id }) },
     Sequelize: { Op },
     sequelize: { transaction: async (options, callback) => {
       if (typeof options === 'function') { callback = options; options = {}; }

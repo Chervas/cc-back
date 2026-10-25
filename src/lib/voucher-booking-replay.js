@@ -166,5 +166,5 @@ function receiptFromMetadata(committed, prepared) {
   }
   return clone(receipt);
 }
-module.exports = { SOURCE, VERSION, enabled, key, sha, hash, eventType, intentForPlan, preparedMetadata, readMetadata,
+module.exports = { SOURCE, VERSION, enabled, key, sha, hash, eventType, selectionsForPlan, intentForPlan, preparedMetadata, readMetadata,
   validatePayload, payloadForIntent, receiptForAppointments, committedMetadata, receiptFromMetadata };

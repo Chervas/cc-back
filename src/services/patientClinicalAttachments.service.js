@@ -3,6 +3,8 @@
 const path = require('path');
 const { Op } = require('sequelize');
 const db = require('../../models');
+const G = require('../lib/clinical-gallery-contract');
+const C = require('../lib/clinical-episode-contract');
 const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const { canUserAccessFeature } = require('../lib/access-policy');
 
@@ -142,6 +144,7 @@ function clinicalAttachmentToJson(row) {
     icon: config.icon,
     created_at: asset.created_at || null,
     updated_at: asset.updated_at || null,
+    ...G.libraryItem(asset),
     private_storage: {
       sensitivity: asset.sensitivity || 'clinical_private',
       provider: asset.provider || null,
@@ -209,7 +212,7 @@ function forbiddenAttachment(featureKey, clinicId) {
   throw error;
 }
 
-async function listPatientClinicalAttachments(patientIdentifier, actorId) {
+async function listPatientClinicalAttachments(patientIdentifier, actorId, query = {}) {
   const patient = await findPatient(patientIdentifier);
   if (!patient) {
     const error = new Error('patient_not_found');
@@ -226,6 +229,10 @@ async function listPatientClinicalAttachments(patientIdentifier, actorId) {
   }
 
   const allowed = await allowedClinicPurposes(patient, actorId);
+  if (query.clinic_id !== undefined) {
+    const selected = C.integer(query.clinic_id, 'clinic_id');
+    for (const clinicId of allowed.keys()) if (clinicId !== selected) allowed.delete(clinicId);
+  }
   if (!allowed.size) {
     return {
       patient_id: patient.id_paciente,
@@ -234,8 +241,13 @@ async function listPatientClinicalAttachments(patientIdentifier, actorId) {
     };
   }
 
-  const rows = await db.ClinicalPrivateAsset.findAll({
-    where: {
+  const classification = query.classification == null || query.classification === 'all' ? null : G.classification(query.classification);
+  const limit = query.limit == null ? 200 : C.integer(query.limit, 'limit');
+  if (limit > 200) throw C.error(400, 'clinical_attachment_limit', 'Solicita como máximo doscientos archivos.');
+  const scope = C.hash([Number(patient.id_paciente), [...allowed], classification]);
+  const cursor = C.decodeCursor(query.cursor);
+  if (cursor && cursor.scope !== scope) throw C.error(400, 'clinical_gallery_cursor', 'La página no corresponde a esta biblioteca.');
+  const where = {
       patient_id: Number(patient.id_paciente),
       status: 'active',
       // This endpoint has clinic ACL, not an explicit group/system asset grant.
@@ -244,12 +256,23 @@ async function listPatientClinicalAttachments(patientIdentifier, actorId) {
       scope_type: 'clinic',
       [Op.or]: [...allowed].map(([clinicId, purposes]) => ({ clinic_id: clinicId,
         purpose: { [Op.in]: purposes } })),
-    },
-    order: [['created_at', 'DESC'], ['id', 'DESC']],
-    limit: 200,
-  });
-
-  const items = rows.filter(row => assetHasAllowedClinicPurpose(toPlain(row), allowed)).map(clinicalAttachmentToJson);
+  };
+  const items = []; let after = cursor ? C.integer(cursor.id) : null, exhausted = false, scanned = 0;
+  // The sidecar does not change source status. Archived rows are skipped before
+  // filling a page, with a bounded scan and an explicit continuation cursor.
+  while (items.length < limit && scanned < 2000) {
+    const rows = await db.ClinicalPrivateAsset.findAll({ where: { ...where, ...(after ? { id: { [Op.lt]: after } } : {}) }, order: [['id', 'DESC']], limit: 200 });
+    if (!rows.length) { exhausted = true; break; }
+    const states = db.ClinicalAttachmentLibraryState ? await db.ClinicalAttachmentLibraryState.findAll({ where: { asset_id: { [Op.in]: rows.map(row => Number(row.id)) } } }) : [];
+    const byId = new Map(states.map(row => [Number(row.asset_id), row]));
+    for (const row of rows) {
+      after = Number(row.id); scanned++;
+      const plain = toPlain(row), library = G.libraryItem(plain, byId.get(after));
+      if (assetHasAllowedClinicPurpose(plain, allowed) && library.library_status === 'active' && (!classification || library.classification === classification)) items.push({ ...clinicalAttachmentToJson(plain), ...library });
+      if (items.length >= limit) break;
+    }
+    if (rows.length < 200 && items.length < limit) { exhausted = true; break; }
+  }
   const byCategory = items.reduce((acc, item) => {
     acc[item.category] = (acc[item.category] || 0) + 1;
     return acc;
@@ -262,6 +285,7 @@ async function listPatientClinicalAttachments(patientIdentifier, actorId) {
       total: items.length,
       by_category: byCategory,
     },
+    next_cursor: !exhausted && after ? C.encodeCursor({ scope, id: after }) : null,
   };
 }
 
@@ -337,7 +361,7 @@ async function createPatientClinicalAttachment(patientIdentifier, actorId, paylo
   }
 
   const contentType = String(payload.content_type || payload.contentType || '').trim().toLowerCase();
-  const allowedContentTypes = new Set(['application/pdf', 'image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+  const allowedContentTypes = new Set(['application/pdf', 'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'model/stl', 'application/sla', 'application/octet-stream']);
   if (!allowedContentTypes.has(contentType)) {
     const error = new Error('clinical_attachment_content_type_not_allowed');
     error.status = 400;
@@ -345,6 +369,8 @@ async function createPatientClinicalAttachment(patientIdentifier, actorId, paylo
     throw error;
   }
 
+  const classification = G.classification(payload.classification, true);
+  if (classification === 'photo' && !contentType.startsWith('image/')) throw C.error(400, 'clinical_attachment_photo_invalid', 'Sólo una imagen puede clasificarse como foto.');
   const appointmentId = toIntOrNull(payload.appointment_id || payload.appointmentId);
   if (appointmentId) {
     const appointment = await db.CitaPaciente.findOne({
@@ -365,6 +391,13 @@ async function createPatientClinicalAttachment(patientIdentifier, actorId, paylo
   const category = normalizeUploadCategory(payload.category);
   const filename = cleanFilename(payload.filename || payload.original_filename) || 'adjunto-clinico';
   const buffer = decodeBase64Payload(payload.data_base64 || payload.base64 || payload.dataUrl);
+  const isStl = ['model/stl', 'application/sla', 'application/octet-stream'].includes(contentType);
+  if (isStl) require('../lib/dental-supporting-tools-contract').validateFile({ filename, content_type: contentType, data_base64: buffer.toString('base64') });
+  let context = null;
+  if (payload.service_ref != null || payload.treatment_id != null) {
+    context = await require('./clinicalPhotoPairs.service').createService({ db, canAccess: canUserAccessFeature })
+      .resolveScope(payload, { patientId: Number(patient.id_paciente), clinicId, actorId });
+  }
   const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
     purpose: 'clinical_attachment',
     clinicId,
@@ -372,10 +405,13 @@ async function createPatientClinicalAttachment(patientIdentifier, actorId, paylo
     ownerType: appointmentId ? 'patient_appointment' : 'patient',
     ownerId: appointmentId ? String(appointmentId) : String(patient.id_paciente),
     originalFilename: filename,
-    contentType,
+    contentType: isStl ? 'application/octet-stream' : contentType,
     buffer,
     metadata: {
       category,
+      classification,
+      ...(isStl ? { dental_stl_validated: true } : {}),
+      ...(context ? { clinical_context: context } : {}),
       appointment_id: appointmentId,
       uploaded_from: 'patient_attachments',
       notes: String(payload.notes || '').trim().slice(0, 1000) || null,

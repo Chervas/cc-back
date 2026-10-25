@@ -14,6 +14,7 @@ function actorIdFromRequest(req) {
 }
 
 function sendClinicalAttachmentError(error, res) {
+  if ([400, 409, 413, 428].includes(error.statusCode) && typeof error.code === 'string') return res.status(error.statusCode).json({ message: error.message, code: error.code });
   if (error.status === 401 || error.message === 'auth_failed') {
     return res.status(401).json({ message: 'Auth failed!' });
   }
@@ -64,7 +65,7 @@ function sendClinicalAttachmentReadError(error, res) {
     || ['patient_not_found', 'clinical_attachment_not_found', 'clinical_private_asset_not_found', 'clinical_private_asset_not_active'].includes(error?.message)) {
     return res.status(404).json({ message: 'Adjunto clinico no encontrado', code: 'clinical_attachment_not_found' });
   }
-  if ([400, 413].includes(error?.statusCode) && typeof error.code === 'string' && error.code.startsWith('clinical_attachment_preview_')) {
+  if ([400, 413].includes(error?.statusCode) && typeof error.code === 'string' && ['clinical_attachment_preview_', 'clinical_attachment_', 'clinical_gallery_', 'clinical_episode_invalid_'].some(prefix => error.code.startsWith(prefix))) {
     return res.status(error.statusCode).json({ message: error.message, code: error.code });
   }
   const status = error?.status === 503 || error?.statusCode === 503 ? 503 : 500;
@@ -75,7 +76,8 @@ exports.listPatientClinicalAttachments = asyncHandler(async (req, res) => {
   setClinicalReadHeaders(res);
   try {
     const actorId = actorIdFromRequest(req);
-    const data = await patientClinicalAttachmentsService.listPatientClinicalAttachments(req.params.id, actorId);
+    const query = Object.fromEntries(['clinic_id', 'classification', 'cursor', 'limit'].filter(key => req.query?.[key] !== undefined).map(key => [key, req.query[key]]));
+    const data = await patientClinicalAttachmentsService.listPatientClinicalAttachments(req.params.id, actorId, query);
     return res.json(data);
   } catch (error) {
     return sendClinicalAttachmentReadError(error, res);
@@ -129,6 +131,6 @@ exports.createPatientClinicalAttachment = asyncHandler(async (req, res) => {
   } catch (error) {
     const handled = sendClinicalAttachmentError(error, res);
     if (handled) return handled;
-    throw error;
+    return res.status(500).json({ message: 'No se pudo guardar el adjunto clínico.', code: 'clinical_attachment_unavailable' });
   }
 });

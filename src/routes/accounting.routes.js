@@ -22,6 +22,10 @@ router.get('/portal/scope', controller.getPortalScope);
 router.get('/portal/workspace', controller.getPortalWorkspace);
 router.get('/portal/export.csv', controller.exportPortalCsv);
 router.get('/portal/export.zip', controller.exportPortalZip);
+router.use('/ingestion', (req, res, next) => {
+  if (req.method === 'POST' && !req.is('application/json')) return res.status(415).json({error: {code: 'accounting_ingestion_json_required', message: 'Envía el documento mediante la carga de Contabilidad en formato JSON.'}});
+  next();
+});
 router.get('/ingestion', controller.listIngestion);
 router.post('/ingestion', controller.enqueueIngestion);
 router.post('/ingestion/:jobId/process', controller.processIngestion);
@@ -42,6 +46,7 @@ router.get('/expenses/:expenseId/attachment', controller.downloadExpenseAttachme
 router.post('/cash/open', controller.openCash);
 router.post('/cash/movements', controller.createCashMovement);
 router.post('/cash/closures', controller.closeCash);
+router.get('/payroll-employees', controller.listPayrollEmployees);
 router.post('/payroll', controller.createPayroll);
 router.patch('/payroll/:payrollId', controller.updatePayroll);
 router.get('/payroll/:payrollId/document', controller.downloadPayrollAttachment);

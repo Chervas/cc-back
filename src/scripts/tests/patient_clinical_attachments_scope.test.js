@@ -4,7 +4,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
 const file = require.resolve('../../services/patientClinicalAttachments.service');
-const Op = { in: Symbol('in'), or: Symbol('or') };
+const Op = { in: Symbol('in'), or: Symbol('or'), lt: Symbol('lt') };
 const plain = value => JSON.parse(JSON.stringify(value));
 const asset = (id, clinic = 66, purpose = 'clinical_attachment', patch = {}) => ({ id, public_id: 'OWNED-ASSET-' + id,
   patient_id: 10, clinic_id: clinic, scope_type: 'clinic', purpose, status: 'active', original_filename: 'fictitious-' + id + '.pdf',
@@ -17,7 +17,8 @@ function fixture({ assets = [asset(1), asset(2, 72)], primary = 66,
   const matches = (row, where) => Reflect.ownKeys(where).every(key => key === Op.or
     ? where[key].some(clause => matches(row, clause))
     : where[key] && typeof where[key] === 'object' && Object.hasOwn(where[key], Op.in)
-      ? where[key][Op.in].includes(row[key]) : row[key] === where[key]);
+      ? where[key][Op.in].includes(row[key]) : where[key] && typeof where[key] === 'object' && Object.hasOwn(where[key], Op.lt)
+        ? row[key] < where[key][Op.lt] : row[key] === where[key]);
   const db = { Clinica: {},
     Paciente: { findOne: async query => { calls.patients.push(query); return matches(patient, query.where) ? patient : null; } },
     ...(hasMembershipModel ? { PacienteClinica: { findAll: async query => { calls.memberships.push(query); return memberships; } } } : {}),
@@ -39,6 +40,9 @@ function fixture({ assets = [asset(1), asset(2, 72)], primary = 66,
     if (name === '../lib/access-policy') return { canUserAccessFeature: async input => {
       calls.acl.push(input); return input.actorId === 9 && (grants[input.clinicId] || []).includes(input.featureKey);
     } };
+    if (name === '../lib/clinical-gallery-contract') return require('../../lib/clinical-gallery-contract');
+    if (name === '../lib/clinical-episode-contract') return require('../../lib/clinical-episode-contract');
+    if (name === '../lib/dental-supporting-tools-contract') return require('../../lib/dental-supporting-tools-contract');
     throw Error('UNEXPECTED_DEPENDENCY: ' + name);
   } };
   vm.runInNewContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
@@ -122,7 +126,7 @@ test('limit200 remains bounded; query scope applies before limit and unauthorize
   assert.equal(f.calls.queries[0].limit, 200);
 });
 test('upload uses the explicitly selected member clinic and its own write permission', async () => {
-  const payload = { filename: 'fictitious.pdf', content_type: 'application/pdf', data_base64: Buffer.from('FICTITIOUS').toString('base64'), clinic_id: 72 };
+  const payload = { filename: 'fictitious.pdf', content_type: 'application/pdf', classification: 'test', data_base64: Buffer.from('FICTITIOUS').toString('base64'), clinic_id: 72 };
   const secondary = fixture({ grants: { 72: ['patients.edit', 'patients.sensitive.view'] } });
   const shared = await secondary.service.createPatientClinicalAttachment('10', 9, payload);
   assert.equal(shared.clinic_id, 72); assert.equal(secondary.calls.writes[0].clinicId, 72);
@@ -148,7 +152,24 @@ test('upload rejects malformed selected clinic and appointments belonging to ano
     await assert.rejects(f.service.createPatientClinicalAttachment('10', 9, { clinic_id }), error => error.status === 400);
   }
   await assert.rejects(f.service.createPatientClinicalAttachment('10', 9, {
-    clinic_id: 72, appointment_id: 1, filename: 'test.pdf', content_type: 'application/pdf', data_base64: 'VEVTVA==',
+    clinic_id: 72, appointment_id: 1, filename: 'test.pdf', content_type: 'application/pdf', classification: 'test', data_base64: 'VEVTVA==',
   }), error => error.status === 404 && error.message === 'appointment_not_found');
   assert.equal(f.calls.writes.length, 0);
+});
+test('all new uploads require Foto/Prueba; unknown legacy remains unknown and photo cannot label a PDF', async () => {
+  const f = fixture({ grants: { 66: ['patients.edit', 'patients.sensitive.view'] } });
+  const payload = { filename: 'test.pdf', content_type: 'application/pdf', data_base64: 'VEVTVA==' };
+  for (const classification of [undefined, null, 'unknown', 'otros', 'Photo']) await assert.rejects(f.service.createPatientClinicalAttachment('10', 9, { ...payload, classification }), { code: 'clinical_attachment_classification_required' });
+  await assert.rejects(f.service.createPatientClinicalAttachment('10', 9, { ...payload, classification: 'photo' }), { code: 'clinical_attachment_photo_invalid' });
+  const saved = await f.service.createPatientClinicalAttachment('10', 9, { ...payload, classification: 'test' });
+  assert.equal(saved.classification, 'test'); assert.equal(saved.library_version, 1); assert.equal(f.calls.writes[0].metadata.classification, 'test');
+  assert.equal((await f.service.listPatientClinicalAttachments('10', 9)).items[0].classification, 'unknown');
+});
+test('Prueba STL reuses the canonical triangle/signature validator and preserves safe private MIME', async () => {
+  const f = fixture({ grants: { 66: ['patients.edit'] } });
+  const data = Buffer.from('solid fictitious\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid fictitious\n').toString('base64');
+  await f.service.createPatientClinicalAttachment('10', 9, { filename: 'owned.stl', content_type: 'model/stl', data_base64: data, classification: 'test' });
+  assert.equal(f.calls.writes[0].contentType, 'application/octet-stream'); assert.equal(f.calls.writes[0].metadata.dental_stl_validated, true);
+  await assert.rejects(f.service.createPatientClinicalAttachment('10', 9, { filename: 'unsafe.stl', content_type: 'application/octet-stream', data_base64: 'VEVTVA==', classification: 'test' }));
+  assert.equal(f.calls.writes.length, 1);
 });

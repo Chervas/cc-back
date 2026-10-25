@@ -24,6 +24,8 @@ router.get('/:id/communication-preferences', require('../controllers/patientComm
 router.post('/:id/communication-preferences', require('../controllers/patientCommunication.controller').set);
 router.get('/:id/clinical-attachments', patientClinicalAttachmentsController.listPatientClinicalAttachments);
 router.post('/:id/clinical-attachments', patientClinicalAttachmentsController.createPatientClinicalAttachment);
+router.post('/:id/clinical-attachments/:attachmentId/archive', require('../controllers/clinicalPhotoPairs.controller').archiveAttachment);
+router.post('/:id/clinical-attachments/:attachmentId/classification', require('../controllers/clinicalPhotoPairs.controller').classifyAttachment);
 router.get('/:id/clinical-attachments/:attachmentId', patientClinicalAttachmentsController.getPatientClinicalAttachment);
 router.get('/:id/clinical-attachments/:attachmentId/preview', patientClinicalAttachmentsController.previewPatientClinicalAttachment);
 router.get('/:id/clinical-episodes', require('../controllers/clinicalEpisodes.controller').list);
@@ -37,6 +39,11 @@ router.get('/:id/clinical-reference', require('../controllers/patientClinicalRef
 router.get('/:id/clinical-medication', require('../controllers/patientClinicalMedication.controller').read);
 router.patch('/:id/clinical-medication', require('../controllers/patientClinicalMedication.controller').update);
 router.get('/:id/clinical-material-gallery', require('../controllers/clinicalMaterialGallery.controller').read);
+router.get('/:id/clinical-photo-pairs', require('../controllers/clinicalPhotoPairs.controller').list);
+router.post('/:id/clinical-photo-pairs', require('../controllers/clinicalPhotoPairs.controller').create);
+router.get('/:id/clinical-photo-pairs/:pairId', require('../controllers/clinicalPhotoPairs.controller').get);
+router.patch('/:id/clinical-photo-pairs/:pairId', require('../controllers/clinicalPhotoPairs.controller').save);
+router.post('/:id/clinical-photo-pairs/:pairId/archive', require('../controllers/clinicalPhotoPairs.controller').archive);
 router.get('/:id/clinical-drawings', require('../controllers/clinicalDrawings.controller').list);
 router.post('/:id/clinical-drawings', require('../controllers/clinicalDrawings.controller').create);
 router.get('/:id/clinical-drawings/:drawingId', require('../controllers/clinicalDrawings.controller').get);

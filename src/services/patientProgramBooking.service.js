@@ -74,6 +74,15 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
   async function load({ publicId, clinicId, transaction = null, lock = false }) {
     assertEnabled();
     if (!Number.isSafeInteger(clinicId) || clinicId < 1) fail('program_clinic_required', 'Clínica no válida.', null, 400);
+    if (lock) {
+      if (!transaction) fail('program_transaction_required', 'No se puede verificar esta reserva sin transacción.', null, 500);
+      const located = await db.PatientVoucher.findOne({ where: { public_id: publicId, clinic_id: clinicId, source_system: 'treatment_program' }, attributes: ['patient_id'] });
+      if (!located) fail('program_purchase_not_found', 'Programa comprado no encontrado.', null, 404);
+      // Same patient-first mutex as collections, concept adjustments and the
+      // native series planner. Never hold the voucher while waiting for it.
+      const patient = await db.Paciente.findByPk(located.patient_id, { attributes: ['id_paciente'], transaction, lock: transaction.LOCK.UPDATE });
+      if (!patient) fail('program_patient_not_found', 'Paciente no encontrado.', null, 404);
+    }
     const voucher = await db.PatientVoucher.findOne({ where: { public_id: publicId, clinic_id: clinicId, source_system: 'treatment_program' },
       transaction, ...(lock ? { lock: transaction.LOCK.UPDATE } : {}) });
     if (!voucher) fail('program_purchase_not_found', 'Programa comprado no encontrado.', null, 404);

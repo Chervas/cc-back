@@ -13,7 +13,7 @@ function fixture({ failInsert = false } = {}) {
       create: async values => { if (failInsert) { failInsert = false; throw Error('fictitious interrupted insert'); }
         const result = row({ id: rows.length + 1, ...values }); rows.push(result); return result; } },
     AccountingExpenseDocument: { findAll: async () => [], findOne: async () => expenses[0] || null },
-    AccountingPayrollDocument: {}, Usuario: {}, UsuarioClinica: {},
+    AccountingPayrollDocument: {}, Usuario: {findAll:async()=>[]}, UsuarioClinica: {findAll:async()=>[]},
   };
   const storage = { storeClinicalPrivateAsset: async input => { const asset = row({ id: assets.length + 1, public_id: 'private-synthetic',
     clinic_id: input.clinicId, purpose: input.purpose, owner_type: input.ownerType, sha256: require('node:crypto').createHash('sha256').update(input.buffer).digest('hex'),
@@ -63,7 +63,7 @@ test('reading a document only proposes data, preserves unreadable nulls, uses st
   await assert.rejects(f.service.process({ publicId: job.id, clinicId: 73 }), { code: 'accounting_ingestion_not_found' });
 });
 test('acceptance requires explicit payment, all amounts and a real paid date; mismatches and other currency cannot be silently registered', async () => {
-  const payload = { supplier_name: 'Synthetic supplier', document_number: 'SYNTHETIC-001', issue_date: '2026-10-21', category: 'Otros',
+  const payload = { currency: 'EUR', supplier_name: 'Synthetic supplier', document_number: 'SYNTHETIC-001', issue_date: '2026-10-21', category: 'Otros',
     status: 'pending', payment_method: 'transfer', taxable_base: 10, tax_amount: 2.1, withholding_amount: 0, total: 12.1 };
   for (const [change, code] of [
     [value => { delete value.status; }, 'accounting_ingestion_review_required'],
@@ -81,4 +81,19 @@ test('acceptance requires explicit payment, all amounts and a real paid date; mi
   const f = fixture(), job = await f.service.enqueue(f.input); f.rows[0].status = 'review';
   await f.service.accept({ publicId: job.id, clinicId: 72, actorId: 5, payload }); assert.equal(f.financialWrites(), 1);
   const again = await f.service.accept({ publicId: job.id, clinicId: 72, actorId: 5, payload }); assert.equal(again.already_accepted, true); assert.equal(f.financialWrites(), 1);
+});
+
+test('manual review preserves the source and unread values; explicit currency is required before acceptance', async()=>{
+  const f=fixture(),job=await f.service.enqueue(f.input);
+  const review=await f.service.process({publicId:job.id,clinicId:72,mode:'manual'});
+  assert.equal(review.status,'review');assert.equal(review.provider,'manual');assert.equal(review.extracted_data.tax_amount,null);assert.equal(review.extracted_data.currency,null);assert.equal(f.providerCalls.length,0);assert.equal(f.financialWrites(),0);
+  await assert.rejects(f.service.accept({publicId:job.id,clinicId:72,actorId:5,payload:{}}),{code:'accounting_ingestion_currency_unsupported'});
+  await assert.rejects(f.service.process({publicId:job.id,clinicId:72,mode:'arbitrary'}),{code:'accounting_ingestion_mode_invalid'});
+});
+test('payroll acceptance rejects unread values, malformed identities and foreign currency before writing a document',async()=>{
+  const valid={currency:'EUR',employee_name:'Synthetic person',period_month:'2026-10-01',employee_id:null,gross_salary:2000,employee_social_security:130,irpf_withholding:200,net_salary:1670,other_amounts:0};
+  for(const [patch,code] of [[{gross_salary:null},'accounting_payroll_amounts_required'],[{other_amounts:''},'accounting_payroll_amounts_required'],[{period_month:'2026-13-01'},'payroll_document_period_required'],[{employee_id:'7abc'},'payroll_document_employee_invalid'],[{currency:'USD'},'accounting_ingestion_currency_unsupported']]){
+    const f=fixture(),job=await f.service.enqueue({...f.input,documentKind:'payroll'});await f.service.process({publicId:job.id,clinicId:72,mode:'manual'});
+    await assert.rejects(f.service.accept({publicId:job.id,clinicId:72,actorId:5,payload:{...valid,...patch}}),{code});assert.equal(f.financialWrites(),0);
+  }
 });

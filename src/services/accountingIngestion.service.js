@@ -8,6 +8,7 @@ const db = require('../../models');
 const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const accounting = require('./accounting.service');
 const { withIngestionLease } = require('../lib/accountingIngestionLease');
+const documentReader = require('./accountingDocumentReader.service');
 
 const {
   sequelize,
@@ -64,6 +65,7 @@ function serialize(job, asset = null) {
   const value = job.toJSON ? job.toJSON() : job;
   return {
     id: value.public_id,
+    clinic_id: Number(value.clinic_id),
     document_kind: value.document_kind || 'expense',
     status: value.status,
     provider: value.provider || null,
@@ -382,7 +384,7 @@ function normalizePersonName(value) {
     .trim();
 }
 
-async function applyEmployeeMatching(clinicId, extracted) {
+async function employees(clinicId) {
   const pivots = await UsuarioClinica.findAll({
     where: {
       id_clinica: clinicId,
@@ -397,10 +399,15 @@ async function applyEmployeeMatching(clinicId, extracted) {
       attributes: ['id_usuario', 'nombre', 'apellidos'],
     })
     : [];
+  return users.map(user => ({ id: Number(user.id_usuario), name: clean(`${user.nombre || ''} ${user.apellidos || ''}`, 180) }));
+}
+
+async function applyEmployeeMatching(clinicId, extracted) {
+  const users = await employees(clinicId);
   const extractedName = normalizePersonName(extracted.employee_name);
   const ranked = users
     .map((user) => {
-      const name = clean(`${user.nombre || ''} ${user.apellidos || ''}`, 180);
+      const name = user.name;
       const normalized = normalizePersonName(name);
       const expectedTokens = new Set(extractedName.split(' ').filter(Boolean));
       const actualTokens = new Set(normalized.split(' ').filter(Boolean));
@@ -411,7 +418,7 @@ async function applyEmployeeMatching(clinicId, extracted) {
           ? Math.round(common / expectedTokens.size * 100)
           : 0;
       return {
-        id: Number(user.id_usuario),
+        id: user.id,
         name,
         score,
       };
@@ -419,7 +426,8 @@ async function applyEmployeeMatching(clinicId, extracted) {
     .filter((candidate) => candidate.score >= 40)
     .sort((left, right) => right.score - left.score)
     .slice(0, 5);
-  const exact = ranked.find((candidate) => candidate.score === 100) || null;
+  const exactMatches = ranked.filter((candidate) => candidate.score === 100);
+  const exact = exactMatches.length === 1 ? exactMatches[0] : null;
   return {
     ...extracted,
     employee_match: {
@@ -431,7 +439,8 @@ async function applyEmployeeMatching(clinicId, extracted) {
   };
 }
 
-async function processJob({ publicId, clinicId }) {
+async function processJob({ publicId, clinicId, mode = 'automatic' }) {
+  if (!['automatic', 'local', 'manual'].includes(mode)) throw domainError(400, 'accounting_ingestion_mode_invalid', 'Selecciona una lectura válida.');
   const claim = await sequelize.transaction(async (transaction) => {
     const job = await AccountingIngestionJob.findOne({
       where: { public_id: publicId, clinic_id: clinicId },
@@ -461,13 +470,15 @@ async function processJob({ publicId, clinicId }) {
     }
     const stored = await clinicalPrivateStorage.readClinicalPrivateAsset(asset);
     const documentKind = job.document_kind || 'expense';
-    const result = await extractWithOpenAi(asset, stored.buffer, documentKind);
+    const result = mode === 'automatic' ? await extractWithOpenAi(asset, stored.buffer, documentKind)
+      : mode === 'manual' ? { data: documentReader.parseDocumentText('', documentKind), provider: 'manual', model: 'manual' }
+        : await documentReader.readLocalDocument({ buffer: stored.buffer, contentType: asset.content_type, documentKind });
     result.data = documentKind === 'payroll'
       ? await applyEmployeeMatching(clinicId, result.data)
       : await applySupplierHistory(clinicId, result.data);
     await job.update({
       status: 'review',
-      provider: 'openai',
+      provider: result.provider || 'openai',
       model: result.model,
       extracted_data: result.data,
       confidence: Number(result.data.confidence || 0),
@@ -476,8 +487,8 @@ async function processJob({ publicId, clinicId }) {
   } catch (error) {
     await job.update({
       status: 'failed',
-      provider: 'openai',
-      model: MODEL,
+      provider: mode === 'automatic' ? 'openai' : mode === 'manual' ? 'manual' : 'local',
+      model: mode === 'automatic' ? MODEL : null,
       error_code: clean(error.code || 'accounting_ocr_failed', 80),
       error_message: clean(
         error.response?.data?.error?.message || error.message || 'No se pudo leer el documento.',
@@ -505,7 +516,13 @@ async function accept({ publicId, clinicId, actorId, payload }) {
     if (job.status !== 'review') {
       throw domainError(409, 'accounting_ingestion_not_reviewable', 'El documento todavía no está listo para revisar.');
     }
+    const currency = clean(job.extracted_data?.currency || payload?.currency, 10).toUpperCase();
+    if (currency !== 'EUR') throw domainError(409, 'accounting_ingestion_currency_unsupported', currency ? 'El documento está en otra moneda. Necesita revisión contable antes de registrarse en euros.' : 'Confirma la moneda del documento antes de registrar.');
     if ((job.document_kind || 'expense') === 'payroll') {
+      const keys = documentReader.PAYROLL_AMOUNTS;
+      if (keys.some(key => typeof payload?.[key] !== 'number' || !Number.isFinite(payload[key]) || payload[key] < 0 || payload[key] > 100000000)) throw domainError(400, 'accounting_payroll_amounts_required', 'Comprueba todos los importes de la nómina; un campo vacío no equivale a cero.');
+      if (!/^\d{4}-(?:0[1-9]|1[0-2])-01$/.test(payload?.period_month || '')) throw domainError(400, 'payroll_document_period_required', 'Selecciona el mes de la nómina.');
+      if (payload.employee_id != null && (!Number.isSafeInteger(payload.employee_id) || payload.employee_id <= 0)) throw domainError(400, 'payroll_document_employee_invalid', 'Selecciona una persona válida de esta clínica.');
       const payrollDocument = await accounting.createPayrollDocument({
         clinicId,
         actorId,
@@ -544,8 +561,6 @@ async function accept({ publicId, clinicId, actorId, payload }) {
     if (Math.abs(Number(payload.taxable_base) + Number(payload.tax_amount) - Number(payload.withholding_amount) - Number(payload.total)) > 0.02) {
       throw domainError(400, 'accounting_ingestion_totals_mismatch', 'La base, el IVA y la retención no coinciden con el total. Revisa el original.');
     }
-    const currency = clean(job.extracted_data?.currency, 10).toUpperCase();
-    if (currency && currency !== 'EUR') throw domainError(409, 'accounting_ingestion_currency_unsupported', 'La factura está en otra moneda. Necesita revisión contable antes de registrarse en euros.');
     const expense = await accounting.createExpense({
       clinicId,
       actorId,
@@ -617,4 +632,5 @@ module.exports = {
   accept,
   readSource,
   kind,
+  employees,
 };

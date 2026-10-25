@@ -121,8 +121,9 @@ function createService({ db, canAccess, readAsset = asset => require('./clinical
     const payload = input.payload;
     if (typeof payload.idempotency_key !== 'string' || !/^[a-zA-Z0-9_-]{8,80}$/.test(payload.idempotency_key)) fail('clinical_drawing_idempotency_required', 'Vuelve a abrir la nueva anotación.');
     if (!Object.hasOwn(VIEWS, payload.template_key)) fail('clinical_drawing_template_invalid', 'Selecciona un modelo válido.');
-    if (payload.template_version !== undefined && ![1, 2].includes(payload.template_version)) fail('clinical_drawing_template_version_invalid', 'La versión del modelo anatómico no está disponible.');
+    if (payload.template_version !== undefined && ![1, 2, 3].includes(payload.template_version)) fail('clinical_drawing_template_version_invalid', 'La versión del modelo anatómico no está disponible.');
     const templateVersion = payload.template_version ?? 1;
+    if (payload.template_key === 'image' && templateVersion !== 1) fail('clinical_drawing_template_version_invalid', 'Las anotaciones conservan la geometría de la prueba original.');
     const document = validateDrawingDocument(payload.document, payload.template_key), normalizedTitle = title(payload.title);
     return db.sequelize.transaction(async transaction => {
       const ctx = await context(input, transaction, true);
