@@ -16,21 +16,35 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report, registerOwnedLoopbac
   db.PacienteClinica = sql.define('PacienteClinica', { id: { type: D.INTEGER, primaryKey: true }, paciente_id: D.INTEGER, clinica_id: D.INTEGER }, { tableName: 'PacientesClinicas', timestamps: false });
   db.CitaPaciente = sql.define('CitaPaciente', { id_cita: { type: D.INTEGER, primaryKey: true, autoIncrement: true }, paciente_id: D.INTEGER, clinica_id: D.INTEGER, voucher_id: D.BIGINT.UNSIGNED, tratamiento_id: D.INTEGER,
     estado: D.STRING, inicio: D.DATE, fin: D.DATE, es_provisional: D.BOOLEAN, care_schedule_start: D.DATE, arrived_at: D.DATE, care_started_at: D.DATE, care_completed_at: D.DATE, care_legacy_attendance: D.BOOLEAN }, { tableName: 'CitasPacientes', timestamps: false });
-  for (const file of ['patientvoucher','patientvouchermovement','economicbudget','economicbudgetversion','economicbudgetevent','economicpayment','patientwalletentry','patientfiscaldocument','cliniceconomictemplate','accountingcashmovement','accountingexpensedocument','accountingcashsession','accountingcashclosure']) {
+  db.Tratamiento = sql.define('Tratamiento', { id_tratamiento: { type: D.INTEGER, primaryKey: true } }, { tableName: 'Tratamientos', timestamps: false });
+  for (const file of ['accountingcashmovement','accountingexpensedocument','accountingcashsession','accountingcashclosure']) {
     const model = require('../../../models/' + file)(sql, D); db[model.name] = model;
   }
   await sql.sync();
+  // The deployed domain uses native ENUMs. Model.sync silently creates VARCHAR
+  // and used to hide missing audit values; always build economics from its DDL.
+  for (const name of ['20260724183000-create-patient-economics-domain', '20260914003000-allow-budget-signature-events',
+    '20261005052000-allow-budget-appointment-link-events', '20261020170000-add-patient-program-enrollment-snapshot']) {
+    await require('../../../migrations/' + name).up(sql.getQueryInterface(), S);
+  }
+  // Unrelated private-PDF column normally provided by the accounting workflow DDL.
+  await sql.getQueryInterface().addColumn('PatientFiscalDocuments', 'pdf_asset_id', { type: D.INTEGER, allowNull: true });
+  for (const file of ['patientvoucher','patientvouchermovement','economicbudget','economicbudgetversion','economicbudgetevent','economicpayment','patientwalletentry','patientfiscaldocument','cliniceconomictemplate']) {
+    const model = require('../../../models/' + file)(sql, D); db[model.name] = model;
+  }
   const migration = require('../../../migrations/20261025110000-economic-concept-adjustments-fiscal-coverage');
   await migration.up(sql.getQueryInterface(), S); await migration.up(sql.getQueryInterface(), S);
   for (const file of ['economicfundingpart','economicconceptadjustment','economicfiscalcoverage','economicfiscalcommand','economicfiscalcounter']) { const model = require('../../../models/' + file)(sql, D); db[model.name] = model; }
   await db.Clinica.bulkCreate([{ id_clinica: 100, nombre_clinica: 'Clínica sintética', datos_fiscales_clinica: { cif: 'QA000000A', direccion: 'Calle ficticia', codigo_postal: '00000', ciudad: 'QA' } }, { id_clinica: 200, nombre_clinica: 'Otra clínica' }]);
   await db.Paciente.bulkCreate(Array.from({ length: 18 }, (_, i) => ({ id_paciente: i + 1, clinica_id: i === 17 ? 200 : 100, nombre: 'QA', apellidos: 'Paciente ' + i })));
+  await db.Tratamiento.create({ id_tratamiento: 1 });
   const monolith = load(require.resolve('../../services/patientEconomics.service'), { '../../models': db, './whatsapp.service': {}, './treatmentPrograms.service': {}, './clinicBranding.service': { resolveClinicAvatar: async () => ({ url: null }) } });
   const funding = require('../../services/economicFunding.service').createService({ db });
   const concepts = require('../../services/economicConcepts.service').createService({ db, canAccess: async ({ actorId, clinicId }) => actorId < 3 && clinicId === 100, rectify: monolith.rectifyEconomicCancellation });
   const profile = { schema_version: 1, price_semantics: 'gross_tax_included', tax_percent: 21, exemption_reason: null };
+  let budgetSequence = 0;
   async function budget(patientId, { quantity = 3, total = 363, extra = [], voucher = false, program = false } = {}) {
-    const b = await db.EconomicBudget.create({ public_id: crypto.randomUUID(), patient_id: patientId, clinic_id: patientId === 18 ? 200 : 100, status: 'accepted', current_version: 1, number: 'QA-' + patientId, accepted_amount: total + extra.reduce((n, x) => n + x.total, 0) });
+    const b = await db.EconomicBudget.create({ public_id: crypto.randomUUID(), patient_id: patientId, clinic_id: patientId === 18 ? 200 : 100, status: 'accepted', current_version: 1, number: 'QA-' + patientId + '-' + (++budgetSequence), accepted_amount: total + extra.reduce((n, x) => n + x.total, 0) });
     const line = { key: 'main', name: 'Concepto QA', treatment_id: 1, product_type: voucher ? 'voucher' : 'treatment', quantity, entitlement_units: quantity, unit_price: total / quantity, total, accepted: true,
       price_snapshot: { schema_version: 1, source: { kind: 'treatment', id: 1 }, profile }, ...(program ? { program_snapshot: { kind: 'program', appointments: [{ key: 'a' }, { key: 'b' }, { key: 'c' }] } } : {}) };
     await db.EconomicBudgetVersion.create({ budget_id: b.id, version_number: 1, lines: [line, ...extra], totals: { total: Number(b.accepted_amount) }, payment_proposal: {}, design_config: {}, clinic_snapshot: {}, patient_snapshot: {} });
@@ -41,6 +55,40 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report, registerOwnedLoopbac
   async function pay(b, amount, options = {}) {
     return db.EconomicPayment.create({ public_id: crypto.randomUUID(), clinic_id: b.clinic_id, patient_id: b.patient_id, budget_id: b.id, budget_version: 1, amount, method: 'cash', status: 'confirmed', paid_at: new Date(), application: { allocations: [{ target_type: options.generic ? 'budget' : options.wallet ? 'wallet' : 'budget_line', ...(options.generic || options.wallet ? {} : { line_key: 'main' }), amount }] } });
   }
+  const E = require('../../lib/mysqlEnumExtension'), enumMigration = require('../../../migrations/20261025160000-economic-runtime-enum-values');
+  const native = await budget(17, { voucher: true }), nativeVoucher = await db.PatientVoucher.findOne({ where: { budget_id: native.id } });
+  const invalidWrites = [
+    () => db.EconomicBudgetEvent.create({ budget_id: native.id, version_number: 1, event_type: 'concept_cancelled', to_status: 'accepted' }),
+    () => db.PatientWalletEntry.create({ public_id: crypto.randomUUID(), clinic_id: 100, patient_id: 17, entry_type: 'concept_credit', amount: 1, occurred_at: new Date() }),
+    () => db.PatientVoucherMovement.create({ voucher_id: nativeVoucher.id, movement_type: 'cancellation', units: 1, occurred_at: new Date() }),
+    () => pay(native, 1).then(row => row.update({ method: 'direct_debit' })),
+  ];
+  for (const write of invalidWrites) await assert.rejects(write(), error => error.original?.code === 'WARN_DATA_TRUNCATED');
+  const beforeEnums = new Map();
+  for (const [table, name] of [['EconomicBudgetEvents','event_type'], ['PatientWalletEntries','entry_type'], ['PatientVoucherMovements','movement_type'], ['EconomicPayments','method']]) {
+    const [row] = await sql.query(E.metadataSql, { replacements: [table, name], type: S.QueryTypes.SELECT }); beforeEnums.set(table, E.column(row));
+  }
+  // Run the selected migration through the actual RDS Sequelize bridge against
+  // this owned MySQL, including current-column validation and warning readback.
+  const raw = await sql.connectionManager.getConnection({ type: 'WRITE' }), journal = [];
+  const bridge = require('../../lib/rdsSchemaMigration').migrationInterface({ admin: { raw, identity: { database: sql.config.database } },
+    aws: { assertFresh() {} }, journal: event => journal.push(event), migrationName: '20261025160000-economic-runtime-enum-values.js' });
+  try { await enumMigration.up(bridge.queryInterface, S); await enumMigration.up(bridge.queryInterface, S); }
+  finally { await bridge.restore(); await sql.connectionManager.releaseConnection(raw); }
+  assert.equal(journal.filter(row => row.event === 'statement_request').length, 4);
+  assert.equal(journal.filter(row => row.event === 'statement_ack').length, 4);
+  for (const [table, name] of [['EconomicBudgetEvents','event_type'], ['PatientWalletEntries','entry_type'], ['PatientVoucherMovements','movement_type'], ['EconomicPayments','method']]) {
+    const [row] = await sql.query(E.metadataSql, { replacements: [table, name], type: S.QueryTypes.SELECT }); E.validate(beforeEnums.get(table), E.column(row));
+  }
+  const nativeAcceptance = await db.EconomicBudgetEvent.findOne({ where: { budget_id: native.id, event_type: 'accepted' } });
+  await nativeAcceptance.update({ metadata: { accepted_amount: 363, accepted_line_keys: ['main'], selected_payment_mode: 'external_financing', selected_financing_months: 12, financing_provider: 'QA', financing_status: 'pending_approval' } });
+  const financing = require('../../services/economicFinancing.service').createService({ db });
+  const financingCommand = { publicId: native.public_id, actorId: 1, payload: { expected_version: 1, expected_financing_revision: 0,
+    idempotency_key: crypto.randomUUID(), approval_status: 'approved', financed_amount: 300, reference: 'QA', notes: 'Seguimiento sintético sin proveedor' } };
+  assert.equal((await financing.update(financingCommand)).financing_summary.approval_status, 'approved');
+  assert.equal((await financing.update(financingCommand)).replayed, true);
+  assert.equal(await db.EconomicBudgetEvent.count({ where: { budget_id: native.id, event_type: 'financing_updated' } }), 1);
+  report.checks.push('Native original economics migrations reproduce unsupported ENUM writes. Selected forward-only repair passes actual RDS bridge on real MySQL, appends values without changing order/nullability/default/comment/charset/collation, verifies each ALTER, and reruns without another ALTER.');
   const fiscalInput = (b, source, kind, key = crypto.randomUUID(), amount) => ({ patientIdentifier: b.patient_id, clinicId: b.clinic_id, actorId: 1, payload: { source_type: source.type, source_id: source.id, document_type: kind, status: 'issued', idempotency_key: key, ...(amount ? { source_amount: amount } : {}), issuer: { legal_name: 'Clínica QA', tax_id: 'QA', address: 'Calle QA', postal_code: '00000', city: 'QA', country: 'España' }, recipient: { legal_name: 'Paciente QA', tax_id: 'QA2', address: 'Calle QA2', postal_code: '00000', city: 'QA', country: 'España' } } });
   const fiscal = input => monolith.createPatientFiscalDocument(input);
   const counts = async () => Object.fromEntries(await Promise.all(['EconomicPayment','PatientWalletEntry','EconomicConceptAdjustment','EconomicFiscalCoverage','EconomicFiscalCommand','PatientFiscalDocument','EconomicBudgetEvent','PatientVoucherMovement'].map(async key => [key, await db[key].count()])));
@@ -166,13 +214,13 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report, registerOwnedLoopbac
     '../lib/access-policy': { getAccessibleClinicIdsForFeature: async ({ actorId, featureKey, clinicIds }) => actorId === 1 || actorId === 2 && featureKey === 'patients.view' ? clinicIds.filter(id => id === 100) : [] } });
   const router = load(require.resolve('../../routes/patientEconomics.routes'), { '../controllers/patientEconomics.controller': controller,
     './auth.middleware': (req, _res, next) => { req.userData = { userId: Number(req.headers['x-owned-actor'] || 1) }; next(); } });
-  const app = express(); app.use(express.json()); app.use('/api/economics', router); app.use((error, _req, res, _next) => res.status(500).json({ error: { code: 'internal_error' } }));
+  const app = express(); app.use(express.json()); app.use('/api/economics', router);
   const server = app.listen(0, '127.0.0.1'); await new Promise(resolve => server.once('listening', resolve)); registerOwnedLoopbackServer(server);
   const baseUrl = 'http://127.0.0.1:' + server.address().port + '/api/economics';
   async function http(path, body, actor = 1, method = 'POST') {
     return new Promise((resolve, reject) => {
       const request = require('node:http').request(baseUrl + path, { method, headers: { 'Content-Type': 'application/json', 'x-owned-actor': String(actor) } }, response => {
-        let buffer = ''; response.setEncoding('utf8'); response.on('data', chunk => { buffer += chunk; }); response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(buffer), cache: response.headers['cache-control'] }));
+        let buffer = ''; response.setEncoding('utf8'); response.on('data', chunk => { buffer += chunk; }); response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(buffer), cache: response.headers['cache-control'], contentType: response.headers['content-type'] }));
       }); request.on('error', reject); request.end(JSON.stringify(body));
     });
   }
@@ -186,7 +234,21 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report, registerOwnedLoopbac
     const portal = await http('/budgets/' + bc.public_id + '/concepts/main/cancellation-preview', cbase, 9); assert.equal(portal.status, 403); assert.equal(portal.body.error.code, 'accounting_portal_read_only');
     const goodPreview = await http('/budgets/' + bc.public_id + '/concepts/main/cancellation-preview', cbase); assert.equal(goodPreview.status, 200); assert.equal(goodPreview.cache, 'private, no-store'); assert.equal(goodPreview.body.concept_revision, 1);
     assert.deepEqual(await counts(), beforeHttp);
-    report.checks.push('Owned HTTP routes enforce actual entity clinic and actor permissions, accounting portal read-only, cash request identity and unpaid/manual fiscal guards. Spoofed clinic does not authorize; previews are private and perform no writes.');
+    const failedCommand = { ...cbase, expected_concept_revision: goodPreview.body.concept_revision, preview_hash: goodPreview.body.preview_hash, confirmed: true, idempotency_key: crypto.randomUUID() };
+    db.EconomicBudgetEvent.addHook('beforeCreate', 'http-audit-failure', row => { if (row.event_type === 'concept_cancelled') throw Error('PRIVATE_SQL_DETAILS_NOT_FOR_RESPONSE'); });
+    try {
+      const failed = await http('/budgets/' + bc.public_id + '/concepts/main/cancel', failedCommand);
+      assert.equal(failed.status, 500); assert.match(failed.contentType, /application\/json/); assert.deepEqual(await counts(), beforeHttp); assert.equal(failed.body.error.code, 'economics_internal_error');
+      assert.equal(JSON.stringify(failed.body).includes('PRIVATE_SQL'), false); assert.equal(failed.body.error.details, null);
+    } finally { db.EconomicBudgetEvent.removeHook('beforeCreate', 'http-audit-failure'); }
+    const recovered = await http('/budgets/' + bc.public_id + '/concepts/main/cancel', failedCommand);
+    assert.equal(recovered.status, 201); assert.equal(recovered.body.replayed, false);
+    const exactReplay = await http('/budgets/' + bc.public_id + '/concepts/main/cancel', failedCommand);
+    assert.equal(exactReplay.status, 200); assert.equal(exactReplay.body.replayed, true);
+    const debitBudget = await budget(4), debitQuote = await concepts.paymentPreview({ publicId: debitBudget.public_id, actorId: 1, payload: { expected_version: 1, lines: [{ line_key: 'main', units: 1 }] } });
+    const debit = await http('/budgets/' + debitBudget.public_id + '/payments', { expected_version: 1, amount: debitQuote.total, method: 'direct_debit', allocations: debitQuote.allocations, idempotency_key: crypto.randomUUID() });
+    assert.equal(debit.status, 201); assert.equal(debit.body.method, 'direct_debit');
+    report.checks.push('Owned HTTP routes enforce actual entity clinic and actor permissions, accounting portal read-only, cash request identity and unpaid/manual fiscal guards. Spoofed clinic does not authorize; previews are private and perform no writes. A real native-schema cancellation returns JSON after injected audit failure, exact retry commits once and exact replay stays one operation; direct-debit cash route persists successfully.');
   } finally { await new Promise(resolve => server.close(resolve)); }
-  report.boundary = 'Real MySQL models, selected additive DDL (twice), native fiscal numbering/parties/template and monolith cash routes; injected concept ACL and branding only. No provider, runtime database, financial transfer, email or messaging.';
+  report.boundary = 'Real native MySQL ENUM schema, selected append-only ENUM DDL through RDS bridge (twice), models, native fiscal numbering/parties/template and monolith cash routes; injected concept ACL and branding only. No provider, runtime database, financial transfer, email or messaging.';
 }).catch(error => { console.error(error); process.exitCode = 1; });

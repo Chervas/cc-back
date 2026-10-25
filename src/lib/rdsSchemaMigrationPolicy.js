@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { digest, compare } = require('./securitySchemaContract');
+const enumExtension = require('./mysqlEnumExtension');
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const need = (value, code) => { if (!value) throw Error(code); };
 const NAME = /^[0-9]{14}-[a-z0-9-]+\.js$/;
@@ -52,6 +53,7 @@ function buildPlan({ info, before, identity, selected, moduleFiles, profile, at 
     compatibilityBefore: compare(before, info.contract),
     policy: { schemaOnly: true, clinicalRowDml: false, dcl: false, automaticHistoricalMigrations: false,
       destructiveDdl: false, maxDdlPhaseMs: 600000, maxStatementMs: 300000,
+      enumMemberAppendOnly: true,
       bootstrapSequelizeMeta: !before.tables.some(table => table.TABLE_NAME === 'SequelizeMeta'),
       mysqlDdlIsAtomic: false, unknownRequiresManualReconciliation: true } };
 }
@@ -73,6 +75,11 @@ function statementKind(input, values = [], database = 'clinicaclick') {
   // Remove SQL string literals before checking keywords/qualified identifiers.
   const tokens = sql.replace(/'(?:''|\\.|[^'\\])*'/g, "''");
   need(!/\b(?:GRANT|REVOKE|TRUNCATE|RENAME|DROP|REPLACE|LOAD|OUTFILE|DUMPFILE|CALL|PREPARE|EXECUTE|DISABLE|FOREIGN_KEY_CHECKS|SLEEP|BENCHMARK|LOAD_FILE)\b/i.test(tokens), 'rds_schema_sql_scope');
+  if (/^ALTER\s+TABLE\s+.+?\s+CHANGE\s+/i.test(tokens)) {
+    const target = enumExtension.statement(sql); // Live metadata is validated before dispatch.
+    need(!/^SequelizeMeta$/i.test(target.table), 'rds_schema_meta_ddl_forbidden');
+    return 'enum_extension';
+  }
   if (/^(?:ALTER\s+TABLE\s+.+?\s+ADD\s+|CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\s+)/i.test(tokens)) {
     need(!/\b(?:MODIFY|CHANGE|AS\s+SELECT|SELECT)\b/i.test(tokens), 'rds_schema_destructive_or_data_sql_forbidden');
     const qualified = [...tokens.matchAll(/(`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)\s*\.\s*(`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)/g)];

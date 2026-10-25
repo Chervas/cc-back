@@ -20,6 +20,7 @@ fs.readFileSync = function deniedSecretReads(file, ...args) {
 };
 const { digest } = require('../../lib/securitySchemaContract');
 const P = require('../../lib/rdsSchemaMigrationPolicy');
+const E = require('../../lib/mysqlEnumExtension');
 const C = require('../../lib/rdsSchemaMigration');
 const T = require('../../lib/rdsSchemaMigrationTransport');
 const CLI = require('../security-rds-schema-migrate');
@@ -84,6 +85,7 @@ function fixture(t, up = "await q.createTable('SchemaReleaseFixture', { id: { ty
   function respond(sql, values = []) {
     state.dispatch.push(sql);
     if (sql === 'SHOW WARNINGS') return structuredClone(state.warnings);
+    if (sql === E.metadataSql) return state.enumRow ? [structuredClone(state.enumRow)] : [];
     if (/FROM information_schema.SCHEMATA/.test(sql)) return [{ DEFAULT_CHARACTER_SET_NAME: 'utf8mb4', DEFAULT_COLLATION_NAME: 'utf8mb4_unicode_ci' }];
     if (/FROM information_schema.TABLES/.test(sql)) return structuredClone(state.tables).sort((a, b) => a.TABLE_NAME.localeCompare(b.TABLE_NAME));
     if (/information_schema\./.test(sql)) return [];
@@ -96,6 +98,12 @@ function fixture(t, up = "await q.createTable('SchemaReleaseFixture', { id: { ty
       if (state.ddlFailure) throw Error('DO_NOT_PERSIST_PASSWORD_OR_RAW_SQL');
       assert.match(sql, /`SchemaReleaseFixture`/); assert.match(sql, /`label` VARCHAR\(40\)/);
       state.tables.push({ TABLE_NAME: 'SchemaReleaseFixture', ENGINE: 'InnoDB', TABLE_COLLATION: 'utf8mb4_unicode_ci' });
+      return { affectedRows: 0, warningStatus: 0 };
+    }
+    if (/^ALTER TABLE/.test(sql) && state.enumRow) {
+      const parsed = E.statement(sql);
+      state.enumRow.COLUMN_TYPE = 'enum(' + parsed.values.map(value => "'" + value.replace(/'/g, "''") + "'").join(',') + ')';
+      if (state.enumPostTamper) state.enumRow.COLUMN_COMMENT = 'Unexpected metadata drift';
       return { affectedRows: 0, warningStatus: 0 };
     }
     throw Error('UNEXPECTED_FAKE_SQL:' + sql);
@@ -203,6 +211,59 @@ test('driver execute bind path has the same scope guard and cannot bypass via pr
   const bridge = C.migrationInterface({ admin, aws: f.aws, journal: event => events.push(event), migrationName: NAME });
   await assert.rejects(bridge.queryInterface.sequelize.query('UPDATE Patients SET name=$name', { bind: { name: 'TEST_ONLY' } }), /rds_schema_sql_scope/);
   await bridge.restore(); assert.equal(f.state.dispatch.length, 0); assert.equal(events.length, 0);
+});
+
+test('ENUM bridge allows only append with identical properties, validates live metadata before dispatch and verifies after', async t => {
+  const f = fixture(t), events = [];
+  f.state.enumRow = { COLUMN_TYPE: "enum('old','legacy-2')", IS_NULLABLE: 'NO', COLUMN_DEFAULT: 'old',
+    COLUMN_COMMENT: 'Audit history', EXTRA: '', GENERATION_EXPRESSION: '', CHARACTER_SET_NAME: 'utf8mb4', COLLATION_NAME: 'utf8mb4_bin' };
+  const before = E.column(f.state.enumRow), target = { ...before, values: [...before.values, 'new'] };
+  const bridge = C.migrationInterface({ admin: { raw: f.raw }, aws: f.aws, journal: event => events.push(event), migrationName: NAME });
+  try { await bridge.queryInterface.sequelize.query(E.sql('SchemaReleaseFixture', 'event_type', target)); }
+  finally { await bridge.restore(); }
+  assert.deepEqual(E.column(f.state.enumRow).values, ['old', 'legacy-2', 'new']);
+  assert.equal(f.state.dispatch.filter(sql => sql === E.metadataSql).length, 2);
+  assert.deepEqual(events.map(event => event.event), ['statement_request', 'statement_ack']);
+});
+
+test('ENUM bridge refuses removed/reordered members, other types and changed default/nullability/comment/charset/collation before DDL', async t => {
+  const row = { COLUMN_TYPE: "enum('old','legacy-2')", IS_NULLABLE: 'NO', COLUMN_DEFAULT: 'old',
+    COLUMN_COMMENT: 'Audit', EXTRA: '', GENERATION_EXPRESSION: '', CHARACTER_SET_NAME: 'utf8mb4', COLLATION_NAME: 'utf8mb4_bin' };
+  const base = E.column(row);
+  for (const change of [{ values: ['old'] }, { values: ['legacy-2','old','new'] }, { values: ['old','legacy-2'] },
+    { defaultValue: null }, { allowNull: true }, { comment: '' }, { charset: 'latin1' }, { collation: 'utf8mb4_unicode_ci' }]) {
+    const f = fixture(t), events = []; f.state.enumRow = structuredClone(row);
+    const bridge = C.migrationInterface({ admin: { raw: f.raw }, aws: f.aws, journal: event => events.push(event), migrationName: NAME });
+    try { await assert.rejects(bridge.queryInterface.sequelize.query(E.sql('SchemaReleaseFixture', 'event_type', { ...base, values: [...base.values,'new'], ...change })), /enum_extension_invalid/); }
+    finally { await bridge.restore(); }
+    assert.equal(f.state.dispatch.some(sql => /^ALTER/.test(sql)), false); assert.equal(events.length, 0);
+  }
+  const f = fixture(t); f.state.enumRow = { ...row, COLUMN_TYPE: 'varchar(100)' };
+  const bridge = C.migrationInterface({ admin: { raw: f.raw }, aws: f.aws, journal() {}, migrationName: NAME });
+  try { await assert.rejects(bridge.queryInterface.sequelize.query(E.sql('SchemaReleaseFixture','event_type',{ ...base, values: [...base.values,'new'] })), /enum_extension_invalid/); }
+  finally { await bridge.restore(); }
+  assert.equal(f.state.dispatch.some(sql => /^ALTER/.test(sql)), false);
+  for (const sql of ['ALTER TABLE `x` CHANGE `a` `b` ENUM(\'old\',\'new\') CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL',
+    'ALTER TABLE `x` CHANGE `a` `a` VARCHAR(100) NOT NULL', 'ALTER TABLE `foreign`.`x` CHANGE `a` `a` ENUM(\'old\',\'new\') NOT NULL',
+    E.sql('SequelizeMeta', 'name', { ...base, values: [...base.values,'new'] }),
+    'ALTER TABLE `x` CHANGE `a` `a` ENUM(\'old\',\'new\') CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, ADD `other` INT']) {
+    assert.throws(() => P.statementKind(sql), /rds_schema_/);
+  }
+});
+
+test('ENUM postverification failure omits ACK and poisons subsequent statements after the dispatched DDL', async t => {
+  const f = fixture(t), events = [];
+  f.state.enumRow = { COLUMN_TYPE: "enum('old')", IS_NULLABLE: 'YES', COLUMN_DEFAULT: null,
+    COLUMN_COMMENT: '', EXTRA: '', GENERATION_EXPRESSION: '', CHARACTER_SET_NAME: 'utf8mb4', COLLATION_NAME: 'utf8mb4_bin' };
+  f.state.enumPostTamper = true;
+  const target = { ...E.column(f.state.enumRow), values: ['old','new'] };
+  const bridge = C.migrationInterface({ admin: { raw: f.raw }, aws: f.aws, journal: event => events.push(event), migrationName: NAME });
+  try {
+    await assert.rejects(bridge.queryInterface.sequelize.query(E.sql('SchemaReleaseFixture','event_type',target)), /enum_extension_invalid/);
+    await assert.rejects(bridge.queryInterface.sequelize.query('SHOW TABLES'), /prior_statement_failed/);
+  } finally { await bridge.restore(); }
+  assert.equal(f.state.dispatch.filter(sql => /^ALTER/.test(sql)).length, 1);
+  assert.deepEqual(events.map(event => event.event), ['statement_request']);
 });
 
 test('restricted module loading refuses models/process imports and detects transitive drift', t => {

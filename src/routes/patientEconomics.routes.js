@@ -55,7 +55,9 @@ router.post('/templates', controller.createTemplate);
 router.patch('/templates/:templateId', controller.updateTemplate);
 
 router.use((error, req, res, next) => {
-  if (!error?.statusCode) return next(error);
+  if (!error?.statusCode) return res.status(500).json({ error: {
+    code: 'economics_internal_error', message: 'No se pudo confirmar el resultado. Conserva la solicitud y vuelve a intentarlo.', details: null,
+  } });
   return res.status(error.statusCode).json({
     error: {
       code: error.code || 'economics_error',

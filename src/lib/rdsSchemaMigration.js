@@ -7,6 +7,7 @@ const { EventEmitter } = require('node:events');
 const { snapshot, digest, compare } = require('./securitySchemaContract');
 const P = require('./rdsSchemaMigrationPolicy');
 const T = require('./rdsSchemaMigrationTransport');
+const E = require('./mysqlEnumExtension');
 const STATE = '/var/lib/clinicaclick-rds-schema-release';
 const SAFE = /^rds_schema_[a-z_]+$/;
 const safeCode = error => SAFE.test(error?.message || '') ? error.message : 'rds_schema_operation_failed';
@@ -95,26 +96,39 @@ function migrationInterface({ admin, aws, journal, migrationName, Sequelize = re
       let kind;
       try { P.need(!closed && typeof callback === 'function', 'rds_schema_query_interface_required'); kind = P.statementKind(sql, values, admin.identity?.database || T.DATABASE); }
       catch (error) { queueMicrotask(() => callback(error)); return emitter; }
-      const task = tail.then(() => new Promise((resolve, reject) => {
-        try {
-          P.need(!poisoned, 'rds_schema_prior_statement_failed');
-          aws.assertFresh((kind === 'ddl' ? ddlTimeoutMs : 30000) + 30000);
-          if (kind === 'ddl') journal({ event: 'statement_request', migration: migrationName, sqlSha256: P.sha(sql), kind: 'ddl' });
-        } catch (error) { reject(error); return; }
-        // Serialize query AND execute, including their warning readback. No
-        // query can replace the warning context of the preceding DDL.
-        originals[method].call(raw, { sql, timeout: kind === 'ddl' ? ddlTimeoutMs : 30000 }, values, (error, result, fields) => {
-          if (error) { reject(Error('rds_schema_statement_outcome_requires_reconciliation')); return; }
-          originals.query.call(raw, { sql: 'SHOW WARNINGS', timeout: 5000 }, (warningError, warnings) => {
-            if (warningError || !Array.isArray(warnings) || warnings.length || Number(result?.warningStatus || 0) !== 0) {
-              reject(Error('rds_schema_statement_warnings_require_reconciliation')); return;
-            }
-            try { if (kind === 'ddl') journal({ event: 'statement_ack', migration: migrationName, sqlSha256: P.sha(sql), kind: 'ddl', warnings: 0 }); }
-            catch { reject(Error('rds_schema_ack_persistence_failed')); return; }
-            resolve({ result, fields });
+      const task = tail.then(async () => {
+        const isDdl = kind === 'ddl' || kind === 'enum_extension';
+        const target = kind === 'enum_extension' ? E.statement(sql) : null;
+        const metadata = () => new Promise((resolve, reject) => {
+          originals.query.call(raw, { sql: E.metadataSql, timeout: 30000 }, [target.table, target.name], (error, rows) => {
+            if (error || !Array.isArray(rows) || rows.length !== 1) return reject(Error('rds_schema_enum_metadata_invalid'));
+            try { resolve(E.column(rows[0])); } catch (caught) { reject(caught); }
           });
         });
-      }));
+        P.need(!poisoned, 'rds_schema_prior_statement_failed');
+        aws.assertFresh((isDdl ? ddlTimeoutMs : 30000) + 30000);
+        if (target) E.validate(await metadata(), target);
+        return new Promise((resolve, reject) => {
+          try {
+            if (isDdl) journal({ event: 'statement_request', migration: migrationName, sqlSha256: P.sha(sql), kind: 'ddl' });
+          } catch (error) { reject(error); return; }
+          // Serialize query AND execute, including their warning readback. No
+          // query can replace the warning context of the preceding DDL.
+          originals[method].call(raw, { sql, timeout: isDdl ? ddlTimeoutMs : 30000 }, values, (error, result, fields) => {
+            if (error) { reject(Error('rds_schema_statement_outcome_requires_reconciliation')); return; }
+            originals.query.call(raw, { sql: 'SHOW WARNINGS', timeout: 5000 }, async (warningError, warnings) => {
+              if (warningError || !Array.isArray(warnings) || warnings.length || Number(result?.warningStatus || 0) !== 0) {
+                reject(Error('rds_schema_statement_warnings_require_reconciliation')); return;
+              }
+              try {
+                if (target) E.validate(target, await metadata(), false);
+                if (isDdl) journal({ event: 'statement_ack', migration: migrationName, sqlSha256: P.sha(sql), kind: 'ddl', warnings: 0 });
+              } catch (caught) { reject(caught); return; }
+              resolve({ result, fields });
+            });
+          });
+        });
+      });
       tail = task.then(() => {}, () => { poisoned = true; });
       task.then(value => callback(null, value.result, value.fields), error => callback(error));
       return emitter;
