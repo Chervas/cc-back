@@ -10,6 +10,8 @@ const FEATURE_KEYS = Object.freeze([
   'billing.reports.view',
   'billing.documents.manage',
   'accounting.expenses.manage',
+  'accounting.bank.view',
+  'accounting.bank.manage',
   'accounting.cash.manage',
   'accounting.payroll.view',
   'accounting.payroll.manage',

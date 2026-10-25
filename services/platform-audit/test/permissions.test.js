@@ -23,3 +23,10 @@ test('closed permission schema rejects content, fake outcomes, non-owner mutatio
   assert(pack(attempted)); assert.throws(() => pack({ ...attempted, resultCount: 1 }));
   assert(pack({ ...attempted, stage: 'completed', outcome: 'denied', reason: 'access_denied', resultCount: 0, scopeClinicCount: 0, authorizationBasis: 'scope_denied' }));
 });
+
+test('bank permissions use the shared closed vocabulary and durable permission event contract',()=>{
+  for(const featureKey of ['accounting.bank.view','accounting.bank.manage']){
+    assert(FEATURE_KEYS.includes(featureKey));
+    const event={...fixture(),featureKey,roleCode:'admin_staff'};assert.deepEqual(unpack(pack(event)).event,event);
+  }
+});

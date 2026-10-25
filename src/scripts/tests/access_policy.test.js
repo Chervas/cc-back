@@ -324,6 +324,11 @@ async function run() {
   assert.equal(accessPolicy.defaultForFeature('accounting.cash.manage', 'reception'), true);
   assert.equal(accessPolicy.defaultForFeature('accounting.cash.manage', 'assistant'), true);
   assert.equal(accessPolicy.defaultForFeature('billing.reports.view', 'reception'), false);
+  for(const feature of ['accounting.bank.view','accounting.bank.manage']){
+    assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has(feature),true);
+    for(const role of ['propietario','admin_staff'])assert.equal(accessPolicy.defaultForFeature(feature,role),true);
+    for(const role of ['doctor','assistant','reception','accountant','patient_director','agencia','unknown'])assert.equal(accessPolicy.defaultForFeature(feature,role),false);
+  }
   assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('accounting.payroll.view'), true);
   assert.equal(accessPolicy.ALLOWED_FEATURE_KEYS.has('accounting.payroll.manage'), true);
   assert.equal(accessPolicy.defaultForFeature('accounting.payroll.view', 'propietario'), true);
