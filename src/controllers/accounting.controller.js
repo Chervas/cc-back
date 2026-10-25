@@ -350,6 +350,7 @@ exports.processIngestion = asyncHandler(async (req, res) => {
     publicId: req.params.jobId,
     clinicId: resolvedClinicId,
     mode: req.body.mode || 'automatic',
+    reprocess: req.body.reprocess ?? false, expectedAttempts: req.body.expected_attempts,
   }));
 });
 

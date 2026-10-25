@@ -6,8 +6,9 @@ const Op = { or: Symbol('or'), in: Symbol('in'), lt: Symbol('lt') };
 
 function service() {
   const file = require.resolve('../../services/accountingIngestion.service'), local = createRequire(file), module = { exports: {} };
-  const state = { jobs: [], expenses: [], payrolls: [], reads: [], writes: 0 };
+  const state = { jobs: [], expenses: [], payrolls: [], reads: [], writes: 0, decoderCalls: 0, sourceReads: 0 };
   const documentModel = (kind, collection) => ({ findAll: async options => {
+    if(!options.where[Op.or])return [];
     state.reads.push({kind, options});
     return collection.filter(row => options.where[Op.or].some(where => String(where.id) === String(row.id) && where.clinic_id === row.clinic_id));
   } });
@@ -19,9 +20,9 @@ function service() {
     },
     AccountingExpenseDocument: documentModel('expense', state.expenses),
     AccountingPayrollDocument: documentModel('payroll', state.payrolls),
-    ClinicalPrivateAsset: { findAll: async () => [], findByPk: async () => ({content_type: 'application/pdf', original_filename: 'synthetic.pdf'}) },
+    ClinicalPrivateAsset: { findAll: async () => [], findByPk: async () => ({content_type: 'application/pdf', original_filename: 'synthetic.pdf'}), findOne: async () => ({id:4,clinic_id:72,status:'active',content_type:'application/pdf',original_filename:'synthetic.pdf'}) },
   };
-  const mocks = { '../../models': database, sequelize: { Op }, './accounting.service': {}, './aiBroker.service': {}, './clinicalPrivateStorage.service': {}, '../lib/accountingIngestionLease': {}, './accountingDocumentReader.service': {} };
+  const mocks = { '../../models': database, sequelize: { Op }, './accounting.service': {}, './aiBroker.service': {}, './clinicalPrivateStorage.service': {readClinicalPrivateAsset:async()=>{state.sourceReads++;return {buffer:Buffer.from('synthetic')}}}, '../lib/accountingIngestionLease': {}, './accountingDocumentReader.service': {readLocalDocument:async()=>{state.decoderCalls++;return {provider:'local',model:'synthetic-decoder',data:{total:121,currency:'EUR'}}}} };
   vm.runInNewContext(fs.readFileSync(file, 'utf8'), { module, exports: module.exports, Buffer, process: {env:{}}, require: name => Object.hasOwn(mocks, name) ? mocks[name] : local(name) }, {filename:file});
   return {state, api:module.exports};
 }
@@ -64,4 +65,17 @@ test('cursor pagination reaches older jobs, ties are stable and cross-clinic or 
   await assert.rejects(api.list({clinicId:72,documentKind:'payroll',pagination:'cursor',cursor:first.next_cursor}),{code:'accounting_ingestion_cursor_invalid'});
   for(const limit of [0,101,2.5,'bad'])await assert.rejects(api.list({clinicId:72,pagination:'cursor',limit}),{code:'accounting_ingestion_limit_invalid'});
   assert.equal((await api.list({clinicId:72})).length,100);
+});
+
+
+test('an explicit local reread replaces only the unregistered proposal using its read-attempt CAS',async()=>{
+ const {state,api}=service();const job={id:'1',public_id:'reread',clinic_id:72,document_kind:'expense',status:'review',attempts:2,source_asset_id:4,extracted_data:{total:null}};job.update=async patch=>Object.assign(job,patch);state.jobs.push(job);
+ const ordinary=await api.process({publicId:'reread',clinicId:72,mode:'local'});assert.equal(ordinary.extracted_data.total,null);assert.equal(state.decoderCalls,0);
+ await assert.rejects(api.process({publicId:'reread',clinicId:72,mode:'local',reprocess:true,expectedAttempts:1}),{code:'accounting_ingestion_read_conflict'});assert.equal(state.decoderCalls,0);
+ await assert.rejects(api.process({publicId:'reread',clinicId:72,mode:'automatic',reprocess:true,expectedAttempts:2}),{code:'accounting_ingestion_reprocess_invalid'});assert.equal(state.sourceReads,0);
+ const refreshed=await api.process({publicId:'reread',clinicId:72,mode:'local',reprocess:true,expectedAttempts:2});assert.equal(refreshed.status,'review');assert.equal(refreshed.attempts,3);assert.equal(refreshed.extracted_data.total,121);assert.equal(state.decoderCalls,1);assert.equal(state.writes,0);
+ await assert.rejects(api.process({publicId:'reread',clinicId:72,mode:'local',reprocess:true,expectedAttempts:2}),{code:'accounting_ingestion_read_conflict'});
+ job.status='accepted';job.expense_document_id=10;state.expenses.push({id:10,clinic_id:72,public_id:'registered-expense'});
+ const accepted=await api.process({publicId:'reread',clinicId:72,mode:'local',reprocess:true,expectedAttempts:3});assert.equal(accepted.status,'accepted');assert.equal(accepted.expense_id,'registered-expense');assert.equal(state.decoderCalls,1);assert.equal(job.attempts,3);
+ await assert.rejects(api.process({publicId:'reread',clinicId:66,mode:'local',reprocess:true,expectedAttempts:3}),{code:'accounting_ingestion_not_found'});
 });

@@ -479,8 +479,9 @@ async function applyEmployeeMatching(clinicId, extracted) {
   };
 }
 
-async function processJob({ publicId, clinicId, mode = 'automatic' }) {
+async function processJob({ publicId, clinicId, mode = 'automatic', reprocess = false, expectedAttempts }) {
   if (!['automatic', 'local', 'manual'].includes(mode)) throw domainError(400, 'accounting_ingestion_mode_invalid', 'Selecciona una lectura válida.');
+  if (typeof reprocess !== 'boolean' || reprocess && mode !== 'local') throw domainError(400, 'accounting_ingestion_reprocess_invalid', 'La relectura confirmada debe ser local.');
   const claim = await sequelize.transaction(async (transaction) => {
     const job = await AccountingIngestionJob.findOne({
       where: { public_id: publicId, clinic_id: clinicId },
@@ -488,7 +489,9 @@ async function processJob({ publicId, clinicId, mode = 'automatic' }) {
       lock: transaction.LOCK.UPDATE,
     });
     if (!job) throw domainError(404, 'accounting_ingestion_not_found', 'Documento de la cola no encontrado.');
-    if (!['queued', 'failed'].includes(job.status)) return { job, shouldProcess: false };
+    const reread = reprocess && job.status === 'review';
+    if (reread && (!Number.isInteger(expectedAttempts) || expectedAttempts !== Number(job.attempts))) throw domainError(409, 'accounting_ingestion_read_conflict', 'La propuesta ha cambiado. Actualiza la cola antes de volver a leerla.');
+    if (!['queued', 'failed'].includes(job.status) && !reread) return { job, shouldProcess: false };
     await job.update({
       status: 'processing',
       attempts: Number(job.attempts || 0) + 1,
