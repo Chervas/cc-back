@@ -2515,7 +2515,7 @@ async function createWalletDeposit({ patientIdentifier, clinicId, actorId, paylo
   clinicId = context.clinicId;
   const scope = { clinic_id: clinicId, patient_id: Number(patient.id_paciente) };
   const request = walletRequest(payload, 'wallet_deposit', scope);
-  return sequelize.transaction(async (transaction) => {
+  return sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
     await Paciente.findByPk(patient.id_paciente, { attributes: ['id_paciente'], transaction, lock: transaction.LOCK.UPDATE });
     if (request.key) {
       const matches = await EconomicPayment.findAll({ where: { clinic_id: clinicId, patient_id: patient.id_paciente,
@@ -2623,7 +2623,7 @@ async function walletBalance({ clinicId, patientId, transaction = null }) {
 }
 
 async function applyWallet({ publicId, actorId, payload }) {
-  return sequelize.transaction(async (transaction) => {
+  return sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
     const budget = await loadBudgetByPublicId(publicId, transaction);
     const scope = { clinic_id: Number(budget.clinic_id), patient_id: Number(budget.patient_id), budget_id: budget.public_id };
     const request = walletRequest(payload, 'wallet_apply', scope);
