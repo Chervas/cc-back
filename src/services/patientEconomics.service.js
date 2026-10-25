@@ -2487,58 +2487,74 @@ async function createPayment({ publicId, actorId, payload }) {
   });
 }
 
+function walletRequest(payload, kind, context) {
+  const ledger = require('../lib/economic-concept-ledger');
+  const key = payload.idempotency_key == null ? null : ledger.key(payload.idempotency_key);
+  return { key, hash: key ? ledger.hash({ kind, ...context, payload }) : null };
+}
+
+function assertWalletReceipt(command, request, actorId, kind, context) {
+  const receipt = command?.receipt, proof = receipt?.command;
+  if (command?.schema_version !== 1 || command.kind !== kind || command.idempotency_key !== request.key
+    || command.request_hash !== request.hash || Number(command.actor_id) !== Number(actorId)
+    || !proof || proof.kind !== kind || proof.idempotency_key !== request.key || proof.applied !== true
+    || Number(proof.clinic_id) !== Number(context.clinic_id) || Number(proof.patient_id) !== Number(context.patient_id)
+    || (context.budget_id && proof.budget_id !== context.budget_id)) {
+    throw domainError(409, 'economic_request_conflict', 'La solicitud ya se utilizó para otra operación.');
+  }
+  if (!Number.isFinite(receipt.balance) || !Number.isFinite(proof.amount) || proof.amount <= 0
+    || (kind === 'wallet_deposit' && (!receipt.payment?.id || !receipt.wallet_entry?.id))
+    || (kind === 'wallet_apply' && !receipt.entry?.id)) {
+    throw domainError(409, 'wallet_receipt_requires_review', 'El recibo de esta operación requiere revisión. No repitas el movimiento.');
+  }
+  return receipt;
+}
+
 async function createWalletDeposit({ patientIdentifier, clinicId, actorId, payload }) {
-  const { patient } = await loadContext(patientIdentifier, clinicId);
-  const amount = roundMoney(payload.amount);
-  const method = cleanString(payload.method, 20).toLowerCase();
-  if (amount <= 0) throw domainError(400, 'payment_amount_invalid', 'El importe debe ser mayor que cero.');
-  if (!PAYMENT_METHODS.has(method)) throw domainError(400, 'payment_method_invalid', 'El método de cobro no es válido.');
+  const context = await loadContext(patientIdentifier, clinicId), patient = context.patient;
+  clinicId = context.clinicId;
+  const scope = { clinic_id: clinicId, patient_id: Number(patient.id_paciente) };
+  const request = walletRequest(payload, 'wallet_deposit', scope);
   return sequelize.transaction(async (transaction) => {
-    await Paciente.findByPk(patient.id_paciente, {
-      attributes: ['id_paciente'],
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-    const payment = await EconomicPayment.create({
-      public_id: crypto.randomUUID(),
-      clinic_id: clinicId,
-      patient_id: patient.id_paciente,
-      budget_id: null,
-      budget_version: null,
-      amount,
-      method,
-      reference: cleanString(payload.reference, 120) || null,
-      application: {
-        allocations: [{
-          target_type: 'wallet',
-          line_key: null,
-          amount,
-          label: cleanString(payload.label, 180) || 'Anticipo del paciente',
-        }],
-      },
-      notes: cleanString(payload.notes, 2000) || null,
-      paid_at: dateOrNull(payload.paid_at) || new Date(),
-      created_by: actorId,
-    }, { transaction });
-    const entry = await PatientWalletEntry.create({
-      public_id: crypto.randomUUID(),
-      clinic_id: clinicId,
-      patient_id: patient.id_paciente,
-      payment_id: payment.id,
-      budget_id: null,
-      entry_type: 'deposit',
-      amount,
-      reference: payment.reference,
-      notes: cleanString(payload.label, 180) || 'Anticipo del paciente',
-      occurred_at: payment.paid_at,
-      created_by: actorId,
-      created_at: new Date(),
-    }, { transaction });
-    return {
-      payment: serializePayment(payment),
-      wallet_entry: serializeWalletEntry(entry),
-      balance: await walletBalance({ clinicId, patientId: patient.id_paciente, transaction }),
-    };
+    await Paciente.findByPk(patient.id_paciente, { attributes: ['id_paciente'], transaction, lock: transaction.LOCK.UPDATE });
+    if (request.key) {
+      const matches = await EconomicPayment.findAll({ where: { clinic_id: clinicId, patient_id: patient.id_paciente,
+        budget_id: null, application: { wallet_command: { idempotency_key: request.key } } }, limit: 2, transaction, lock: transaction.LOCK.UPDATE });
+      if (matches.length > 1) throw domainError(409, 'wallet_receipt_requires_review', 'La identidad de este anticipo es ambigua. Revisa el diario antes de repetirlo.');
+      const prior = matches[0];
+      if (prior) {
+        const receipt = assertWalletReceipt(parseJson(prior.application, {}).wallet_command, request, actorId, 'wallet_deposit', scope);
+        const entry = await PatientWalletEntry.findOne({ where: { public_id: receipt.wallet_entry?.id, payment_id: prior.id,
+          clinic_id: clinicId, patient_id: patient.id_paciente, entry_type: 'deposit' }, transaction, lock: transaction.LOCK.UPDATE });
+        if (!entry || Number(prior.created_by) !== Number(actorId) || Number(entry.created_by) !== Number(actorId) || receipt.payment?.id !== prior.public_id || Number(receipt.payment.amount) !== Number(prior.amount)
+          || receipt.payment.method !== prior.method || Number(receipt.wallet_entry.amount) !== Number(entry.amount)
+          || Number(entry.amount) !== Number(prior.amount) || Number(receipt.command.amount) !== Number(prior.amount)) {
+          throw domainError(409, 'wallet_receipt_requires_review', 'El recibo de este anticipo requiere revisión. No crees otro depósito.');
+        }
+        return { ...cloneJson(receipt), replayed: true, current_state: { payment_status: prior.status, wallet_entry_status: entry.status, balance: await walletBalance({clinicId,patientId:patient.id_paciente,transaction}) } };
+      }
+    }
+    try {
+      const amount = roundMoney(payload.amount), method = cleanString(payload.method, 20).toLowerCase();
+      if (!Number.isFinite(Number(payload.amount)) || amount <= 0) throw domainError(400, 'payment_amount_invalid', 'El importe debe ser mayor que cero.');
+      if (!PAYMENT_METHODS.has(method)) throw domainError(400, 'payment_method_invalid', 'El método de cobro no es válido.');
+      const payment = await EconomicPayment.create({ public_id: crypto.randomUUID(), clinic_id: clinicId, patient_id: patient.id_paciente,
+        budget_id: null, budget_version: null, amount, method, reference: cleanString(payload.reference, 120) || null,
+        application: { allocations: [{ target_type: 'wallet', line_key: null, amount, label: cleanString(payload.label, 180) || 'Anticipo del paciente' }] },
+        notes: cleanString(payload.notes, 2000) || null, paid_at: dateOrNull(payload.paid_at) || new Date(), created_by: actorId }, { transaction });
+      const entry = await PatientWalletEntry.create({ public_id: crypto.randomUUID(), clinic_id: clinicId, patient_id: patient.id_paciente,
+        payment_id: payment.id, budget_id: null, entry_type: 'deposit', amount, reference: payment.reference,
+        notes: cleanString(payload.label, 180) || 'Anticipo del paciente', occurred_at: payment.paid_at, created_by: actorId, created_at: new Date() }, { transaction });
+      const receipt = { payment: serializePayment(payment), wallet_entry: serializeWalletEntry(entry),
+        balance: await walletBalance({ clinicId, patientId: patient.id_paciente, transaction }),
+        ...(request.key ? { command: { kind: 'wallet_deposit', idempotency_key: request.key, applied: true, ...scope, amount } } : {}) };
+      if (request.key) await payment.update({ application: { ...parseJson(payment.application, {}), wallet_command: {
+        schema_version: 1, kind: 'wallet_deposit', idempotency_key: request.key, request_hash: request.hash, actor_id: Number(actorId), receipt: cloneJson(receipt) } } }, { transaction });
+      return { ...receipt, replayed: false, current_state: { payment_status: payment.status, wallet_entry_status: entry.status, balance: receipt.balance } };
+    } catch (error) {
+      if (error.statusCode) error.details = { ...error.details, applied: false };
+      throw error;
+    }
   });
 }
 
@@ -2609,6 +2625,28 @@ async function walletBalance({ clinicId, patientId, transaction = null }) {
 async function applyWallet({ publicId, actorId, payload }) {
   return sequelize.transaction(async (transaction) => {
     const budget = await loadBudgetByPublicId(publicId, transaction);
+    const scope = { clinic_id: Number(budget.clinic_id), patient_id: Number(budget.patient_id), budget_id: budget.public_id };
+    const request = walletRequest(payload, 'wallet_apply', scope);
+    if (request.key) {
+      const budgets = await EconomicBudget.findAll({ where: { clinic_id: budget.clinic_id, patient_id: budget.patient_id }, attributes: ['id'], transaction });
+      const matches = await EconomicBudgetEvent.findAll({ where: { budget_id: { [Op.in]: budgets.map(row => row.id) },
+        event_type: 'payment_recorded', metadata: { request_key: request.key } }, limit: 2, transaction, lock: transaction.LOCK.UPDATE });
+      if (matches.length) {
+        if (matches.length !== 1) throw domainError(409, 'wallet_receipt_requires_review', 'La identidad de esta aplicación es ambigua. Revisa el diario antes de repetirla.');
+        if (Number(matches[0].budget_id) !== Number(budget.id)) throw domainError(409, 'economic_request_conflict', 'La solicitud ya corresponde a otro presupuesto.');
+        const metadata = parseJson(matches[0].metadata, {});
+        const receipt = assertWalletReceipt(metadata.wallet_command, request, actorId, 'wallet_apply', scope);
+        const entry = await PatientWalletEntry.findOne({ where: { public_id: receipt.entry?.id, clinic_id: budget.clinic_id,
+          patient_id: budget.patient_id, budget_id: budget.id, entry_type: 'allocation' }, transaction, lock: transaction.LOCK.UPDATE });
+        if (metadata.operation !== 'wallet_apply' || metadata.request_hash !== request.hash || Number(entry?.created_by) !== Number(actorId) || Number(matches[0].actor_id) !== Number(actorId) || !entry
+          || Number(receipt.entry.amount) !== Number(entry.amount) || Number(entry.amount) !== -Number(receipt.command.amount)) {
+          throw domainError(409, 'wallet_receipt_requires_review', 'El recibo de esta aplicación requiere revisión. No repitas el movimiento.');
+        }
+        return { ...cloneJson(receipt), replayed: true, current_state: { wallet_entry_status: entry.status, budget_status: budget.status, budget_version: Number(budget.current_version), balance: await walletBalance({clinicId:budget.clinic_id,patientId:budget.patient_id,transaction}) } };
+      }
+    }
+    try {
+    if (payload.expected_version !== undefined && (!Number.isSafeInteger(payload.expected_version) || payload.expected_version !== Number(budget.current_version))) throw domainError(409, 'budget_version_conflict', 'El presupuesto ha cambiado. Revisa antes de aplicar saldo.', { applied: false });
     if (!['accepted', 'partially_accepted', 'presented'].includes(budget.status)) {
       throw domainError(409, 'budget_not_payable', 'El presupuesto todavía no admite saldo.');
     }
@@ -2670,10 +2708,17 @@ async function applyWallet({ publicId, actorId, payload }) {
     if (roundMoney(alreadyApplied + amount) >= payable) {
       await activateVouchers({ budget, rule: 'on_full_payment', actorId, transaction });
     }
-    return {
-      entry: serializeWalletEntry(entry, budget.public_id),
-      balance: roundMoney(available - amount),
-    };
+    const receipt = { entry: serializeWalletEntry(entry, budget.public_id), balance: roundMoney(available - amount),
+      ...(request.key ? { command: { kind: 'wallet_apply', idempotency_key: request.key, applied: true, ...scope, amount } } : {}) };
+    if (request.key) await EconomicBudgetEvent.create({ budget_id: budget.id, version_number: budget.current_version, event_type: 'payment_recorded',
+      from_status: budget.status, to_status: budget.status, actor_id: actorId, created_at: new Date(), metadata: { operation: 'wallet_apply', request_key: request.key,
+        request_hash: request.hash, wallet_command: { schema_version: 1, kind: 'wallet_apply', idempotency_key: request.key, request_hash: request.hash,
+          actor_id: Number(actorId), receipt: cloneJson(receipt) } } }, { transaction });
+    return { ...receipt, replayed: false, current_state: { wallet_entry_status: entry.status, budget_status: budget.status, budget_version: Number(budget.current_version), balance: receipt.balance } };
+    } catch (error) {
+      if (error.statusCode) error.details = { ...error.details, applied: false };
+      throw error;
+    }
   });
 }
 

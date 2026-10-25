@@ -76,7 +76,7 @@ async function command({clinicId,actorId,payload,kind,lineId=null,matchId=null,i
     const clinic=await db.Clinica.findByPk(clinicId,{attributes:['id_clinica'],transaction,lock:transaction.LOCK.UPDATE});
     if(!clinic)throw L.error(404,'bank_clinic_not_found','Clínica no encontrada.');
     const old=await db.AccountingBankCommand.findOne({where:{clinic_id:clinicId,actor_id:actorId,idempotency_key:key},transaction});
-    if(old){if(old.request_hash!==requestHash||old.command_type!==kind)throw L.error(409,'bank_idempotency_conflict','La referencia ya corresponde a otra operación.',{applied:false});return {...visibleResult(json(old.result),includePayroll),command:{idempotency_key:key,kind,applied:true},replayed:true};}
+    if(old){if(old.request_hash!==requestHash||old.command_type!==kind)throw L.error(409,'bank_idempotency_conflict','La referencia ya corresponde a otra operación.');return {...visibleResult(json(old.result),includePayroll),command:{idempotency_key:key,kind,applied:true},replayed:true};}
     try{
       const result={...await work(transaction),command:{idempotency_key:key,kind,applied:true}};
       await db.AccountingBankCommand.create({id:crypto.randomUUID(),clinic_id:clinicId,actor_id:actorId,idempotency_key:key,command_type:kind,request_hash:requestHash,result,created_at:new Date()},{transaction});
