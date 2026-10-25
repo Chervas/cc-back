@@ -93,8 +93,12 @@ function createService({ db, canAccess, readAsset = asset => require('./clinical
     if (!limit || limit > 100) fail('clinical_drawing_limit_invalid', 'Solicita como máximo 100 modelos.');
     const status = input.status || 'active';
     if (!['active', 'archived', 'all'].includes(status)) fail('clinical_drawing_status_invalid', 'El estado no es válido.');
-    const where = { clinic_id: ctx.clinicId, patient_id: ctx.patientId, ...(status !== 'all' ? { status } : {}) };
-    const scope = hash([ctx.clinicId, ctx.patientId, status]);
+    const asset = input.source_asset_id === undefined ? null : await sourceAsset(input.source_asset_id, ctx);
+    if (asset && status !== 'active') fail('clinical_drawing_status_invalid', 'Las anotaciones de una prueba se retoman desde sus registros activos.');
+    const where = { clinic_id: ctx.clinicId, patient_id: ctx.patientId, ...(status !== 'all' ? { status } : {}), ...(asset ? { source_asset_id: asset.id } : {}) };
+    // Existing unfiltered cursors retain their exact scope. Source-filtered
+    // pages cannot be reused for another original or broadened to the library.
+    const scope = hash([ctx.clinicId, ctx.patientId, status, ...(asset ? [asset.public_id] : [])]);
     if (input.cursor) {
       const cursor = contract.decodeCursor(input.cursor);
       if (cursor.scope !== scope || !integer(cursor.id)) fail('clinical_drawing_cursor_invalid', 'La página no es válida.');

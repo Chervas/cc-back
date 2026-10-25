@@ -63,7 +63,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   }
   // This suite verifies only the two original foundation migrations. Later
   // additive fields have their own full-schema integration suites.
-  for (const field of ['template_snapshot', 'form_data', 'diagnoses', 'service_ref']) db.AppointmentClinicalReport.removeAttribute(field);
+  for (const field of ['template_snapshot', 'form_data', 'diagnoses', 'service_ref', 'template_default_origin']) db.AppointmentClinicalReport.removeAttribute(field);
   const R = db.AppointmentClinicalReport, V = db.AppointmentClinicalReportRevision, L = db.ClinicalEpisodeAppointment;
   const migrated = await R.findByPk(old.id, { raw: true });
   for (const key of Object.keys(legacyBefore)) assert.deepEqual(migrated[key], legacyBefore[key]);
@@ -220,6 +220,28 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const pdfDrawing = await drawingService.create({ ...base, payload: pdfPayload }); assert.equal(pdfDrawing.item.source.id, 'cpa_owned_pdf'); assert.equal(pdfDrawing.item.template_version, 1); assert(pdfDrawing.item.source.preview_path.endsWith('/preview'));
   await assert.rejects(drawingService.create({ ...base, payload: { ...pdfPayload, idempotency_key: 'drawing-invalid-page', document: { version: 1, views: { 'page-3': {} } } } }), { code: 'clinical_drawing_source_view_invalid' });
   await assert.rejects(drawingService.create({ ...base, payload: { ...pdfPayload, idempotency_key: 'drawing-invalid-image', source_asset_id: 'cpa_owned_image' } }), { code: 'clinical_drawing_source_view_invalid' });
+  const pdfSecond = await drawingService.create({ ...base, payload: { ...pdfPayload, idempotency_key: 'drawing-owned-pdf-second', title: 'Otra anotación PDF' } });
+  await drawingService.save({ ...base, id: pdfSecond.item.id, payload: { expected_version: 1, title: 'Última revisión de la prueba' } });
+  const pdfArchived = await drawingService.create({ ...base, payload: { ...pdfPayload, idempotency_key: 'drawing-owned-pdf-archived', title: 'Anotación retirada' } });
+  await drawingService.save({ ...base, id: pdfArchived.item.id, payload: { expected_version: 1, status: 'archived' } });
+  await drawingService.create({ ...base, payload: { ...pdfPayload, idempotency_key: 'drawing-owned-image-source', source_asset_id: 'cpa_owned_image', document: { version: 1, views: { original: {} } } } });
+  const bySource = await drawingService.list({ ...base, source_asset_id: 'cpa_owned_pdf', limit: 1 });
+  assert.equal(bySource.items.length, 1); assert.equal(bySource.items[0].id, pdfSecond.item.id); assert.equal(bySource.items[0].version, 2); assert.equal(bySource.items[0].title, 'Última revisión de la prueba');
+  assert.equal(bySource.items[0].source.id, 'cpa_owned_pdf'); assert.equal(bySource.items[0].source.sha256, 'b'.repeat(64)); assert(bySource.next_cursor);
+  const sourceNext = await drawingService.list({ ...base, source_asset_id: 'cpa_owned_pdf', limit: 1, cursor: bySource.next_cursor });
+  assert.deepEqual(sourceNext.items.map(item => item.id), [pdfDrawing.item.id]); assert.equal(sourceNext.next_cursor, null);
+  const unfiltered = await drawingService.list({ ...base, limit: 1 }); assert.equal(C.decodeCursor(unfiltered.next_cursor).scope, C.hash([72, 1, 'active']));
+  for (const input of [{ source_asset_id: 'cpa_owned_image', cursor: bySource.next_cursor }, { cursor: bySource.next_cursor }, { source_asset_id: 'cpa_owned_pdf', cursor: unfiltered.next_cursor }]) {
+    await assert.rejects(drawingService.list({ ...base, ...input }), { code: 'clinical_drawing_cursor_invalid' });
+  }
+  for (const id of ['cpa_foreign_image', 'cpa_wrong_purpose']) await assert.rejects(drawingService.list({ ...base, source_asset_id: id }), { code: 'clinical_drawing_source_not_found' });
+  await assert.rejects(drawingService.list({ patientIdentifier: 'other-patient', clinicId: 73, actorId: 7, source_asset_id: 'cpa_owned_pdf' }), { code: 'clinical_drawing_source_not_found' });
+  await assert.rejects(drawingService.list({ ...base, source_asset_id: 'cpa_owned_pdf', status: 'all' }), { code: 'clinical_drawing_status_invalid' });
+  const beforeOriginalStatus = await db.ClinicalPrivateAsset.findOne({ where: { public_id: 'cpa_owned_pdf' } });
+  await beforeOriginalStatus.update({ status: 'archived' });
+  await assert.rejects(drawingService.list({ ...base, source_asset_id: 'cpa_owned_pdf' }), { code: 'clinical_drawing_source_not_found' });
+  await beforeOriginalStatus.update({ status: 'active' });
+  report.checks.push('Source-filtered drawing list resolves the private public asset ID in patient/clinic/purpose scope and returns only its active annotations newest-first with latest revision. Paging excludes other originals/models/archives, rejects cursor mixing and foreign/inactive/wrong-purpose originals, preserves old unfiltered cursor hashes and the original checksum.');
   const revisionCreate = db.ClinicalDrawingRevision.create;
   db.ClinicalDrawingRevision.create = async () => { throw Error('OWNED_DRAWING_REVISION_FAILURE'); };
   await assert.rejects(drawingService.save({ ...base, id: drawId, payload: { expected_version: 4, title: 'Must rollback' } }), /OWNED_DRAWING_REVISION_FAILURE/);

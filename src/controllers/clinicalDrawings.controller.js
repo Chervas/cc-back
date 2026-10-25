@@ -5,7 +5,7 @@ const { clinicalEpisodeHandler } = require('./clinicalEpisodes.controller');
 function createClinicalDrawingsController({ service = () => drawings.current() } = {}) {
   const input = req => ({ patientIdentifier: req.params.id, clinicId: req.query.clinic_id ?? req.body?.clinic_id,
     actorId: req.userData?.userId, id: req.params.drawingId, payload: req.body,
-    version: req.query.version, cursor: req.query.cursor, limit: req.query.limit, status: req.query.status });
+    version: req.query.version, cursor: req.query.cursor, limit: req.query.limit, status: req.query.status, source_asset_id: req.query.source_asset_id });
   const handler = action => clinicalEpisodeHandler(async (req, res) => { res.set('Cache-Control', 'private, no-store'); await action(req, res); });
   return {
     list: handler(async (req, res) => res.json(await service().list(input(req)))),
