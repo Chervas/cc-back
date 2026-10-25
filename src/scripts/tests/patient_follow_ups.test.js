@@ -102,7 +102,10 @@ function fixture() {
       findAll: async ({ where }) => state.treatments.filter((row) => matches(row, where)),
     },
     Clinica: { findOne: async () => null },
-    AppointmentClinicalReport: { findOne: async ({ where }) => state.reports.find(row=>matches(row,where))||null },
+    AppointmentClinicalReport: {
+      findOne: async ({ where }) => state.reports.find(row=>matches(row,where))||null,
+      findAll: async (options) => { state.queries.push(options); return state.reports.filter(row=>matches(row,options.where)); },
+    },
     ClinicalEpisodeAppointment: {findOne:async({where})=>matches({appointment_id:105,report_id:81,clinic_id:10,patient_id:1},where)?{appointment_id:105,report_id:81}:null},
   };
   const service = createPatientFollowUpService({ db, now: () => new Date('2026-09-06T23:30:00Z') });
@@ -337,4 +340,21 @@ test('new domain has no jobs/messages and routes require auth, migration refuses
   let dropped = false;
   await assert.rejects(migration.down({ sequelize: { query: async () => [[{ count: 1 }]] }, dropTable: async () => { dropped = true; } }), /contiene historia/);
   assert.equal(dropped, false);
+});
+
+
+test('episode provenance is hydrated only for clinical readers and never across patient or clinic',async()=>{
+  const {create,service,state}=fixture();const episode='00000000-0000-4000-8000-000000000081';
+  state.reports.find(row=>row.id===81).title='Consulta ficticia de origen';
+  const {item}=await create({source_episode_id:episode},{includeClinical:true});
+  assert.equal(item.source_episode_id,episode);assert.equal(item.source_episode_title,'Consulta ficticia de origen');
+  const before=state.queries.length;
+  const operational=await service.get({clinicId:10,id:item.id,includeClinical:false});
+  assert.equal(operational.item.source_episode_id,null);assert.equal(operational.item.source_episode_title,null);
+  assert(!state.queries.slice(before).some(query=>query.attributes?.includes('title')));
+  const panel=await service.list({clinicId:10,includeClinical:true});assert.equal(panel.items[0].source_episode_id,episode);
+  state.reports.find(row=>row.id===81).patient_id=2;
+  assert.equal((await service.get({clinicId:10,id:item.id,includeClinical:true})).item.source_episode_id,null);
+  state.reports.find(row=>row.id===81).patient_id=1;state.reports.find(row=>row.id===81).clinic_id=20;
+  assert.equal((await service.get({clinicId:10,id:item.id,includeClinical:true})).item.source_episode_id,null);
 });

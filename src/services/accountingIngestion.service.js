@@ -3,7 +3,7 @@
 const axios = require('axios');
 const aiBroker = require('./aiBroker.service');
 const crypto = require('crypto');
-const { Op } = require('sequelize');
+const { Op, literal } = require('sequelize');
 const db = require('../../models');
 const clinicalPrivateStorage = require('./clinicalPrivateStorage.service');
 const accounting = require('./accounting.service');
@@ -61,7 +61,29 @@ function decodeAttachment(attachment) {
   };
 }
 
-function serialize(job, asset = null) {
+async function registeredDocumentReferences(jobs, transaction = null) {
+  const values = jobs.map(job => job.toJSON ? job.toJSON() : job);
+  const accepted = values.filter(job => job.status === 'accepted');
+  const expenseJobs = accepted.filter(job => (job.document_kind || 'expense') === 'expense' && job.expense_document_id);
+  const payrollJobs = accepted.filter(job => job.document_kind === 'payroll' && job.payroll_document_id);
+  const options = (rows, column) => ({
+    where: { [Op.or]: rows.map(job => ({ id: job[column], clinic_id: job.clinic_id })) },
+    attributes: ['id', 'public_id', 'clinic_id'], transaction,
+  });
+  const [expenses, payrolls] = await Promise.all([
+    expenseJobs.length ? AccountingExpenseDocument.findAll(options(expenseJobs, 'expense_document_id')) : [],
+    payrollJobs.length ? AccountingPayrollDocument.findAll(options(payrollJobs, 'payroll_document_id')) : [],
+  ]);
+  const key = (clinic, id) => `${clinic}:${id}`;
+  const expenseMap = new Map(expenses.map(row => [key(row.clinic_id, row.id), row.public_id]));
+  const payrollMap = new Map(payrolls.map(row => [key(row.clinic_id, row.id), row.public_id]));
+  return new Map(values.map(job => [job.public_id, {
+    expense_id: (job.document_kind || 'expense') === 'expense' ? expenseMap.get(key(job.clinic_id, job.expense_document_id)) || null : null,
+    payroll_id: job.document_kind === 'payroll' ? payrollMap.get(key(job.clinic_id, job.payroll_document_id)) || null : null,
+  }]));
+}
+
+function serialize(job, asset = null, references = {}) {
   const value = job.toJSON ? job.toJSON() : job;
   return {
     id: value.public_id,
@@ -79,6 +101,10 @@ function serialize(job, asset = null) {
     attempts: Number(value.attempts || 0),
     expense_document_id: value.expense_document_id ? String(value.expense_document_id) : null,
     payroll_document_id: value.payroll_document_id ? String(value.payroll_document_id) : null,
+    // Public document identities are distinct from the legacy numeric foreign keys.
+    expense_id: references.expense_id || null,
+    payroll_id: references.payroll_id || null,
+    registered_document_missing: value.status === 'accepted' && !references.expense_id && !references.payroll_id,
     file: asset ? {
       name: asset.original_filename,
       content_type: asset.content_type,
@@ -89,25 +115,36 @@ function serialize(job, asset = null) {
   };
 }
 
-async function list({ clinicId, documentKind = 'expense' }) {
+async function list({ clinicId, documentKind = 'expense', pagination, cursor, limit, q }) {
   const normalizedKind = clean(documentKind || 'expense', 20).toLowerCase();
   if (!['expense', 'payroll'].includes(normalizedKind)) {
     throw domainError(400, 'accounting_ingestion_kind_invalid', 'El tipo de documento no es válido.');
   }
-  const jobs = await AccountingIngestionJob.findAll({
-    where: {
-      clinic_id: clinicId,
-      document_kind: normalizedKind,
-    },
-    order: [['created_at', 'DESC']],
-    limit: 100,
-  });
+  const paged = pagination === 'cursor';
+  if (pagination != null && !paged) throw domainError(400, 'accounting_ingestion_pagination_invalid', 'La paginación no es válida.');
+  const pageLimit = paged ? Number(limit ?? 30) : 100;
+  if (!Number.isInteger(pageLimit) || pageLimit < 1 || pageLimit > 100) throw domainError(400, 'accounting_ingestion_limit_invalid', 'El tamaño de página debe estar entre 1 y 100.');
+  if (q != null && (typeof q !== 'string' || q.length > 120)) throw domainError(400, 'accounting_ingestion_search_invalid', 'La búsqueda admite hasta 120 caracteres.');
+  const search = clean(q, 120);
+  const scope = crypto.createHash('sha256').update(JSON.stringify([Number(clinicId), normalizedKind, search])).digest('hex');
+  const where = { clinic_id: clinicId, document_kind: normalizedKind };
+  if (cursor != null) {
+    try {
+      if (!paged || typeof cursor !== 'string' || cursor.length > 500) throw Error();
+      const page = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+      if (page.scope !== scope || !/^[1-9]\d{0,19}$/.test(String(page.id))) throw Error();
+      where.id = { [Op.lt]: String(page.id) };
+    } catch { throw domainError(400, 'accounting_ingestion_cursor_invalid', 'La página pertenece a otra búsqueda.'); }
+  }
+  if (search) where[Op.and] = literal(`EXISTS (SELECT 1 FROM ClinicalPrivateAssets ingestion_asset WHERE ingestion_asset.id = AccountingIngestionJob.source_asset_id AND ingestion_asset.clinic_id = AccountingIngestionJob.clinic_id AND ingestion_asset.original_filename LIKE ${sequelize.escape('%' + search + '%')})`);
+  const found = await AccountingIngestionJob.findAll({ where, order: paged ? [['id', 'DESC']] : [['created_at', 'DESC']], limit: pageLimit + (paged ? 1 : 0) });
+  const jobs = found.slice(0, pageLimit);
   const assetIds = [...new Set(jobs.map((job) => Number(job.source_asset_id)).filter(Boolean))];
-  const assets = assetIds.length
-    ? await ClinicalPrivateAsset.findAll({ where: { id: assetIds } })
-    : [];
+  const assets = assetIds.length ? await ClinicalPrivateAsset.findAll({ where: { id: assetIds, clinic_id: clinicId } }) : [];
   const byId = new Map(assets.map((asset) => [Number(asset.id), asset]));
-  return jobs.map((job) => serialize(job, byId.get(Number(job.source_asset_id))));
+  const references = await registeredDocumentReferences(jobs);
+  const items = jobs.map((job) => serialize(job, byId.get(Number(job.source_asset_id)), references.get(job.public_id)));
+  return paged ? { items, next_cursor: found.length > pageLimit ? Buffer.from(JSON.stringify({ id: String(jobs.at(-1).id), scope })).toString('base64url') : null } : items;
 }
 
 async function enqueue({
@@ -130,7 +167,10 @@ async function enqueue({
     const ids = matches.map(asset => asset.id);
     const existing = ids.length ? await AccountingIngestionJob.findOne({ where: { clinic_id: clinicId,
       document_kind: normalizedKind, source_asset_id: { [Op.in]: ids } }, order: [['created_at', 'DESC']] }) : null;
-    if (existing) return { ...serialize(existing, matches.find(asset => Number(asset.id) === Number(existing.source_asset_id))), duplicate: true };
+    if (existing) {
+      const references = await registeredDocumentReferences([existing]);
+      return { ...serialize(existing, matches.find(asset => Number(asset.id) === Number(existing.source_asset_id)), references.get(existing.public_id)), duplicate: true };
+    }
     const recorded = ids.length && normalizedKind === 'expense'
       ? await AccountingExpenseDocument.findOne({ where: { clinic_id: clinicId, attachment_asset_id: { [Op.in]: ids } } }) : null;
     if (recorded) throw domainError(409, 'expense_duplicate_detected', 'Este archivo ya pertenece a una factura recibida.', { expense_id: recorded.public_id });
@@ -459,7 +499,8 @@ async function processJob({ publicId, clinicId, mode = 'automatic' }) {
   });
   const { job, shouldProcess } = claim;
   if (!shouldProcess) {
-    return serialize(job, await ClinicalPrivateAsset.findByPk(job.source_asset_id));
+    const references = await registeredDocumentReferences([job]);
+    return serialize(job, await ClinicalPrivateAsset.findByPk(job.source_asset_id), references.get(job.public_id));
   }
   const asset = await ClinicalPrivateAsset.findOne({
     where: { id: job.source_asset_id, clinic_id: clinicId, status: 'active' },
@@ -511,7 +552,8 @@ async function accept({ publicId, clinicId, actorId, payload }) {
     if (!job) throw domainError(404, 'accounting_ingestion_not_found', 'Documento de la cola no encontrado.');
     if (job.status === 'accepted') {
       const asset = await ClinicalPrivateAsset.findByPk(job.source_asset_id, { transaction });
-      return { job: serialize(job, asset), already_accepted: true };
+      const references = await registeredDocumentReferences([job], transaction);
+      return { job: serialize(job, asset, references.get(job.public_id)), already_accepted: true };
     }
     if (job.status !== 'review') {
       throw domainError(409, 'accounting_ingestion_not_reviewable', 'El documento todavía no está listo para revisar.');
@@ -543,7 +585,7 @@ async function accept({ publicId, clinicId, actorId, payload }) {
       }, { transaction });
       const asset = await ClinicalPrivateAsset.findByPk(job.source_asset_id, { transaction });
       return {
-        job: serialize(job, asset),
+        job: serialize(job, asset, { payroll_id: payrollDocument.id }),
         payroll_document: payrollDocument,
       };
     }
@@ -588,7 +630,7 @@ async function accept({ publicId, clinicId, actorId, payload }) {
     }, { transaction });
     const asset = await ClinicalPrivateAsset.findByPk(job.source_asset_id, { transaction });
     return {
-      job: serialize(job, asset),
+      job: serialize(job, asset, { expense_id: expense.id }),
       expense: {
         ...expense,
         attachment: asset ? {

@@ -613,7 +613,7 @@ async function getWorkspace({
   );
   const issuedDocuments = documents.filter((document) => document.status === 'issued');
   const activeExpenses = expenses.filter((expense) => expense.status !== 'cancelled');
-  const salesTotal = money(issuedDocuments.filter(row => row.document_type !== 'receipt').reduce((sum, document) => sum + Number(document.totals?.total || 0), 0));
+  const salesTotal = money(issuedDocuments.filter(row => row.document_type !== 'receipt').reduce((sum, document) => sum + (document.document_type === 'credit_note' ? -Math.abs(Number(document.totals?.total || 0)) : Number(document.totals?.total || 0)), 0));
   const expensesTotal = money(activeExpenses.reduce((sum, expense) => sum + Number(expense.total), 0));
   const payrollTotal = money(payrollPeriods.reduce(
     (sum, payroll) => sum + Number(payroll.total_personnel_cost),
@@ -641,7 +641,7 @@ async function getWorkspace({
   };
   for (const document of issuedDocuments.filter(row => row.document_type !== 'receipt')) {
     ensureDay(document.issue_date).sales = money(
-      ensureDay(document.issue_date).sales + Number(document.totals?.total || 0),
+      ensureDay(document.issue_date).sales + (document.document_type === 'credit_note' ? -Math.abs(Number(document.totals?.total || 0)) : Number(document.totals?.total || 0)),
     );
   }
   for (const expense of activeExpenses) {
@@ -791,6 +791,7 @@ async function storeExpenseAttachment({
     buffer: preparedAttachment.buffer,
     createdBy: actorId,
     metadata: { document_number: expense.document_number },
+    transaction,
   });
   await expense.update(
     { attachment_asset_id: asset.id, updated_by: actorId },
@@ -847,16 +848,24 @@ async function createExpense({ clinicId, actorId, payload, transaction = null })
 }
 
 async function updateExpense({ publicId, clinicId, actorId, payload }) {
-  const expense = await AccountingExpenseDocument.findOne({ where: { public_id: publicId, clinic_id: clinicId } });
+  let uploaded = null;
+  try { return await db.sequelize.transaction(async transaction => {
+  const expense = await AccountingExpenseDocument.findOne({ where: { public_id: publicId, clinic_id: clinicId }, transaction, lock: transaction.LOCK.UPDATE });
   if (!expense) throw domainError(404, 'expense_not_found', 'Factura recibida no encontrada.');
+  await require('./accountingBank.service').assertTargetEditable({clinicId,type:'expense',id:expense.public_id,transaction});
   const preparedAttachment = prepareExpenseAttachment(payload.attachment);
-  await expense.update({ ...normalizeExpense(payload), updated_by: actorId });
+  await expense.update({ ...normalizeExpense(payload), updated_by: actorId }, {transaction});
   const asset = preparedAttachment
-    ? await storeExpenseAttachment({ expense, clinicId, actorId, preparedAttachment })
+    ? await storeExpenseAttachment({ expense, clinicId, actorId, preparedAttachment, transaction })
     : expense.attachment_asset_id
       ? await ClinicalPrivateAsset.findByPk(expense.attachment_asset_id)
       : null;
+  if(preparedAttachment)uploaded=asset;
   return serializeExpense(expense, asset);
+  }); } catch(error) {
+    if(uploaded)await clinicalPrivateStorage.discardUncommittedClinicalObject(uploaded);
+    throw error;
+  }
 }
 
 async function readExpenseAttachment({ publicId, clinicId }) {
@@ -871,6 +880,27 @@ async function readExpenseAttachment({ publicId, clinicId }) {
   if (!asset) throw domainError(404, 'expense_attachment_not_found', 'Archivo privado no encontrado.');
   const stored = await clinicalPrivateStorage.readClinicalPrivateAsset(asset);
   return { asset, buffer: stored.buffer };
+}
+
+async function getExpense({publicId,clinicId}) {
+  const expense=await AccountingExpenseDocument.findOne({where:{public_id:publicId,clinic_id:clinicId}});
+  if(!expense)throw domainError(404,'expense_not_found','Factura recibida no encontrada.');
+  const asset=expense.attachment_asset_id?await ClinicalPrivateAsset.findOne({where:{id:expense.attachment_asset_id,clinic_id:clinicId,status:'active'}}):null;
+  return serializeExpense(expense,asset);
+}
+
+async function getPayrollDocument({publicId,clinicId}) {
+  const document=await AccountingPayrollDocument.findOne({where:{public_id:publicId,clinic_id:clinicId}});
+  if(!document)throw domainError(404,'payroll_document_not_found','Nómina individual no encontrada.');
+  const asset=await ClinicalPrivateAsset.findOne({where:{id:document.source_asset_id,clinic_id:clinicId,status:'active',purpose:'accounting_payroll_document'}});
+  return serializePayrollDocument(document,asset);
+}
+
+async function getPayroll({publicId,clinicId}) {
+  const payroll=await AccountingPayrollPeriod.findOne({where:{public_id:publicId,clinic_id:clinicId}});
+  if(!payroll)throw domainError(404,'payroll_not_found','Registro de nóminas no encontrado.');
+  const asset=payroll.document_asset_id?await ClinicalPrivateAsset.findOne({where:{id:payroll.document_asset_id,clinic_id:clinicId,status:'active'}}):null;
+  return serializePayroll(payroll,asset);
 }
 
 async function getCashWorkspace({ clinicId, query = {} }) {
@@ -1147,6 +1177,7 @@ async function storePayrollAttachment({
   clinicId,
   actorId,
   preparedAttachment,
+  transaction = null,
 }) {
   if (!preparedAttachment) return null;
   const asset = await clinicalPrivateStorage.storeClinicalPrivateAsset({
@@ -1159,8 +1190,9 @@ async function storePayrollAttachment({
     buffer: preparedAttachment.buffer,
     createdBy: actorId,
     metadata: { period_month: payroll.period_month },
+    transaction,
   });
-  await payroll.update({ document_asset_id: asset.id, updated_by: actorId });
+  await payroll.update({ document_asset_id: asset.id, updated_by: actorId }, {transaction});
   return asset;
 }
 
@@ -1201,10 +1233,13 @@ async function createPayroll({ clinicId, actorId, payload }) {
 }
 
 async function updatePayroll({ publicId, clinicId, actorId, payload }) {
+  let uploaded = null;
+  try { return await db.sequelize.transaction(async transaction => {
   const payroll = await AccountingPayrollPeriod.findOne({
-    where: { public_id: publicId, clinic_id: clinicId },
+    where: { public_id: publicId, clinic_id: clinicId }, transaction, lock:transaction.LOCK.UPDATE,
   });
   if (!payroll) throw domainError(404, 'payroll_not_found', 'Registro de nóminas no encontrado.');
+  await require('./accountingBank.service').assertTargetEditable({clinicId,type:'payroll',id:payroll.public_id,transaction});
   const values = normalizePayroll(payload);
   const duplicate = await AccountingPayrollPeriod.findOne({
     where: {
@@ -1222,18 +1257,23 @@ async function updatePayroll({ publicId, clinicId, actorId, payload }) {
     );
   }
   const preparedAttachment = prepareExpenseAttachment(payload.attachment);
-  await payroll.update({ ...values, updated_by: actorId });
+  await payroll.update({ ...values, updated_by: actorId },{transaction});
   const asset = preparedAttachment
     ? await storePayrollAttachment({
       payroll,
       clinicId,
       actorId,
-      preparedAttachment,
+      preparedAttachment, transaction,
     })
     : payroll.document_asset_id
       ? await ClinicalPrivateAsset.findByPk(payroll.document_asset_id)
       : null;
+  if(preparedAttachment)uploaded=asset;
   return serializePayroll(payroll, asset);
+  }); } catch(error) {
+    if(uploaded)await clinicalPrivateStorage.discardUncommittedClinicalObject(uploaded);
+    throw error;
+  }
 }
 
 async function readPayrollAttachment({ publicId, clinicId }) {
@@ -1423,6 +1463,9 @@ module.exports = {
   getCashWorkspace,
   createExpense,
   updateExpense,
+  getExpense,
+  getPayroll,
+  getPayrollDocument,
   readExpenseAttachment,
   openCash,
   createCashMovement,

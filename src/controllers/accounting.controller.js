@@ -6,6 +6,7 @@ const accountingFirms = require('../services/accountingFirms.service');
 const accountingIngestion = require('../services/accountingIngestion.service');
 const accountingSepa = require('../services/accountingSepa.service');
 const accountingExport = require('../services/accountingExport.service');
+const accountingBank = () => require('../services/accountingBank.service');
 const { canUserAccessFeature } = require('../lib/access-policy');
 
 function positiveInteger(value) {
@@ -69,6 +70,32 @@ async function requireAnyFeature(req, featureKeys) {
   return resolvedClinicId;
 }
 
+async function bankContext(req,write=false) {
+  const resolvedClinicId=await requireFeature(req,'accounting.bank.view');
+  if(write)await requireFeature(req,'accounting.bank.manage');
+  // Manage never grants visibility of employee payroll implicitly.
+  const includePayroll=await canUserAccessFeature({actorId:actorId(req),clinicId:resolvedClinicId,featureKey:'accounting.payroll.view'});
+  return {clinicId:resolvedClinicId,actorId:actorId(req),includePayroll,query:req.query,payload:req.body};
+}
+exports.bankWorkspace=asyncHandler(async(req,res)=>{
+  const context=await bankContext(req);
+  const canManage=await canUserAccessFeature({actorId:context.actorId,clinicId:context.clinicId,featureKey:'accounting.bank.manage'});
+  res.json({...await accountingBank().workspace(context),capabilities:{manage:canManage,payroll:context.includePayroll}});
+});
+exports.bankLines=asyncHandler(async(req,res)=>res.json(await accountingBank().listLines(await bankContext(req))));
+exports.bankImports=asyncHandler(async(req,res)=>res.json(await accountingBank().listImports(await bankContext(req))));
+exports.bankTargets=asyncHandler(async(req,res)=>res.json(await accountingBank().listTargets(await bankContext(req))));
+exports.bankPreviewImport=asyncHandler(async(req,res)=>res.json(await accountingBank().previewImport(await bankContext(req,true))));
+exports.bankCreateImport=asyncHandler(async(req,res)=>res.status(201).json(await accountingBank().createImport(await bankContext(req,true))));
+exports.bankCreateMatches=asyncHandler(async(req,res)=>res.json(await accountingBank().createMatches({...await bankContext(req,true),lineId:req.params.lineId})));
+exports.bankReverseMatch=asyncHandler(async(req,res)=>res.json(await accountingBank().reverseMatch({...await bankContext(req,true),matchId:req.params.matchId})));
+exports.bankImportSource=asyncHandler(async(req,res)=>{
+  const context=await bankContext(req),result=await accountingBank().source({...context,id:req.params.importId});
+  res.setHeader('Content-Type','text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition','attachment; filename="extracto.csv"');
+  res.send(result.buffer);
+});
+
 exports.getWorkspace = asyncHandler(async (req, res) => {
   const resolvedClinicId = await requireFeature(req, 'billing.reports.view');
   const resolvedActorId = actorId(req);
@@ -111,6 +138,18 @@ exports.updateExpense = asyncHandler(async (req, res) => {
     actorId: actorId(req),
     payload: req.body,
   }));
+});
+exports.getExpense=asyncHandler(async(req,res)=>{
+  const resolvedClinicId=await requireAnyFeature(req,['billing.reports.view','accounting.expenses.manage']);
+  res.json(await accounting.getExpense({publicId:req.params.expenseId,clinicId:resolvedClinicId}));
+});
+exports.getPayrollDocument=asyncHandler(async(req,res)=>{
+  const resolvedClinicId=await requireFeature(req,'accounting.payroll.view');
+  res.json(await accounting.getPayrollDocument({publicId:req.params.documentId,clinicId:resolvedClinicId}));
+});
+exports.getPayroll=asyncHandler(async(req,res)=>{
+  const resolvedClinicId=await requireFeature(req,'accounting.payroll.view');
+  res.json(await accounting.getPayroll({publicId:req.params.payrollId,clinicId:resolvedClinicId}));
 });
 
 exports.downloadExpenseAttachment = asyncHandler(async (req, res) => {
@@ -282,6 +321,7 @@ exports.listIngestion = asyncHandler(async (req, res) => {
   res.json(await accountingIngestion.list({
     clinicId: resolvedClinicId,
     documentKind,
+    pagination: req.query.pagination, cursor: req.query.cursor, limit: req.query.limit, q: req.query.q,
   }));
 });
 

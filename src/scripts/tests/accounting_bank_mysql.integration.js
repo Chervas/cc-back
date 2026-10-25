@@ -1,0 +1,131 @@
+'use strict';
+// Native production modules and the selected additive DDL on a disposable
+// socket-only mysqld. No clinical rows, runtime credential or provider is used.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const {createRequire}=require('node:module'),{randomUUID}=require('node:crypto'),{DataTypes:D}=require('sequelize');
+const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fixture');
+function load(file,overrides,env={}){const local=createRequire(file),module={exports:{}};vm.runInNewContext(fs.readFileSync(file,'utf8'),{module,exports:module.exports,Buffer,Date,Map,Set,Object,TextDecoder,console,__dirname:path.dirname(file),process:{env},require:name=>Object.hasOwn(overrides,name)?overrides[name]:local(name)},{filename:file});return module.exports;}
+withIsolatedCampaignMysql(async({sql,models:db,report,registerOwnedLoopbackServer})=>{
+ db.Clinica=sql.define('Clinica',{id_clinica:{type:D.INTEGER,primaryKey:true},nombre_clinica:D.STRING,configuracion:D.JSON,url_avatar:D.STRING,datos_fiscales_clinica:D.JSON,direccion:D.STRING,codigo_postal:D.STRING,ciudad:D.STRING,provincia:D.STRING,pais:D.STRING},{tableName:'Clinicas',timestamps:false});
+ for(const file of ['clinicalprivateasset','economicpayment','economicfiscalcoverage','economicconceptadjustment','patientfiscaldocument','accountingexpensedocument','accountingpayrollperiod','accountingpayrolldocument','accountingcashclosure','accountingcashsession','accountingcashmovement']){const model=require('../../../models/'+file)(sql,D);db[model.name]=model;}
+ await sql.sync();
+ await require('../../../migrations/20261026010000-accounting-bank-reconciliation').up(sql.getQueryInterface(),D);
+ for(const file of ['accountingbankimport','accountingbankline','accountingbankmatch','accountingbankcommand']){const model=require('../../../models/'+file)(sql,D);db[model.name]=model;}
+ await db.Clinica.bulkCreate([{id_clinica:72,nombre_clinica:'Ficticia A'},{id_clinica:73,nombre_clinica:'Ficticia B'}]);
+ const [foreignKeys]=await sql.query("SELECT DELETE_RULE,UPDATE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME LIKE 'AccountingBank%'");assert.equal(foreignKeys.length,7);assert(foreignKeys.every(r=>r.DELETE_RULE==='RESTRICT'&&r.UPDATE_RULE==='RESTRICT'));
+ const root=path.join(report.root,'private');fs.mkdirSync(root,{mode:0o700});
+ const storage=load(require.resolve('../../services/clinicalPrivateStorage.service'),{'../../models':db},{CLINICAL_PRIVATE_STORAGE_ROOT:root});
+ const getService=()=>load(require.resolve('../../services/accountingBank.service'),{'../../models':db,'./clinicalPrivateStorage.service':storage});
+ let service=getService();
+ const context={clinicId:72,actorId:5,includePayroll:true};
+ const payload=(rows,patch={})=>({filename:'synthetic-bank.csv',content_base64:Buffer.from('date;description;amount;ID\n'+rows.join('\n')).toString('base64'),account_ref:'QA-bank',currency:'EUR',delimiter:';',decimal_separator:',',date_format:'YYYY-MM-DD',mapping:{date:'date',description:'description',amount:'amount',transaction_id:'ID'},...patch});
+ const importRows=async(rows,patch={})=>service.createImport({...context,payload:payload(rows,{idempotency_key:randomUUID(),...patch})});
+ const request=(line,allocations,patch={})=>({...context,lineId:line.id,payload:{expected_version:line.version,idempotency_key:randomUUID(),allocations,...patch}});
+ const payment=async(amount,patch={})=>db.EconomicPayment.create({public_id:randomUUID(),clinic_id:72,patient_id:11,amount,method:'transfer',status:'confirmed',application:{allocations:[]},paid_at:new Date('2026-10-25T12:00Z'),...patch});
+ const fiscal=async(type,p,amount)=>db.PatientFiscalDocument.create({public_id:randomUUID(),clinic_id:72,patient_id:11,payment_id:p.id,document_type:type,series:type==='receipt'?'REC':'FAC',number:type+'-'+randomUUID(),status:'issued',issue_date:new Date('2026-10-25T12:00Z'),issuer_snapshot:{},recipient_snapshot:{name:'Fictitious'},lines:[],totals:{total:amount},template_snapshot:{}});
+ const pay=await payment(100),invoice=await fiscal('invoice',pay,100),receipt=await fiscal('receipt',pay,100);
+ for(const doc of [invoice,receipt])await db.EconomicFiscalCoverage.create({id:randomUUID(),clinic_id:72,patient_id:11,document_id:doc.id,document_version:1,document_type:doc.document_type,funding_key:'native-payment-'+pay.id,payment_id:pay.id,amount:100,status:'issued',created_at:new Date()});
+ const expense=await db.AccountingExpenseDocument.create({public_id:randomUUID(),clinic_id:72,supplier_name:'Fictitious supplier',document_number:'QA-1',issue_date:'2026-10-25',category:'Other',status:'pending',taxable_base:50,total:50});
+ const payroll=await db.AccountingPayrollPeriod.create({public_id:randomUUID(),clinic_id:72,period_month:'2026-10-01',status:'scheduled',gross_salaries:100,irpf_withholding:20,net_paid:80,total_personnel_cost:100});
+ const refund=await db.EconomicConceptAdjustment.create({id:randomUUID(),clinic_id:72,patient_id:11,budget_id:1,line_key:'line',refund_amount:20,refund_method:'transfer',settlement:'refund',reason:'Fictitious refund',created_at:new Date('2026-10-25T12:00Z')});
+ const original=payload(['2026-10-25;Synthetic incoming;100,00;in-1','2026-10-25;Synthetic expense;-50,00;out-1','2026-10-25;Synthetic payroll;-80,00;out-2','2026-10-25;Synthetic refund;-20,00;out-3'],{idempotency_key:randomUUID()});
+ const headersOnly=await service.previewImport({...context,payload:{...original,mapping:{date:'',description:'',amount:''}}});assert.equal(headersOnly.can_confirm,false);assert.equal(headersOnly.headers.length,4);
+ const preview=await service.previewImport({...context,payload:original});assert.equal(preview.can_confirm,true);assert.equal(await db.AccountingBankImport.count(),0);
+ const first=await service.createImport({...context,payload:original});assert.equal(first.items.length,4);assert.equal(first.import.created_count,4);assert.equal(first.command.idempotency_key,original.idempotency_key);assert.equal(first.command.kind,'import');assert.equal(first.command.applied,true);
+ assert.equal((await service.createImport({...context,payload:original})).replayed,true);
+ assert.equal((await service.createImport({...context,payload:{...original,idempotency_key:randomUUID()}})).duplicate,true);
+ assert.equal(await db.AccountingBankLine.count(),4);assert.equal(await db.ClinicalPrivateAsset.count(),1);
+ const source=await service.source({clinicId:72,id:first.import.id});assert.equal(source.buffer.toString('base64'),original.content_base64);
+ await assert.rejects(service.source({clinicId:73,id:first.import.id}),{code:'bank_import_not_found'});
+ await assert.rejects(service.source({clinicId:72,id:'../../private'}),{code:'bank_import_not_found'});
+ const incoming=first.items.find(r=>r.direction==='incoming'),outgoing=first.items.filter(r=>r.direction==='outgoing');
+ const firstCommand=request(incoming,[{target_type:'payment',target_id:pay.public_id,amount:60}]);
+ let result=await service.createMatches(firstCommand);assert.equal(result.line.status,'partial');assert.equal(result.line.remaining,40);assert.equal(result.line.version,2);
+ assert.equal((await service.createMatches(firstCommand)).replayed,true);
+ await assert.rejects(service.createMatches({...firstCommand,lineId:outgoing[0].id}),{code:'bank_idempotency_conflict'});
+ await assert.rejects(service.createMatches(request(incoming,[{target_type:'payment',target_id:pay.public_id,amount:40}])),{code:'bank_line_version_conflict'});
+ result=await service.createMatches(request(result.line,[{target_type:'payment',target_id:pay.public_id,amount:40}]));assert.equal(result.line.status,'matched');
+ for(const doc of [invoice,receipt]){const targets=await service.listTargets({...context,query:{fiscal_document_id:doc.public_id}});assert.equal(targets.items.length,1);assert.equal(targets.items[0].id,pay.public_id);assert.equal(targets.items[0].matched_amount,100);assert.equal(targets.items[0].documents.length,2);}
+ assert.equal(result.line.matches[0].documents.length,2);
+ report.checks.push('Selected four-table DDL has RESTRICT foreign keys. Private CSV bytes survive; import and exact command replay are durable. FAC and REC resolve the same canonical payment, with one shared reconciliation capacity.');
+ await assert.rejects(service.assertTargetEditable({clinicId:72,type:'payment',id:pay.public_id}),{code:'bank_reconciliation_target_locked'});
+ const reversal={...context,matchId:result.line.matches.find(m=>m.amount===60).id,payload:{expected_version:result.line.version,idempotency_key:randomUUID(),reason:'Fictitious undo'}};
+ const undone=await service.reverseMatch(reversal);assert.equal(undone.line.remaining,60);assert.equal(undone.command.kind,'reverse');assert.equal(undone.command.idempotency_key,reversal.payload.idempotency_key);assert.equal(undone.line.matches.find(m=>m.amount===60).status,'reversed');assert.equal((await service.reverseMatch(reversal)).replayed,true);
+ service=getService();assert.equal((await service.listTargets({...context,query:{target_type:'payment',target_id:pay.public_id}})).items[0].remaining,60);
+ assert.equal((await db.EconomicPayment.findByPk(pay.id)).amount,'100.00');assert.equal((await db.AccountingExpenseDocument.findByPk(expense.id)).status,'pending');
+ const newPay=await payment(100),concurrent=await importRows(['2026-10-25;Concurrent A;60,00;c-a','2026-10-25;Concurrent B;60,00;c-b']);
+ const outcomes=await Promise.allSettled(concurrent.items.map(line=>service.createMatches(request(line,[{target_type:'payment',target_id:newPay.public_id,amount:60}]))));
+ assert.equal(outcomes.filter(r=>r.status==='fulfilled').length,1);assert.equal(outcomes.find(r=>r.status==='rejected').reason.code,'bank_target_overcovered');
+ assert.equal((await service.listTargets({...context,query:{target_type:'payment',target_id:newPay.public_id}})).items[0].matched_amount,60);
+ report.checks.push('Native concurrent requests on different bank lines cannot over-cover the same payment; stale CAS fails. Undo survives service reload, retains the original match and restores only link capacity without changing money.');
+ const unpaidTarget=(await service.listTargets({...context,query:{target_type:'expense',target_id:expense.public_id}})).items[0];assert.equal(unpaidTarget.can_match,false);assert.equal(unpaidTarget.required_action,'register_payment');
+ await assert.rejects(service.createMatches(request(outgoing[0],[{target_type:'expense',target_id:expense.public_id,amount:50}])),{code:'bank_target_payment_required'});
+ const nativeAccounting=load(require.resolve('../../services/accounting.service'),{'../../models':db,'./clinicalPrivateStorage.service':storage,'./patientEconomics.service':{listTemplates:async()=>[]},'./accountingBank.service':service});
+ const expenseDetails=await nativeAccounting.getExpense({clinicId:72,publicId:expense.public_id});await nativeAccounting.updateExpense({clinicId:72,actorId:5,publicId:expense.public_id,payload:{...expenseDetails,status:'paid',paid_at:'2026-10-25T12:00Z'}});
+ const payrollPending=await nativeAccounting.getPayroll({clinicId:72,publicId:payroll.public_id});await nativeAccounting.updatePayroll({clinicId:72,actorId:5,publicId:payroll.public_id,payload:{...payrollPending,status:'paid',paid_at:'2026-10-25T12:00Z'}});
+ const allocatedCommands={};for(const [i,type,row,amount] of [[0,'expense',expense,50],[1,'payroll',payroll,80],[2,'refund',refund,20]]){allocatedCommands[type]=request(outgoing[i],[{target_type:type,target_id:type==='refund'?row.id:row.public_id,amount}]);await service.createMatches(allocatedCommands[type]);}
+ const revokedReplay=await service.createMatches({...allocatedCommands.payroll,includePayroll:false});assert.equal(revokedReplay.replayed,true);assert.equal(revokedReplay.line.matches[0].target_type,'restricted');assert.equal(revokedReplay.line.matches[0].target_id,null);assert.equal(revokedReplay.line.matches[0].documents.length,0);assert.equal(revokedReplay.command.idempotency_key,allocatedCommands.payroll.payload.idempotency_key);assert.equal(revokedReplay.command.kind,'match');assert.equal(revokedReplay.command.applied,true);
+ const restoredReplay=await service.createMatches(allocatedCommands.payroll);assert.equal(restoredReplay.line.matches[0].target_id,payroll.public_id);
+ await assert.rejects(service.listTargets({...context,includePayroll:false,query:{target_type:'payroll'}}),{code:'bank_payroll_forbidden'});
+ const redacted=(await service.listLines({...context,includePayroll:false,query:{q:'payroll'}})).items[0].matches[0];assert.equal(redacted.target_id,null);assert.equal(redacted.target_type,'restricted');
+ const foreign=await payment(10,{clinic_id:73}),testLine=(await importRows(['2026-10-25;Guard incoming;10,00;guard-in'])).items[0];
+ await assert.rejects(service.createMatches(request(testLine,[{target_type:'payment',target_id:foreign.public_id,amount:10}])),{code:'bank_target_not_found'});
+ await assert.rejects(service.createMatches(request(testLine,[{target_type:'expense',target_id:expense.public_id,amount:1}])),{code:'bank_direction_mismatch'});
+ const usd=(await importRows(['2026-10-25;USD test;10,00;usd-1'],{currency:'USD'})).items[0];
+ await assert.rejects(service.createMatches(request(usd,[{target_type:'payment',target_id:pay.public_id,amount:1}])),{code:'bank_currency_mismatch'});
+ const overlap=await importRows(['2026-10-25;Guard incoming;10,00;guard-in','2026-10-25;New overlapping row;1,00;overlap-new']);assert.equal(overlap.import.duplicate_count,1);assert.equal(overlap.items.length,1);
+ const importView=await service.listLines({...context,query:{import_id:overlap.import.id,limit:1}});assert.equal(importView.items.length,1);assert(importView.next_cursor);const importNext=await service.listLines({...context,query:{import_id:overlap.import.id,limit:1,cursor:importView.next_cursor}});assert.equal(importNext.items.length,1);assert.notEqual(importNext.items[0].id,importView.items[0].id);assert.equal((await service.workspace({...context,query:{import_id:overlap.import.id,limit:1}})).summary[0].line_count,2);
+ await assert.rejects(service.listLines({...context,query:{import_id:first.import.id,limit:1,cursor:importView.next_cursor}}),{code:'bank_cursor_invalid'});await assert.rejects(service.listLines({...context,clinicId:73,query:{import_id:overlap.import.id}}),{code:'bank_import_not_found'});
+ await assert.rejects(importRows(['2026-10-25;Changed external identity;9,00;guard-in']),{code:'bank_transaction_identity_conflict'});
+ const page=await service.listLines({...context,query:{limit:2}});assert.equal(page.items.length,2);assert(page.next_cursor);await assert.rejects(service.listLines({...context,query:{limit:2,cursor:page.next_cursor,q:'another'}}),{code:'bank_cursor_invalid'});
+ const targetPage=await service.listTargets({...context,query:{limit:1}});assert(targetPage.next_cursor);const targetNext=await service.listTargets({...context,query:{limit:1,cursor:targetPage.next_cursor}});assert.notEqual(targetNext.items[0].id,targetPage.items[0].id);
+ const aggregate=await service.workspace({...context,query:{limit:1}});assert.equal(aggregate.items.length,1);assert(aggregate.summary.reduce((n,r)=>n+r.line_count,0)>1);
+ report.checks.push('Outgoing expenses, payroll and refunds have independent canonical capacities; permissions redact payroll targets, cross-clinic/direction/currency mismatches fail. Overlapping originals deduplicate real row identity; pagination is scope-pinned and summary covers all pages.');
+ const rollbackLine=(await importRows(['2026-10-25;Rollback audit;5,00;rollback'])).items[0],rollbackPay=await payment(5),matchesBefore=await db.AccountingBankMatch.count();
+ db.AccountingBankCommand.addHook('beforeCreate','owned-audit-failure',()=>{throw Error('OWNED_AUDIT_FAILURE');});
+ await assert.rejects(service.createMatches(request(rollbackLine,[{target_type:'payment',target_id:rollbackPay.public_id,amount:5}])),/OWNED_AUDIT_FAILURE/);
+ db.AccountingBankCommand.removeHook('beforeCreate','owned-audit-failure');assert.equal(await db.AccountingBankMatch.count(),matchesBefore);assert.equal((await db.AccountingBankLine.findByPk(rollbackLine.id)).version,1);
+ const accounting=load(require.resolve('../../services/accounting.service'),{'../../models':db,'./clinicalPrivateStorage.service':storage,'./patientEconomics.service':{listTemplates:async()=>[]},'./accountingBank.service':service});
+ await assert.rejects(accounting.updateExpense({clinicId:72,actorId:5,publicId:expense.public_id,payload:{}}),{code:'bank_reconciliation_target_locked'});
+ await assert.rejects(accounting.updatePayroll({clinicId:72,actorId:5,publicId:payroll.public_id,payload:{}}),{code:'bank_reconciliation_target_locked'});
+ const credit=await fiscal('credit_note',pay,20),signedCredit=await fiscal('credit_note',pay,-20);await signedCredit.update({payment_data:{adjustment_id:refund.id}});
+ const refundTargets=await service.listTargets({...context,query:{fiscal_document_id:signedCredit.public_id}});assert.equal(refundTargets.items.length,1);assert.equal(refundTargets.items[0].type,'refund');assert.equal(refundTargets.items[0].id,refund.id);assert.equal(refundTargets.items[0].direction,'outgoing');assert.equal(refundTargets.items[0].documents[0].id,signedCredit.public_id);
+ const legacyCredit=await service.listTargets({...context,query:{fiscal_document_id:credit.public_id}});assert.equal(legacyCredit.items.length,0);assert.equal(legacyCredit.review_required,true);const payrollSource=await storage.storeClinicalPrivateAsset({purpose:'accounting_payroll_document',contentType:'application/pdf',buffer:Buffer.from('%PDF-1.4\n%%EOF'),clinicId:72,originalFilename:'fictitious-payroll.pdf'});await db.AccountingPayrollDocument.create({source_asset_id:payrollSource.id,public_id:randomUUID(),clinic_id:72,employee_name:'Fictitious individual',period_month:'2026-10-01',gross_salary:9999,net_salary:9000,other_amounts:0});
+ const accountingWorkspace=await accounting.getWorkspace({clinicId:72,includePayroll:true,query:{from:'2026-10-01',to:'2026-10-31',business_date:'2026-10-25'}});
+ assert.equal(accountingWorkspace.summary.sales_total,60);assert.equal(accountingWorkspace.summary.payroll_total,100);assert.equal(accountingWorkspace.summary.patient_refunds_total,20);assert.equal(accountingWorkspace.summary.collected_total,185);
+ assert.equal(accountingWorkspace.analytics.daily.reduce((n,r)=>n+r.sales,0),60);
+ // Two native payments may cover one bank row, without inventing a fiscal
+ // target. One native payment may span several bank rows as well.
+ const multiA=await payment(30),multiB=await payment(20),multiLine=(await importRows(['2026-10-25;Combined incoming;50,00;combined-in'])).items[0];
+ const multi=await service.createMatches(request(multiLine,[{target_type:'payment',target_id:multiA.public_id,amount:30},{target_type:'payment',target_id:multiB.public_id,amount:20}]));assert.equal(multi.line.status,'matched');assert.equal(multi.line.matches.length,2);
+ const remainderLine=(await importRows(['2026-10-25;Split remainder;40,00;split-rem'])).items[0];await service.createMatches(request(remainderLine,[{target_type:'payment',target_id:newPay.public_id,amount:40}]));
+ assert.equal((await service.listTargets({...context,query:{target_type:'payment',target_id:newPay.public_id}})).items[0].remaining,0);
+ // The original must not leak if the audit command fails after its bytes and
+ // rows were written, and a retry must remain possible with the same key.
+ const rollbackImport=payload(['2026-10-25;Rollback original;3,00;rollback-import'],{idempotency_key:randomUUID()}),assetsBefore=await db.ClinicalPrivateAsset.count();
+ const countFiles=folder=>fs.readdirSync(folder,{withFileTypes:true}).reduce((n,e)=>n+(e.isDirectory()?countFiles(path.join(folder,e.name)):1),0),filesBefore=countFiles(root);
+ db.AccountingBankCommand.addHook('beforeCreate','owned-import-audit-failure',()=>{throw Error('OWNED_IMPORT_AUDIT_FAILURE');});
+ await assert.rejects(service.createImport({...context,payload:rollbackImport}),/OWNED_IMPORT_AUDIT_FAILURE/);db.AccountingBankCommand.removeHook('beforeCreate','owned-import-audit-failure');
+ assert.equal(await db.ClinicalPrivateAsset.count(),assetsBefore);assert.equal(countFiles(root),filesBefore);assert.equal((await service.createImport({...context,payload:rollbackImport})).items.length,1);
+ const details=await accounting.getExpense({clinicId:72,publicId:expense.public_id});assert.equal(details.status,'paid');await assert.rejects(accounting.getExpense({clinicId:73,publicId:expense.public_id}),{code:'expense_not_found'});
+ const payrollDetails=await accounting.getPayroll({clinicId:72,publicId:payroll.public_id});assert.equal(payrollDetails.status,'paid');await assert.rejects(accounting.getPayroll({clinicId:73,publicId:payroll.public_id}),{code:'payroll_not_found'});
+ report.checks.push('Audit-command failure atomically rolls back matches and CAS. Financial edits of reconciled sources are blocked. Accounting sales exclude receipts and subtract credit notes; individual payroll uploads do not duplicate the monthly cost, and refunds remain separate.');
+ const largeImport=await importRows(['2026-10-25;Large A;9999999999,99;large-a','2026-10-25;Large B;9999999999,99;large-b'],{account_ref:'large-sum'});
+ const largeSummary=await service.workspace({...context,query:{account_ref:'large-sum',limit:1}});assert.equal(largeSummary.summary[0].amount,19999999999.98);assert.equal(largeSummary.summary[0].remaining,19999999999.98);assert.equal(largeSummary.summary[0].line_count,2);
+ report.checks.push('Exact cached replay rechecks current payroll visibility without mutating its historical receipt. Full-scope decimal sums may exceed a single-row DECIMAL bound without rounding or pretending the current page is the total.');
+ const allDuplicate=await importRows(['2026-10-25;Synthetic refund;-20,00;out-3','2026-10-25;Synthetic payroll;-80,00;out-2','2026-10-25;Synthetic expense;-50,00;out-1','2026-10-25;Synthetic incoming;100,00;in-1']);assert.equal(allDuplicate.import.created_count,0);assert.equal(allDuplicate.import.duplicate_count,4);assert.equal((await service.workspace({...context,query:{import_id:allDuplicate.import.id}})).items.length,4);
+ const history=await service.listImports({...context,query:{q:'synthetic-bank',limit:1}});assert.equal(history.items.length,1);assert(history.next_cursor);assert.equal(history.items[0].filename,'synthetic-bank.csv');
+ const historyNext=await service.listImports({...context,query:{q:'synthetic-bank',limit:1,cursor:history.next_cursor}});assert.equal(historyNext.items.length,1);assert.notEqual(historyNext.items[0].id,history.items[0].id);await assert.rejects(service.listImports({...context,query:{q:'other',limit:1,cursor:history.next_cursor}}),{code:'bank_cursor_invalid'});assert.equal((await service.listImports({...context,clinicId:73,query:{}})).items.length,0);
+ report.checks.push('Persisted import history is searchable and paginated after reload; an entirely overlapping CSV still retains its original and all canonical line references. Exact import scope traverses every page without deriving dates from one page or reassigning original ownership.');
+ // Full native HTTP stack with explicit test identity and the native bank service.
+ const express=require('express'),allowed=new Set(['accounting.bank.view','accounting.bank.manage','accounting.payroll.view']);
+ const controller=load(require.resolve('../../controllers/accounting.controller'),{'../services/accounting.service':accounting,'../services/accountingBank.service':service,'../services/accountingFirms.service':{isPortalUser:async({actorId})=>actorId===90},'../services/accountingIngestion.service':{},'../services/accountingSepa.service':{},'../services/accountingExport.service':{},'../lib/access-policy':{canUserAccessFeature:async({actorId,clinicId,featureKey})=>actorId===5&&clinicId===72&&allowed.has(featureKey)}});
+ const router=load(require.resolve('../../routes/accounting.routes'),{'../controllers/accounting.controller':controller,'./accountingDocumentPreview.routes':express.Router(),'./auth.middleware':(req,res,next)=>{if(!req.headers['x-owned-actor'])return res.sendStatus(401);req.userData={userId:Number(req.headers['x-owned-actor'])};next();}});
+ const app=express();app.use(express.json({limit:'4mb'}));app.use(router);const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});registerOwnedLoopbackServer(server);
+ try{const requestHttp=(url,actor=5,body)=>new Promise((resolve,reject)=>{const request=require('node:http').request({host:'127.0.0.1',port:server.address().port,path:url,method:body===undefined?'GET':'POST',headers:{'x-owned-actor':String(actor),...(body?{'content-type':'application/json'}:{})}},response=>{const chunks=[];response.on('data',c=>chunks.push(c));response.on('end',()=>resolve({status:response.statusCode,headers:{get:key=>response.headers[key]},json:async()=>JSON.parse(Buffer.concat(chunks).toString())}));});request.on('error',reject);request.end(body?JSON.stringify(body):undefined);});const get=(url,actor=5)=>requestHttp(url,actor);
+ assert.equal((await get('/bank/workspace?clinic_id=72')).status,200);assert.equal((await get('/bank/workspace?clinic_id=73')).status,403);assert.equal((await get('/bank/workspace?clinic_id=72',90)).status,403);
+ allowed.delete('accounting.bank.manage');const response=await requestHttp('/bank/lines/'+testLine.id+'/matches',5,{clinic_id:72,expected_version:1,idempotency_key:randomUUID(),allocations:[]});assert.equal(response.status,403);
+ const noStore=await get('/bank/targets?clinic_id=72&fiscal_document_id='+receipt.public_id);assert.equal(noStore.headers.get('cache-control'),'private, no-store');assert.equal((await noStore.json()).items[0].id,pay.public_id);
+ }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+ report.checks.push('Production HTTP routes retain native auth, exact clinic and separate bank/payroll privileges; portal is denied and responses are private/no-store. No outside socket/provider was accessed.');
+}).catch(error=>{console.error(error);process.exitCode=1;});

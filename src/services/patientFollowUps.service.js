@@ -85,6 +85,8 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
       linked_appointment_needs_review: data.status === 'scheduled' && (!appointment || ['cancelada', 'no_asistio'].includes(appointment.estado)),
       linked_appointment_completed: data.status === 'scheduled' && require('../lib/status-catalog').hasAttendedAppointment(appointment),
       source_kind: data.source_kind,
+      source_episode_id: includeClinical ? related.report?.public_id || null : null,
+      source_episode_title: includeClinical ? related.report?.title || null : null,
       source_appointment_id: data.source_appointment_id ? Number(data.source_appointment_id) : null,
       source_date: data.source_date || null,
       source_date_semantics: data.source_date_semantics,
@@ -97,19 +99,27 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
     const ids = (field) => [...new Set(rows.map((row) => Number(row[field])).filter(Boolean))];
     const treatmentIds = ids('treatment_id');
     const appointmentIds = ids('linked_appointment_id');
-    const [patients, treatments, appointments] = await Promise.all([
+    const reportIds = includeClinical ? ids('source_report_id') : [];
+    const [patients, treatments, appointments, reports] = await Promise.all([
       Paciente.findAll({ where: { id_paciente: { [Op.in]: ids('patient_id') } }, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos'], transaction }),
       treatmentIds.length ? Tratamiento.findAll({ where: { id_tratamiento: { [Op.in]: treatmentIds } }, attributes: ['id_tratamiento', 'nombre'], transaction }) : [],
       appointmentIds.length ? CitaPaciente.findAll({ where: { id_cita: { [Op.in]: appointmentIds }, clinica_id: rows[0].clinic_id }, attributes: ['id_cita', 'paciente_id', 'inicio', 'estado'], transaction }) : [],
+      reportIds.length && db.AppointmentClinicalReport?.findAll ? db.AppointmentClinicalReport.findAll({
+        where: { id: { [Op.in]: reportIds }, clinic_id: rows[0].clinic_id },
+        attributes: ['id', 'public_id', 'patient_id', 'clinic_id', 'title'], transaction,
+      }) : [],
     ]);
     const patientMap = new Map(patients.map((row) => [Number(row.id_paciente), row]));
     const treatmentMap = new Map(treatments.map((row) => [Number(row.id_tratamiento), row]));
     const appointmentMap = new Map(appointments.map((row) => [Number(row.id_cita), row]));
+    const reportMap = new Map(reports.map(row => [Number(row.id), row]));
     return rows.map((row) => {
       const appointment = appointmentMap.get(Number(row.linked_appointment_id));
+      const report = reportMap.get(Number(row.source_report_id));
       return serialize(row, { includeClinical, related: {
         patient: patientMap.get(Number(row.patient_id)), treatment: treatmentMap.get(Number(row.treatment_id)),
         appointment: Number(appointment?.paciente_id) === Number(row.patient_id) ? appointment : null,
+        report: Number(report?.patient_id) === Number(row.patient_id) && Number(report?.clinic_id) === Number(row.clinic_id) ? report : null,
       } });
     });
   }

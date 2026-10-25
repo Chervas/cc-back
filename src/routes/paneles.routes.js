@@ -81,6 +81,16 @@ const requireMarketingClinicSet = requirePanelScope({
 // Todos los paneles, incluidos los endpoints legacy, requieren una sesión real.
 router.use(authMiddleware);
 
+router.get('/doctor-day',async(req,res)=>{
+    res.setHeader('Cache-Control','private, no-store');
+    try {
+        res.json(await panelesDashboardService.getDoctorDay({userId:req.userData?.userId,query:req.query||{}}));
+    } catch(error) {
+        const status=Number(error.statusCode||error.status||500);
+        res.status(status>=400&&status<600?status:500).json({error:error.code||'doctor_day_unavailable',message:status>=500?'No se pudo cargar la jornada clínica.':error.message});
+    }
+});
+
 // GET /api/paneles/main
 router.get('/main', async (req, res) => {
     try {

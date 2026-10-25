@@ -138,6 +138,14 @@ const DEFAULT_FEATURES = {
     accountant: false,
     unknown: false,
   },
+  'accounting.bank.view': {
+    propietario: true, agencia: false, doctor: false, assistant: false,
+    reception: false, admin_staff: true, accountant: false, unknown: false,
+  },
+  'accounting.bank.manage': {
+    propietario: true, agencia: false, doctor: false, assistant: false,
+    reception: false, admin_staff: true, accountant: false, unknown: false,
+  },
   'accounting.cash.manage': {
     propietario: true,
     agencia: false,
@@ -463,6 +471,8 @@ const PATIENT_DIRECTOR_DEFAULTS = Object.freeze({
   'billing.reports.view': false,
   'billing.documents.manage': false,
   'accounting.expenses.manage': false,
+  'accounting.bank.view': false,
+  'accounting.bank.manage': false,
   'accounting.cash.manage': false,
   'accounting.payroll.view': false,
   'accounting.payroll.manage': false,
@@ -743,6 +753,14 @@ const FEATURE_CATALOG = [
     label: 'Gestionar facturas recibidas y gastos',
     enforcement_status: 'backend',
     sensitive: true,
+  },
+  {
+    key: 'accounting.bank.view', group: 'administration', kind: 'view',
+    label: 'Ver extractos y conciliación bancaria', enforcement_status: 'backend', sensitive: true,
+  },
+  {
+    key: 'accounting.bank.manage', group: 'administration', kind: 'action',
+    label: 'Importar extractos y conciliar movimientos', enforcement_status: 'backend', sensitive: true,
   },
   {
     key: 'accounting.cash.manage',

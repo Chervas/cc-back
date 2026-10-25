@@ -1619,8 +1619,54 @@ async function getMainDashboard({ userId, query = {} }) {
   });
 }
 
+// A read-only day view uses the same appointment projection as the main panel,
+// with a single clinic and a provider scope that can never collapse to "all".
+async function getDoctorDay({userId,query={}}) {
+  const fail=(statusCode,code,message)=>{throw Object.assign(Error(message),{statusCode,code});};
+  const positive=value=>!Array.isArray(value)&&/^\d+$/.test(String(value??''))&&Number.isSafeInteger(Number(value))&&Number(value)>0?Number(value):null;
+  userId=positive(userId);if(!userId)fail(401,'unauthenticated','Usuario no autenticado.');
+  const clinicId=positive(query.clinic_id);if(!clinicId)fail(400,'doctor_day_clinic_required','Selecciona una única clínica.');
+  const explicitDoctor=query.doctor_id!==undefined;
+  const requestedDoctor=explicitDoctor?positive(query.doctor_id):null;
+  if(explicitDoctor&&!requestedDoctor)fail(400,'doctor_day_professional_invalid','Selecciona un profesional válido.');
+  const requestedDate=query.date===undefined?null:normalizeDateOnly(query.date);
+  if(query.date!==undefined&&(Array.isArray(query.date)||!requestedDate))fail(400,'doctor_day_date_invalid','Selecciona una fecha válida.');
+  const features=['appointments.view','patients.view','patients.sensitive.view','appointments.manage','clinical.reports.view','consents.view'];
+  const decisions=await Promise.all(features.map(featureKey=>getAccessibleClinicIdsForFeature({actorId:userId,featureKey,clinicIds:[clinicId]})));
+  const permitted=feature=>uniqueInts(decisions[features.indexOf(feature)]).includes(clinicId);
+  if(features.slice(0,3).some(feature=>!permitted(feature)))fail(403,'access_policy_forbidden','No tienes permiso para consultar esta jornada.');
+  const globalAdmin=isGlobalAdmin(userId);
+  const membership=await UsuarioClinica.findOne({where:{id_usuario:userId,id_clinica:clinicId,[Op.or]:[{estado_invitacion:'aceptada'},{estado_invitacion:null}]},attributes:['rol_clinica','subrol_clinica'],raw:true});
+  const role=String(membership?.rol_clinica??'').toLowerCase(),subrole=normalizeSubrolCode(membership?.subrol_clinica);
+  const ownOnly=!globalAdmin&&role==='personaldeclinica'&&subrole==='doctor';
+  const canSelect=globalAdmin||role==='propietario'||role==='personaldeclinica'&&['admin_staff','reception'].includes(subrole);
+  if(!ownOnly&&!canSelect)fail(403,'doctor_day_role_forbidden','Este rol no tiene acceso a la jornada clínica.');
+  if(ownOnly&&explicitDoctor&&requestedDoctor!==userId)fail(403,'doctor_day_own_professional_required','Tu jornada muestra únicamente tus citas.');
+  const clinic=await Clinica.findByPk(clinicId,{attributes:['id_clinica','nombre_clinica','configuracion'],raw:true});
+  if(!clinic)fail(404,'doctor_day_clinic_not_found','Clínica no encontrada.');
+  const timeZone=resolveClinicTimeZone(clinic),now=new Date(),range=dayRange(requestedDate??dateOnly(now,timeZone),timeZone);
+  const assignments=await DoctorClinica.findAll({where:{clinica_id:clinicId,activo:true,recibe_citas:true,...(ownOnly?{doctor_id:userId}:{})},attributes:['doctor_id'],order:[['doctor_id','ASC']],raw:true});
+  const doctorIds=uniqueInts(assignments.map(row=>row.doctor_id));
+  let professionals=[];
+  if(doctorIds.length){
+    const [users,memberships]=await Promise.all([
+      Usuario.findAll({where:{id_usuario:{[Op.in]:doctorIds},estado_cuenta:'activo'},attributes:['id_usuario','nombre','apellidos'],order:[['id_usuario','ASC']],raw:true}),
+      UsuarioClinica.findAll({where:{id_usuario:{[Op.in]:doctorIds},id_clinica:clinicId,rol_clinica:{[Op.in]:['personaldeclinica','propietario','agencia']},[Op.or]:[{estado_invitacion:'aceptada'},{estado_invitacion:null}]},attributes:['id_usuario'],raw:true}),
+    ]);
+    const staffIds=new Set(memberships.map(row=>Number(row.id_usuario)));
+    professionals=users.filter(row=>staffIds.has(Number(row.id_usuario))).map(row=>({id:Number(row.id_usuario),name:fullName(row,'Profesional')}));
+  }
+  let professional=null;
+  if(ownOnly)professional=professionals.find(row=>row.id===userId)??null;
+  else if(explicitDoctor){professional=professionals.find(row=>row.id===requestedDoctor)??null;if(!professional)fail(400,'doctor_day_professional_invalid','El profesional no recibe citas en esta clínica.');}
+  else professional=professionals.find(row=>row.id===userId)??professionals[0]??null;
+  const appointments=professional?await loadAppointments({clinicIds:[clinicId],clinicMap:new Map([[clinicId,clinic]]),todayDate:range.date,now,doctorId:professional.id,includeToday:true,includeClosedToday:true,includePastAttendance:false,includeNext:false,manageClinicIds:permitted('appointments.manage')?[clinicId]:[],consentClinicIds:permitted('consents.view')?[clinicId]:[]}):{today:[],inactiveToday:[]};
+  return {clinic:{id:clinicId,name:clinic.nombre_clinica},date:range.date,time_zone:timeZone,professional,professionals,can_select_professional:canSelect,can_view_history:permitted('clinical.reports.view'),appointments:appointments.today,inactive_appointments:appointments.inactiveToday,meta:{generatedAt:now.toISOString()}};
+}
+
 module.exports = {
   getMainDashboard,
+  getDoctorDay,
   __testing: {
     isExpectedTodayAppointment,
     isInactiveTodayAppointment,

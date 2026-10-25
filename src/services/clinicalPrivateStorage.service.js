@@ -20,10 +20,12 @@ const ALLOWED_PURPOSES = new Set([
   'accounting_expense_document',
   'accounting_payroll_document',
   'fiscal_document_pdf',
+  'accounting_bank_statement',
 ]);
 
 const CONTENT_TYPE_EXTENSIONS = new Map([
   ['application/pdf', 'pdf'],
+  ['text/csv', 'csv'],
   ['image/jpeg', 'jpg'],
   ['image/jpg', 'jpg'],
   ['image/png', 'png'],
@@ -73,6 +75,7 @@ function extensionForContentType(contentType) {
 }
 
 function maxBytesFor({ purpose, contentType }) {
+  if (purpose === 'accounting_bank_statement') return 2 * 1024 * 1024;
   if (purpose === 'accounting_expense_document' || purpose === 'accounting_payroll_document') {
     return MAX_ACCOUNTING_DOCUMENT_BYTES;
   }
@@ -87,7 +90,9 @@ function assertPayload({ purpose, contentType, buffer }) {
     err.status = 400;
     throw err;
   }
-  const allowedForPurpose = purpose === 'nutrition_report_pdf'
+  const allowedForPurpose = purpose === 'accounting_bank_statement'
+    ? contentType === 'text/csv'
+    : purpose === 'nutrition_report_pdf'
     || purpose === 'consent_document_pdf'
     || purpose === 'fiscal_document_pdf'
     ? contentType === 'application/pdf'

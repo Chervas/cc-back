@@ -2558,6 +2558,7 @@ async function voidPayment({ publicId, actorId, payload }) {
       transaction,
       lock: transaction.LOCK.UPDATE,
     });
+    await require('./accountingBank.service').assertTargetEditable({clinicId:payment.clinic_id,type:'payment',id:payment.public_id,transaction});
     if (payment.status !== 'confirmed') {
       throw domainError(409, 'payment_not_voidable', 'El cobro ya no está confirmado.');
     }

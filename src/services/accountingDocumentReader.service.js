@@ -43,9 +43,118 @@ function date(value) {
   return year >= 1900 && year <= 2200 && parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day ? parsed.toISOString().slice(0, 10) : null;
 }
 
+function payrollPeriod(value) {
+  const fullDate = date(value);
+  if (fullDate) return fullDate.slice(0, 7) + '-01';
+  const numeric = /\b(?:(\d{4})[-/](\d{1,2})|(\d{1,2})[/\-](\d{4}))\b/.exec(value || '');
+  if (numeric) return date(`${numeric[1] || numeric[4]}-${String(numeric[2] || numeric[3]).padStart(2, '0')}-01`);
+  const months = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  const normalized = fold(value), year = /\b((?:19|20|21)\d{2})\b/.exec(normalized);
+  const found = months.map((name, index) => new RegExp(`\\b${name}\\b`).test(normalized) ? index : -1).filter(index => index >= 0);
+  return year && found.length === 1 ? `${year[1]}-${String(found[0] + 1).padStart(2, '0')}-01` : null;
+}
+
+// Payrolls commonly put company and employee details, and deduction bases and
+// amounts, on the same physical row. Keep the layout instead of reading the
+// company NIF or the employer's contributions as employee data.
+function parsePayroll(lines, warnings) {
+  const employeeLabel = /(?:^|\s{2,})(trabajador(?:a)?|empleado(?:a)?|nombre y apellidos)\s*:\s*/g;
+  const taxLabel = /\b(?:n\.?\s*i\.?\s*f\.?|d\.?\s*n\.?\s*i\.?)(?:\s+del?\s+trabajador(?:a)?)?\s*:\s*/g;
+  const taxId = value => /^(?:[A-Z]\d{7}[A-Z0-9]|\d{8}[A-Z]|[XYZ]\d{7}[A-Z])\b/i.exec(clean(value))?.[0].toUpperCase() || null;
+  const employees = [];
+  for (let row = 0; row < lines.length; row++) {
+    const line = lines[row], normalized = fold(line);
+    for (const match of normalized.matchAll(employeeLabel)) {
+      const start = match.index + match[0].length;
+      const value = line.slice(start).split(/\s{2,}(?=(?:n\.?i\.?f\.?|d\.?n\.?i\.?|n[ºo.]?(?:mero)?\s+(?:de\s+)?empleado|categoria|grupo|antiguedad)\s*:)/i)[0];
+      const name = clean(value).slice(0, 180);
+      if (name && !/^\d+$/.test(name)) employees.push({ name, row, column: match.index + match[0].indexOf(match[1]) });
+    }
+  }
+  const worker = employees[0];
+  let employeeTaxId = null;
+  if (worker) {
+    for (let row = worker.row; row < Math.min(lines.length, worker.row + 8); row++) {
+      for (const match of fold(lines[row]).matchAll(taxLabel)) {
+        const explicitWorker = /trabajador/.test(match[0]);
+        if (!explicitWorker && (worker.column > 12 ? match.index < worker.column - 8 : match.index > 12)) continue;
+        const candidate = taxId(lines[row].slice(match.index + match[0].length));
+        if (candidate) { employeeTaxId = candidate; break; }
+      }
+      if (employeeTaxId) break;
+    }
+  }
+  const periods = lines.filter(line => /^\s*(?:periodo(?: de liquidacion)?|mes)\b\s*:?/.test(fold(line)))
+    .map(line => payrollPeriod(line)).filter(Boolean);
+  const uniquePeriods = new Set(periods);
+  const decimalValues = value => [...value.replace(/(\d[.,])\s+(?=\d{2}\b)/g, '$1').matchAll(/-?\d[\d.,]*[.,]\d{2}(?!\d)(?:\s*€)?/g)].map(match => amount(match[0])).filter(value => value != null);
+  const labelledPayrollAmount = (pattern, wrapped = false) => {
+    const row = lines.findIndex(line => pattern.test(fold(line.trim())));
+    if (row < 0) return null;
+    const line = lines[row].trim(), match = pattern.exec(fold(line));
+    // Formula numbers such as “(1 + 2)” are never monetary amounts.
+    const tail = line.slice(match[0].length).replace(/\([^)]*\)/g, '').replace(/\d[\d.,]*\s*%/g, '');
+    const values = decimalValues(tail);
+    if (values.length) return values[values.length - 1];
+    const integer = /^\s*[:.\-]?\s*(-?\d+)\s*(?:EUR|€)?\s*$/i.exec(tail);
+    if (integer) return amount(integer[1]);
+    if (wrapped && row + 1 < lines.length) {
+      const next = /^[\s.o·:_]*(-?\d[\d.,]*(?:\s*€)?)(?:\s*EUR)?\s*$/i.exec(lines[row + 1]);
+      if (next) return amount(next[1]);
+    }
+    return null;
+  };
+  const rowAmount = line => {
+    const withoutRates = line.replace(/\d[\d.,]*\s*%/g, '');
+    const values = decimalValues(withoutRates);
+    return values.length ? values[values.length - 1] : null;
+  };
+  let deductions = false, workerContributions = null, incomeTax = null;
+  for (let row = 0; row < lines.length; row++) {
+    const line = lines[row], normalized = fold(line);
+    if (/^\s*ii\.?\s*deducciones\b/.test(normalized)) deductions = true;
+    if (deductions && /\btotal aportaciones\b/.test(normalized)) workerContributions = rowAmount(line.split(/recibi/i)[0]);
+    const heading = /\bimpuesto\s+sobre\s+la\s+renta\s+de\s+las\s+personas\b/.exec(normalized);
+    if (heading) {
+      // The right column may wrap “físicas” onto the next row. Only a value
+      // printed after the percentage is a deduction, never its taxable base.
+      for (let next = row; next < Math.min(lines.length, row + 3); next++) {
+        const rightColumn = lines[next].slice(Math.max(0, heading.index - 3));
+        if (next > row && /^\s*\d\s*[.)]\s*(?!\d)/.test(rightColumn)) break;
+        const rate = /\d[\d.,]*\s*%/.exec(rightColumn);
+        if (rate) {
+          const values = decimalValues(rightColumn.slice(rate.index + rate[0].length));
+          if (values.length) incomeTax = values[values.length - 1];
+          break;
+        }
+      }
+    }
+    if (/\brecibi\b/.test(normalized) || /^\s*(?:determinacion de las bases|aportacion de la empresa)\b/.test(normalized)) deductions = false;
+  }
+  const data = {
+    employee_name: worker?.name || null, employee_tax_id: employeeTaxId,
+    period_month: uniquePeriods.size === 1 ? periods[0] : null,
+    gross_salary: labelledPayrollAmount(/^(?:[a-z]\.\s*)?(?:salario bruto|total devengado|total ingresos)\b/, true),
+    employee_social_security: workerContributions ?? labelledPayrollAmount(/^(?:ss trabajador|seguridad social (?:del )?trabajador|total aportaciones (?:del )?trabajador)\b/),
+    irpf_withholding: incomeTax ?? labelledPayrollAmount(/^(?:retencion(?:es)? (?:de )?irpf|irpf)\b/),
+    net_salary: labelledPayrollAmount(/^(?:neto(?: a percibir)?|liquido(?: total)? a percibir|total liquido)\b/, true),
+    other_amounts: labelledPayrollAmount(/^otros importes\b/),
+  };
+  if (new Set(employees.map(employee => fold(employee.name))).size > 1) {
+    warnings.unshift('El archivo contiene varias personas. Importa una nómina por archivo y comprueba persona, mes e importes.');
+    data.employee_name = null; data.employee_tax_id = null; data.period_month = null;
+    for (const key of PAYROLL_AMOUNTS) data[key] = null;
+  } else if (uniquePeriods.size > 1) {
+    warnings.unshift('El archivo contiene varios meses. Importa una nómina por persona y mes y comprueba los importes.');
+    for (const key of PAYROLL_AMOUNTS) data[key] = null;
+  }
+  return data;
+}
+
 function parseDocumentText(text, kind = 'expense') {
   text = String(text || '').slice(0, 512 * 1024);
-  const lines = String(text || '').slice(0, 512 * 1024).split(/[\r\n]+/).map(line => line.trim()).filter(Boolean);
+  const layoutLines = text.split(/[\r\n\f]+/).filter(line => line.trim());
+  const lines = layoutLines.map(line => line.trim());
   const warnings = ['Lectura local: comprueba los datos propuestos con el documento original.'];
   const find = pattern => lines.find(line => pattern.test(fold(line))) || '';
   const labelValue = pattern => {
@@ -59,31 +168,14 @@ function parseDocumentText(text, kind = 'expense') {
     const values = line.replace(/\d[\d.,]*\s*%/g, '').match(/-?\d[\d.,]*(?:\s*€)?/g) || [];
     return values.length ? amount(values[values.length - 1]) : null;
   };
-  const foreign = /\b(?:USD|GBP|CHF|CAD|AUD|JPY|CNY|MAD|MXN|ARS|COP|CLP|BRL|PEN)\b/i.exec(text);
-  const currency = foreign ? foreign[0].toUpperCase() : /\$/.test(text) ? '$' : /£/.test(text) ? 'GBP' : /\bEUR\b|€|\beuros?\b/i.test(text) ? 'EUR' : null;
+  const currencies = new Set((text.match(/\b(?:EUR|USD|GBP|CHF|CAD|AUD|JPY|CNY|MAD|MXN|ARS|COP|CLP|BRL|PEN)\b/gi) || []).map(value => value.toUpperCase()));
+  if (/€|\beuros?\b/i.test(text)) currencies.add('EUR');
+  if (/£/.test(text)) currencies.add('GBP');
+  const currency = currencies.size === 1 ? [...currencies][0] : currencies.size > 1 ? null : /\$/.test(text) ? '$' : null;
+  if (currencies.size > 1) warnings.push('El documento contiene varias monedas. Comprueba la moneda de los importes antes de registrar.');
   let data;
   if (kind === 'payroll') {
-    const period = labelValue(/^(?:periodo(?: de liquidacion)?|mes)\s*:?\s*/);
-    let periodMonth = date(period);
-    if (!periodMonth) {
-      const numeric = /\b(?:(\d{4})[-/](\d{1,2})|(\d{1,2})[/\-](\d{4}))\b/.exec(period || '');
-      if (numeric) periodMonth = date(`${numeric[1] || numeric[4]}-${String(numeric[2] || numeric[3]).padStart(2, '0')}-01`);
-      else {
-        const months = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
-        const year = /\b(20\d{2})\b/.exec(period || ''), month = months.findIndex(value => fold(period).includes(value));
-        if (year && month >= 0) periodMonth = `${year[1]}-${String(month + 1).padStart(2, '0')}-01`;
-      }
-    }
-    data = {
-      employee_name: labelValue(/^(?:trabajador(?:a)?|empleado(?:a)?|nombre y apellidos)\s*:?\s*/)?.slice(0, 180) || null,
-      employee_tax_id: labelValue(/^(?:nif(?: del trabajador)?|dni)\s*:?\s*/)?.slice(0, 40) || null,
-      period_month: periodMonth ? periodMonth.slice(0, 7) + '-01' : null,
-      gross_salary: labelledAmount(/^(?:salario bruto|total devengado|total ingresos)\b/),
-      employee_social_security: labelledAmount(/^(?:ss trabajador|seguridad social (?:del )?trabajador|total aportaciones (?:del )?trabajador)\b/),
-      irpf_withholding: labelledAmount(/^(?:retencion(?:es)? (?:de )?irpf|irpf)\b/),
-      net_salary: labelledAmount(/^(?:neto(?: a percibir)?|liquido(?: total)? a percibir|total liquido)\b/),
-      other_amounts: labelledAmount(/^otros importes\b/),
-    };
+    data = parsePayroll(layoutLines, warnings);
   } else {
     const taxIds = [...new Set((text.match(/\b(?:[A-Z]\d{7}[A-Z0-9]|\d{8}[A-Z]|[XYZ]\d{7}[A-Z])\b/g) || []))];
     data = {
@@ -99,14 +191,6 @@ function parseDocumentText(text, kind = 'expense') {
       withholding_amount: labelledAmount(/^(?:retencion(?:es)?(?: irpf)?|irpf)\b/),
       total: labelledAmount(/^(?:total(?: factura| a pagar)?|importe total)\b/),
     };
-  }
-  if (kind === 'payroll') {
-    const names = new Set(lines.filter(line => /^(?:trabajador(?:a)?|empleado(?:a)?|nombre y apellidos)\s*:/i.test(fold(line))).map(fold));
-    if (names.size > 1) {
-      warnings.unshift('El archivo contiene varias personas. Importa una nómina por archivo y comprueba persona, mes e importes.');
-      data.employee_name = null; data.period_month = null;
-      for (const key of PAYROLL_AMOUNTS) data[key] = null;
-    }
   }
   const missing = (kind === 'payroll' ? PAYROLL_AMOUNTS : EXPENSE_AMOUNTS).filter(key => data[key] == null);
   if (missing.length) warnings.push('Hay importes sin leer. Complétalos; un campo vacío no equivale a cero.');
@@ -136,4 +220,4 @@ async function readLocalDocument({ buffer, contentType, documentKind }) {
   return { data, provider: model === 'manual' ? 'manual' : 'local', model };
 }
 
-module.exports = { readLocalDocument, parseDocumentText, amount, date, EXPENSE_AMOUNTS, PAYROLL_AMOUNTS };
+module.exports = { readLocalDocument, parseDocumentText, amount, date, EXPENSE_AMOUNTS, PAYROLL_AMOUNTS, runLocalDecoder: run };

@@ -12,6 +12,21 @@ router.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   next();
 });
+router.use(require('./accountingDocumentPreview.routes'));
+
+router.use('/bank', (req,res,next)=>{
+  if(req.method==='POST'&&!req.is('application/json'))return res.status(415).json({error:{code:'bank_json_required',message:'Envía la operación en formato JSON.'}});
+  next();
+});
+router.get('/bank/workspace',controller.bankWorkspace);
+router.get('/bank/lines',controller.bankLines);
+router.get('/bank/targets',controller.bankTargets);
+router.post('/bank/imports/preview',controller.bankPreviewImport);
+router.post('/bank/imports',controller.bankCreateImport);
+router.get('/bank/imports',controller.bankImports);
+router.get('/bank/imports/:importId/source',controller.bankImportSource);
+router.post('/bank/lines/:lineId/matches',controller.bankCreateMatches);
+router.post('/bank/matches/:matchId/reverse',controller.bankReverseMatch);
 
 router.get('/workspace', controller.getWorkspace);
 router.get('/cash/workspace', controller.getCashWorkspace);
@@ -41,6 +56,7 @@ router.get('/documents/:documentId', controller.getFiscalDocument);
 router.get('/export.csv', controller.exportCsv);
 router.get('/export.zip', controller.exportZip);
 router.post('/expenses', controller.createExpense);
+router.get('/expenses/:expenseId',controller.getExpense);
 router.patch('/expenses/:expenseId', controller.updateExpense);
 router.get('/expenses/:expenseId/attachment', controller.downloadExpenseAttachment);
 router.post('/cash/open', controller.openCash);
@@ -48,11 +64,14 @@ router.post('/cash/movements', controller.createCashMovement);
 router.post('/cash/closures', controller.closeCash);
 router.get('/payroll-employees', controller.listPayrollEmployees);
 router.post('/payroll', controller.createPayroll);
+router.get('/payroll/:payrollId',controller.getPayroll);
 router.patch('/payroll/:payrollId', controller.updatePayroll);
 router.get('/payroll/:payrollId/document', controller.downloadPayrollAttachment);
+router.get('/payroll-documents/:documentId',controller.getPayrollDocument);
 router.get('/payroll-documents/:documentId/document', controller.downloadPayrollDocumentAttachment);
 
 router.use((error, req, res, next) => {
+  if(req.path.startsWith('/bank')&&!error?.statusCode&&!error?.status)return res.status(500).json({error:{code:'bank_operation_uncertain',message:'No se pudo confirmar el resultado. Conserva la operación para reintentarlo.'}});
   if (!error?.statusCode && !error?.status) return next(error);
   res.status(error.statusCode || error.status).json({
     error: {
