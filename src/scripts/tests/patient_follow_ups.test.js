@@ -6,6 +6,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { Op } = require('sequelize');
+require('./fixtures/campaign_offline_runtime.cjs');
+const modelsPath = require.resolve('../../../models');
+require.cache[modelsPath] = { id: modelsPath, filename: modelsPath, loaded: true, exports: {} };
 const contract = require('../../lib/patientFollowUps.contract');
 const { createPatientFollowUpService } = require('../../services/patientFollowUps.service');
 const { createPatientFollowUpsController } = require('../../controllers/patientFollowUps.controller');
@@ -33,6 +36,10 @@ function matches(row, where = {}) {
 
 function fixture() {
   const state = { rows: [], revisions: [], transactions: 0, queries: [],
+    clinics: [
+      { id_clinica: 10, configuracion: { timezone: 'Europe/Madrid' } },
+      { id_clinica: 20, configuracion: { timezone: 'America/New_York' } },
+    ],
     patients: [
       { id_paciente: 1, public_id: 'pac_one', clinica_id: 10, nombre: 'Ficticio', apellidos: 'Uno' },
       { id_paciente: 2, public_id: 'pac_two', clinica_id: 20, nombre: 'Ficticio', apellidos: 'Dos' },
@@ -101,7 +108,9 @@ function fixture() {
       findOne: async ({ where }) => state.treatments.find((row) => matches(row, where)),
       findAll: async ({ where }) => state.treatments.filter((row) => matches(row, where)),
     },
-    Clinica: { findOne: async () => null },
+    Clinica: { findOne: async (options) => {
+      state.queries.push(options); return state.clinics.find(row => matches(row, options.where)) || null;
+    } },
     AppointmentClinicalReport: {
       findOne: async ({ where }) => state.reports.find(row=>matches(row,where))||null,
       findAll: async (options) => { state.queries.push(options); return state.reports.filter(row=>matches(row,options.where)); },
@@ -273,6 +282,57 @@ test('report context reopens same source and changed linked appointment is a liv
     await assert.rejects(service.update({ clinicId: 10, id: item.id, actorId: 3,
       payload: { expected_version: item.version, status: 'scheduled', linked_appointment_id: 105 } }), { code: 'follow_up_appointment_inactive' });
   }
+});
+
+test('linked appointment carries its scoped clinic time zone across DST without changing the instant or revision', async () => {
+  const { create, service, state } = fixture();
+  const { item } = await create({ status: 'scheduled', linked_appointment_id: 100 });
+  const appointment = state.appointments.find(row => row.id_cita === 100);
+  const format = value => new Intl.DateTimeFormat('en-GB', {
+    timeZone: value.linked_appointment_timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).format(value.linked_appointment_start);
+  for (const [instant, local] of [
+    ['2026-01-15T08:55:00Z', '09:55'],
+    ['2026-07-15T07:55:00Z', '09:55'],
+    ['2026-03-29T00:55:00Z', '01:55'],
+    ['2026-03-29T01:55:00Z', '03:55'],
+    ['2026-10-25T00:55:00Z', '02:55'],
+    ['2026-10-25T01:55:00Z', '02:55'],
+  ]) {
+    appointment.inicio = new Date(instant);
+    const read = (await service.get({ clinicId: 10, id: item.id })).item;
+    assert.equal(read.linked_appointment_timezone, 'Europe/Madrid');
+    assert.equal(read.linked_appointment_start.toISOString(), new Date(instant).toISOString());
+    assert.equal(format(read), local);
+    assert.equal(read.version, 1);
+  }
+  const listed = await service.list({ clinicId: 10, patientIdentifier: 'pac_one' });
+  assert.equal(listed.items[0].linked_appointment_timezone, 'Europe/Madrid');
+  assert.equal(state.revisions.length, 1);
+  assert.equal(state.transactions, 1);
+  assert.ok(state.queries.filter(query => query.attributes?.includes('configuracion'))
+    .every(query => query.where.id_clinica === 10));
+  state.clinics[0].configuracion = JSON.stringify({ timeZone: 'Atlantic/Canary' });
+  assert.equal((await service.get({ clinicId: 10, id: item.id })).item.linked_appointment_timezone, 'Atlantic/Canary');
+  state.clinics[0].configuracion = { timezone: 'invalid/zone' };
+  assert.equal((await service.get({ clinicId: 10, id: item.id })).item.linked_appointment_timezone, 'Europe/Madrid');
+});
+
+test('linked appointment time zone is null for absent, deleted, foreign-patient or foreign-clinic links', async () => {
+  const { create, service, state } = fixture();
+  const { item } = await create();
+  const row = state.rows[0];
+  for (const appointmentId of [null, 999, 101, 102]) {
+    row.linked_appointment_id = appointmentId;
+    const read = (await service.get({ clinicId: 10, id: item.id })).item;
+    assert.equal(read.linked_appointment_start, null);
+    assert.equal(read.linked_appointment_timezone, null);
+  }
+  row.linked_appointment_id = 100;
+  state.clinics[0].id_clinica = 99;
+  assert.equal((await service.get({ clinicId: 10, id: item.id })).item.linked_appointment_timezone, null);
+  await assert.rejects(service.get({ clinicId: 20, id: item.id }), { code: 'follow_up_not_found' });
+  assert.equal(state.revisions.length, 1);
 });
 
 test('independent episode follow-up preserves the canonical report provenance and reopens idempotently',async()=>{

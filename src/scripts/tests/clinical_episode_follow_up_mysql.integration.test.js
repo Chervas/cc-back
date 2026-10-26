@@ -3,12 +3,14 @@ const assert=require('node:assert/strict'),Sequelize=require('sequelize');
 const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fixture');
 withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   const D=Sequelize.DataTypes;
+  db.Clinica=sql.define('Clinica',{id_clinica:{type:D.INTEGER,primaryKey:true},configuracion:D.JSON},{timestamps:false});
   db.Paciente=sql.define('Paciente',{id_paciente:{type:D.INTEGER,primaryKey:true},public_id:D.STRING,clinica_id:D.INTEGER,nombre:D.STRING,apellidos:D.STRING},{timestamps:false});
   db.PacienteClinica=sql.define('PacienteClinica',{id:{type:D.INTEGER,primaryKey:true},paciente_id:D.INTEGER,clinica_id:D.INTEGER},{timestamps:false});
   db.CitaPaciente=sql.define('CitaPaciente',{id_cita:{type:D.INTEGER,primaryKey:true},paciente_id:D.INTEGER,clinica_id:D.INTEGER,estado:D.STRING,inicio:D.DATE,fin:D.DATE,titulo:D.STRING,tratamiento_id:D.INTEGER,es_provisional:D.BOOLEAN},{timestamps:false});
   db.Tratamiento=sql.define('Tratamiento',{id_tratamiento:{type:D.INTEGER,primaryKey:true},nombre:D.STRING,clinica_id:D.INTEGER},{timestamps:false});
   for(const file of ['appointmentclinicalreport','clinicalepisodeappointment','patientfollowup','patientfollowuprevision']){const model=require('../../../models/'+file)(sql,D);db[model.name]=model;}
   await sql.sync();await db.Paciente.bulkCreate([{id_paciente:9,public_id:'OWNED-ONE',clinica_id:72,nombre:'Paciente',apellidos:'Ficticio'},{id_paciente:10,public_id:'OWNED-TWO',clinica_id:72,nombre:'Otro',apellidos:'Ficticio'}]);
+  await db.Clinica.bulkCreate([{id_clinica:72,configuracion:{timezone:'Europe/Madrid'}},{id_clinica:66,configuracion:{timezone:'America/New_York'}}]);
   await db.CitaPaciente.create({id_cita:100,paciente_id:9,clinica_id:72,estado:'pendiente',inicio:'2030-01-07T10:00:00Z',fin:'2030-01-07T10:30:00Z',titulo:'Consulta ficticia'});
   const independent=await db.AppointmentClinicalReport.create({public_id:'00000000-0000-4000-8000-000000000081',clinic_id:72,patient_id:9,appointment_id:null,status:'final',summary:'Registro ficticio final'});
   const legacy=await db.AppointmentClinicalReport.create({public_id:'00000000-0000-4000-8000-000000000080',clinic_id:72,patient_id:9,appointment_id:100,status:'final',summary:'Registro ficticio de cita'});
@@ -30,5 +32,22 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   db.PatientFollowUpRevision.create=revisionCreate;row=await row.reload();assert.equal(row.version_number,1);assert.equal(row.operational_reason,'Revisión ficticia');
   await assert.rejects(service.update({clinicId:72,id:row.public_id,actorId:7,payload:{expected_version:2,operational_reason:'Stale'}}),{code:'follow_up_version_conflict'});
   assert.equal(JSON.stringify(await db.CitaPaciente.findAll({raw:true})),before);assert.equal((await independent.reload()).status,'final');
+  const linked=await create({status:'scheduled',linked_appointment_id:100});
+  const revisionCount=await db.PatientFollowUpRevision.count();
+  for(const [instant,local] of [['2030-01-07T08:55:00Z','09:55'],['2030-07-07T07:55:00Z','09:55'],['2030-03-31T00:55:00Z','01:55'],['2030-03-31T01:55:00Z','03:55']]){
+    await db.CitaPaciente.update({inicio:instant},{where:{id_cita:100}});
+    const read=(await service.get({clinicId:72,id:linked.item.id})).item;
+    assert.equal(read.linked_appointment_timezone,'Europe/Madrid');assert.equal(read.linked_appointment_start.toISOString(),new Date(instant).toISOString());
+    assert.equal(new Intl.DateTimeFormat('en-GB',{timeZone:read.linked_appointment_timezone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(read.linked_appointment_start),local);
+    assert.equal(read.version,1);
+  }
+  assert.equal((await service.list({clinicId:72,patientIdentifier:'OWNED-ONE'})).items.find(item=>item.id===linked.item.id).linked_appointment_timezone,'Europe/Madrid');
+  await db.CitaPaciente.update({clinica_id:66},{where:{id_cita:100}});
+  const foreign=(await service.get({clinicId:72,id:linked.item.id})).item;
+  assert.equal(foreign.linked_appointment_start,null);assert.equal(foreign.linked_appointment_timezone,null);
+  await db.CitaPaciente.update({clinica_id:72,paciente_id:10},{where:{id_cita:100}});
+  assert.equal((await service.get({clinicId:72,id:linked.item.id})).item.linked_appointment_timezone,null);
+  assert.equal(await db.PatientFollowUpRevision.count(),revisionCount);
+  report.checks.push('Linked appointment DTO resolves the authorized clinic IANA zone; winter/summer and DST preserve UTC instants and render the booked local hour; list/get remain read-only and cross-clinic/patient links expose neither timestamp nor zone.');
   report.checks.push('Actual follow-up service/models in owned MySQL: independent final episode provenance persists; simultaneous same-episode and mixed legacy-appointment/episode requests create one reminder/revision; current reads preserve replay after a waited report lock; foreign patient rejected; revision failure rolls back; stale version rejected; appointments and final narrative unchanged. No DEV DB or external providers.');
 }).catch(error=>{console.error(error);process.exitCode=1;});

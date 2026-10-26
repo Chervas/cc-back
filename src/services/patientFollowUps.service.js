@@ -81,6 +81,8 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
       status: data.status, version: Number(data.version_number),
       linked_appointment_id: data.linked_appointment_id ? Number(data.linked_appointment_id) : null,
       linked_appointment_start: appointment?.inicio || null,
+      linked_appointment_timezone: appointment?.inicio && related.clinic
+        ? require('./clinicOpeningHours.service').resolveClinicTimeZone(related.clinic) : null,
       linked_appointment_status: appointment?.estado || null,
       linked_appointment_needs_review: data.status === 'scheduled' && (!appointment || ['cancelada', 'no_asistio'].includes(appointment.estado)),
       linked_appointment_completed: data.status === 'scheduled' && require('../lib/status-catalog').hasAttendedAppointment(appointment),
@@ -100,14 +102,16 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
     const treatmentIds = ids('treatment_id');
     const appointmentIds = ids('linked_appointment_id');
     const reportIds = includeClinical ? ids('source_report_id') : [];
-    const [patients, treatments, appointments, reports] = await Promise.all([
+    const [patients, treatments, appointments, reports, clinic] = await Promise.all([
       Paciente.findAll({ where: { id_paciente: { [Op.in]: ids('patient_id') } }, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos'], transaction }),
       treatmentIds.length ? Tratamiento.findAll({ where: { id_tratamiento: { [Op.in]: treatmentIds } }, attributes: ['id_tratamiento', 'nombre'], transaction }) : [],
-      appointmentIds.length ? CitaPaciente.findAll({ where: { id_cita: { [Op.in]: appointmentIds }, clinica_id: rows[0].clinic_id }, attributes: ['id_cita', 'paciente_id', 'inicio', 'estado'], transaction }) : [],
+      appointmentIds.length ? CitaPaciente.findAll({ where: { id_cita: { [Op.in]: appointmentIds }, clinica_id: rows[0].clinic_id }, attributes: ['id_cita', 'clinica_id', 'paciente_id', 'inicio', 'estado'], transaction }) : [],
       reportIds.length && db.AppointmentClinicalReport?.findAll ? db.AppointmentClinicalReport.findAll({
         where: { id: { [Op.in]: reportIds }, clinic_id: rows[0].clinic_id },
         attributes: ['id', 'public_id', 'patient_id', 'clinic_id', 'title'], transaction,
       }) : [],
+      appointmentIds.length ? db.Clinica.findOne({ where: { id_clinica: rows[0].clinic_id },
+        attributes: ['id_clinica', 'configuracion'], transaction }) : null,
     ]);
     const patientMap = new Map(patients.map((row) => [Number(row.id_paciente), row]));
     const treatmentMap = new Map(treatments.map((row) => [Number(row.id_tratamiento), row]));
@@ -118,7 +122,9 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
       const report = reportMap.get(Number(row.source_report_id));
       return serialize(row, { includeClinical, related: {
         patient: patientMap.get(Number(row.patient_id)), treatment: treatmentMap.get(Number(row.treatment_id)),
-        appointment: Number(appointment?.paciente_id) === Number(row.patient_id) ? appointment : null,
+        appointment: Number(appointment?.paciente_id) === Number(row.patient_id)
+          && Number(appointment?.clinica_id) === Number(row.clinic_id) ? appointment : null,
+        clinic: Number(clinic?.id_clinica) === Number(row.clinic_id) ? clinic : null,
         report: Number(report?.patient_id) === Number(row.patient_id) && Number(report?.clinic_id) === Number(row.clinic_id) ? report : null,
       } });
     });
