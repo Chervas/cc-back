@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { withCalendarMutation, uncoveredPhases } = require('../../services/appointmentCalendarMutation.service');
+const { withCalendarMutation, uncoveredPhases, assertDoctorIdentityMutable } = require('../../services/appointmentCalendarMutation.service');
 function fixture() {
   let end = '20:00', committed = false, rolledBack = false, calls = [];
   const blocks = [];
@@ -141,4 +141,83 @@ test('legacy review is bounded before mutation, including when the gate is close
   await assert.rejects(withCalendarMutation({ ...f.options, enabled: false, protectLegacyAppointments: true,
     mutate: async () => { mutated = true; } }), { code: 'booking_calendar_review_required' });
   assert.equal(mutated, false);
+});
+
+function identityFixture() {
+  const events = [], holders = new Map(), revisions = new Map(); let shared = false, nextTransaction = 0;
+  const lock = async (key, transaction) => {
+    while (holders.has(key) && holders.get(key).transaction !== transaction) {
+      events.push(`wait:${transaction.id}:${key}`); await holders.get(key).released;
+    }
+    if (holders.has(key)) return;
+    let release; const released = new Promise(resolve => { release = resolve; });
+    holders.set(key, { transaction, released }); events.push(`lock:${transaction.id}:${key}`);
+    transaction.releases.push(() => { holders.delete(key); release(); });
+  };
+  const emptyEvidence = table => ({ findOne: async () => { events.push(`evidence:${table}`); return null; } });
+  const db = {
+    Sequelize: { Op: Object.fromEntries(['in', 'ne', 'or', 'gt'].map(key => [key, Symbol(key)])),
+      fn: (...args) => args, col: value => value, where: (...args) => args, literal: value => value },
+    sequelize: { escape: value => JSON.stringify(value), transaction: async (options, callback) => {
+      const transaction = { id: ++nextTransaction, options, LOCK: { UPDATE: 'UPDATE' }, releases: [] };
+      try { return await callback(transaction); }
+      finally { for (const release of transaction.releases.reverse()) release(); }
+    } },
+    AppointmentBookingResource: {
+      upsert: async (row, options) => lock(`resource:${row.resource_key}`, options.transaction),
+      findByPk: async (key, options) => { await lock(`resource:${key}`, options.transaction); return {}; },
+    },
+    PersonalCalendarRevision: {
+      findOrCreate: async ({ where, transaction }) => {
+        await lock(`revision:${where.doctor_id}`, transaction);
+        if (!revisions.has(where.doctor_id)) revisions.set(where.doctor_id, { revision: '0', update: async function(values) { Object.assign(this, values); } });
+      },
+      findByPk: async (id, options) => { if (options.lock) await lock(`revision:${id}`, options.transaction); return revisions.get(id); },
+    },
+    DoctorClinica: { findOne: async () => { events.push('shared:read'); return shared ? { id: 101 } : null; }, findAll: async () => [] },
+    AppointmentBookingOccupancy: { ...emptyEvidence('occupancy'), findAll: async () => [] },
+    Tratamiento: emptyEvidence('treatment'), PatientProgramSession: emptyEvidence('program'), EconomicBudgetVersion: emptyEvidence('budget'),
+  };
+  return { db, events, setShared: () => { shared = true; } };
+}
+
+test('identity checks lock both doctors before reading shared calendars or protected evidence', async () => {
+  for (const enabled of [true, false]) {
+    const f = identityFixture();
+    await f.db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, transaction =>
+      assertDoctorIdentityMutable({ db: f.db, doctorIds: [12, 5, 12], transaction, enabled }));
+    assert.deepEqual(f.events, [
+      ...(enabled ? ['lock:1:resource:doctor:12', 'lock:1:resource:doctor:5'] : []),
+      'lock:1:revision:5', 'lock:1:revision:12', 'shared:read',
+      ...(enabled ? ['evidence:occupancy', 'evidence:treatment', 'evidence:program', 'evidence:budget'] : []),
+    ]);
+  }
+});
+
+test('identity merge waiting behind a calendar link observes the committed group and rejects in both ledger modes', async () => {
+  for (const enabled of [true, false]) {
+    const f = identityFixture(); let releaseLink, signalLinkEntered;
+    const linkEntered = new Promise(resolve => { signalLinkEntered = resolve; });
+    const linkCanCommit = new Promise(resolve => { releaseLink = resolve; });
+    const linking = withCalendarMutation({ db: f.db, doctorId: 5, enabled, realtimeEnabled: false,
+      mutate: async () => { f.setShared(); signalLinkEntered(); await linkCanCommit; } });
+    await linkEntered;
+    const merging = f.db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, transaction =>
+      assertDoctorIdentityMutable({ db: f.db, doctorIds: [5, 12], transaction, enabled }));
+    // Let the merge reach its blocked mutex while the link still owns it.
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.events.includes('shared:read'), false, 'the identity guard must not read before obtaining the mutex');
+    assert.ok(f.events.some(event => event.startsWith('wait:2:')));
+    releaseLink(); await linking;
+    await assert.rejects(merging, { code: 'personal_schedule_sharing_unlink_required' });
+    assert.equal(f.events.filter(event => event === 'shared:read').length, 1);
+    assert.equal(f.events.some(event => event.startsWith('evidence:')), false);
+  }
+});
+
+test('identity guard rejects an unsupported isolation level before reading or locking', async () => {
+  const f = identityFixture();
+  await assert.rejects(assertDoctorIdentityMutable({ db: f.db, doctorIds: [5, 12], transaction: { options: {} }, enabled: true }),
+    /booking_requires_read_committed/);
+  assert.deepEqual(f.events, []);
 });

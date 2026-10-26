@@ -40,6 +40,9 @@ router.delete('/:id/clinicas/:clinicaId', personalController.removeClinicCollabo
 // Schedule/Horarios (canónico para todo el personal)
 router.get('/me/schedule', personalController.getScheduleForCurrent);
 router.get('/:id/schedule', personalController.getScheduleForPersonal);
+router.get('/:id/schedule-sharing', personalController.getScheduleSharing);
+router.post('/:id/schedule-sharing/preview', personalController.previewScheduleSharing);
+router.put('/:id/schedule-sharing', personalController.updateScheduleSharing);
 
 
 // Horarios por clínica (compat con /api/doctors/*)

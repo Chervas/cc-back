@@ -228,3 +228,59 @@ test('undo restores deleted blocks and their exceptions but a new booking can fo
     }
   }
 });
+
+test('membership-only changes expand Undo permissions over both historical and resulting shared groups even with no raw schedules', () => {
+  const before = Object.fromEntries(Object.keys(undoService.TABLES).map(table => [table, []]));
+  before.DoctorClinica = [10, 20, 30].map((clinica_id, index) => ({ id: 201 + index, doctor_id: 2,
+    clinica_id, activo: true, shared_schedule_source_id: 201 }));
+  const after = clone(before); after.DoctorClinica[2].shared_schedule_source_id = null;
+  for (const [left, right] of [[before, after], [after, before]]) {
+    const scopes = undoService.changedScopes(left, right, undoService.changesBetween(left, right));
+    assert.deepEqual(scopes.map(scope => scope.clinicId).sort((a, b) => a - b), [10, 20, 30]);
+    assert(scopes.every(scope => scope.doctorId === 2 && scope.kind === 'horario'));
+  }
+});
+
+test('Undo of a real shared-calendar unlink refuses revoked group permissions, then restores pointers and the empty raw member archive', async () => {
+  const sharing = require('../../services/personalScheduleSharing.service');
+  const f = fixture(); f.state().DoctorClinica[0].shared_schedule_source_id = 201;
+  f.state().DoctorClinica.push(...[20, 30].map((clinica_id, index) => ({ id: 202 + index, doctor_id: 2, clinica_id,
+    activo: true, recibe_citas: true, agenda_flexible: false, allow_overlap_confirmation: false, shared_schedule_source_id: 201 })));
+  f.state().DoctorHorarioExcepcion.push({ id: 900, doctor_horario_id: 100, fecha: '2027-01-11', cancelado: true,
+    hora_inicio_override: null, hora_fin_override: null });
+  assert.equal(f.state().DoctorHorario.filter(row => row.doctor_clinica_id === 203).length, 0);
+  // Metadata-only RAM adapters; the plan/materialization/Undo implementations
+  // are real. No fixture copy of their scope or source-selection rules.
+  const read = f.db.DoctorClinica.findAll;
+  f.db.DoctorClinica.findAll = async query => (await read(query)).map(row => ({ ...row.toJSON(), clinica: {
+    id_clinica: row.clinica_id, nombre_clinica: 'Owned clinic' + row.clinica_id, grupoClinicaId: 50,
+    configuracion: { timezone: 'Europe/Madrid' },
+  } }));
+  f.db.DoctorHorarioExcepcion.bulkCreate = (rows, options) => Promise.all(rows.map(row => f.db.DoctorHorarioExcepcion.create(row, options)));
+  const originalLinks = clone(f.state().DoctorClinica), originalSchedules = clone(f.state().DoctorHorario), originalExceptions = clone(f.state().DoctorHorarioExcepcion);
+  const input = { operation: 'unlink', source_clinica_id: 10, clinic_ids: [30], expected_revision: '0', same_site_confirmed: false };
+  const preview = await sharing.previewScheduleSharing({ db: f.db, doctorId: 2, input, checkAll: async () => true });
+  const result = await withCalendarMutation({ ...f.options(), undoContext: { actorId: 1, now: f.now },
+    mutate: transaction => sharing.applyScheduleSharing({ db: f.db, doctorId: 2, input: { ...input, preview_hash: preview.preview_hash },
+      transaction, checkAll: async () => true }) });
+  assert(result.undo?.token);
+  assert.equal(f.state().DoctorClinica.find(row => row.id === 203).shared_schedule_source_id, null);
+  assert.equal(f.state().DoctorHorario.filter(row => row.doctor_clinica_id === 203).length, 1);
+  const beforeRejectedUndo = clone(f.state());
+  let checked;
+  await assert.rejects(undo(f, result.undo.token, { assertPermissions: async scopes => {
+    checked = scopes.map(scope => scope.clinicId).sort((a, b) => a - b);
+    return scopes.every(scope => scope.clinicId === 30); // Permissions on A/B were revoked.
+  } }), { code: 'availability_undo_forbidden' });
+  assert.deepEqual(checked, [10, 20, 30]); assert.deepEqual(f.state(), beforeRejectedUndo);
+  assert.equal(f.state().PersonalCalendarUndoReceipt[0].consumed_at == null, true);
+  await undo(f, result.undo.token, { assertPermissions: async scopes => {
+    assert.deepEqual(scopes.map(scope => scope.clinicId).sort((a, b) => a - b), [10, 20, 30]); return true;
+  } });
+  assert.deepEqual(f.state().DoctorClinica, originalLinks);
+  assert.deepEqual(f.state().DoctorHorario, originalSchedules);
+  assert.deepEqual(f.state().DoctorHorarioExcepcion, originalExceptions);
+  const projected = await sharing.projectDoctorClinicas({ db: f.db, rows: f.state().DoctorClinica });
+  assert(projected.every(row => row.horarios[0].id === 100 && row.horarios[0].excepciones[0].id === 900));
+  assert(f.state().PersonalCalendarUndoReceipt[0].consumed_at);
+});

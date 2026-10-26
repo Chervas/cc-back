@@ -29,7 +29,7 @@ function matches(value, where = {}) {
     return actual === wanted || String(actual) === String(wanted);
   });
 }
-function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard = false, emitUndoReceipt = false, sensitiveClinics = [10, 20] } = {}) {
+function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard = false, emitUndoReceipt = false, sensitiveClinics = [10, 20], concurrentMutations = false } = {}) {
   let state = {
     links: [{ id: 201, doctor_id: 2, clinica_id: 10, activo: true, recibe_citas: true },
       { id: 202, doctor_id: 2, clinica_id: 20, activo: true, recibe_citas: true },
@@ -43,7 +43,7 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
       hora_inicio_override: null, hora_fin_override: null },
       { id: 901, doctor_horario_id: 100, fecha: '2027-02-01', cancelado: false,
         hora_inicio_override: '10:00', hora_fin_override: '12:00' }],
-    appointments: [], phases: [], blocks: [], nextId: 1000,
+    appointments: [], phases: [], blocks: [], revisions: [], timezones: { 10: 'Europe/Madrid', 20: 'Atlantic/Canary' }, nextId: 1000,
   };
   const calls = { transactions: 0, scopes: [], rollback: 0, writes: 0, reads: [] };
   const tx = { options: { isolationLevel: 'READ COMMITTED' }, LOCK: { UPDATE: 'UPDATE' } };
@@ -78,13 +78,15 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
     },
     DoctorClinica: {
       findOne: async query => state.links.find(row => matches(row, query.where)) || null,
+      findByPk: async id => state.links.find(row => row.id === Number(id)) || null,
       findAll: async query => state.links.filter(row => matches(row, query.where)).map(row => ({ ...row,
-        clinica: { id_clinica: row.clinica_id, nombre_clinica: `Clínica ${row.clinica_id}` },
+        clinica: { id_clinica: row.clinica_id, nombre_clinica: `Clínica ${row.clinica_id}`, grupoClinicaId: 50,
+          configuracion: { timezone: state.timezones[row.clinica_id] || 'Europe/Madrid' } },
         horarios: state.schedules.filter(h => h.doctor_clinica_id === row.id).map(schedule) })),
     },
-    Clinica: { findByPk: async id => ({ id_clinica: Number(id), configuracion: { timezone: Number(id) === 20 ? 'Atlantic/Canary' : 'Europe/Madrid' } }),
-      findAll: async () => [10, 20].map(id => ({ id_clinica: id, configuracion: { timezone: id === 20 ? 'Atlantic/Canary' : 'Europe/Madrid' } })) },
-    ClinicaHorario: { findAll: async query => [10, 20].filter(id => !query.where?.clinica_id || matches({ clinica_id: id }, query.where))
+    Clinica: { findByPk: async id => ({ id_clinica: Number(id), configuracion: { timezone: state.timezones[id] || 'Europe/Madrid' } }),
+      findAll: async () => Object.keys(state.timezones).map(Number).map(id => ({ id_clinica: id, configuracion: { timezone: state.timezones[id] } })) },
+    ClinicaHorario: { findAll: async query => Object.keys(state.timezones).map(Number).filter(id => !query.where?.clinica_id || matches({ clinica_id: id }, query.where))
       .flatMap(id => [0, 1, 2, 3, 4, 5, 6].map(dia_semana => ({ clinica_id: id, dia_semana, hora_inicio: '07:00', hora_fin: '22:00', activo: true }))) },
     Usuario: { findByPk: async id => ({ id_usuario: Number(id), nombre: 'Profesional ficticio', estado_cuenta: 'activa', es_provisional: false }) },
     UsuarioClinica: {
@@ -99,8 +101,28 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
       .slice(0, query.limit || Infinity).map(row => ({ ...row, appointment: state.appointments.find(appointment => appointment.id_cita === row.appointment_id) })) },
     DoctorBloqueoExcepcion: {}, Paciente: {}, Instalacion: {}, Tratamiento: {},
   };
+  if (concurrentMutations) {
+    models.Sequelize = { Op };
+    const revision = row => row && ({ ...row, update: async (fields, options) => {
+      assert.equal(options.transaction, tx); Object.assign(row, fields); return revision(row);
+    } });
+    models.PersonalCalendarRevision = {
+      findByPk: async id => revision(state.revisions.find(row => row.doctor_id === Number(id))),
+      findOrCreate: async options => {
+        let row = state.revisions.find(row => matches(row, options.where));
+        if (row) return [revision(row), false];
+        row = { ...options.where, ...options.defaults }; state.revisions.push(row); return [revision(row), true];
+      },
+    };
+  }
+  // RAM adapter for the database's ordered calendar mutex: both requests finish
+  // their real controller validation before either enters its serialized TX.
+  let releaseStart, arrived = 0, tail = Promise.resolve();
+  const start = concurrentMutations ? new Promise(resolve => { releaseStart = resolve; }) : null;
   const withCalendarMutation = async options => {
     calls.transactions++; assert.equal(options.protectLegacyAppointments, true); calls.scopes.push(options.doctorIds || [options.doctorId]);
+    if (concurrentMutations) { if (++arrived === 2) releaseStart(); await start; }
+    const previous = tail; let release; tail = new Promise(resolve => { release = resolve; }); await previous;
     const before = structuredClone(state);
     try {
       if (realCoverageGuard) {
@@ -111,9 +133,12 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
           now: new Date('2027-01-01T00:00:00Z'), realtimeEnabled: false, notify: async () => {} });
       }
       const value = await options.mutate(tx);
+      if (concurrentMutations) await require('../../services/personalCalendarUndo.service').bumpRevisions({ db: models,
+        doctorIds: [...new Set(options.doctorIds || [options.doctorId])], transaction: tx });
       return emitUndoReceipt ? { value, undo: { token: 'A'.repeat(43), expires_at: '2027-01-01T00:00:20.000Z', label: 'Cambio de disponibilidad' } } : value;
     }
     catch (error) { state = before; calls.rollback++; throw error; }
+    finally { release(); }
   };
   const imports = {
     sequelize: { Op, fn: () => {}, col: () => {}, where: () => {} }, '../../models': models, bcryptjs: {},
@@ -123,6 +148,7 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
     '../lib/access-policy': { canUserAccessFeature: async ({ clinicId }) => Number(clinicId) !== deniedClinic,
       getAccessibleClinicIdsForFeature: async ({ featureKey } = {}) => featureKey === 'patients.sensitive.view' ? sensitiveClinics : [10, 20] },
     '../services/personalPresence.service': {},
+    '../services/personalScheduleSharing.service': require('../../services/personalScheduleSharing.service'),
     '../services/personalScheduleProgramRead.service': require('../../services/personalScheduleProgramRead.service'),
     '../services/appointmentCalendarMutation.service': { withCalendarMutation,
       sendCalendarMutationError: (error, res) => { if (!/^booking_calendar_/.test(error?.code || '')) return false;
@@ -307,6 +333,27 @@ test('schedule response exposes the exact timezone for each clinic', async () =>
   assert.equal(result.statusCode, 200, JSON.stringify(result));
   assert.equal(result.body.clinicas.find(row => row.clinica_id === 10).timezone, 'Europe/Madrid');
   assert.equal(result.body.clinicas.find(row => row.clinica_id === 20).timezone, 'Atlantic/Canary');
+});
+
+test('schedule DTO conceals shared clinic names and membership outside the actor-visible scope', async () => {
+  const f = fixture({ concurrentMutations: true });
+  f.state().timezones[20] = 'Europe/Madrid';
+  const metadata = { source_clinica_id: 20, source_doctor_clinica_id: 202,
+    clinic_ids: [10, 20], clinic_names: ['Visible fictitious clinic', 'Hidden fictitious clinic'] };
+  for (const row of f.state().links.filter(row => row.doctor_id === 2)) {
+    row.shared_schedule_source_id = 202; row.shared_schedule = metadata;
+  }
+  const complete = await f.call('getScheduleForPersonal', {}, { id: '2' });
+  assert.equal(complete.statusCode, 200, JSON.stringify(complete));
+  assert.deepEqual(complete.body.clinicas[0].shared_schedule.clinic_ids, [10, 20]);
+  const original = f.models.UsuarioClinica.findAll;
+  f.models.UsuarioClinica.findAll = async query => (await original(query)).filter(row => Number(row.id_clinica) === 10);
+  const restricted = await f.call('getScheduleForPersonal', {}, { id: '2' });
+  assert.equal(restricted.statusCode, 200, JSON.stringify(restricted));
+  assert.deepEqual(restricted.body.clinicas.map(row => row.clinica_id), [10]);
+  assert.equal(restricted.body.clinicas[0].shared_schedule_source_id, 202);
+  assert.equal(restricted.body.clinicas[0].shared_schedule, undefined);
+  assert(!JSON.stringify(restricted.body).includes('Hidden fictitious clinic'));
 });
 
 test('copy validates exception override hours against destination opening and rolls back every copied row', async () => {
@@ -559,4 +606,31 @@ test('the dedicated append endpoint always appends even when the caller requests
   assert.equal(result.statusCode, 200, JSON.stringify(result)); assert.equal(result.body.horarios.length, 3);
   assert.ok(result.body.horarios.find(row => row.id === 100)); assert.equal(result.body.horarios.find(row => row.id === 100).excepciones.length, 2);
   assert.equal(f.calls.transactions, 1);
+});
+
+test('competing validated edits pin the same revision and the second transaction rejects stale shared or unrelated-clinic writes', { timeout: 5000 }, async () => {
+  for (const secondClinicId of [20, 30]) {
+    const f = fixture({ concurrentMutations: true });
+    f.state().schedules = []; f.state().exceptions = []; f.state().timezones[20] = 'Europe/Madrid';
+    f.state().links.filter(row => row.doctor_id === 2).forEach(row => { row.shared_schedule_source_id = 201; });
+    if (secondClinicId === 30) {
+      f.state().links.push({ id: 203, doctor_id: 2, clinica_id: 30, activo: true, recibe_citas: true, shared_schedule_source_id: null });
+      f.state().timezones[30] = 'Europe/Madrid';
+    }
+    const row = (start, end) => ({ dia_semana: 1, hora_inicio: start, hora_fin: end, activo: true,
+      rrule: null, fecha_inicio_vigencia: '2027-01-04', fecha_fin_vigencia: '2027-01-04' });
+    const responses = await Promise.all([
+      f.call('createHorarioClinica', row('09:00', '10:00'), { id: '2', clinicaId: '10' }),
+      f.call('createHorarioClinica', row(secondClinicId === 20 ? '09:30' : '12:00', secondClinicId === 20 ? '10:30' : '13:00'),
+        { id: '2', clinicaId: String(secondClinicId) }),
+    ]);
+    assert.deepEqual(responses.map(row => row.statusCode).sort(), [201, 409], JSON.stringify(responses));
+    assert.equal(responses.find(row => row.statusCode === 409).body.code, 'personal_schedule_sharing_stale');
+    assert.equal(f.state().schedules.length, 1, 'A stale request must not create a second row');
+    const expectedPivot = responses[0].statusCode === 201 || secondClinicId === 20 ? 201 : 203;
+    assert.equal(f.state().schedules[0].doctor_clinica_id, expectedPivot);
+    assert.equal(f.calls.transactions, 2, 'Both real validators completed before the serialized transactions started');
+    assert.equal(f.state().revisions.find(row => row.doctor_id === 2).revision, '1');
+    assert.equal(f.calls.rollback, 1);
+  }
 });

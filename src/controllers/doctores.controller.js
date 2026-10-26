@@ -6,18 +6,12 @@ const withDoctorCalendarMutation = (doctorId, mutate) => withCalendarMutation({ 
 const { Op } = db.Sequelize;
 const { STAFF_ROLES } = require('../lib/role-helpers');
 const { isFlexibleDoctor } = require('../lib/flexible-agenda');
+const { buildWindowsFromHorarios, inAnyWindow, resolveClinicTimezone, formatDateLocal,
+  localDateTimeToUtc, dayIndexFromLocalDate } = require('../lib/availability-calendar');
+const { addDays, normalizeDateOnly } = require('../lib/personal-schedule-recurring');
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
-const dayIndex = (date) => new Date(date).getDay();
-const toTime = (d) => d.toTimeString().slice(0,5);
 const overlap = (a1, a2, b1, b2) => a1 < b2 && b1 < a2;
-const timeStrToDate = (fecha, hhmm) => new Date(`${fecha}T${hhmm}:00Z`);
-
-const buildWindows = (horarios, dow, fecha) => {
-  return (horarios || [])
-    .filter(h => h.dia_semana === dow && h.activo)
-    .map(h => ({ start: timeStrToDate(fecha, h.hora_inicio), end: timeStrToDate(fecha, h.hora_fin) }));
-};
 
 const subtractIntervals = (windows, blocks) => {
   let res = [...windows];
@@ -114,9 +108,11 @@ exports.list = asyncHandler(async (req, res) => {
       {
         model: db.DoctorHorario,
         as: 'horarios',
-        attributes: ['id'],
+        attributes: ['id', 'activo'],
         where: { activo: true },
-        required: !agendaContext,
+        // Shared members can have no physical rows: the afterFind projection
+        // supplies their canonical source before readiness is evaluated below.
+        required: false,
       },
     ],
     order: [['clinica_id', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'apellidos', 'ASC'], [{ model: db.Usuario, as: 'doctor' }, 'nombre', 'ASC']],
@@ -127,7 +123,9 @@ exports.list = asyncHandler(async (req, res) => {
   doctorClinicas.forEach((dc) => {
     const key = `${dc.doctor_id}:${dc.clinica_id}`;
     if (uniqueByPivot.has(key)) return;
-    const hasSchedule = Array.isArray(dc.horarios) && dc.horarios.some((horario) => horario?.id != null);
+    const hasSchedule = Array.isArray(dc.horarios) && dc.horarios.some((horario) =>
+      horario?.id != null && horario.activo !== false && horario.activo !== 0);
+    if (!agendaContext && !hasSchedule) return;
     const clinicHasOpening = Array.isArray(dc.clinica?.horarios) && dc.clinica.horarios.length > 0;
     const receivesAppointments = !!dc.recibe_citas;
     const flexibleAgenda = agendaContext && isFlexibleDoctor(dc);
@@ -158,22 +156,36 @@ exports.list = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
+async function delegatePersonalSchedule(req, res, method, doctorId, clinicId, horarios = undefined) {
+  const personal = require('./personal.controller');
+  const previousParams = req.params, previousBody = req.body, previousJson = res.json;
+  const sendJson = previousJson.bind(res);
+  req.params = { ...previousParams, id: String(doctorId), clinicaId: String(clinicId) };
+  if (horarios !== undefined) req.body = { horarios };
+  // Keep the legacy array contract without wrapping the real Express response:
+  // status(), headers and error bodies continue through the canonical handler.
+  res.json = payload => sendJson((!res.statusCode || res.statusCode < 400) && Array.isArray(payload?.horarios)
+    ? payload.horarios : payload);
+  try { return await personal[method](req, res); }
+  finally { req.params = previousParams; req.body = previousBody; res.json = previousJson; }
+}
+
 exports.getHorarios = asyncHandler(async (req, res) => {
-  const { doctorClinicaId } = req.params;
-  const horarios = await db.DoctorHorario.findAll({ where: { doctor_clinica_id: doctorClinicaId } });
-  res.json(horarios);
+  const link = await db.DoctorClinica.findByPk(req.params.doctorClinicaId, {
+    attributes: ['id', 'doctor_id', 'clinica_id'], skipSharedScheduleProjection: true,
+  });
+  if (!link) return res.status(404).json({ message: 'Profesional no asignado a esta clínica' });
+  return delegatePersonalSchedule(req, res, 'getHorariosClinica', link.doctor_id, link.clinica_id);
 });
 
 exports.updateHorarios = asyncHandler(async (req, res) => {
   const { doctorClinicaId } = req.params;
   const rows = Array.isArray(req.body) ? req.body : [];
-  const link = await db.DoctorClinica.findByPk(doctorClinicaId);
-  if (!link) return res.status(404).json({ message: 'Profesional no asignado a esta clínica' });
-  const created = await withDoctorCalendarMutation(link.doctor_id, async transaction => {
-    await db.DoctorHorario.destroy({ where: { doctor_clinica_id: doctorClinicaId }, transaction });
-    return db.DoctorHorario.bulkCreate(rows.map(r => ({ ...r, doctor_clinica_id: doctorClinicaId })), { transaction });
+  const link = await db.DoctorClinica.findByPk(doctorClinicaId, {
+    attributes: ['id', 'doctor_id', 'clinica_id'], skipSharedScheduleProjection: true,
   });
-  res.json(created);
+  if (!link) return res.status(404).json({ message: 'Profesional no asignado a esta clínica' });
+  return delegatePersonalSchedule(req, res, 'updateHorariosClinica', link.doctor_id, link.clinica_id, rows);
 });
 
 exports.listBloqueos = asyncHandler(async (req, res) => {
@@ -278,20 +290,7 @@ exports.updateHorariosClinica = asyncHandler(async (req, res) => {
   const { clinicaId } = req.params;
   const doctorId = req.authorizedDoctorId || req.params.doctorId || req.userData?.userId;
   const horarios = Array.isArray(req.body?.horarios) ? req.body.horarios : [];
-  const created = await withDoctorCalendarMutation(doctorId, async transaction => {
-  let dc = await db.DoctorClinica.findOne({ where: { doctor_id: doctorId, clinica_id: clinicaId }, transaction });
-  if (!dc) {
-    dc = await db.DoctorClinica.create({
-      doctor_id: doctorId,
-      clinica_id: clinicaId,
-      recibe_citas: true,
-      activo: true
-    }, { transaction });
-  }
-  await db.DoctorHorario.destroy({ where: { doctor_clinica_id: dc.id }, transaction });
-  return db.DoctorHorario.bulkCreate(horarios.map(h => ({ ...h, doctor_clinica_id: dc.id })), { transaction });
-  });
-  res.json(created);
+  return delegatePersonalSchedule(req, res, 'updateHorariosClinica', doctorId, clinicaId, horarios);
 });
 
 // Disponibilidad de doctor (slots o validación puntual)
@@ -301,23 +300,30 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
   const wantsSlots = parseBool(slots) || (!inicio && !fin && fecha);
   if (!fecha && !(inicio && fin)) return res.status(400).json({ message: 'fecha o inicio/fin requeridos' });
 
-  const start = inicio ? new Date(inicio) : new Date(`${fecha}T00:00:00Z`);
+  let start = inicio ? new Date(inicio) : null;
   let durMinParam = duracion_min ? parseInt(duracion_min,10) : null;
   let end = fin ? new Date(fin) : null;
-  if (isNaN(start) || (fin && isNaN(end))) return res.status(400).json({ message: 'rango inválido' });
-  const dow = dayIndex(start);
+  if ((inicio && isNaN(start)) || (fin && isNaN(end))) return res.status(400).json({ message: 'rango inválido' });
   const conflicts = [];
 
   // Fetch doctor-clinica + horarios
   const dc = await db.DoctorClinica.findOne({
     where: clinica_id ? { doctor_id, clinica_id } : { doctor_id },
     include: [
-      { model: db.DoctorHorario, as: 'horarios' },
-      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','grupoClinicaId'] }
+      { model: db.DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] },
+      { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','grupoClinicaId','configuracion'] }
     ]
   });
   if (!dc || !dc.activo) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
   if (group_id && dc?.clinica?.grupoClinicaId && dc.clinica.grupoClinicaId !== parseInt(group_id,10)) conflicts.push({ type: 'not_in_group', message: 'Doctor fuera del grupo' });
+  const timeZone = resolveClinicTimezone(dc?.clinica);
+  const fechaLocal = fecha ? normalizeDateOnly(fecha) : formatDateLocal(start, timeZone);
+  if (!fechaLocal) return res.status(400).json({ message: 'rango inválido' });
+  const dayStart = localDateTimeToUtc(fechaLocal, '00:00:00', timeZone);
+  const dayEnd = localDateTimeToUtc(addDays(fechaLocal, 1), '00:00:00', timeZone);
+  if (!dayStart || !dayEnd) return res.status(400).json({ message: 'rango inválido' });
+  start ||= dayStart;
+  const dow = dayIndexFromLocalDate(fechaLocal);
 
   // Optional: fetch instalacion to intersect windows
   let inst = null;
@@ -335,21 +341,20 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
   // Slots mode
   if (wantsSlots) {
     const durMin = durMinParam && durMinParam > 0 ? durMinParam : 30;
-    let windows = buildWindows(dc?.horarios || [], dow, fecha);
+    let windows = buildWindowsFromHorarios(dc?.horarios || [], dow, fechaLocal, timeZone);
     if (inst) {
-      const instWins = buildWindows(inst.horarios || [], dow, fecha);
-      if (windows.length === 0) windows = instWins;
-      else windows = windows.flatMap(w => instWins.map(i => ({ start: new Date(Math.max(w.start, i.start)), end: new Date(Math.min(w.end, i.end)) }))).filter(w => w.start < w.end);
+      const instWins = buildWindowsFromHorarios(inst.horarios || [], dow, fechaLocal, timeZone);
+      windows = windows.flatMap(w => instWins.map(i => ({ start: new Date(Math.max(w.start, i.start)), end: new Date(Math.min(w.end, i.end)) }))).filter(w => w.start < w.end);
     }
     // Blocks
     const blocks = [];
-    const bloqueosDoc = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: timeStrToDate(fecha,'23:59') }, fecha_fin: { [Op.gt]: timeStrToDate(fecha,'00:00') } } });
+    const bloqueosDoc = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: dayEnd }, fecha_fin: { [Op.gt]: dayStart } } });
     bloqueosDoc.forEach(b => blocks.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
-    const citasDoc = await resourceAppointments({ db, doctorId: doctor_id, start: timeStrToDate(fecha,'00:00'), end: timeStrToDate(fecha,'23:59') });
+    const citasDoc = await resourceAppointments({ db, doctorId: doctor_id, start: dayStart, end: dayEnd });
     citasDoc.forEach(c => blocks.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
     if (inst) {
-      (await resourceInstallationBlocks({ db, clinic: dc.clinica, installationIds: [instalacion_id], start: timeStrToDate(fecha,'00:00'), end: timeStrToDate(fecha,'23:59') })).forEach(b => blocks.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
-      const citasInst = await resourceAppointments({ db, clinic: dc.clinica, installationId: instalacion_id, start: timeStrToDate(fecha,'00:00'), end: timeStrToDate(fecha,'23:59') });
+      (await resourceInstallationBlocks({ db, clinic: dc.clinica, installationIds: [instalacion_id], start: dayStart, end: dayEnd })).forEach(b => blocks.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
+      const citasInst = await resourceAppointments({ db, clinic: dc.clinica, installationId: instalacion_id, start: dayStart, end: dayEnd });
       citasInst.forEach(c => blocks.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
     }
     const free = subtractIntervals(windows, blocks);
@@ -373,8 +378,7 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
 
   // Validation mode
   const effectiveEnd = end || new Date(start.getTime() + (durMinParam || 30)*60000);
-  const h = dc && (dc.horarios || []).find(h => h.dia_semana === dow);
-  const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(effectiveEnd);
+  const inRange = inAnyWindow(buildWindowsFromHorarios(dc?.horarios || [], dow, fechaLocal, timeZone), start, effectiveEnd);
   if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
   const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: effectiveEnd }, fecha_fin: { [Op.gt]: start } } });
   if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
@@ -382,8 +386,7 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
   if (citasDoc.length) conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
 
   if (inst) {
-    const hInst = (inst.horarios || []).find(h => h.dia_semana === dow);
-    const inRangeInst = hInst && hInst.activo && `${hInst.hora_inicio}` <= toTime(start) && `${hInst.hora_fin}` >= toTime(effectiveEnd);
+    const inRangeInst = inAnyWindow(buildWindowsFromHorarios(inst.horarios || [], dow, fechaLocal, timeZone), start, effectiveEnd);
     if (!inRangeInst) conflicts.push({ type: 'out_of_hours', message: 'Instalación fuera de horario' });
     (await resourceInstallationBlocks({ db, clinic: dc.clinica, installationIds: [instalacion_id], start, end: effectiveEnd })).forEach(b => { if (overlap(start, effectiveEnd, b.fecha_inicio, b.fecha_fin)) conflicts.push({ type: 'blocked', message: b.motivo || 'Bloqueo instalación' }); });
     const citasInst = await resourceAppointments({ db, clinic: dc.clinica, installationId: instalacion_id, start, end: effectiveEnd });

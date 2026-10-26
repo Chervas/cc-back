@@ -2,7 +2,7 @@
 const crypto = require('node:crypto');
 const TTL_MS = 20000;
 const TABLES = {
-  DoctorClinica: ['id', 'doctor_id', 'clinica_id', 'activo', 'recibe_citas', 'allow_overlap_confirmation', 'agenda_flexible', 'allow_legacy_attention_confirmation', 'rol_en_clinica', 'created_at', 'updated_at'],
+  DoctorClinica: ['id', 'doctor_id', 'clinica_id', 'activo', 'recibe_citas', 'allow_overlap_confirmation', 'agenda_flexible', 'allow_legacy_attention_confirmation', 'rol_en_clinica', 'shared_schedule_source_id', 'created_at', 'updated_at'],
   DoctorHorario: ['id', 'doctor_clinica_id', 'dia_semana', 'activo', 'hora_inicio', 'hora_fin', 'rrule', 'fecha_inicio_vigencia', 'fecha_fin_vigencia', 'created_at', 'updated_at'],
   DoctorHorarioExcepcion: ['id', 'doctor_horario_id', 'fecha', 'cancelado', 'hora_inicio_override', 'hora_fin_override', 'creado_por', 'created_at', 'updated_at'],
   DoctorBloqueo: ['id', 'doctor_id', 'clinica_id', 'fecha_inicio', 'fecha_fin', 'tipo', 'motivo', 'recurrente', 'recurrente_hasta', 'aplica_a_todas_clinicas', 'creado_por', 'created_at', 'updated_at'],
@@ -144,12 +144,22 @@ function changedScopes(before, after, changes) {
   const scheduleScope = (snapshot, id) => {
     const schedule = snapshot.DoctorHorario.find(row => Number(row.id) === Number(id));
     const link = schedule && snapshot.DoctorClinica.find(row => Number(row.id) === Number(schedule.doctor_clinica_id));
-    if (link) scopes.push({ kind: 'horario', doctorId: Number(link.doctor_id), clinicId: Number(link.clinica_id) });
+    if (link) {
+      const members = Number(link.shared_schedule_source_id) > 0
+        ? snapshot.DoctorClinica.filter(member => Number(member.doctor_id) === Number(link.doctor_id)
+          && Number(member.shared_schedule_source_id) === Number(link.shared_schedule_source_id)) : [link];
+      members.forEach(member => scopes.push({ kind: 'horario', doctorId: Number(member.doctor_id), clinicId: Number(member.clinica_id) }));
+    }
   };
   for (const table of Object.keys(TABLES)) for (const change of changes[table]) for (const side of ['before', 'after']) {
     const row = change[side], snapshot = side === 'before' ? before : after;
     if (!row) continue;
-    if (table === 'DoctorClinica') scopes.push({ kind: 'horario', doctorId: Number(row.doctor_id), clinicId: Number(row.clinica_id) });
+    if (table === 'DoctorClinica') {
+      const members = Number(row.shared_schedule_source_id) > 0
+        ? snapshot.DoctorClinica.filter(member => Number(member.doctor_id) === Number(row.doctor_id)
+          && Number(member.shared_schedule_source_id) === Number(row.shared_schedule_source_id)) : [row];
+      members.forEach(member => scopes.push({ kind: 'horario', doctorId: Number(member.doctor_id), clinicId: Number(member.clinica_id) }));
+    }
     else if (table === 'DoctorHorario') scheduleScope(snapshot, row.id);
     else if (table === 'DoctorHorarioExcepcion') scheduleScope(snapshot, row.doctor_horario_id);
     else {
@@ -173,7 +183,8 @@ async function restoreChanges({ db, changes, transaction }) {
       delete fields.id; delete fields.created_at;
       // Schedule creation can reactivate an existing link. Undo that activation,
       // but never rewrite receives-appointments, overlap, role or flexible flags.
-      const restore = table === 'DoctorClinica' ? { activo: fields.activo } : fields;
+      const restore = table === 'DoctorClinica' ? { activo: fields.activo,
+        ...(Object.hasOwn(fields, 'shared_schedule_source_id') ? { shared_schedule_source_id: fields.shared_schedule_source_id } : {}) } : fields;
       await db[table].update(restore, { where: { id: change.id }, transaction });
     } else await db[table].create(fields, { transaction });
   }

@@ -186,13 +186,24 @@ async function withCalendarMutation({ db, doctorId = null, doctorIds = [], insta
 // booking/budget snapshots. This rare administrative operation fails closed
 // with an actionable review instead of partially migrating clinical history.
 async function assertDoctorIdentityMutable({ db, doctorIds, transaction, enabled = bookingCapabilities().simple }) {
+  if (transaction?.options?.isolationLevel !== 'READ COMMITTED') throw Error('booking_requires_read_committed');
+  const doctors = [...new Set(doctorIds.map(Number))].sort((a, b) => a - b);
+  // Sharing takes resource anchors, then durable revisions. Take the same
+  // mutexes before reading: a link committed while we wait must be visible to
+  // the identity guard, including when the booking ledger is disabled.
+  if (enabled) await lockBookingResources({ db, resourceKeys: doctors.map(id => `doctor:${id}`), transaction });
+  await require('./personalCalendarUndo.service').lockRevisions({ db, doctorIds: doctors, transaction });
+  const shared = await db.DoctorClinica.findOne({ where: { doctor_id: { [db.Sequelize.Op.in]: doctors },
+    shared_schedule_source_id: { [db.Sequelize.Op.ne]: null } }, attributes: ['id'], transaction,
+    skipSharedScheduleProjection: true });
+  if (shared) throw bookingError('personal_schedule_sharing_unlink_required',
+    'Desvincula los calendarios compartidos antes de fusionar la identidad del profesional.');
   if (!enabled) return;
-  await lockBookingResources({ db, resourceKeys: doctorIds.map(id => `doctor:${Number(id)}`), transaction });
   const { Op, fn, col, where, literal } = db.Sequelize;
-  const refersToDoctor = (column, path) => ({ [Op.or]: doctorIds.map(id =>
+  const refersToDoctor = (column, path) => ({ [Op.or]: doctors.map(id =>
     where(fn('JSON_CONTAINS', fn('JSON_EXTRACT', col(column), literal(db.sequelize.escape(path))), JSON.stringify(Number(id))), 1)) });
   const evidence = await Promise.all([
-    db.AppointmentBookingOccupancy.findOne({ where: { doctor_id: { [Op.in]: doctorIds } }, attributes: ['id'], transaction }),
+    db.AppointmentBookingOccupancy.findOne({ where: { doctor_id: { [Op.in]: doctors } }, attributes: ['id'], transaction }),
     db.Tratamiento.findOne({ where: refersToDoctor('clinical_config', '$.booking_profile.phases[*].professionals.ids'), attributes: ['id_tratamiento'], transaction }),
     db.PatientProgramSession.findOne({ where: refersToDoctor('snapshot', '$.booking_profile.phases[*].professionals.ids'), attributes: ['id'], transaction }),
     db.EconomicBudgetVersion.findOne({ where: refersToDoctor('lines', '$[*].program_snapshot.appointments[*].booking_profile.phases[*].professionals.ids'), attributes: ['id'], transaction }),
@@ -202,7 +213,7 @@ async function assertDoctorIdentityMutable({ db, doctorIds, transaction, enabled
 }
 
 function sendCalendarMutationError(error, res) {
-  if (!/^booking_calendar_/.test(error?.code || '')) return false;
+  if (!/^(booking_calendar_|personal_schedule_sharing_)/.test(error?.code || '')) return false;
   res.status(error.status || 409).json({ message: error.message, code: error.code, details: error.details || null });
   return true;
 }

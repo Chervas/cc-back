@@ -18,6 +18,7 @@ const {
   resolveClinicTimeZone,
 } = require('./clinicOpeningHours.service');
 const personalPresenceService = require('./personalPresence.service');
+const { projectDoctorClinicas } = require('./personalScheduleSharing.service');
 const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
 
 const {
@@ -832,7 +833,7 @@ async function loadWeeklySchedule({ clinicIds, clinicMap, userId, todayIso }) {
       activo: true,
       ...scopedWhere('clinica_id', clinicIds),
     },
-    attributes: ['id', 'doctor_id', 'clinica_id'],
+    attributes: ['id', 'doctor_id', 'clinica_id', 'shared_schedule_source_id'],
     raw: true,
   });
   const doctorClinicIds = uniqueInts(doctorClinics.map((row) => row.id));
@@ -844,7 +845,7 @@ async function loadWeeklySchedule({ clinicIds, clinicMap, userId, todayIso }) {
         ...scopedWhere('doctor_clinica_id', doctorClinicIds),
         activo: true,
       },
-      attributes: ['id', 'doctor_clinica_id', 'dia_semana', 'activo', 'hora_inicio', 'hora_fin', 'rrule', 'fecha_inicio_vigencia', 'fecha_fin_vigencia'],
+      attributes: ['id', 'doctor_clinica_id', 'dia_semana', 'activo', 'hora_inicio', 'hora_fin', 'rrule', 'fecha_inicio_vigencia', 'fecha_fin_vigencia', 'created_at'],
       raw: true,
     }),
     DoctorHorarioExcepcion
@@ -858,12 +859,13 @@ async function loadWeeklySchedule({ clinicIds, clinicMap, userId, todayIso }) {
       : [],
   ]);
 
-  const doctorClinicMap = new Map(doctorClinics.map((row) => [Number(row.id), row]));
-  const exceptionMap = buildHorarioExceptionMap(exceptions);
-  const expanded = expandHorariosForRange(horarios, from, to, exceptionMap);
-
-  return expanded.map((slot) => {
-    const doctorClinic = doctorClinicMap.get(Number(slot.doctor_clinica_id));
+  const projectedLinks = await projectDoctorClinicas({ db, rows: doctorClinics.map((link) => ({
+    ...link,
+    horarios: horarios.filter((row) => Number(row.doctor_clinica_id) === Number(link.id))
+      .map((row) => ({ ...row, excepciones: exceptions.filter((exception) => Number(exception.doctor_horario_id) === Number(row.id)) })),
+  })) });
+  return projectedLinks.flatMap((doctorClinic) => expandHorariosForRange(doctorClinic.horarios || [], from, to,
+    buildHorarioExceptionMap((doctorClinic.horarios || []).flatMap((row) => row.excepciones || []))).map((slot) => {
     const clinic = clinicMap.get(Number(doctorClinic?.clinica_id));
     return {
       date: slot.fecha,
@@ -873,7 +875,7 @@ async function loadWeeklySchedule({ clinicIds, clinicMap, userId, todayIso }) {
       start: slot.hora_inicio,
       end: slot.hora_fin,
     };
-  });
+  }));
 }
 
 function parseJsonObject(value) {
@@ -1037,7 +1039,7 @@ async function loadSetupStatus({ clinicIds, groupIds, clinics, whatsappStatus })
             ...scopedWhere('clinica_id', clinicIds),
             activo: true,
           },
-          attributes: ['id'],
+          attributes: ['id', 'doctor_id', 'clinica_id', 'shared_schedule_source_id'],
           raw: true,
         })
       : [],
@@ -1065,14 +1067,21 @@ async function loadSetupStatus({ clinicIds, groupIds, clinics, whatsappStatus })
   ]);
 
   const doctorClinicIds = uniqueInts(doctorClinics.map((row) => row.id));
-  const scheduleCount = doctorClinicIds.length && DoctorHorario
-    ? await DoctorHorario.count({
+  const rawSchedules = doctorClinicIds.length && DoctorHorario
+    ? await DoctorHorario.findAll({
         where: {
           ...scopedWhere('doctor_clinica_id', doctorClinicIds),
           activo: true,
         },
+        attributes: ['id', 'doctor_clinica_id', 'activo'],
+        raw: true,
       })
-    : 0;
+    : [];
+  const effectiveLinks = await projectDoctorClinicas({ db, rows: doctorClinics.map((link) => ({
+    ...link, horarios: rawSchedules.filter((row) => Number(row.doctor_clinica_id) === Number(link.id)),
+  })) });
+  const scheduleCount = effectiveLinks.reduce((total, link) => total + (link.horarios || [])
+    .filter((row) => row.activo !== false && row.activo !== 0).length, 0);
 
   const hasLocalProfile = localProfileCount > 0 || (clinics || []).some((clinic) => String(clinic.url_ficha_local || '').trim());
   const items = [
@@ -1668,6 +1677,8 @@ module.exports = {
   getMainDashboard,
   getDoctorDay,
   __testing: {
+    loadWeeklySchedule,
+    loadSetupStatus,
     isExpectedTodayAppointment,
     isInactiveTodayAppointment,
     loadAppointments,

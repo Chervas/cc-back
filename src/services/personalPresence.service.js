@@ -10,6 +10,7 @@ const {
 } = require('../lib/personal-schedule-recurring');
 const { getAccessibleClinicIdsForFeature } = require('../lib/access-policy');
 const { isGlobalAdmin } = require('../lib/role-helpers');
+const { projectDoctorClinicas } = require('./personalScheduleSharing.service');
 const {
   DEFAULT_TIME_ZONE,
   resolveClinicTimeZone,
@@ -317,7 +318,7 @@ async function buildPresenceRowsForClinic({ clinicId, clinic: clinicInput = null
           doctor_id: { [Op.in]: userIds },
           activo: true,
         },
-        attributes: ['id', 'doctor_id', 'clinica_id', 'rol_en_clinica'],
+        attributes: ['id', 'doctor_id', 'clinica_id', 'rol_en_clinica', 'shared_schedule_source_id'],
         raw: true,
       })
     : [];
@@ -340,24 +341,22 @@ async function buildPresenceRowsForClinic({ clinicId, clinic: clinicInput = null
         raw: true,
       })
     : [];
-  const exceptionMap = buildHorarioExceptionMap(exceptions);
+  const projectedLinks = await projectDoctorClinicas({ db, rows: doctorClinicas.map((link) => ({
+    ...link,
+    horarios: horarios.filter((row) => Number(row.doctor_clinica_id) === Number(link.id))
+      .map((row) => ({ ...row, excepciones: exceptions.filter((exception) => Number(exception.doctor_horario_id) === Number(row.id)) })),
+  })) });
   const linksByUser = new Map();
-  for (const link of doctorClinicas) {
+  for (const link of projectedLinks) {
     const list = linksByUser.get(Number(link.doctor_id)) || [];
     list.push(link);
     linksByUser.set(Number(link.doctor_id), list);
   }
-  const horariosByDoctorClinica = new Map();
-  for (const horario of horarios) {
-    const list = horariosByDoctorClinica.get(Number(horario.doctor_clinica_id)) || [];
-    list.push(horario);
-    horariosByDoctorClinica.set(Number(horario.doctor_clinica_id), list);
-  }
-
   const rows = staff.map(({ pivot, user, userId }) => {
     const links = linksByUser.get(Number(userId)) || [];
     const intervals = links.flatMap((link) =>
-      expandHorariosForDate(horariosByDoctorClinica.get(Number(link.id)) || [], dateValue, exceptionMap)
+      expandHorariosForDate(link.horarios || [], dateValue,
+        buildHorarioExceptionMap((link.horarios || []).flatMap((row) => row.excepciones || [])))
     ).sort((a, b) => a.hora_inicio.localeCompare(b.hora_inicio));
     const expectedMinutes = intervalMinutes(intervals);
     const userEvents = eventsByUser.get(Number(userId)) || [];
@@ -579,6 +578,7 @@ module.exports = {
   getDashboardPresenceSummary,
   getPresenceWorkspace,
   __testing: {
+    buildPresenceRowsForClinic,
     computeWorkedMinutes,
     isValidTransition,
     rowStatus,

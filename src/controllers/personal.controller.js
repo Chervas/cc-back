@@ -38,10 +38,68 @@ const personalPresenceService = require('../services/personalPresence.service');
 const { withCalendarMutation, sendCalendarMutationError, assertDoctorIdentityMutable } = require('../services/appointmentCalendarMutation.service');
 const withDoctorCalendarMutation = (doctorId, mutate) => withCalendarMutation({ protectLegacyAppointments: true, db: require('../../models'), doctorId, mutate });
 const personalCalendarUndo = require('../services/personalCalendarUndo.service');
+const scheduleSharing = require('../services/personalScheduleSharing.service');
+const scheduleDb = () => require('../../models');
+
+async function scheduleSharingContext(doctorId, clinicId, transaction = null) {
+    const dc = await DoctorClinica.findOne({ where: { doctor_id: Number(doctorId), clinica_id: Number(clinicId) },
+        transaction, skipSharedScheduleProjection: true });
+    if (!dc || dc.shared_schedule_source_id == null) return { dc, source: dc,
+        memberRows: dc ? [dc] : [], clinicIds: [Number(clinicId)] };
+    return await scheduleSharing.resolveEffectiveDoctorClinica({ db: scheduleDb(), doctorId: Number(doctorId),
+        clinicId: Number(clinicId), transaction });
+}
+
+async function canEditSharedHorarios(actorId, doctorId, clinicId, transaction = null) {
+    if (!await canEditHorarios(actorId, doctorId, clinicId)) return false;
+    const context = await scheduleSharingContext(doctorId, clinicId, transaction);
+    const clinicIds = context?.clinicIds?.length ? context.clinicIds : [Number(clinicId)];
+    for (const memberId of clinicIds) if (!await canEditHorarios(actorId, doctorId, memberId)) return false;
+    return true;
+}
+
+async function pinSharedScheduleAccess(req, actorId, doctorId, clinicId) {
+    if (!await canEditSharedHorarios(actorId, doctorId, clinicId)) return false;
+    const context = await scheduleSharingContext(doctorId, clinicId);
+    const revision = scheduleDb().PersonalCalendarRevision
+        ? await scheduleDb().PersonalCalendarRevision.findByPk(Number(doctorId)) : null;
+    const pin = { doctorId: Number(doctorId), clinicId: Number(clinicId), revision: String(revision?.revision || '0'),
+        sourceId: Number(context?.source?.id || context?.dc?.id || 0),
+        clinicIds: (context?.clinicIds?.length ? context.clinicIds : [Number(clinicId)]).map(Number).sort((a, b) => a - b) };
+    (req.personalSharedSchedulePins ||= []).push(pin);
+    return true;
+}
+
+async function validateSharedSchedulePins(req, transaction) {
+    for (const pin of req.personalSharedSchedulePins || []) {
+        const context = await scheduleSharingContext(pin.doctorId, pin.clinicId, transaction);
+        const ids = (context?.clinicIds?.length ? context.clinicIds : [pin.clinicId]).map(Number).sort((a, b) => a - b);
+        const revision = scheduleDb().PersonalCalendarRevision
+            ? await scheduleDb().PersonalCalendarRevision.findByPk(pin.doctorId, { transaction }) : null;
+        if (String(revision?.revision || '0') !== pin.revision
+            || Number(context?.source?.id || context?.dc?.id || 0) !== pin.sourceId || JSON.stringify(ids) !== JSON.stringify(pin.clinicIds)) {
+            rejectPersonalScheduleTransfer(409, { code: 'personal_schedule_sharing_stale',
+                message: 'El vínculo del horario ha cambiado. Actualiza la vista antes de guardar.' });
+        }
+        if (!await canEditSharedHorarios(Number(req.userData?.userId), pin.doctorId, pin.clinicId, transaction)) {
+            rejectPersonalScheduleTransfer(403, { message: 'No tienes permiso para modificar el horario en todas las clínicas vinculadas.' });
+        }
+    }
+}
+
+async function ownedDoctorClinicaWhere(doctorId, clinicId, transaction = null) {
+    const context = await scheduleSharingContext(doctorId, clinicId, transaction);
+    return { doctor_id: Number(doctorId), ...(context?.source?.id
+        ? { id: Number(context.source.id) } : { clinica_id: Number(clinicId) }) };
+}
+
 async function withPersonalAvailabilityMutation(req, doctorIds, mutate) {
     const result = await withCalendarMutation({ protectLegacyAppointments: true, db: require('../../models'),
         doctorIds: Array.isArray(doctorIds) ? doctorIds.map(Number) : [Number(doctorIds)],
-        undoContext: { actorId: Number(req.userData?.userId) }, mutate });
+        undoContext: { actorId: Number(req.userData?.userId) }, mutate: async transaction => {
+            await validateSharedSchedulePins(req, transaction);
+            return mutate(transaction);
+        } });
     if (result && Object.prototype.hasOwnProperty.call(result, 'value') && Object.prototype.hasOwnProperty.call(result, 'undo')) {
         req.personalAvailabilityUndo = result.undo; return result.value;
     }
@@ -1706,6 +1764,10 @@ exports.mergePersonalAccounts = async (req, res) => {
             transaction,
         });
 
+        // The identity guard holds both calendar mutexes. Invalidate edits
+        // validated before this merge, including independent calendars.
+        await personalCalendarUndo.bumpRevisions({ db: scheduleDb(),
+            doctorIds: [principalUserId, secondaryUserId], transaction });
         await transaction.commit();
 
         return res.status(200).json({
@@ -1912,7 +1974,7 @@ exports.createPersonalBloqueo = async (req, res) => {
 
         return res.status(201).json(availabilityResponse(req, serialized));
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.createPersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error creating personal bloqueo', error: error.message });
     }
@@ -2024,7 +2086,7 @@ exports.updatePersonalBloqueo = async (req, res) => {
 
         return res.json(availabilityResponse(req, serializeBloqueo(bloqueo, clinicTimezone)));
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.updatePersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error updating personal bloqueo', error: error.message });
     }
@@ -2063,7 +2125,7 @@ exports.deletePersonalBloqueo = async (req, res) => {
         await withPersonalAvailabilityMutation(req, targetUserId, transaction => bloqueo.destroy({ transaction }));
         return req.personalAvailabilityUndo ? res.json(availabilityResponse(req)) : res.status(204).end();
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.deletePersonalBloqueo] Error:', error);
         return res.status(500).json({ message: 'Error deleting personal bloqueo', error: error.message });
     }
@@ -2144,7 +2206,7 @@ exports.createPersonalBloqueoExcepcion = async (req, res) => {
         });
         return res.status(201).json(availabilityResponse(req, serializeBloqueoExceptionRow(persisted)));
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.createPersonalBloqueoExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error creating bloqueo exception', error: error.message });
     }
@@ -2190,7 +2252,7 @@ exports.patchPersonalBloqueoExcepcion = async (req, res) => {
         }, { transaction }));
         return res.json(availabilityResponse(req, serializeBloqueoExceptionRow(exception)));
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.patchPersonalBloqueoExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error updating bloqueo exception', error: error.message });
     }
@@ -2226,7 +2288,7 @@ exports.deletePersonalBloqueoExcepcion = async (req, res) => {
         if (!deleted) return res.status(404).json({ message: 'Bloqueo exception not found' });
         return req.personalAvailabilityUndo ? res.json(availabilityResponse(req)) : res.status(204).end();
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.deletePersonalBloqueoExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error deleting bloqueo exception', error: error.message });
     }
@@ -2628,6 +2690,8 @@ async function findCrossClinicScheduleConflicts({ targetUserId, clinicaId, candi
             .filter((id) => Number.isFinite(id)),
     );
 
+    const sharedContext = await scheduleSharingContext(targetUserId, clinicaId, transaction);
+    const sharedClinicIds = new Set((sharedContext?.clinicIds || [Number(clinicaId)]).map(Number));
     const otherDoctorClinicas = await DoctorClinica.findAll({
         where: {
             doctor_id: Number(targetUserId),
@@ -2662,6 +2726,7 @@ async function findCrossClinicScheduleConflicts({ targetUserId, clinicaId, candi
             candidateExceptionMap,
         );
         for (const dc of otherDoctorClinicas) {
+            if (sharedClinicIds.has(Number(dc.clinica_id))) continue;
             const horarios = Array.isArray(dc.horarios) ? dc.horarios : [];
             const existingExceptionMap = buildHorarioExceptionMap(
                 horarios.flatMap((row) => Array.isArray(row.excepciones) ? row.excepciones : [])
@@ -2703,6 +2768,8 @@ async function findCrossClinicScheduleConflicts({ targetUserId, clinicaId, candi
 }
 
 async function validateHorarioExceptionCandidate({ targetUserId, clinicaId, horarioId, fecha, hora_inicio, hora_fin }) {
+    const sharedContext = await scheduleSharingContext(targetUserId, clinicaId);
+    const sharedClinicIds = new Set((sharedContext?.clinicIds || [Number(clinicaId)]).map(Number));
     const otherDoctorClinicas = await DoctorClinica.findAll({
         where: {
             doctor_id: Number(targetUserId),
@@ -2725,6 +2792,7 @@ async function validateHorarioExceptionCandidate({ targetUserId, clinicaId, hora
     });
 
     for (const dc of otherDoctorClinicas) {
+        if (sharedClinicIds.has(Number(dc.clinica_id))) continue;
         const exceptionMap = buildHorarioExceptionMap(
             (dc.horarios || []).flatMap((row) => Array.isArray(row.excepciones) ? row.excepciones : [])
         );
@@ -2881,6 +2949,11 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             activo: !!row.activo,
             recibe_citas: normalizeRecibeCitas(row.recibe_citas, false),
             allow_overlap_confirmation: row.allow_overlap_confirmation === true || row.allow_overlap_confirmation === 1,
+            shared_schedule_source_id: row.shared_schedule_source_id ?? null,
+            // Source resolution is internal; clinic names and membership are
+            // visible only when the actor can view the complete shared group.
+            shared_schedule: row.shared_schedule?.clinic_ids?.every(id => allowedClinicIds.includes(Number(id)))
+                ? row.shared_schedule : undefined,
             horarios: row.horarios || [],
             rol_clinica: null,
             subrol_clinica: null,
@@ -2958,7 +3031,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             if (!Number.isFinite(clinicId)) return [clinicId, false];
             return [
                 clinicId,
-                await canEditHorarios(actorId, targetUserId, clinicId),
+                await canEditSharedHorarios(actorId, targetUserId, clinicId),
             ];
         }),
     );
@@ -2967,6 +3040,9 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             .filter(([, canEdit]) => canEdit)
             .map(([clinicId]) => clinicId),
     );
+    const configurableClinicIds = new Set((await Promise.all(clinicasBase.map(async c =>
+        await canEditHorarios(actorId, targetUserId, Number(c.clinica_id)) ? Number(c.clinica_id) : null)))
+        .filter(id => id != null));
 
     const scheduleClinicIds = clinicasBase.map((c) => Number(c.clinica_id)).filter((id) => Number.isFinite(id));
     const scheduleTimezoneMap = await buildClinicTimezoneMap(scheduleClinicIds);
@@ -2992,7 +3068,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             scheduleRange.to,
             horarioExceptionMap,
         ).map((he) => enrichExpandedShiftWithAppointments(
-            { ...he, clinica_id: clinicId },
+            { ...he, clinica_id: clinicId, shared_clinic_ids: c.shared_schedule?.clinic_ids?.filter(id => allowedClinicIds.includes(Number(id))) },
             scheduleAppointmentRows,
             clinicTimeZone,
         ));
@@ -3003,7 +3079,7 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
             horarios_expandidos: horariosExpandidos,
             permissions: {
                 can_edit_horarios: canEditClinic,
-                can_edit_disponibilidad_config: canEditClinic,
+                can_edit_disponibilidad_config: configurableClinicIds.has(clinicId),
                 can_edit_overlap_confirmation: overlapEditableIds.has(clinicId),
             },
         };
@@ -3060,6 +3136,79 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
         onboarding_horario_clinicas_pendientes: onboardingClinicasPendientes,
     };
 }
+
+async function sharingPermissions(actorId, doctorId, clinicIds) {
+    for (const clinicId of clinicIds) if (!await canEditHorarios(actorId, doctorId, clinicId)) return false;
+    return true;
+}
+
+async function sharingStateForActor(actorId, doctorId, state) {
+    const allowed = new Set((await getAllowedClinicIdsForActorTarget(actorId, doctorId)).map(Number));
+    const clinicas = await Promise.all((state.clinicas || []).filter(row => allowed.has(Number(row.clinica_id)))
+        .map(async row => ({ ...row, can_view: true, can_edit: await canEditHorarios(actorId, doctorId, row.clinica_id) })));
+    const groups = (state.groups || []).filter(group => group.clinic_ids.every(id => allowed.has(Number(id))));
+    const editable = new Set(clinicas.filter(row => row.active && row.can_edit).map(row => Number(row.clinica_id)));
+    return { ...state, clinicas, groups, can_manage: editable.size >= 2
+        || groups.some(group => group.clinic_ids.every(id => editable.has(Number(id)))) };
+}
+
+async function sharingRequestIdentity(req, res) {
+    const actorId = Number(req.userData?.userId), doctorId = Number(req.params.id);
+    if (!Number.isSafeInteger(actorId) || actorId <= 0) { res.status(401).json({ message: 'Auth failed!' }); return null; }
+    if (!Number.isSafeInteger(doctorId) || doctorId <= 0) { res.status(400).json({ message: 'Invalid id' }); return null; }
+    if (!await canAccessTargetPersonal(actorId, doctorId, null)) { res.status(403).json({ message: 'Forbidden' }); return null; }
+    return { actorId, doctorId };
+}
+
+function sendSharingRequestError(error, res) {
+    if (sendPersonalScheduleTransferError(error, res) || personalCalendarUndo.sendUndoError(error, res)
+        || sendCalendarMutationError(error, res)) return;
+    console.error('[personal.scheduleSharing] failed');
+    res.status(500).json({ message: 'No se pudo gestionar la disponibilidad compartida. Actualiza la vista antes de reintentarlo.' });
+}
+
+exports.getScheduleSharing = async (req, res) => {
+    try {
+        const identity = await sharingRequestIdentity(req, res); if (!identity) return;
+        const state = await scheduleSharing.getScheduleSharing({ db: scheduleDb(), doctorId: identity.doctorId });
+        return res.json(await sharingStateForActor(identity.actorId, identity.doctorId, state));
+    } catch (error) { sendSharingRequestError(error, res); }
+};
+
+exports.previewScheduleSharing = async (req, res) => {
+    try {
+        const identity = await sharingRequestIdentity(req, res); if (!identity) return;
+        const preview = await scheduleSharing.previewScheduleSharing({ db: scheduleDb(), doctorId: identity.doctorId,
+            input: req.body, checkAll: ({ clinicIds }) => sharingPermissions(identity.actorId, identity.doctorId, clinicIds) });
+        return res.json(preview);
+    } catch (error) { sendSharingRequestError(error, res); }
+};
+
+exports.updateScheduleSharing = async (req, res) => {
+    try {
+        const identity = await sharingRequestIdentity(req, res); if (!identity) return;
+        const result = await withPersonalAvailabilityMutation(req, identity.doctorId, async transaction => {
+            const value = await scheduleSharing.applyScheduleSharing({ db: scheduleDb(), doctorId: identity.doctorId,
+                input: req.body, transaction,
+                checkAll: ({ clinicIds }) => sharingPermissions(identity.actorId, identity.doctorId, clinicIds) });
+            if (req.body?.operation === 'link') {
+                for (const clinicId of value.preview.affected_clinic_ids) {
+                    const context = await scheduleSharingContext(identity.doctorId, clinicId, transaction);
+                    const schedules = context?.source?.horarios || [];
+                    const conflicts = await findCrossClinicScheduleConflicts({ targetUserId: identity.doctorId, clinicaId: clinicId,
+                        candidateHorarios: schedules, transaction });
+                    if (conflicts.length) rejectPersonalScheduleTransfer(409, { code: 'STAFF_SCHEDULE_OVERLAP_OTHER_CLINIC',
+                        message: 'El calendario compartido se solapa con un turno de otra sede.', can_force: false });
+                }
+            }
+            return value;
+        });
+        // The mutation advanced the durable version after apply's callback.
+        const current = await scheduleSharing.getScheduleSharing({ db: scheduleDb(), doctorId: identity.doctorId });
+        return res.json(availabilityResponse(req, await sharingStateForActor(identity.actorId, identity.doctorId,
+            { ...current, preview: result.preview })));
+    } catch (error) { sendSharingRequestError(error, res); }
+};
 
 exports.getScheduleForCurrent = async (req, res) => {
     try {
@@ -3122,15 +3271,20 @@ exports.previewHorarioImpact = async (req, res) => {
             return res.status(400).json({ message: 'Invalid id' });
         }
 
-        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        const isBlockImpact = ['block', 'create_block', 'update_block'].includes(req.body?.action);
+        const canEdit = isBlockImpact
+            ? await canEditBloqueos(actorId, targetUserId, req.body?.aplica_a_todas_clinicas === true ? null : clinicaId)
+            : await pinSharedScheduleAccess(req, actorId, targetUserId, clinicaId);
         if (!canEdit) {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
+        const impactContext = !isBlockImpact ? await scheduleSharingContext(targetUserId, clinicaId) : null;
+        const impactClinicIds = impactContext?.clinicIds || [clinicaId];
         if (['delete_row', 'delete-row'].includes(req.body?.action)) {
             const clinicTimezone = await getClinicTimezoneById(clinicaId);
-            const appointments = await findFutureAppointmentsForRowImpact({ actorId, doctorId: targetUserId, clinicaId,
-                timeZone: clinicTimezone });
+            const appointments = (await Promise.all(impactClinicIds.map(impactId => findFutureAppointmentsForRowImpact({ actorId,
+                doctorId: targetUserId, clinicaId: impactId, timeZone: clinicTimezone })))).flat();
             return res.json({ scope: 'row', clinic_timezone: clinicTimezone, intervals: [],
                 has_affected_appointments: appointments.length > 0, affected_count: appointments.length, appointments });
         }
@@ -3145,7 +3299,7 @@ exports.previewHorarioImpact = async (req, res) => {
                     {
                         model: DoctorClinica,
                         as: 'doctorClinica',
-                        where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                        where: await ownedDoctorClinicaWhere(targetUserId, clinicaId),
                         attributes: ['id'],
                         required: true,
                     },
@@ -3196,13 +3350,9 @@ exports.previewHorarioImpact = async (req, res) => {
         const appointments = ['block', 'create_block', 'update_block'].includes(req.body?.action)
             && ['daily', 'weekly', 'monthly'].includes(req.body?.recurrente)
             ? await findAppointmentsForRecurringBlockImpact({ actorId, doctorId: targetUserId, clinicaId, body: req.body, timeZone: clinicTimezone })
-            : await findAppointmentsForImpact({
-            actorId,
-            doctorId: targetUserId,
-            clinicaId,
-            intervals,
-            timeZone: clinicTimezone,
-        });
+            : (await Promise.all(impactClinicIds.map(impactId => findAppointmentsForImpact({
+            actorId, doctorId: targetUserId, clinicaId: impactId, intervals, timeZone: clinicTimezone,
+        })))).flat();
 
         return res.json({
             has_affected_appointments: appointments.length > 0,
@@ -3220,21 +3370,18 @@ exports.previewHorarioImpact = async (req, res) => {
 
 
 async function getHorariosFor(targetUserId, clinicId) {
-    const dc = await DoctorClinica.findOne({
-        where: {
-            doctor_id: targetUserId,
-            clinica_id: clinicId,
-        },
-        attributes: ['id', 'doctor_id', 'clinica_id', 'activo', 'recibe_citas'],
-        raw: true,
-    });
+    const context = await scheduleSharingContext(targetUserId, clinicId);
+    const dc = context?.dc;
+    /* The selected clinic retains its receives-appointments setting. */
+    /* Source patterns and exception IDs remain canonical across members. */
+    const source = context?.source || dc;
 
     if (!dc) {
         return { doctor_clinica_id: null, horarios: [], recibe_citas: false };
     }
 
     const horarios = await DoctorHorario.findAll({
-        where: { doctor_clinica_id: dc.id },
+        where: { doctor_clinica_id: source.id },
         include: [{ model: DoctorHorarioExcepcion, as: 'excepciones' }],
         order: [['dia_semana', 'ASC'], ['hora_inicio', 'ASC']],
     });
@@ -3471,7 +3618,7 @@ function enrichExpandedShiftWithAppointments(shift, appointmentRows, timeZone = 
     const seen = new Set();
     const matches = (appointmentRows || []).filter((row) => {
         const plain = row.toJSON ? row.toJSON() : row;
-        if (clinicId && Number(plain.clinica_id) !== clinicId) return false;
+        if (clinicId && !(shift.shared_clinic_ids || [clinicId]).map(Number).includes(Number(plain.clinica_id))) return false;
         return (plain.schedule_phases || [plain]).some(phase =>
             overlapsDateRange(phase.inicio, phase.fin, shiftStart, shiftEnd));
     }).filter(row => {
@@ -3659,6 +3806,10 @@ async function getOrCreateDoctorClinica(targetUserId, clinicaId, options = {}) {
         dc.activo = true;
         await dc.save({ transaction });
     }
+    if (options.resolveShared !== false && Number(dc.shared_schedule_source_id) > 0) {
+        const context = await scheduleSharingContext(targetUserId, clinicaId, transaction);
+        return DoctorClinica.findByPk(Number(context.source.id), { transaction });
+    }
     return dc;
 }
 
@@ -3667,15 +3818,8 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
         return null;
     }
 
-    const sameClinicDoctorPivot = await DoctorClinica.findOne({
-        where: {
-            doctor_id: Number(targetUserId),
-            clinica_id: Number(clinicaId),
-        },
-        attributes: ['id'],
-        raw: true,
-        transaction,
-    });
+    const sharingContext = await scheduleSharingContext(targetUserId, clinicaId, transaction);
+    const sameClinicDoctorPivot = sharingContext?.source || sharingContext?.dc;
 
     if (sameClinicDoctorPivot) {
         const dia = normalizeDiaSemana(candidateHorario.dia_semana);
@@ -3863,7 +4007,7 @@ exports.createHorarioClinica = async (req, res) => {
             return res.status(400).json({ message: 'Invalid id' });
         }
 
-        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        const canEdit = await pinSharedScheduleAccess(req, actorId, targetUserId, clinicaId);
         if (!canEdit) {
             return res.status(403).json({ message: 'Forbidden' });
         }
@@ -3899,7 +4043,7 @@ exports.createHorarioClinica = async (req, res) => {
 
         return res.status(201).json(availabilityResponse(req, serializeHorarioRow(created)));
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.createHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error creating horario', error: error.message });
     }
@@ -3924,7 +4068,7 @@ exports.patchHorarioClinica = async (req, res) => {
             return res.status(400).json({ message: 'Invalid id' });
         }
 
-        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        const canEdit = await pinSharedScheduleAccess(req, actorId, targetUserId, clinicaId);
         if (!canEdit) {
             return res.status(403).json({ message: 'Forbidden' });
         }
@@ -3935,7 +4079,7 @@ exports.patchHorarioClinica = async (req, res) => {
                 {
                     model: DoctorClinica,
                     as: 'doctorClinica',
-                    where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                    where: await ownedDoctorClinicaWhere(targetUserId, clinicaId),
                     attributes: ['id'],
                     required: true,
                 },
@@ -3981,7 +4125,7 @@ exports.patchHorarioClinica = async (req, res) => {
 
         return res.json(availabilityResponse(req, serializeHorarioRow(existing)));
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.patchHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error patching horario', error: error.message });
     }
@@ -4006,7 +4150,7 @@ exports.deleteHorarioClinica = async (req, res) => {
             return res.status(400).json({ message: 'Invalid id' });
         }
 
-        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        const canEdit = await pinSharedScheduleAccess(req, actorId, targetUserId, clinicaId);
         if (!canEdit) {
             return res.status(403).json({ message: 'Forbidden' });
         }
@@ -4017,7 +4161,7 @@ exports.deleteHorarioClinica = async (req, res) => {
                 {
                     model: DoctorClinica,
                     as: 'doctorClinica',
-                    where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                    where: await ownedDoctorClinicaWhere(targetUserId, clinicaId),
                     required: true,
                 },
             ],
@@ -4030,7 +4174,7 @@ exports.deleteHorarioClinica = async (req, res) => {
 
         return req.personalAvailabilityUndo ? res.json(availabilityResponse(req)) : res.status(204).end();
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.deleteHorarioClinica] Error:', error);
         return res.status(500).json({ message: 'Error deleting horario', error: error.message });
     }
@@ -4050,7 +4194,7 @@ exports.getHorarioExcepciones = async (req, res) => {
         if (![actorId, targetUserId, clinicaId, horarioId].every((v) => Number.isFinite(v))) {
             return res.status(400).json({ message: 'Invalid id' });
         }
-        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        const canEdit = await pinSharedScheduleAccess(req, actorId, targetUserId, clinicaId);
         if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
 
         const horario = await DoctorHorario.findOne({
@@ -4058,7 +4202,7 @@ exports.getHorarioExcepciones = async (req, res) => {
             include: [{
                 model: DoctorClinica,
                 as: 'doctorClinica',
-                where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                where: await ownedDoctorClinicaWhere(targetUserId, clinicaId),
                 required: true,
             }],
         });
@@ -4089,7 +4233,7 @@ exports.createHorarioExcepcion = async (req, res) => {
         if (![actorId, targetUserId, clinicaId, horarioId].every((v) => Number.isFinite(v))) {
             return res.status(400).json({ message: 'Invalid id' });
         }
-        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        const canEdit = await pinSharedScheduleAccess(req, actorId, targetUserId, clinicaId);
         if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
 
         const horario = await DoctorHorario.findOne({
@@ -4097,7 +4241,7 @@ exports.createHorarioExcepcion = async (req, res) => {
             include: [{
                 model: DoctorClinica,
                 as: 'doctorClinica',
-                where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                where: await ownedDoctorClinicaWhere(targetUserId, clinicaId),
                 required: true,
             }],
         });
@@ -4139,7 +4283,7 @@ exports.createHorarioExcepcion = async (req, res) => {
         });
         return res.status(201).json(availabilityResponse(req, serializeHorarioExceptionRow(persisted)));
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.createHorarioExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error creating horario exception', error: error.message });
     }
@@ -4160,7 +4304,7 @@ exports.patchHorarioExcepcion = async (req, res) => {
         if (![actorId, targetUserId, clinicaId, horarioId, exceptionId].every((v) => Number.isFinite(v))) {
             return res.status(400).json({ message: 'Invalid id' });
         }
-        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        const canEdit = await pinSharedScheduleAccess(req, actorId, targetUserId, clinicaId);
         if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
 
         const horario = await DoctorHorario.findOne({
@@ -4168,7 +4312,7 @@ exports.patchHorarioExcepcion = async (req, res) => {
             include: [{
                 model: DoctorClinica,
                 as: 'doctorClinica',
-                where: { doctor_id: targetUserId, clinica_id: clinicaId },
+                where: await ownedDoctorClinicaWhere(targetUserId, clinicaId),
                 required: true,
             }],
         });
@@ -4214,7 +4358,7 @@ exports.patchHorarioExcepcion = async (req, res) => {
         }, { transaction }));
         return res.json(availabilityResponse(req, serializeHorarioExceptionRow(exception)));
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.patchHorarioExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error updating horario exception', error: error.message });
     }
@@ -4235,12 +4379,12 @@ exports.deleteHorarioExcepcion = async (req, res) => {
         if (![actorId, targetUserId, clinicaId, horarioId, exceptionId].every((v) => Number.isFinite(v))) {
             return res.status(400).json({ message: 'Invalid id' });
         }
-        const canEdit = await canEditHorarios(actorId, targetUserId, clinicaId);
+        const canEdit = await pinSharedScheduleAccess(req, actorId, targetUserId, clinicaId);
         if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
 
         const ownedHorario = await DoctorHorario.findOne({ where: { id: horarioId },
             include: [{ model: DoctorClinica, as: 'doctorClinica', required: true,
-                where: { doctor_id: targetUserId, clinica_id: clinicaId } }] });
+                where: await ownedDoctorClinicaWhere(targetUserId, clinicaId) }] });
         if (!ownedHorario) return res.status(404).json({ message: 'Horario not found' });
         const deleted = await withPersonalAvailabilityMutation(req, targetUserId, transaction => DoctorHorarioExcepcion.destroy({
             where: { id: exceptionId, doctor_horario_id: horarioId },
@@ -4249,7 +4393,7 @@ exports.deleteHorarioExcepcion = async (req, res) => {
         if (!deleted) return res.status(404).json({ message: 'Horario exception not found' });
         return req.personalAvailabilityUndo ? res.json(availabilityResponse(req)) : res.status(204).end();
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.deleteHorarioExcepcion] Error:', error);
         return res.status(500).json({ message: 'Error deleting horario exception', error: error.message });
     }
@@ -4270,14 +4414,18 @@ function rejectPersonalScheduleTransfer(status, body) {
 }
 
 function sendPersonalScheduleTransferError(error, res) {
+    if (/^personal_schedule_sharing_/.test(error?.code || '')) {
+        res.status(error.status || 409).json({ code: error.code, message: error.message });
+        return true;
+    }
     if (!error?.personalScheduleStatus) return false;
     res.status(error.personalScheduleStatus).json(error.personalScheduleBody);
     return true;
 }
 
-function ownedHorarioInclude(doctorId, clinicaId) {
+async function ownedHorarioInclude(doctorId, clinicaId, transaction = null) {
     return [{ model: DoctorClinica, as: 'doctorClinica',
-        where: { doctor_id: doctorId, clinica_id: clinicaId }, attributes: ['id', 'clinica_id'], required: true },
+        where: await ownedDoctorClinicaWhere(doctorId, clinicaId, transaction), attributes: ['id', 'clinica_id'], required: true },
         { model: DoctorHorarioExcepcion, as: 'excepciones' }];
 }
 
@@ -4307,16 +4455,20 @@ exports.copyHorarioClinica = async (req, res) => {
         }
         const sourceIds = rawIds.map(Number);
         const [canReadSource, canEditTarget] = await Promise.all([
-            canEditHorarios(actorId, sourceDoctorId, sourceClinicaId), canEditHorarios(actorId, targetUserId, toClinicaId),
+            pinSharedScheduleAccess(req, actorId, sourceDoctorId, sourceClinicaId), pinSharedScheduleAccess(req, actorId, targetUserId, toClinicaId),
         ]);
         if (!canReadSource || !canEditTarget) return res.status(403).json({ message: 'Forbidden' });
 
         const created = await withPersonalAvailabilityMutation(req, [sourceDoctorId, targetUserId], async transaction => {
                 const sources = await DoctorHorario.findAll({ where: { id: { [Op.in]: sourceIds } },
-                    include: ownedHorarioInclude(sourceDoctorId, sourceClinicaId), order: [['id', 'ASC']],
+                    include: await ownedHorarioInclude(sourceDoctorId, sourceClinicaId, transaction), order: [['id', 'ASC']],
                     transaction, lock: transaction.LOCK.UPDATE });
                 if (sources.length !== sourceIds.length) rejectPersonalScheduleTransfer(404, { message: 'Horario not found' });
                 const targetDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId, { transaction });
+                if (sourceDoctorId === targetUserId && sources.some(source => Number(source.doctor_clinica_id) === Number(targetDc.id))) {
+                    rejectPersonalScheduleTransfer(409, { code: 'SAME_SHARED_SCHEDULE',
+                        message: 'Estas clínicas ya comparten el mismo calendario. Elige otro destino para copiar.' });
+                }
                 const copies = [];
                 for (const id of sourceIds) {
                     const source = sources.find(row => Number(row.id) === id);
@@ -4372,13 +4524,13 @@ exports.moveHorarioClinica = async (req, res) => {
             code: occurrence ? 'SAME_SOURCE_AND_TARGET_OCCURRENCE' : 'SAME_SOURCE_AND_TARGET_CLINIC' });
         }
         const [canEditSource, canEditTarget] = await Promise.all([
-            canEditHorarios(actorId, sourceDoctorId, fromClinicaId), canEditHorarios(actorId, targetUserId, toClinicaId),
+            pinSharedScheduleAccess(req, actorId, sourceDoctorId, fromClinicaId), pinSharedScheduleAccess(req, actorId, targetUserId, toClinicaId),
         ]);
         if (!canEditSource || !canEditTarget) return res.status(403).json({ message: 'Forbidden' });
 
         const moved = await withPersonalAvailabilityMutation(req, [sourceDoctorId, targetUserId], async transaction => {
                 const existing = await DoctorHorario.findOne({ where: { id: horarioId },
-                    include: ownedHorarioInclude(sourceDoctorId, fromClinicaId), transaction, lock: transaction.LOCK.UPDATE });
+                    include: await ownedHorarioInclude(sourceDoctorId, fromClinicaId, transaction), transaction, lock: transaction.LOCK.UPDATE });
                 if (!existing) rejectPersonalScheduleTransfer(404, { message: 'Horario not found' });
                 let rawCandidate = horarioTransferFields(existing, req.body);
                 if (occurrence) {
@@ -4397,6 +4549,11 @@ exports.moveHorarioClinica = async (req, res) => {
                 const [candidate] = normalizeHorarioRows([rawCandidate]);
                 if (!candidate) rejectPersonalScheduleTransfer(400, { message: 'horario inválido' });
                 const targetDc = await getOrCreateDoctorClinica(targetUserId, toClinicaId, { transaction });
+                if (sourceDoctorId === targetUserId && Number(existing.doctor_clinica_id) === Number(targetDc.id)
+                    && (!occurrence || sourceDate === targetDate)) {
+                    rejectPersonalScheduleTransfer(409, { code: 'SAME_SHARED_SCHEDULE',
+                        message: 'Estas clínicas comparten el mismo calendario. Elige otra fecha para mover la ocurrencia.' });
+                }
                 if (occurrence) {
                     // Target validation reads this cancellation in the same
                     // transaction. A failed target write rolls it back as well.
@@ -4447,10 +4604,10 @@ exports.mergeHorariosClinica = async (req, res) => {
             || keepId === deleteId || (hasDate && !date) || !start || !end || start >= end) {
             return res.status(400).json({ message: 'Invalid merge payload' });
         }
-        if (!await canEditHorarios(actorId, doctorId, clinicaId)) return res.status(403).json({ message: 'Forbidden' });
+        if (!await pinSharedScheduleAccess(req, actorId, doctorId, clinicaId)) return res.status(403).json({ message: 'Forbidden' });
         const merged = await withPersonalAvailabilityMutation(req, doctorId, async transaction => {
             const rows = await DoctorHorario.findAll({ where: { id: { [Op.in]: [keepId, deleteId] } },
-                include: ownedHorarioInclude(doctorId, clinicaId), order: [['id', 'ASC']],
+                include: await ownedHorarioInclude(doctorId, clinicaId, transaction), order: [['id', 'ASC']],
                 transaction, lock: transaction.LOCK.UPDATE });
             if (rows.length !== 2) rejectPersonalScheduleTransfer(404, { message: 'Horario not found' });
             const keep = rows.find(row => Number(row.id) === keepId), removed = rows.find(row => Number(row.id) === deleteId);
@@ -4622,7 +4779,7 @@ exports.updateHorariosClinica = async (req, res) => {
         const targetUserId = Number(req.params.id);
         const clinicaId = Number(req.params.clinicaId);
         if (!Number.isFinite(targetUserId) || !Number.isFinite(clinicaId)) return res.status(400).json({ message: 'Invalid id' });
-        if (!await canEditHorarios(actorId, targetUserId, clinicaId)) return res.status(403).json({ message: 'Forbidden' });
+        if (!await pinSharedScheduleAccess(req, actorId, targetUserId, clinicaId)) return res.status(403).json({ message: 'Forbidden' });
         const hasAppendOnly = !Array.isArray(req.body) && Object.prototype.hasOwnProperty.call(req.body || {}, 'append_only');
         if (hasAppendOnly && typeof req.body.append_only !== 'boolean') return res.status(400).json({ message: 'append_only debe ser verdadero o falso.' });
         const appendOnly = hasAppendOnly && req.body.append_only;
@@ -4732,7 +4889,7 @@ exports.updateDisponibilidadConfigClinica = async (req, res) => {
         // Configuration changes invalidate older availability receipts, but do
         // not offer Undo of receives-appointments or overlap settings themselves.
         const dc = await withDoctorCalendarMutation(targetUserId, async transaction => {
-            const link = await getOrCreateDoctorClinica(targetUserId, clinicaId, { transaction });
+            const link = await getOrCreateDoctorClinica(targetUserId, clinicaId, { transaction, resolveShared: false });
             await link.update({ ...(hasRecibeCitasInput ? { recibe_citas: recibeCitas } : {}),
                 ...(hasOverlapInput ? { allow_overlap_confirmation: req.body.allow_overlap_confirmation } : {}) }, { transaction });
             return link;
@@ -4747,7 +4904,7 @@ exports.updateDisponibilidadConfigClinica = async (req, res) => {
             allow_overlap_confirmation: !!dc.allow_overlap_confirmation,
         });
     } catch (error) {
-        if (personalCalendarUndo.sendUndoError(error, res) || sendCalendarMutationError(error, res)) return;
+        if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.updateDisponibilidadConfigClinica] Error:', error);
         return res.status(500).json({ message: 'Error updating disponibilidad config', error: error.message });
     }
@@ -5324,7 +5481,7 @@ exports.undoPersonalAvailability = async (req, res) => {
                 for (const scope of scopes) {
                     const canEdit = scope.kind === 'bloqueo'
                         ? await canEditBloqueos(Number(req.userData?.userId), scope.doctorId, scope.clinicId)
-                        : await canEditHorarios(Number(req.userData?.userId), scope.doctorId, scope.clinicId);
+                        : await canEditSharedHorarios(Number(req.userData?.userId), scope.doctorId, scope.clinicId);
                     if (!canEdit) return false;
                 }
                 return true;
@@ -5339,8 +5496,12 @@ exports.undoPersonalAvailability = async (req, res) => {
                     const original = before.DoctorHorario.find(row => Number(row.id) === id);
                     const link = original && before.DoctorClinica.find(row => Number(row.id) === Number(original.doctor_clinica_id));
                     if (!link) continue;
+                    // Restoring an archived member calendar does not expose it
+                    // while that member still reads the common source.
+                    if (Number(link.shared_schedule_source_id) > 0
+                        && Number(link.shared_schedule_source_id) !== Number(link.id)) continue;
                     const row = await DoctorHorario.findOne({ where: { id },
-                        include: ownedHorarioInclude(link.doctor_id, link.clinica_id), transaction });
+                        include: await ownedHorarioInclude(link.doctor_id, link.clinica_id, transaction), transaction });
                     if (!row) rejectPersonalScheduleTransfer(409, { code: 'availability_undo_conflict', message: 'El horario original ya no se puede restaurar.' });
                     const validationError = await validateSingleHorarioCandidate({ targetUserId: link.doctor_id, clinicaId: link.clinica_id,
                         candidateHorario: { ...horarioTransferFields(row), excepciones: (row.excepciones || []).map(scheduleExceptionFields) },

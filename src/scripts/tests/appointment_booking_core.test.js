@@ -1347,8 +1347,24 @@ function linkedReservationFixture(phaseCount = 2) {
   const session = { id: 15, voucher_id: 8, appointment_id: 80, session_key: 's1', snapshot, reload: async () => session };
   f.db.PatientVoucher = { findByPk: async () => ({ id: 8, patient_id: 1, clinic_id: 72 }) };
   f.db.PatientProgramSession = { findOne: async () => session, findAll: async () => [session] };
+  // Since the program scope-review contract, a date edit is dispatched only by
+  // the coordinator. Exercise its real transaction-bound WeakMap capability
+  // and canonical read context, rather than making a direct appointment write.
+  const coordinatedReserve = (overrides = {}) => f.db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+    const values = { ...row, ...overrides.appointmentValues };
+    const preparedContext = await loadBookingContext({ db: f.db, clinic: f.clinic, profile: purchased.profile,
+      start: new Date(values.inicio), end: new Date(values.fin), transaction, ignoreAppointmentId: row.id_cita,
+      occupancyEnabled: true, equipmentEnabled: false });
+    const selected = [{ key: session.session_key, record: session, appointment: row, scheduling_status: 'reserved',
+      start_at: values.inicio, end_at: values.fin }];
+    const series = [{ key: session.session_key, offset_days: snapshot.offset_days, start_at: values.inicio, end_at: values.fin }];
+    const trustedProgramSeries = require('../../lib/program-replan').createSeriesContext({ transaction,
+      plan: { voucher: { id: 8, patient_id: 1, clinic_id: 72 }, timeZone: 'Europe/Madrid' }, selected, series });
+    return f.reserve({ ...overrides, transaction, preparedContext, trustedProgramSeries });
+  });
   return { ...f, row, snapshot, originalSelections, canonicalSelections: Object.fromEntries(purchased.profile.phases.map(phase =>
     [phase.key, { doctor_id: 6, installation_id: 10 }])),
+    coordinatedReserve,
     newEnd: new Date(new Date('2030-01-07T11:00:00Z').getTime() + phaseCount * 30 * 60000).toISOString() };
 }
 
@@ -1359,7 +1375,7 @@ test('linked single/multiphase rescheduling preserves selected staff and rooms w
   t.after(() => keys.forEach((key, index) => { if (previous[index] == null) delete process.env[key]; else process.env[key] = previous[index]; }));
   for (const count of [1, 2]) for (const choice of ['originalSelections', 'canonicalSelections', null]) {
     const f = linkedReservationFixture(count), before = structuredClone(f.row);
-    const saved = await f.reserve({ existingAppointmentId: 80, priorityAcknowledged: true,
+    const saved = await f.coordinatedReserve({ existingAppointmentId: 80, priorityAcknowledged: true,
       selections: choice ? f[choice] : {},
       appointmentValues: { inicio: '2030-01-07T11:00:00Z', fin: f.newEnd, estado: 'reprogramada' } });
     assert.equal(saved.source_system, 'cliniccloud'); assert.equal(saved.voucher_id, 8);
@@ -1382,7 +1398,7 @@ test('linked phase selections reject unknown, duplicate aliases and ambiguous ma
   for (const selections of [{ unknown: { doctor_id: 6, installation_id: 10 } },
     { original0: { doctor_id: 6, installation_id: 10 }, t1_p1: { doctor_id: 6, installation_id: 10 } }]) {
     const f = linkedReservationFixture();
-    await assert.rejects(f.reserve({ existingAppointmentId: 80, priorityAcknowledged: true, selections,
+    await assert.rejects(f.coordinatedReserve({ existingAppointmentId: 80, priorityAcknowledged: true, selections,
       appointmentValues: { inicio: '2030-01-07T11:00:00Z', fin: f.newEnd } }), { code: 'program_selection_invalid' });
     assert.equal(f.state.persists, 0); assert.equal(f.state.commits, 0);
   }
@@ -1393,6 +1409,18 @@ test('linked phase selections reject unknown, duplicate aliases and ambiguous ma
   ambiguous.import_metadata.booking.profile.phases[0].key = 't1_p2';
   assert.throws(() => programBookingSelections(f.snapshot, ambiguous, { t1_p2: { doctor_id: 6 } }), { code: 'program_selection_invalid' });
   assert.deepEqual(programBookingSelections(f.snapshot, { ...f.row, import_metadata: JSON.stringify(f.row.import_metadata) }, f.originalSelections), f.canonicalSelections);
+});
+
+test('linked program date edits reject direct commands and forged JSON capabilities before persistence', async () => {
+  for (const count of [1, 2]) for (const forged of [false, true]) {
+    const f = linkedReservationFixture(count), beforeAppointments = structuredClone(f.state.appointments), beforeOccupancies = structuredClone(f.state.occupancies);
+    await assert.rejects(f.reserve({ existingAppointmentId: 80, priorityAcknowledged: true,
+      appointmentValues: { inicio: '2030-01-07T11:00:00Z', fin: f.newEnd, estado: 'reprogramada' },
+      ...(forged ? { trustedProgramSeries: {} } : {}),
+    }), forged ? /program_series_context_invalid/ : { code: 'program_reschedule_required' });
+    assert.equal(f.state.persists, 0); assert.equal(f.state.commits, 0);
+    assert.deepEqual(f.state.appointments, beforeAppointments); assert.deepEqual(f.state.occupancies, beforeOccupancies);
+  }
 });
 
 function patientOverlapFixture({ otherChanges = {}, bookingProfile = profile(phase('one')), originalChanges = {} } = {}) {
