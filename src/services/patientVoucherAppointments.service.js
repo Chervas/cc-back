@@ -4,7 +4,7 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const appointmentAutomationV2Runtime = require('./appointmentAutomationV2Runtime.service');
 const { resolveClinicTimezone, formatDateLocal } = require('../lib/availability-calendar');
-const { parseSeriesStart, buildSeriesSlots } = require('../lib/voucher-schedule-calendar');
+const { parseSeriesStart, buildSeriesSlots, explicitSeriesSlots } = require('../lib/voucher-schedule-calendar');
 const { activeAppointmentWhere, inspectSeries } = require('./voucherScheduleAvailability.service');
 const { bookingCapabilities, requireOperationalProfile, loadScopedTreatment, assertTreatmentBookingVisibility, parseClinicalConfig } = require('./treatmentBookingProfile.service');
 const { loadBookingContext } = require('./appointmentBookingAvailability.service');
@@ -133,17 +133,19 @@ async function resources({ publicId }) {
   return resourcesForClinic(voucher.clinic_id);
 }
 
-async function resourcesForClinic(clinicId) {
+async function resourcesForClinic(clinicId, transaction = null) {
   const [doctorLinks, installations] = await Promise.all([
     DoctorClinica.findAll({
       where: { clinica_id: clinicId, activo: true, recibe_citas: true },
       attributes: ['doctor_id'],
       order: [['doctor_id', 'ASC']],
+      transaction,
     }),
     Instalacion.findAll({
       where: { clinica_id: clinicId, activo: true },
       attributes: ['id', 'nombre', 'tipo', 'default_duracion_minutos'],
       order: [['orden_visualizacion', 'ASC'], ['nombre', 'ASC']],
+      transaction,
     }),
   ]);
   const doctorIds = doctorLinks.map((link) => Number(link.doctor_id));
@@ -152,6 +154,7 @@ async function resourcesForClinic(clinicId) {
       where: { id_usuario: { [Op.in]: doctorIds } },
       attributes: ['id_usuario', 'nombre', 'apellidos', 'avatar'],
       order: [['nombre', 'ASC'], ['apellidos', 'ASC']],
+      transaction,
     })
     : [];
   return {
@@ -257,6 +260,36 @@ async function buildPlan({ publicId, payload, transaction = null, lockVoucher = 
     throw domainError(400, 'voucher_schedule_installation_invalid', 'La instalación no es válida.');
   }
   const selectionsBySequence = selectionsForSeries(payload, bookingProfile, count, doctorId, installationId);
+  const profilesBySequence = new Map(), durationsBySequence = new Map(), resourcesBySequence = new Map();
+  const durationChoices = payload.duration_selections_by_sequence;
+  const resourceChoices = payload.resources_by_sequence;
+  const priorityChoices = payload.booking_priority_acknowledgements_by_sequence;
+  for (const map of [durationChoices, resourceChoices]) if (map !== undefined && (!selectionRecord(map)
+    || Object.keys(map).length !== count || Object.keys(map).some(sequence => !/^[1-9]\d*$/.test(sequence) || Number(sequence) > count))) {
+    throw domainError(400, 'voucher_schedule_selection_invalid', 'Conserva la selección explícita de cada cita.');
+  }
+  if (priorityChoices !== undefined && (!selectionRecord(priorityChoices) || Object.keys(priorityChoices).length !== count
+    || Object.keys(priorityChoices).some(sequence => !/^[1-9]\d*$/.test(sequence) || Number(sequence) > count || typeof priorityChoices[sequence] !== 'boolean'))) {
+    throw domainError(400, 'voucher_schedule_selection_invalid', 'Conserva la confirmación de profesional de cada cita.');
+  }
+  if (resourceChoices && bookingProfile) throw domainError(400, 'voucher_schedule_selection_invalid', 'Elige los recursos de cada fase configurada.');
+  for (let sequence = 1; sequence <= count; sequence++) {
+    const choice = durationChoices?.[String(sequence)];
+    if (choice !== undefined && (!selectionRecord(choice) || Object.keys(choice).some(key => !['duration_minutes', 'phase_durations'].includes(key)))) {
+      throw domainError(400, 'voucher_schedule_duration_invalid', 'Revisa la duración de cada cita.');
+    }
+    const selection = choice && (variableDuration || Object.hasOwn(choice, 'phase_durations')) ? durationSelectionForRequest(treatment, choice) : durationSelection;
+    const profile = choice ? requireOperationalProfile(treatment, { durationSelection: selection }) : bookingProfile;
+    const minutes = positiveInteger(choice?.duration_minutes) || (profile ? bookingProfileDurationMinutes(profile) : durationMinutes);
+    if (!minutes || minutes < (profile ? 1 : 10) || minutes > (profile ? 1440 : 480)
+      || profile && minutes !== bookingProfileDurationMinutes(profile)) throw domainError(400, 'voucher_schedule_duration_invalid', 'La duración debe respetar el perfil del tratamiento.');
+    profilesBySequence.set(sequence, profile);
+    durationsBySequence.set(sequence, { minutes, selection });
+    const resource = resourceChoices?.[String(sequence)] || { doctor_id: doctorId, installation_id: installationId };
+    if (resourceChoices && (!selectionRecord(resource) || Object.keys(resource).some(key => !['doctor_id', 'installation_id'].includes(key))
+      || !positiveInteger(resource.doctor_id) || !positiveInteger(resource.installation_id))) throw domainError(400, 'voucher_schedule_selection_invalid', 'Selecciona una sala y un profesional válidos para cada cita.');
+    resourcesBySequence.set(sequence, resource);
+  }
   let doctor = null;
   let installation = null;
   if (doctorId) {
@@ -275,7 +308,12 @@ async function buildPlan({ publicId, payload, transaction = null, lockVoucher = 
     });
     if (!installation) throw domainError(400, 'voucher_schedule_installation_invalid', 'La instalación no está disponible.');
   }
-  const slots = buildSeriesSlots({ startAt, count, intervalDays, durationMinutes, timeZone });
+  const explicitDates = Object.hasOwn(payload, 'starts_by_sequence');
+  const slots = (explicitDates
+    ? explicitSeriesSlots({ starts: payload.starts_by_sequence, startAt, count, durationMinutes, timeZone, durations: durationsBySequence })
+    : buildSeriesSlots({ startAt, count, intervalDays, durationMinutes, timeZone }))
+    .map(slot => ({ ...slot, end: new Date(+slot.start + durationsBySequence.get(slot.sequence).minutes * 60000) }));
+  if (slots.some((slot, index) => index && +slot.start < +slots[index - 1].end)) throw domainError(400, 'voucher_schedule_dates_invalid', 'Las citas deben conservar su orden y no solaparse.');
   let result;
   if (bookingProfile) {
     const context = await loadBookingContext({ db, clinic, profile: bookingProfile, start: slots[0].start,
@@ -284,21 +322,35 @@ async function buildPlan({ publicId, payload, transaction = null, lockVoucher = 
       dates: slots.flatMap((slot) => [formatDateLocal(slot.start, timeZone), formatDateLocal(slot.end, timeZone)]) });
     result = slots.map((slot) => {
       const selections = selectionsBySequence.get(slot.sequence);
-      const solution = solveBookingProfile({ profile: bookingProfile, start: slot.start, ...context, selections });
+      const profile = profilesBySequence.get(slot.sequence);
+      const solution = solveBookingProfile({ profile, start: slot.start, ...context, selections });
       const solutionStart = solution?.start_at == null ? slot.start : new Date(solution.start_at);
       const solutionEnd = new Date(solution?.end_at);
       const valid = solution && solutionStart.getTime() === slot.start.getTime() && solutionEnd.getTime() === slot.end.getTime()
-        && (bookingProfile.version !== 4 || (solution.start_at != null && solution.capacity_fully_verified === true
+        && (profile.version !== 4 || (solution.start_at != null && solution.capacity_fully_verified === true
           && Array.isArray(solution.attention_requirements_pending) && !solution.attention_requirements_pending.length));
       return { sequence: slot.sequence, start_at: (valid ? solutionStart : slot.start).toISOString(), end_at: (valid ? solutionEnd : slot.end).toISOString(),
         conflicts: valid ? [] : [{ code: 'BOOKING_UNAVAILABLE', resource: 'treatment', title: 'No hay disponibilidad para el perfil del tratamiento' }],
         ...(valid ? { phases: solution.phases, warnings: solution.warnings, requires_priority_acknowledgement: solution.requires_priority_acknowledgement,
-          ...(sealPlan ? { booking_plan_sha256: bookingPlanHash(bookingProfile, solution) } : {}),
-          ...(bookingProfile.version === 4 ? { capacity_fully_verified: true, attention_requirements_pending: [] } : {}) } : {}) };
+          ...(sealPlan ? { booking_plan_sha256: bookingPlanHash(profile, solution) } : {}),
+          ...(profile.version === 4 ? { capacity_fully_verified: true, attention_requirements_pending: [] } : {}) } : {}) };
     });
   } else {
-    result = await inspectSeries({ db, slots, clinicId: Number(voucher.clinic_id), doctorId, installationId,
+    if (!resourceChoices) result = await inspectSeries({ db, slots, clinicId: Number(voucher.clinic_id), doctorId, installationId,
       doctor, installation, timeZone, transaction });
+    else {
+      result = [];
+      for (const slot of slots) {
+        const choice = resourcesBySequence.get(slot.sequence);
+        const selectedDoctor = await DoctorClinica.findOne({ where: { doctor_id: choice.doctor_id, clinica_id: voucher.clinic_id, activo: true, recibe_citas: true },
+          include: [{ model: db.DoctorHorario, as: 'horarios', include: [{ model: db.DoctorHorarioExcepcion, as: 'excepciones' }] }], transaction });
+        const selectedRoom = await Instalacion.findOne({ where: { id: choice.installation_id, clinica_id: voucher.clinic_id, activo: true },
+          include: [{ model: db.InstalacionHorario, as: 'horarios' }, { model: db.InstalacionBloqueo, as: 'bloqueos' }], transaction });
+        if (!selectedDoctor || !selectedRoom) throw domainError(400, 'voucher_schedule_selection_invalid', 'La sala o el profesional no está disponible en esta clínica.');
+        result.push(...await inspectSeries({ db, slots: [slot], clinicId: Number(voucher.clinic_id), doctorId: choice.doctor_id,
+          installationId: choice.installation_id, doctor: selectedDoctor, installation: selectedRoom, timeZone, transaction }));
+      }
+    }
   }
   if (!planningSource && voucher.expires_at) {
     const expires = new Date(voucher.expires_at);
@@ -325,6 +377,10 @@ async function buildPlan({ publicId, payload, transaction = null, lockVoucher = 
       doctor_id: doctorId,
       installation_id: installationId,
       timezone: timeZone,
+      ...(payload.agenda_request_sha256 ? { agenda_request_sha256: bookingReplay.sha(payload.agenda_request_sha256) } : {}),
+      ...(explicitDates ? { starts_by_sequence: Object.fromEntries(slots.map(slot => [String(slot.sequence), slot.start.toISOString()])) } : {}),
+      ...(durationChoices ? { duration_selections_by_sequence: Object.fromEntries(Array.from(durationsBySequence, ([sequence, row]) => [String(sequence), row.selection || { duration_minutes: row.minutes }])) } : {}),
+      ...(resourceChoices ? { resources_by_sequence: resourceChoices } : {}),
     },
     appointments: result,
     has_conflicts: result.some((slot) => slot.conflicts.length),
@@ -333,13 +389,17 @@ async function buildPlan({ publicId, payload, transaction = null, lockVoucher = 
     rawSource: voucher,
     selectionsBySequence,
     durationSelection,
+    profilesBySequence,
+    durationsBySequence,
+    resourcesBySequence,
     bookingProfile,
     physicalTemplate,
   };
 }
 
 function serializePlan(plan) {
-  const { rawVoucher, rawSource, treatment, selectionsBySequence, durationSelection, bookingProfile, physicalTemplate, ...serializable } = plan;
+  const { rawVoucher, rawSource, treatment, selectionsBySequence, durationSelection, bookingProfile, physicalTemplate,
+    profilesBySequence, durationsBySequence, resourcesBySequence, ...serializable } = plan;
   return {
     ...serializable,
     treatment: treatment ? {
@@ -377,13 +437,43 @@ async function preview(input) {
   const actorId = positiveInteger(input.actorId);
   if (!actorId) throw domainError(401, 'unauthenticated', 'Usuario no autenticado.');
   return sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+    const previous = await recovered(input, transaction);
+    if (previous) return previous;
+    if (input.validateAgenda) {
+      await loadVoucher(input.publicId, transaction, true, true);
+      await input.validateAgenda(transaction);
+    }
     const plan = await buildPlan({ ...input, transaction, lockVoucher: true, sealPlan: true });
     if (plan.has_conflicts) return { ...serializePlan(plan), booking_replay_supported: true };
     const prepared = bookingReplay.preparedMetadata(plan, actorId);
+    if (input.payload.agenda_request_sha256) {
+      prepared.request_key = bookingReplay.key(input.payload.booking_request_key);
+      prepared.agenda_request_sha256 = bookingReplay.sha(input.payload.agenda_request_sha256);
+    }
     await appendReplayEvent(plan.rawVoucher, 'prepared', prepared, transaction, actorId);
     return { ...serializePlan(plan), booking_replay_supported: true,
-      booking_request_key: prepared.request_key, booking_request_sha256: prepared.request_sha256 };
+      booking_request_key: prepared.request_key, booking_request_sha256: prepared.request_sha256,
+      ...(input.payload.agenda_request_sha256 ? { payload: bookingReplay.payloadForIntent(prepared.intent, input.payload) } : {}) };
   });
+}
+
+async function recovered(input, transaction) {
+  if (!bookingReplay.enabled() || !input.payload?.agenda_request_sha256) return null;
+  const voucher = await loadVoucher(input.publicId, transaction, true, true);
+  const requestKey = bookingReplay.key(input.payload.booking_request_key);
+  const saved = await replayEvent(voucher, 'prepared', requestKey, transaction);
+  if (!saved) return null;
+  if (saved.actor_id !== Number(input.actorId)) throw domainError(403, 'voucher_booking_request_forbidden', 'Esta propuesta pertenece a otra sesión de trabajo.');
+  if (saved.intent.configuration.agenda_request_sha256 !== saved.agenda_request_sha256) throw domainError(409, 'voucher_booking_receipt_invalid', 'No se puede verificar la solicitud guardada.');
+  if (saved.agenda_request_sha256 !== bookingReplay.sha(input.payload.agenda_request_sha256)) throw domainError(409, 'voucher_booking_request_conflict', 'La solicitud guardada no coincide con este borrador.');
+  return { booking_request_key: requestKey, booking_request_sha256: saved.request_sha256, booking_replay_supported: true,
+    payload: bookingReplay.payloadForIntent(saved.intent, input.payload) };
+}
+
+async function recover(input) {
+  if (!bookingReplay.enabled()) return null;
+  assertReplayRuntime();
+  return sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, transaction => recovered(input, transaction));
 }
 
 async function persistPlan({ plan, actorId, payload, transaction, durable = false, prepared = null, afterPersist = null, birthRequestKey = null }) {
@@ -398,11 +488,13 @@ async function persistPlan({ plan, actorId, payload, transaction, durable = fals
     const source = plan.rawSource || plan.rawVoucher;
     const clinic = managed ? await db.Clinica.findByPk(source.clinic_id, { transaction }) : null;
     for (const slot of plan.appointments) {
+      const profile = plan.profilesBySequence?.get(slot.sequence) || plan.bookingProfile;
+      const selectedResources = plan.resourcesBySequence?.get(slot.sequence) || plan.configuration;
       const values = {
         clinica_id: source.clinic_id,
         paciente_id: source.patient_id,
-        doctor_id: plan.configuration.doctor_id,
-        instalacion_id: plan.configuration.installation_id,
+        doctor_id: selectedResources.doctor_id,
+        instalacion_id: selectedResources.installation_id,
         tratamiento_id: source.treatment_id,
         voucher_id: plan.rawVoucher?.id || null,
         created_by: actorId,
@@ -416,14 +508,15 @@ async function persistPlan({ plan, actorId, payload, transaction, durable = fals
         fin: slot.end_at,
       };
       const visitBirth = managed && !plan.rawVoucher ? await managed.prepareBirth({ values, clinic, actorId,
-        profile: plan.bookingProfile, requestKey: birthRequestKey(slot.sequence) })
-        : managed ? await managed.prepareVoucherBirth({ values, clinic, actorId, profile: plan.bookingProfile,
+        profile, requestKey: birthRequestKey(slot.sequence) })
+        : managed ? await managed.prepareVoucherBirth({ values, clinic, actorId, profile,
         parentRequestKey: prepared.request_key, parentRequestSha256: prepared.request_sha256,
         sequence: slot.sequence, slotPlanSha256: slot.booking_plan_sha256, transaction }) : null;
       const appointment = bookingCapabilities().simple
         ? await mutateAppointmentBooking({ db, appointmentValues: values, transaction,
-          selections: plan.selectionsBySequence.get(slot.sequence), priorityAcknowledged: payload.booking_priority_acknowledged === true,
-          durationSelection: plan.durationSelection,
+          selections: plan.selectionsBySequence.get(slot.sequence),
+          priorityAcknowledged: payload.booking_priority_acknowledgements_by_sequence?.[String(slot.sequence)] === true || payload.booking_priority_acknowledged === true,
+          durationSelection: plan.durationsBySequence?.get(slot.sequence)?.selection || plan.durationSelection,
           ...(visitBirth ? { visitBirth } : {}),
           ...(durable && slot.booking_plan_sha256 ? { expectedPlanSha256: slot.booking_plan_sha256 } : {}),
           persist: ({ values: resolved, existing, transaction: tx, sealedBirth }) => sealedBirth ? existing : CitaPaciente.create(resolved, { transaction: tx }) })
@@ -434,7 +527,7 @@ async function persistPlan({ plan, actorId, payload, transaction, durable = fals
     return appointments;
 }
 
-async function create({ publicId, actorId, payload }) {
+async function create({ publicId, actorId, payload, validateAgenda }) {
   const durable = bookingReplay.enabled();
   if (!durable && (Object.hasOwn(payload, 'booking_request_key') || Object.hasOwn(payload, 'booking_request_sha256'))) {
     throw domainError(409, 'voucher_booking_replay_disabled', 'La recuperación de esta reserva todavía no está habilitada. No se creará otra cita.');
@@ -457,6 +550,10 @@ async function create({ publicId, actorId, payload }) {
       bookingReplay.validatePayload(prepared.intent, payload, normalizedSelections);
       const committed = await replayEvent(voucher, 'committed', requestKey, transaction);
       if (committed) return { created: [], replayed: true, receipt: bookingReplay.receiptFromMetadata(committed, prepared) };
+    }
+    if (validateAgenda) {
+      await loadVoucher(publicId, transaction, true, true);
+      await validateAgenda(transaction);
     }
     const plan = await buildPlan({ publicId, transaction, lockVoucher: true, sealPlan: durable,
       payload: durable ? bookingReplay.payloadForIntent(prepared.intent, payload) : payload });
@@ -510,6 +607,7 @@ module.exports = {
   resources,
   preview,
   create,
+  recover,
   // Shared native series coordinator. The budget adapter supplies a canonical
   // budget-line origin and capacity; it never manufactures a PatientVoucher.
   seriesCoordinator: { resourcesForClinic, buildPlan, serializePlan, persistPlan, normalizedSelections, assertReplayRuntime },

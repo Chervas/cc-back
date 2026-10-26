@@ -98,6 +98,20 @@ function integer(value, fallback) {
 }
 function validatePayload(intent, payload, normalizeSelections) {
   const config = intent.configuration;
+  for (const field of ['duration_selections_by_sequence', 'resources_by_sequence']) {
+    if ((config[field] || Object.hasOwn(payload, field)) && hash(config[field] || null) !== hash(payload[field] || null)) {
+      fail('voucher_booking_request_conflict', 'La duración o los recursos de cada cita han cambiado.');
+    }
+  }
+  if (config.starts_by_sequence || Object.hasOwn(payload, 'starts_by_sequence')) {
+    const dates = payload.starts_by_sequence;
+    if (!dates || typeof dates !== 'object' || Array.isArray(dates)
+      || Object.keys(dates).length !== config.count
+      || Object.keys(dates).some(sequence => !Object.hasOwn(config.starts_by_sequence || {}, sequence)
+        || parseSeriesStart(dates[sequence], config.timezone).toISOString() !== config.starts_by_sequence[sequence])) {
+      fail('voucher_booking_request_conflict', 'Las fechas elegidas no coinciden con la propuesta.');
+    }
+  }
   if (parseSeriesStart(payload.start_at, config.timezone).toISOString() !== intent.slots[0].start_at
     || integer(payload.count, config.count) !== config.count
     || integer(payload.interval_days, config.interval_days) !== config.interval_days
@@ -129,7 +143,12 @@ function validatePayload(intent, payload, normalizeSelections) {
       }
     }
   }
-  if (intent.slots.some(slot => slot.requires_priority_acknowledgement) && payload.booking_priority_acknowledged !== true) {
+  const acknowledgements = payload.booking_priority_acknowledgements_by_sequence;
+  if (acknowledgements !== undefined && (!acknowledgements || typeof acknowledgements !== 'object' || Array.isArray(acknowledgements)
+    || Object.keys(acknowledgements).length !== config.count || Object.keys(acknowledgements).some(sequence => !/^[1-9]\d*$/.test(sequence)
+      || Number(sequence) > config.count || typeof acknowledgements[sequence] !== 'boolean'))) fail('voucher_schedule_selection_invalid', 'Conserva la confirmación de cada cita.', 400);
+  if (intent.slots.some(slot => slot.requires_priority_acknowledgement
+    && payload.booking_priority_acknowledged !== true && acknowledgements?.[String(slot.sequence)] !== true)) {
     fail('booking_priority_confirmation_required', 'Confirma la reserva con el profesional alternativo indicado.');
   }
 }
@@ -138,6 +157,12 @@ function payloadForIntent(intent, payload) {
     interval_days: intent.configuration.interval_days, doctor_id: intent.configuration.doctor_id,
     installation_id: intent.configuration.installation_id, duration_minutes: intent.configuration.duration_minutes };
   delete result.booking_selection; delete result.booking_selections_by_sequence;
+  delete result.starts_by_sequence;
+  if (intent.configuration.starts_by_sequence) result.starts_by_sequence = clone(intent.configuration.starts_by_sequence);
+  for (const field of ['duration_selections_by_sequence', 'resources_by_sequence']) {
+    delete result[field];
+    if (intent.configuration[field]) result[field] = clone(intent.configuration[field]);
+  }
   if (intent.selections) result.booking_selections_by_sequence = clone(intent.selections);
   if (intent.duration_selection) {
     // Multi-phase templates need explicit per-phase minutes; a total cannot

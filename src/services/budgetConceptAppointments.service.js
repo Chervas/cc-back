@@ -68,6 +68,23 @@ function createService({ db = require('../../models'), coordinator = require('./
     coordinator.assertReplayRuntime();
     if (!db.PatientOperationalEvent) L.fail('budget_booking_replay_unavailable', 'No se puede verificar la reserva. No se creará otra cita.', 503);
   }
+  async function recovered(input, transaction) {
+    if (!replayEnabled() || !input.payload?.agenda_request_sha256) return null;
+    const budget = await identity(input, transaction, true);
+    const requestKey = replay.key(input.payload.booking_request_key);
+    const saved = await read(budget, input.lineKey, 'prepared', requestKey, transaction);
+    if (!saved) return null;
+    if (saved.actor_id !== Number(input.actorId)) L.fail('budget_booking_request_forbidden', 'Esta propuesta pertenece a otra sesión de trabajo.', 403);
+    if (saved.intent.configuration.agenda_request_sha256 !== saved.agenda_request_sha256) L.fail('budget_booking_receipt_invalid', 'No se puede verificar la solicitud guardada.');
+    if (saved.agenda_request_sha256 !== replay.sha(input.payload.agenda_request_sha256)) L.fail('budget_booking_request_conflict', 'La solicitud guardada no coincide con este borrador.');
+    return { booking_request_key: requestKey, booking_request_sha256: saved.request_sha256, booking_replay_supported: true,
+      payload: replay.payloadForIntent(saved.intent, input.payload) };
+  }
+  async function recover(input) {
+    if (!replayEnabled()) return null;
+    assertReplayRuntime();
+    return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, transaction => recovered(input, transaction));
+  }
   async function resources(input) {
     const budget = await identity(input, null, false, true);
     await source(input, null);
@@ -78,15 +95,21 @@ function createService({ db = require('../../models'), coordinator = require('./
     const durable = replayEnabled();
     if (durable) assertReplayRuntime();
     return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+      const previous = await recovered(input, transaction);
+      if (previous) return previous;
       await identity(input, transaction, true);
+      if (input.validateAgenda) await input.validateAgenda(transaction);
       const origin = await source(input, transaction, true);
       const plan = await coordinator.buildPlan({ payload: input.payload, transaction, planningSource: origin, sealPlan: durable });
       const result = coordinator.serializePlan(plan);
       if (!durable || plan.has_conflicts) return { ...result, booking_replay_supported: durable };
       const preparedIntent = intent(plan, origin, input.actorId), metadata = { version: 1, actor_id: Number(input.actorId),
-        budget_concept: plan.budget_concept, request_key: crypto.randomUUID(), request_sha256: replay.hash(preparedIntent), intent: preparedIntent };
+        budget_concept: plan.budget_concept, request_key: input.payload.agenda_request_sha256 ? replay.key(input.payload.booking_request_key) : crypto.randomUUID(),
+        ...(input.payload.agenda_request_sha256 ? { agenda_request_sha256: replay.sha(input.payload.agenda_request_sha256) } : {}),
+        request_sha256: replay.hash(preparedIntent), intent: preparedIntent };
       await append(origin.budget, 'prepared', metadata, transaction, Number(input.actorId));
-      return { ...result, booking_replay_supported: true, booking_request_key: metadata.request_key, booking_request_sha256: metadata.request_sha256 };
+      return { ...result, booking_replay_supported: true, booking_request_key: metadata.request_key, booking_request_sha256: metadata.request_sha256,
+        ...(input.payload.agenda_request_sha256 ? { payload: replay.payloadForIntent(metadata.intent, input.payload) } : {}) };
     });
   }
   async function create(input) {
@@ -107,6 +130,7 @@ function createService({ db = require('../../models'), coordinator = require('./
         const committed = await read(budget, input.lineKey, 'committed', requestKey, transaction);
         if (committed) return { appointments: [], receipt: replay.receiptFromMetadata(committed, prepared), replayed: true };
       }
+      if (input.validateAgenda) await input.validateAgenda(transaction);
       const origin = await source(input, transaction, true), plan = await coordinator.buildPlan({ planningSource: origin, transaction, sealPlan: durable,
         payload: durable ? replay.payloadForIntent(prepared.intent, payload) : payload });
       if (durable && replay.hash(intent(plan, origin, actorId)) !== requestHash) L.fail('budget_booking_plan_changed', 'Los huecos, el concepto o el tratamiento han cambiado. Comprueba la propuesta otra vez.');
@@ -131,8 +155,8 @@ function createService({ db = require('../../models'), coordinator = require('./
     return { ...outcome.receipt, replayed: outcome.replayed,
       ...(durable ? { booking_request_key: requestKey, booking_request_sha256: requestHash } : {}) };
   }
-  return { resources, preview, create };
+  return { resources, preview, create, recover };
 }
 let singleton;
 const current = () => singleton ||= createService();
-module.exports = { createService, resources: input => current().resources(input), preview: input => current().preview(input), create: input => current().create(input) };
+module.exports = { createService, resources: input => current().resources(input), preview: input => current().preview(input), create: input => current().create(input), recover: input => current().recover(input) };

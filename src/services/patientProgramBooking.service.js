@@ -271,8 +271,11 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const plan = await load(options); assertSchedulable(plan);
     const payload = options.payload || {};
     if (payload.draft_strategy != null) {
-      if (schedulingMode(plan.snapshot) !== 'manual' && resumeInfo(plan, now())) fail('program_resume_required', 'Retoma el programa para revisar juntas las sesiones pendientes y sus fechas.');
-      assertRelativeSessions(plan.sessions.filter(row=>row.scheduling_status==='pending'));
+      const resume = resumeInput(payload);
+      if (resume) assertRevision(plan, resume.expected_plan_revision);
+      else if (schedulingMode(plan.snapshot) !== 'manual' && resumeInfo(plan, now())) fail('program_resume_required', 'Retoma el programa para revisar juntas las sesiones pendientes y sus fechas.');
+      const selected = resume ? resumeSessions(plan, resume.replan_from_key, now()) : plan.sessions.filter(row=>row.scheduling_status==='pending');
+      assertRelativeSessions(selected);
       return require('./patientProgramDraftPreview.service').preview({ plan, payload,
         actorId: options.actorId, now: now(), contextFor, dto, solve: solveBookingProfile, slots: solutionsForCalendar,
         addVirtualBusy, supportIds, supportAvailable, assessment: scheduleAssessment });

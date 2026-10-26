@@ -8,13 +8,18 @@ const { civilLocal, civilMinute, localInstant } = require('../lib/program-resche
 const { addDays } = require('../lib/personal-schedule-recurring');
 const { cloneProgramContext } = require('../lib/program-schedule-confirmation');
 const { normalizePreferences, allowedInterval, preferredStart, timeWarning } = require('../lib/program-booking-preferences');
+const { resumeInput, assertRevision, resumeSessions } = require('../lib/program-replan');
 const fail = (message, code = 'program_draft_invalid', status = 400) => { throw domainError(status, code, message); };
 const actions = ['initial', 'cascade', 'reset', 'previous_time', 'next_time', 'previous_day', 'next_day'];
 function normalize(plan, payload, now) {
   const value = payload.draft_strategy;
+  const resume = resumeInput(payload);
+  if (resume) assertRevision(plan, resume.expected_plan_revision);
+  const eligible = resume ? resumeSessions(plan, resume.replan_from_key, now)
+    : plan.sessions.filter(row => row.scheduling_status === 'pending');
   if (!value || typeof value !== 'object' || Array.isArray(value) || !actions.includes(value.action)
     || Object.keys(value).some(key => !['action', 'pivot_key', 'start_local', 'sessions', 'preferences'].includes(key))
-    || ['mode', 'replan_from_key', 'expected_plan_revision', 'fixed_sessions', 'manual_sessions', 'session_keys', 'direction', 'reschedule_scope', 'reschedule_start_local', 'booking_preferences'].some(key => payload[key] != null)
+    || ['fixed_sessions', 'manual_sessions', 'session_keys', 'direction', 'reschedule_scope', 'reschedule_start_local', 'booking_preferences'].some(key => payload[key] != null)
     || !/^\d{4}-\d{2}-\d{2}$/.test(payload.from_date || '') || !Number.isInteger(payload.days ?? 90) || (payload.days ?? 90) < 1 || (payload.days ?? 90) > 180) {
     fail('Actualiza el borrador y revisa las sesiones que quieres proponer.');
   }
@@ -29,7 +34,7 @@ function normalize(plan, payload, now) {
       fail('Elige hoy o una fecha dentro del próximo año.');
     }
   }
-  const sessions = plan.sessions.filter(row => row.scheduling_status === 'pending').slice(0, 30);
+  const sessions = eligible.slice(0, 30);
   const supplied = value.sessions || [];
   if (!Array.isArray(supplied) || supplied.length > 30 || new Set(supplied.map(row => row?.key)).size !== supplied.length
     || supplied.some(row => !row || !sessions.some(session => session.key === row.key)
@@ -84,7 +89,7 @@ function normalize(plan, payload, now) {
     else if (instant <= now || instant - now > 366 * 86400000) fail('Elige una fecha futura dentro del próximo año.');
   } else if (value.start_local != null) fail('La nueva fecha sólo corresponde a un cambio explícito del borrador.');
   return { action: value.action, pivot, rows, start_local: startLocal, days: payload.days ?? 90, from_date: payload.from_date,
-    preferences: normalizePreferences(value.preferences) };
+    preferences: normalizePreferences(value.preferences), resume, eligible_count: eligible.length };
 }
 function shiftedLocal(previous, next, original, timeZone) {
   const delta = civilMinute(localInstant(next, timeZone), timeZone) - civilMinute(previous, timeZone);
@@ -93,7 +98,12 @@ function shiftedLocal(previous, next, original, timeZone) {
 
 async function preview({ plan, payload, actorId, now, contextFor, dto, solve, slots, addVirtualBusy, supportIds, supportAvailable, assessment }) {
   const draft = normalize(plan, payload, now), { rows, pivot } = draft;
-  if (!rows.length) return { ...dto(plan), proposals: [], unproposed_count: 0,
+  const projectionOptions = { resumeFromKey: draft.resume?.replan_from_key || null };
+  // Only reservations in the canonical affected suffix may be ignored while
+  // searching their replacement. Prefix and unrelated occupancies stay fixed.
+  const ignored = draft.resume ? rows.filter(row => row.scheduling_status === 'reserved')
+    .map(row => Number(row.appointment.id_cita)) : [];
+  if (!rows.length) return { ...dto(plan, projectionOptions), proposals: [], unproposed_count: 0,
     draft_strategy: { action: draft.action, applied: true, affected_keys: [], placed_keys: [] } };
   const from = localInstant(draft.from_date + 'T00:00', plan.timeZone);
   const starts = rows.filter(row => row.original_start_at).map(row => new Date(row.original_start_at).getTime());
@@ -101,7 +111,7 @@ async function preview({ plan, payload, actorId, now, contextFor, dto, solve, sl
   const lower = new Date(Math.max(+now, Math.min(+from, ...starts) - draft.days * 86400000));
   const upper = new Date(Math.min(+now + 366 * 86400000, Math.max(+from, ...starts) + (draft.days + 1) * 86400000));
   const operational = rows.filter(row => row.duration_minutes != null);
-  const base = operational.length ? await contextFor(plan, operational, lower, upper) : null;
+  const base = operational.length ? await contextFor(plan, operational, lower, upper, null, false, ignored) : null;
   const originPosition = pivot?.position ?? rows[0].position;
   const affected = draft.action === 'reset' ? rows.filter(row => !row.placed) : draft.action === 'initial' ? rows : rows.filter(row => row.position >= originPosition);
   const withinYear = instant => new Date(instant) > now && new Date(instant) < new Date(+now + 366 * 86400000);
@@ -231,7 +241,7 @@ async function preview({ plan, payload, actorId, now, contextFor, dto, solve, sl
     }
     if (!result) { applied = false; result = run(null, true); }
   } else result = run();
-  return { ...dto(plan), proposals: result.proposals, unproposed_count: plan.sessions.filter(row => row.scheduling_status === 'pending').length - rows.length,
+  return { ...dto(plan, projectionOptions), proposals: result.proposals, unproposed_count: draft.eligible_count - rows.length,
     draft_strategy: { action: draft.action, ...(pivot ? { pivot_key: pivot.key } : {}), applied, affected_keys: affected.map(row=>row.key), placed_keys: result.proposals.filter(row=>row.placed).map(row=>row.key),
       ...(draft.preferences ? {preferences:draft.preferences} : {}),
       ...(!applied ? { reason_code: 'program_draft_no_candidate' } : {}) } };

@@ -18,6 +18,19 @@ const series = (start = '2030-01-07T10:00:00+01:00', count = 2, intervalDays = 7
   startAt: calendar.parseSeriesStart(start, 'Europe/Madrid'), count, intervalDays, durationMinutes: 30, timeZone: 'Europe/Madrid',
 });
 
+test('explicit independent series preserves chosen instants and per-slot durations across DST, rejecting missing/order/overlap dates', () => {
+  const now = new Date('2030-01-01T00:00Z'), starts = { 1: '2030-03-29T10:00', 2: '2030-04-01T11:30' };
+  const options = { starts, startAt: calendar.parseSeriesStart(starts[1], 'Europe/Madrid'), count: 2,
+    durationMinutes: 45, timeZone: 'Europe/Madrid', now, durations: new Map([[1, { minutes: 45 }], [2, { minutes: 25 }]]) };
+  const slots = calendar.explicitSeriesSlots(options);
+  assert.equal(slots[0].start.toISOString(), '2030-03-29T09:00:00.000Z');
+  assert.equal(slots[1].start.toISOString(), '2030-04-01T09:30:00.000Z');
+  assert.equal(slots[1].end.toISOString(), '2030-04-01T09:55:00.000Z');
+  for (const invalid of [{ 1: starts[1] }, { 1: starts[1], 3: starts[2] }, { 1: starts[2], 2: starts[1] },
+    { 1: starts[1], 2: '2030-03-29T10:15' }]) assert.throws(() => calendar.explicitSeriesSlots({ ...options, starts: invalid }), { code: 'voucher_schedule_dates_invalid' });
+  assert.throws(() => calendar.explicitSeriesSlots({ ...options, starts: { 1: starts[1], 2: '2030-03-31T02:30' } }), { code: 'voucher_schedule_dst_conflict' });
+});
+
 function fixture({ appointments = [], blocks = [], clinicHours = allDays, doctorHours = allDays, installationBlocks = [] } = {}) {
   const calls = [];
   const db = {

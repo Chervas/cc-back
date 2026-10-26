@@ -3951,6 +3951,33 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
   return db.EconomicFundingPart ? require('./economicConcepts.service').createService({ db }).workspace({ workspace: result, clinicId: resolvedClinicId, patientId: patient.id_paciente }) : result;
 }
 
+/** Financial-only quote view for an already verified fiscal-document origin. */
+async function readBudgetForAccounting({ publicId, clinicId, versionNumber }) {
+  const budget = await EconomicBudget.findOne({ where: { public_id: publicId, clinic_id: clinicId } });
+  if (!budget) throw domainError(404, 'accounting_budget_source_not_found', 'No se encuentra el presupuesto de origen.');
+  const version = await EconomicBudgetVersion.findOne({ where: { budget_id: budget.id, version_number: versionNumber } });
+  if (!version) throw domainError(409, 'accounting_budget_source_requires_review', 'No se puede comprobar la versión de origen del presupuesto.');
+  // Reuse the canonical patient/clinic assignment guard and financial projection;
+  // this read path does not persist funding parts or mutate the source ledger.
+  const workspace = await getWorkspace({ patientIdentifier: String(budget.patient_id), clinicId });
+  const actual = workspace.budgets.find(item => item.id === publicId);
+  if (!actual) throw domainError(404, 'accounting_budget_source_not_found', 'No se encuentra el presupuesto de origen.');
+  const events = actual.events.filter(event => event.version === Number(versionNumber) && ['accepted', 'partially_accepted'].includes(event.event_type))
+    .map(event => ({ ...event, actor_id: null, metadata: Object.fromEntries(['selected_payment_mode', 'collection_method', 'accepted_line_keys']
+      .filter(key => Object.hasOwn(event.metadata || {}, key)).map(key => [key, event.metadata[key]])) }));
+  const current = { ...serializeVersion(version), internal_notes: null, change_summary: null, created_by: null };
+  const lastAcceptance = events.at(-1);
+  return { budget: {
+    id: actual.id, number: actual.number, clinic_id: actual.clinic_id, patient_id: actual.patient_id,
+    status: lastAcceptance?.to_status || actual.status, current_version: Number(versionNumber),
+    valid_until: actual.valid_until, presented_at: actual.presented_at, responded_at: actual.responded_at,
+    accepted_amount: actual.accepted_amount, source_system: actual.source_system, source_reference: actual.source_reference,
+    created_at: actual.created_at, updated_at: actual.updated_at, current, events,
+    financial_summary: actual.financial_summary,
+  }, clinic_name: String(current.clinic_snapshot.legal_name || current.clinic_snapshot.name || workspace.clinic.legal_name || workspace.clinic.name || ''),
+  patient_name: String(current.patient_snapshot.legal_name || current.patient_snapshot.name || workspace.patient.legal_name || workspace.patient.name || '') };
+}
+
 let fundedFiscal;
 function fiscalCoverageService() {
   fundedFiscal ||= require('./economicFiscalCoverage.service').createService({ db, helpers: {
@@ -3974,6 +4001,7 @@ module.exports = {
   listTemplates,
   saveTemplate,
   getWorkspace,
+  readBudgetForAccounting,
   createBudget,
   updateDraftBudget,
   reviseBudget,

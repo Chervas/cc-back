@@ -119,35 +119,71 @@ function filters(query,kind,includePayroll){
   return {kind,q,from,to,direction:query.direction??null,account_ref:query.account_ref?L.clean(query.account_ref,80):null,import_id:query.import_id??null,target_type:query.target_type??null,target_id:query.target_id??null,fiscal_document_id:query.fiscal_document_id??null,includePayroll};
 }
 function dated(where,field,scope){if(scope.from||scope.to)where[field]={...(scope.from?{[Op.gte]:scope.from}:{}),...(scope.to?{[Op.lt]:new Date(new Date(`${scope.to}T00:00:00Z`).getTime()+86400000).toISOString().slice(0,10)}: {})};return where;}
+const lineSort={id:'l.id',date:"DATE_FORMAT(l.date,'%Y-%m-%d')",description:'l.description',account_ref:'l.account_ref',amount:"CASE WHEN l.direction='outgoing' THEN -l.amount ELSE l.amount END",direction:'l.direction',currency:'l.currency',
+  status:'CASE WHEN COALESCE(m.matched_amount,0)=0 THEN 0 WHEN COALESCE(m.matched_amount,0)>=l.amount THEN 2 ELSE 1 END',
+  matched_amount:'COALESCE(m.matched_amount,0)',remaining:'GREATEST(l.amount-COALESCE(m.matched_amount,0),0)'};
+const importSort={created_at:"DATE_FORMAT(i.created_at,'%Y-%m-%d %H:%i:%s.%f')",filename:'a.original_filename',account_ref:'i.account_ref',currency:'i.currency',row_count:'i.row_count',created_count:'i.created_count',duplicate_count:'i.duplicate_count'};
+function validateKeysetValue(after,sortBy,kind){
+  if(!after)return;
+  let valid=true;
+  if(['amount','matched_amount','remaining','row_count','created_count','duplicate_count','status'].includes(sortBy)){
+    try{L.cents(after.value);}catch{valid=false;}
+    if(sortBy==='status')valid=valid&&[0,1,2].includes(Number(after.value));
+  }else if(sortBy==='date'||sortBy==='created_at')valid=typeof after.value==='string'&&(kind==='lines'?/^\d{4}-\d{2}-\d{2}$/:/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$/).test(after.value);
+  else if(sortBy==='type')valid=types.includes(after.value);
+  else if(sortBy==='direction')valid=['incoming','outgoing'].includes(after.value);
+  else if(sortBy==='currency')valid=typeof after.value==='string'&&/^[A-Z]{3}$/.test(after.value);
+  else valid=typeof after.value==='string';
+  if(!valid)throw L.error(400,'bank_cursor_invalid','La referencia de orden de esta página no es válida.');
+}
+function keysetWhere(clauses,replacements,after,expression,idColumn,direction,typeColumn=null){
+  if(!after)return;
+  if(typeColumn?!types.includes(after.type):after.type!==null)throw L.error(400,'bank_cursor_invalid','La página pertenece a otro listado.');
+  const operator=direction==='asc'?'>':'<';
+  replacements.afterValue=after.value;replacements.afterId=after.id;
+  const tie=typeColumn?`(${typeColumn} ${operator} :afterType OR (${typeColumn} = :afterType AND ${idColumn} ${operator} :afterId))`:`${idColumn} ${operator} :afterId`;
+  if(typeColumn)replacements.afterType=after.type;
+  clauses.push(`(${expression} ${operator} :afterValue OR (${expression} = :afterValue AND ${tie}))`);
+}
 async function listLines({clinicId,query={},includePayroll=false}){
-  const scope={clinicId,...filters(query,'lines',includePayroll)},after=L.cursor(query.cursor,scope),limit=L.limit(query.limit),where={clinic_id:clinicId};
-  if(scope.import_id){const head=await db.AccountingBankImport.findOne({where:{id:scope.import_id,clinic_id:clinicId}});if(!head)throw L.error(404,'bank_import_not_found','Extracto no encontrado.');where.id={[Op.in]:json(head.source_line_ids)};}
-  if(after)where.id={...where.id,[Op.gt]:after};if(scope.direction)where.direction=scope.direction;if(scope.account_ref)where.account_ref=scope.account_ref;if(scope.q)where.description={[Op.like]:`%${scope.q}%`};dated(where,'date',scope);
-  const rows=await db.AccountingBankLine.findAll({where,order:[['id','ASC']],limit:limit+1}),items=[];
+  const ordering=L.sort(query,Object.keys(lineSort),'id'),scope={clinicId,...filters(query,'lines',includePayroll),...ordering},after=L.keysetCursor(query.cursor,scope),limit=L.limit(query.limit);
+  const clauses=['l.clinic_id=:clinicId'],replacements={clinicId,limit:limit+1},expression=lineSort[ordering.sort_by],direction=ordering.sort_direction.toUpperCase();
+  validateKeysetValue(after,ordering.sort_by,'lines');
+  if(scope.import_id){const head=await db.AccountingBankImport.findOne({where:{id:scope.import_id,clinic_id:clinicId}});if(!head)throw L.error(404,'bank_import_not_found','Extracto no encontrado.');const ids=json(head.source_line_ids);clauses.push(ids.length?'l.id IN (:importLines)':'1=0');replacements.importLines=ids;}
+  if(scope.direction){clauses.push('l.direction=:direction');replacements.direction=scope.direction;}
+  if(scope.account_ref){clauses.push('l.account_ref=:account');replacements.account=scope.account_ref;}
+  if(scope.q){clauses.push('l.description LIKE :q');replacements.q=`%${scope.q}%`;}
+  if(scope.from){clauses.push('l.date>=:from');replacements.from=scope.from;}
+  if(scope.to){clauses.push('l.date<=:to');replacements.to=scope.to;}
+  keysetWhere(clauses,replacements,after,expression,'l.id',ordering.sort_direction);
+  const [rows]=await db.sequelize.query(`SELECT l.*,DATE_FORMAT(l.date,'%Y-%m-%d') AS date,${expression} AS cursor_sort_value
+    FROM AccountingBankLines l LEFT JOIN (SELECT line_id,SUM(amount) AS matched_amount FROM AccountingBankMatches
+      WHERE clinic_id=:clinicId AND status='active' GROUP BY line_id) m ON m.line_id=l.id
+    WHERE ${clauses.join(' AND ')} ORDER BY ${expression} ${direction},l.id ${direction} LIMIT :limit`,{replacements}),items=[];
   for(const row of rows.slice(0,limit))items.push(await lineDto(row,null,includePayroll));
-  return {items,next_cursor:rows.length>limit?L.nextCursor(rows[limit-1].id,scope):null};
+  const last=rows[Math.min(rows.length,limit)-1];
+  return {items,next_cursor:rows.length>limit?L.nextKeysetCursor({id:last.id,value:last.cursor_sort_value},scope):null,...ordering};
 }
 async function listImports({clinicId,query={}}){
-  const scope={clinicId,...filters(query,'imports',false)},after=L.cursor(query.cursor,scope),limit=L.limit(query.limit);
-  const clauses=['i.clinic_id=:clinicId'],replacements={clinicId,limit:limit+1};
+  const ordering=L.sort(query,Object.keys(importSort),'created_at','desc'),scope={clinicId,...filters(query,'imports',false),...ordering},after=L.keysetCursor(query.cursor,scope),limit=L.limit(query.limit);
+  const clauses=['i.clinic_id=:clinicId'],replacements={clinicId,limit:limit+1},expression=importSort[ordering.sort_by],direction=ordering.sort_direction.toUpperCase();
+  validateKeysetValue(after,ordering.sort_by,'imports');
   if(scope.q){clauses.push('(i.account_ref LIKE :q OR a.original_filename LIKE :q)');replacements.q=`%${scope.q}%`;}
   if(scope.account_ref){clauses.push('i.account_ref=:account');replacements.account=scope.account_ref;}
   if(scope.import_id){clauses.push('i.id=:importId');replacements.importId=scope.import_id;}
   if(scope.from){clauses.push('i.created_at >= :from');replacements.from=scope.from;}
   if(scope.to){clauses.push('i.created_at < :to');replacements.to=new Date(new Date(scope.to+'T00:00Z').getTime()+86400000);}
-  if(after){
-    if(!/^\d{13}-[a-zA-Z0-9-]{1,36}$/.test(after))throw L.error(400,'bank_cursor_invalid','La página del historial no es válida.');
-    const date=new Date(Number(after.slice(0,13)));if(Number.isNaN(date.getTime()))throw L.error(400,'bank_cursor_invalid','La página del historial no es válida.');
-    clauses.push('(i.created_at < :afterDate OR (i.created_at = :afterDate AND i.id < :afterId))');replacements.afterDate=date;replacements.afterId=after.slice(14);
-  }
-  const [rows]=await db.sequelize.query(`SELECT i.id,a.original_filename AS filename,i.account_ref,i.currency,i.row_count,i.created_count,i.duplicate_count,i.created_at
+  keysetWhere(clauses,replacements,after,expression,'i.id',ordering.sort_direction);
+  const [rows]=await db.sequelize.query(`SELECT i.id,a.original_filename AS filename,i.account_ref,i.currency,i.row_count,i.created_count,i.duplicate_count,i.created_at,${expression} AS cursor_sort_value
     FROM AccountingBankImports i JOIN ClinicalPrivateAssets a ON a.id=i.source_asset_id AND a.clinic_id=i.clinic_id AND a.purpose='accounting_bank_statement'
-    WHERE ${clauses.join(' AND ')} ORDER BY i.created_at DESC,i.id DESC LIMIT :limit`,{replacements});
-  const items=rows.slice(0,limit).map(r=>({...r,row_count:Number(r.row_count),created_count:Number(r.created_count),duplicate_count:Number(r.duplicate_count)})),last=items.at(-1);
-  return {items,next_cursor:rows.length>limit?L.nextCursor(`${String(new Date(last.created_at).getTime()).padStart(13,'0')}-${last.id}`,scope):null};
+    WHERE ${clauses.join(' AND ')} ORDER BY ${expression} ${direction},i.id ${direction} LIMIT :limit`,{replacements});
+  const items=rows.slice(0,limit).map(({cursor_sort_value,...r})=>({...r,row_count:Number(r.row_count),created_count:Number(r.created_count),duplicate_count:Number(r.duplicate_count)})),last=rows[Math.min(rows.length,limit)-1];
+  return {items,next_cursor:rows.length>limit?L.nextKeysetCursor({id:last.id,value:last.cursor_sort_value},scope):null,...ordering};
 }
 async function listTargets({clinicId,query={},includePayroll=false}){
-  const scope={clinicId,...filters(query,'targets',includePayroll)},after=L.cursor(query.cursor,scope),limit=L.limit(query.limit),items=[];
+  const targetSort={date:'t.sort_date',description:'t.description',type:'t.type',amount:'t.amount',status:'t.sort_status',remaining:'t.remaining'};
+  const ordering=L.sort(query,Object.keys(targetSort),'type'),scope={clinicId,...filters(query,'targets',includePayroll),...ordering},after=L.keysetCursor(query.cursor,scope),limit=L.limit(query.limit);
+  validateKeysetValue(after,ordering.sort_by,'targets');
   if(scope.target_type&&!types.includes(scope.target_type))throw L.error(400,'bank_target_invalid','Selecciona un destino válido.');
   if(scope.target_type)assertPayroll(scope.target_type,includePayroll);
   let paymentIds=null,refundIds=null,review=false,reason=null;
@@ -165,24 +201,44 @@ async function listTargets({clinicId,query={},includePayroll=false}){
       review=coverage.some(r=>!r.payment_id)||!paymentIds.length;reason=review?'fiscal_funding_requires_review':null;
     }
   }
+  const selections=[],replacements={clinicId,limit:limit+1};
   for(const type of types){
     if(type==='payroll'&&!includePayroll||scope.target_type&&scope.target_type!==type||scope.direction&&descriptor[type].direction!==scope.direction||paymentIds!==null&&type!=='payment'||refundIds!==null&&type!=='refund')continue;
-    if(after&&type<after.split('-')[0])continue;
-    const spec=descriptor[type],where={clinic_id:clinicId,...targetWhere(type)};
-    if(type!=='refund')where[spec.amount]={[Op.gt]:0};
-    if(scope.target_id)where[modelId(type)]=scope.target_id;
-    if(paymentIds!==null)where.id={[Op.in]:paymentIds};
-    if(refundIds!==null)where.id={[Op.in]:refundIds};
-    if(after?.startsWith(`${type}-`))where[modelId(type)]={...(where[modelId(type)]?{[Op.eq]:where[modelId(type)]}:{}),[Op.gt]:after.slice(type.length+1)};
-    if(scope.q)where[Op.or]=[{[spec.description]:{[Op.like]:`%${scope.q}%`}},...(type==='expense'?[{document_number:{[Op.like]:`%${scope.q}%`}}]:[])];
-    dated(where,spec.date,scope);
-    const rows=await db[spec.model].findAll({where,order:[[modelId(type),'ASC']],limit:limit+1-items.length});
-    const docs=type==='payment'?await docsForPayments(clinicId,rows.map(r=>r.id)):null;
-    for(const row of rows)items.push(await targetDto(type,row,null,type==='payment'?docs.get(String(row.id))??[]:[]));
-    if(items.length>limit)break;
+    const spec=descriptor[type],table={expense:'AccountingExpenseDocuments',payment:'EconomicPayments',payroll:'AccountingPayrollPeriods',refund:'EconomicConceptAdjustments'}[type],idColumn=modelId(type);
+    const clauses=['r.clinic_id=:clinicId',`r.${spec.amount}>0`];
+    if(type==='expense')clauses.push("r.status<>'cancelled'");
+    else if(type==='payment')clauses.push("r.status='confirmed'");
+    else if(type==='payroll')clauses.push("r.status IN ('scheduled','paid')");
+    else clauses.push("r.settlement='refund'");
+    if(scope.target_id){clauses.push(`r.${idColumn}=:targetId`);replacements.targetId=scope.target_id;}
+    if(paymentIds!==null){clauses.push(paymentIds.length?'r.id IN (:paymentIds)':'1=0');replacements.paymentIds=paymentIds;}
+    if(refundIds!==null){clauses.push(refundIds.length?'r.id IN (:refundIds)':'1=0');replacements.refundIds=refundIds;}
+    if(scope.q){clauses.push(`(r.${spec.description} LIKE :q${type==='expense'?' OR r.document_number LIKE :q':''})`);replacements.q=`%${scope.q}%`;}
+    if(scope.from){clauses.push(`r.${spec.date}>=:from`);replacements.from=scope.from;}
+    if(scope.to){clauses.push(`r.${spec.date}<:to`);replacements.to=new Date(new Date(scope.to+'T00:00Z').getTime()+86400000);}
+    const description={expense:"CONCAT(r.supplier_name,' · ',r.document_number)",payment:"CONCAT('Cobro · ',LEFT(COALESCE(NULLIF(TRIM(r.reference),''),r.public_id),160))",payroll:"CONCAT('Nóminas · ',r.period_month)",refund:"CONCAT('Devolución · ',LEFT(TRIM(r.reason),160))"}[type];
+    selections.push(`SELECT CONVERT('${type}' USING utf8mb4) COLLATE utf8mb4_unicode_ci AS type,
+      CONVERT(r.${idColumn} USING utf8mb4) COLLATE utf8mb4_unicode_ci AS target_id,DATE_FORMAT(r.${spec.date},'%Y-%m-%d %H:%i:%s.%f') AS sort_date,
+      CONVERT(${description} USING utf8mb4) COLLATE utf8mb4_unicode_ci AS description,r.${spec.amount} AS amount,GREATEST(r.${spec.amount}-COALESCE(m.matched_amount,0),0) AS remaining,
+      CASE WHEN COALESCE(m.matched_amount,0)=0 THEN 0 WHEN COALESCE(m.matched_amount,0)>=r.${spec.amount} THEN 2 ELSE 1 END AS sort_status
+      FROM ${table} r LEFT JOIN (SELECT target_id,SUM(amount) AS matched_amount FROM AccountingBankMatches
+        WHERE clinic_id=:clinicId AND target_type='${type}' AND status='active' GROUP BY target_id) m ON m.target_id=r.${idColumn}
+      WHERE ${clauses.join(' AND ')}`);
   }
-  const page=items.slice(0,limit),last=page.at(-1);
-  return {items:page,next_cursor:items.length>limit?L.nextCursor(`${last.type}-${last.id}`,scope):null,review_required:review,reason};
+  if(!selections.length)return {items:[],next_cursor:null,review_required:review,reason,...ordering};
+  const clauses=['1=1'],expression=targetSort[ordering.sort_by],direction=ordering.sort_direction.toUpperCase();
+  keysetWhere(clauses,replacements,after,expression,'t.target_id',ordering.sort_direction,'t.type');
+  const [ordered]=await db.sequelize.query(`SELECT t.type,t.target_id,${expression} AS cursor_sort_value FROM (${selections.join(' UNION ALL ')}) t
+    WHERE ${clauses.join(' AND ')} ORDER BY ${expression} ${direction},t.type ${direction},t.target_id ${direction} LIMIT :limit`,{replacements});
+  const page=ordered.slice(0,limit),byType=new Map(),items=[];
+  for(const type of types){const ids=page.filter(row=>row.type===type).map(row=>row.target_id);if(!ids.length)continue;
+    const rows=await db[descriptor[type].model].findAll({where:{clinic_id:clinicId,[modelId(type)]:{[Op.in]:ids},...targetWhere(type)}});
+    for(const row of rows)byType.set(`${type}:${row[modelId(type)]}`,row);
+  }
+  const payments=page.filter(row=>row.type==='payment').map(row=>byType.get(`payment:${row.target_id}`)).filter(Boolean),docs=await docsForPayments(clinicId,payments.map(row=>row.id));
+  for(const row of page){const record=byType.get(`${row.type}:${row.target_id}`);if(record)items.push(await targetDto(row.type,record,null,row.type==='payment'?docs.get(String(record.id))??[]:[]));}
+  const last=page.at(-1);
+  return {items,next_cursor:ordered.length>limit?L.nextKeysetCursor({id:last.target_id,type:last.type,value:last.cursor_sort_value},scope):null,review_required:review,reason,...ordering};
 }
 async function createMatches(input){return command({...input,kind:'match'},async transaction=>{
   const line=await db.AccountingBankLine.findOne({where:{id:input.lineId,clinic_id:input.clinicId},transaction,lock:transaction.LOCK.UPDATE});

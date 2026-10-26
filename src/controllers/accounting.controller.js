@@ -85,6 +85,12 @@ exports.bankWorkspace=asyncHandler(async(req,res)=>{
 exports.bankLines=asyncHandler(async(req,res)=>res.json(await accountingBank().listLines(await bankContext(req))));
 exports.bankImports=asyncHandler(async(req,res)=>res.json(await accountingBank().listImports(await bankContext(req))));
 exports.bankTargets=asyncHandler(async(req,res)=>res.json(await accountingBank().listTargets(await bankContext(req))));
+exports.getFiscalSourceBudget=asyncHandler(async(req,res)=>{
+  if(await accountingFirms.isPortalUser({actorId:actorId(req)}))throw accounting.domainError(403,'accounting_portal_read_only','El portal de gestoría no permite consultar presupuestos de pacientes.');
+  const resolvedClinicId=await requireFeature(req,'billing.reports.view');
+  await requireFeature(req,'patients.view');
+  res.json(await require('../services/accountingBudgetSource.service').read({documentId:req.params.documentId,clinicId:resolvedClinicId}));
+});
 exports.bankPreviewImport=asyncHandler(async(req,res)=>res.json(await accountingBank().previewImport(await bankContext(req,true))));
 exports.bankCreateImport=asyncHandler(async(req,res)=>res.status(201).json(await accountingBank().createImport(await bankContext(req,true))));
 exports.bankCreateMatches=asyncHandler(async(req,res)=>res.json(await accountingBank().createMatches({...await bankContext(req,true),lineId:req.params.lineId})));

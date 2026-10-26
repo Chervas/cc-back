@@ -116,6 +116,28 @@ withIsolatedCampaignMysql(async({sql,models:db,report,registerOwnedLoopbackServe
  const allDuplicate=await importRows(['2026-10-25;Synthetic refund;-20,00;out-3','2026-10-25;Synthetic payroll;-80,00;out-2','2026-10-25;Synthetic expense;-50,00;out-1','2026-10-25;Synthetic incoming;100,00;in-1']);assert.equal(allDuplicate.import.created_count,0);assert.equal(allDuplicate.import.duplicate_count,4);assert.equal((await service.workspace({...context,query:{import_id:allDuplicate.import.id}})).items.length,4);
  const history=await service.listImports({...context,query:{q:'synthetic-bank',limit:1}});assert.equal(history.items.length,1);assert(history.next_cursor);assert.equal(history.items[0].filename,'synthetic-bank.csv');
  const historyNext=await service.listImports({...context,query:{q:'synthetic-bank',limit:1,cursor:history.next_cursor}});assert.equal(historyNext.items.length,1);assert.notEqual(historyNext.items[0].id,history.items[0].id);await assert.rejects(service.listImports({...context,query:{q:'other',limit:1,cursor:history.next_cursor}}),{code:'bank_cursor_invalid'});assert.equal((await service.listImports({...context,clinicId:73,query:{}})).items.length,0);
+ // Compare complete server order with traversal of many tiny pages. Sorting is
+ // over the entire scope, including computed reconciliation and mixed targets.
+ const traverse=async(method,query)=>{const rows=[];let cursor;do{const result=await service[method]({...context,query:{...query,limit:2,...(cursor?{cursor}:{})}});rows.push(...result.items);cursor=result.next_cursor;assert(rows.length<200);}while(cursor);return rows;};
+ const rank={unmatched:0,partial:1,matched:2},numeric=new Set(['amount','matched_amount','remaining','row_count','created_count','duplicate_count']);
+ const value=(row,key)=>key==='status'?rank[row.status]:key==='date'||key==='created_at'?new Date(row[key]).getTime():numeric.has(key)?Number(row[key]):String(row[key]??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+ for(const [method,fields] of [['listLines',['date','description','account_ref','amount','direction','status','matched_amount','remaining']],['listImports',['created_at','filename','account_ref','currency','row_count','created_count','duplicate_count']],['listTargets',['date','description','type','amount','status','remaining']]]){
+  for(const sort_by of fields)for(const sort_direction of ['asc','desc']){
+   const query={sort_by,sort_direction},whole=await service[method]({...context,query:{...query,limit:100}}),paged=await traverse(method,query);
+   const identity=row=>method==='listTargets'?row.type+':'+row.id:row.id;
+   assert.deepEqual(paged.map(identity),Array.from(whole.items,identity),method+':'+sort_by+':'+sort_direction);
+   assert.equal(new Set(paged.map(identity)).size,paged.length);
+   const sortedValue=row=>method==='listLines'&&sort_by==='amount'?(row.direction==='outgoing'?-1:1)*Number(row.amount):value(row,sort_by);
+   for(let index=1;index<paged.length;index++){const a=sortedValue(paged[index-1]),b=sortedValue(paged[index]);assert(sort_direction==='asc'?a<=b:a>=b,method+':'+sort_by+':'+sort_direction);}
+  }
+ }
+ const sortedFirst=await service.listLines({...context,query:{sort_by:'amount',sort_direction:'desc',limit:1}});
+ await assert.rejects(service.listLines({...context,query:{sort_by:'date',sort_direction:'desc',limit:1,cursor:sortedFirst.next_cursor}}),{code:'bank_cursor_invalid'});
+ await assert.rejects(service.listLines({...context,query:{sort_by:'amount',sort_direction:'asc',limit:1,cursor:sortedFirst.next_cursor}}),{code:'bank_cursor_invalid'});
+ for(const sort_by of ['amount DESC; DROP TABLE EconomicPayments','unknown'])await assert.rejects(service.listTargets({...context,query:{sort_by}}),{code:'bank_sort_invalid'});
+ const summaryAsc=await service.workspace({...context,query:{sort_by:'date',sort_direction:'asc',limit:1}}),summaryDesc=await service.workspace({...context,query:{sort_by:'amount',sort_direction:'desc',limit:2}});
+ assert.deepEqual(summaryAsc.summary,summaryDesc.summary);
+ report.checks.push('All requested bank/import/heterogeneous-target columns sort the complete scoped dataset in both directions. Tiny keyset pages preserve full ordering, ties and identity without duplicates; changed column/direction rejects old cursors, SQL-like column injection is rejected and the summary remains independent of order/page.');
  report.checks.push('Persisted import history is searchable and paginated after reload; an entirely overlapping CSV still retains its original and all canonical line references. Exact import scope traverses every page without deriving dates from one page or reassigning original ownership.');
  // Full native HTTP stack with explicit test identity and the native bank service.
  const express=require('express'),allowed=new Set(['accounting.bank.view','accounting.bank.manage','accounting.payroll.view']);

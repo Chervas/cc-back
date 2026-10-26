@@ -35,6 +35,7 @@ function normalizeProgramProfile(value, { allowMissingDuration = false } = {}) {
   return template;
 }
 function schedulingMode(value) {
+  if (value.kind === 'series') return 'manual'; // An ordinary series has no purchased program cadence.
   return value.kind === 'program' && !value.cadence
     && value.appointments.some(appointment => appointment.offset_days == null) ? 'manual' : 'automatic';
 }

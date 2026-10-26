@@ -21,6 +21,15 @@ test('pagination is pinned to clinic, filters and payroll visibility',()=>{
  const scope={clinicId:72,q:'x',includePayroll:false},cursor=L.nextCursor('payment-a',scope);assert.equal(L.cursor(cursor,scope),'payment-a');
  for(const patch of [{clinicId:73},{q:'y'},{includePayroll:true}])assert.throws(()=>L.cursor(cursor,{...scope,...patch}),{code:'bank_cursor_invalid'});
 });
+test('sortable keysets bind the column/direction and preserve composite values without SQL identifiers from the client',()=>{
+ const ordering=L.sort({sort_by:'amount',sort_direction:'desc'},['date','amount'],'date');
+ assert.deepEqual(ordering,{sort_by:'amount',sort_direction:'desc'});
+ for(const query of [{sort_by:'amount DESC; DROP TABLE X'},{sort_direction:'DESC'},{sort_direction:['asc']},{sort_by:1}])assert.throws(()=>L.sort(query,['date','amount'],'date'),{code:'bank_sort_invalid'});
+ const scope={clinicId:72,kind:'targets',includePayroll:false,...ordering},position={id:'source-1',type:'payment',value:'250.10'};
+ const cursor=L.nextKeysetCursor(position,scope);assert.deepEqual(L.keysetCursor(cursor,scope),position);
+ for(const change of [{clinicId:66},{sort_by:'date'},{sort_direction:'asc'},{includePayroll:true},{kind:'lines'},{q:'changed'}])assert.throws(()=>L.keysetCursor(cursor,{...scope,...change}),{code:'bank_cursor_invalid'});
+ for(const position of [{id:'../../foreign',type:null,value:'x'},{id:'valid',type:'foreign',value:1},{id:'valid',type:null,value:null}])assert.throws(()=>L.keysetCursor(L.nextKeysetCursor(position,scope),scope),{code:'bank_cursor_invalid'});
+});
 
 test('aggregate sums preserve cents beyond the per-row monetary maximum',()=>{
  assert.equal(L.aggregateCents('19999999999.98'),1999999999998);

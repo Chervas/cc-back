@@ -142,6 +142,41 @@ async function programContext(req, write = false) {
   await requireClinicFeature(req, write ? 'appointments.manage' : 'appointments.view', clinicId);
   return { publicId: req.params.voucherId, clinicId, actorId: actorId(req), payload: req.body };
 }
+async function agendaOriginContext(req, writing = false) {
+  const source = req.method === 'GET' ? req.query : req.body;
+  const clinicId = await requireClinicFeature(req, 'patients.view', source?.clinic_id);
+  await requireClinicFeature(req, writing ? 'appointments.manage' : 'appointments.view', clinicId);
+  return { kind: req.params.budgetId ? 'budget_concept' : 'voucher',
+    publicId: req.params.budgetId || req.params.voucherId, lineKey: req.params.lineKey,
+    clinicId, patientId: source?.patient_id, actorId: actorId(req), payload: req.body };
+}
+exports.getAgendaOriginPlan = asyncHandler(async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.json(await require('../services/appointmentAgendaOrigin.service').read(await agendaOriginContext(req)));
+});
+exports.proposeAgendaOriginPlan = asyncHandler(async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.json(await require('../services/appointmentAgendaOrigin.service').propose(await agendaOriginContext(req)));
+});
+exports.bookAgendaOriginPlan = asyncHandler(async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  const context = await agendaOriginContext(req, true);
+  const result = await require('../services/appointmentAgendaOrigin.service').book(context);
+  if (result.source.kind === 'voucher') {
+    if (result.data.replayed) return res.status(200).json({ ...result, documentation_review_required: true });
+    const documentationPending = [];
+    try {
+      await require('../services/programBookingRealtime.service').publishProgramBookings({ db, clinicId: context.clinicId, result: result.data });
+    } catch (_) { console.warn('[voucher-booking] committed agenda invalidation pending'); }
+    for (const row of result.data.sessions) {
+      try {
+        await require('../services/consentimientos.service').ensurePackageForAppointment(row.appointment_id, { createdBy: context.actorId, triggerSource: 'voucher_booking' });
+      } catch (_) { documentationPending.push(row.appointment_id); }
+    }
+    return res.status(201).json({ ...result, documentation_pending: documentationPending });
+  }
+  res.status(result.data.replayed ? 200 : 201).json(result);
+});
 exports.getProgramPlan = asyncHandler(async (req, res) => res.json(await programBooking.read(await programContext(req))));
 exports.proposeProgramPlan = asyncHandler(async (req, res) => res.json(await programBooking.propose(await programContext(req))));
 exports.reserveProgramPlan = asyncHandler(async (req, res) => {

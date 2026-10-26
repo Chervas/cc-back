@@ -68,6 +68,29 @@ test('variable single phase requires explicit choice; receipt does not silently 
   assert.equal(copy.booking_selection, undefined); assert.equal(copy.duration_minutes, 45);
 });
 
+test('independent series dates/durations/resources are sealed; priority consent belongs only to the slots requiring it', () => {
+  const plan = fixture();
+  plan.configuration.count = 2;
+  plan.appointments.push({ ...plan.appointments[0], sequence: 2, start_at: '2030-01-09T12:00:00.000Z', end_at: '2030-01-09T12:30:00.000Z' });
+  plan.appointments[0].requires_priority_acknowledgement = true;
+  plan.configuration.starts_by_sequence = { 1: plan.appointments[0].start_at, 2: plan.appointments[1].start_at };
+  plan.configuration.duration_selections_by_sequence = { 1: { duration_minutes: 45 }, 2: { duration_minutes: 30 } };
+  plan.configuration.resources_by_sequence = { 1: { doctor_id: 5, installation_id: 6 }, 2: { doctor_id: 7, installation_id: 8 } };
+  const intent = r.intentForPlan(plan, 1), request = { ...payload(), count: 2, starts_by_sequence: plan.configuration.starts_by_sequence,
+    duration_selections_by_sequence: plan.configuration.duration_selections_by_sequence, resources_by_sequence: plan.configuration.resources_by_sequence,
+    booking_priority_acknowledgements_by_sequence: { 1: true, 2: false } };
+  assert.doesNotThrow(() => r.validatePayload(intent, request, value => value));
+  for (const patch of [{ starts_by_sequence: { 1: request.start_at, 2: '2030-01-10T12:00Z' } },
+    { starts_by_sequence: undefined }, { duration_selections_by_sequence: { 1: { duration_minutes: 45 }, 2: { duration_minutes: 40 } } },
+    { resources_by_sequence: { 1: { doctor_id: 9, installation_id: 6 }, 2: { doctor_id: 7, installation_id: 8 } } }]) {
+    assert.throws(() => r.validatePayload(intent, { ...request, ...patch }, value => value), { code: 'voucher_booking_request_conflict' });
+  }
+  assert.throws(() => r.validatePayload(intent, { ...request, booking_priority_acknowledgements_by_sequence: { 1: false, 2: true } }, value => value), { code: 'booking_priority_confirmation_required' });
+  const restored = r.payloadForIntent(intent, request);
+  assert.deepEqual(restored.starts_by_sequence, plan.configuration.starts_by_sequence);
+  assert.deepEqual(restored.duration_selections_by_sequence, plan.configuration.duration_selections_by_sequence);
+});
+
 test('ALL team is frozen whole, never narrowed to a lead, and corrupted/duplicate receipt cannot authorize replay', () => {
   const plan = fixture(); plan.bookingProfile.phases[0].professionals = { mode: 'all', ids: [5, 7], preferred_id: null };
   plan.appointments[0].phases[0].doctor_ids = [5, 7];

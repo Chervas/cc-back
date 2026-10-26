@@ -89,6 +89,10 @@ function fixture({ manual = true, machine = false, alternatives = false, turnaro
     } },
     PatientVoucher: { findOne: async options => query([state.voucher], options)[0] || null,
       findByPk: async id => Number(id) === 1 ? state.voucher : null, update: noEconomics, create: noEconomics },
+    Paciente: { findByPk: async (id, options) => {
+      assert(options.transaction); assert.equal(options.lock, options.transaction.LOCK.UPDATE);
+      return Number(id) === 1 ? { id_paciente: 1 } : null;
+    } },
     PatientVoucherMovement: { create: noEconomics, findAll: async () => [] },
     EconomicBudget: { findOne: async options => query([state.budget], options)[0] || null, update: noEconomics },
     EconomicBudgetVersion: { findOne: async () => ({ lines: [{ key: 'line', program_snapshot: frozen }] }) },
@@ -379,4 +383,63 @@ test('the provisional draft cannot bypass an existing interrupted-program resume
   f.advance('2030-01-08T00:00:00Z');f.appointment('s0').estado='no_asistio';
   await assert.rejects(f.propose({from_date:'2030-02-04',days:1,draft_strategy:{action:'initial'}}),{code:'program_resume_required'});
   assert.equal(f.state.appointments.length,1);assert.equal(f.state.requests.length,1);
+});
+
+test('shared manual draft projects only the canonical resume suffix and treats old dates as history', async () => {
+  const f = fixture();
+  await f.book([session('s0', '2030-01-07'), session('s3', '2030-01-28')]);
+  const resume = await resumePayload(f, 's2');
+  const stable = () => clone(Object.fromEntries(['appointments', 'records', 'requests', 'occupancies', 'events', 'voucher', 'budget'].map(key => [key, f.state[key]])));
+  const before = stable();
+  const initial = await f.propose({ ...resume, from_date: '2030-01-28', days: 1, draft_strategy: { action: 'initial' } });
+  assert.deepEqual(clone(initial.resume.affected_keys), ['s2', 's3']);
+  assert.deepEqual(clone(initial.proposals.map(row => row.key)), ['s2', 's3']);
+  assert(initial.proposals.every(row => row.solution === null));
+  assert.equal(initial.unproposed_count, 0);
+  assert.equal(initial.sessions.find(row => row.key === 's3').previous_appointment.start_at, '2030-01-28T09:00:00.000Z');
+  const rows = ['s2', 's3'].map(key => ({ key, placed: false }));
+  const cascade = await f.propose({ ...resume, from_date: '2030-01-28', days: 1,
+    draft_strategy: { action: 'cascade', pivot_key: 's2', start_local: '2030-01-28T10:00', sessions: rows } });
+  assert.equal(cascade.proposals[0].solution.start_at, '2030-01-28T09:00:00.000Z');
+  assert.equal(cascade.proposals[1].solution, null);
+  assert.deepEqual(clone(f.state.contexts.at(-1).ignored), [f.appointment('s3').id_cita]);
+  assert.deepEqual(stable(), before);
+  await assert.rejects(f.propose({ ...resume, from_date: '2030-01-28', days: 1,
+    draft_strategy: { action: 'reset', sessions: [{ key: 's1', placed: false }, rows[1]] } }), { code: 'program_draft_invalid' });
+  assert.deepEqual(stable(), before);
+});
+
+test('shared resume draft keeps prefix and unrelated capacity busy and rechecks placed draft rows together', async () => {
+  const f = fixture();
+  await f.book([session('s0', '2030-01-07'), session('s3', '2030-01-28')]);
+  const resume = await resumePayload(f, 's2');
+  const rows = ['s2', 's3'].map(key => ({ key, placed: false }));
+  const at = start_local => f.propose({ ...resume, from_date: start_local.slice(0, 10), days: 1,
+    draft_strategy: { action: 'cascade', pivot_key: 's2', start_local, sessions: rows } });
+  assert.equal((await at('2030-01-07T10:00')).proposals[0].solution, null);
+  f.state.busy.push({ kind: 'doctor', id: 5, start: '2030-02-04T09:00:00Z', end: '2030-02-04T10:00:00Z' });
+  assert.equal((await at('2030-02-04T10:00')).proposals[0].solution, null);
+  const overlapping = await f.propose({ ...resume, from_date: '2030-02-05', days: 1, draft_strategy: { action: 'reset',
+    sessions: ['s2', 's3'].map(key => ({ ...session(key, '2030-02-05'), placed: true })) } });
+  assert.equal(overlapping.proposals.filter(row => row.solution).length, 1);
+  assert.equal(f.state.requests.length, 1);
+  assert.equal(f.state.appointments.length, 2);
+});
+
+test('interrupted relative programs can resume through the shared draft without bypassing revision and attendance guards', async () => {
+  const f = fixture({ manual: false });
+  await f.book([session('s0', '2030-01-07')]);
+  f.advance('2030-01-08T00:00:00Z'); f.appointment('s0').estado = 'no_asistio';
+  const mode = await resumePayload(f, 's0');
+  const request = { ...mode, from_date: '2030-02-04', days: 1, draft_strategy: { action: 'initial' } };
+  const result = await f.propose(request);
+  assert.deepEqual(clone(result.proposals.map(row => row.key)), ['s0', 's1', 's2', 's3']);
+  assert(result.proposals.every(row => row.solution));
+  assert.equal(result.can_schedule, false); assert.equal(result.can_resume, true);
+  assert.deepEqual(clone(result.resume.affected_keys), ['s0', 's1', 's2', 's3']);
+  f.state.voucher.available_units = 3;
+  await assert.rejects(f.propose(request), { code: 'program_resume_changed' });
+  f.state.voucher.available_units = 4; f.appointment('s0').estado = 'pendiente';
+  await assert.rejects(f.propose({ ...request, ...await resumePayload(f, 's0') }), { code: 'program_resume_review_required' });
+  assert.equal(f.state.requests.length, 1); assert.equal(f.state.appointments.length, 1);
 });

@@ -81,4 +81,21 @@ function parse(input) {
 function limit(value) {const n=Number(value??50);if(!Number.isInteger(n)||n<1||n>100)throw error(400,'bank_page_limit_invalid','El tamaño de página debe estar entre 1 y 100.');return n;}
 function cursor(value,scope) {if(!value)return null;try {const p=JSON.parse(Buffer.from(value,'base64url'));if(p.scope!==hash(scope)||typeof p.id!=='string'||!/^[a-zA-Z0-9-]{1,80}$/.test(p.id))throw Error();return p.id;}catch{throw error(400,'bank_cursor_invalid','La página pertenece a otra búsqueda.');}}
 const nextCursor=(id,scope)=>Buffer.from(JSON.stringify({id,scope:hash(scope)})).toString('base64url');
-module.exports={error,clean,hash,cents,aggregateCents,parse,limit,cursor,nextCursor};
+function sort(query,allowed,defaultField,defaultDirection='asc') {
+  const field=query.sort_by??defaultField,direction=query.sort_direction??defaultDirection;
+  if(typeof field!=='string'||!allowed.includes(field)||!['asc','desc'].includes(direction))throw error(400,'bank_sort_invalid','Selecciona una columna y un sentido de orden válidos.');
+  return {sort_by:field,sort_direction:direction};
+}
+function keysetCursor(value,scope){
+  if(!value)return null;
+  try{
+    if(typeof value!=='string'||value.length>4096)throw Error();
+    const parsed=JSON.parse(Buffer.from(value,'base64url'));
+    if(parsed.version!==2||parsed.scope!==hash(scope)||typeof parsed.id!=='string'||!/^[a-zA-Z0-9_-]{1,36}$/.test(parsed.id)
+      ||!(typeof parsed.value==='string'&&parsed.value.length<=1000||typeof parsed.value==='number'&&Number.isFinite(parsed.value))
+      ||!(parsed.type===null||['expense','payment','payroll','refund'].includes(parsed.type)))throw Error();
+    return {id:parsed.id,value:parsed.value,type:parsed.type};
+  }catch{throw error(400,'bank_cursor_invalid','La página pertenece a otra búsqueda u orden.');}
+}
+const nextKeysetCursor=(row,scope)=>Buffer.from(JSON.stringify({version:2,scope:hash(scope),id:String(row.id),value:row.value,type:row.type??null})).toString('base64url');
+module.exports={error,clean,hash,cents,aggregateCents,parse,limit,cursor,nextCursor,sort,keysetCursor,nextKeysetCursor};

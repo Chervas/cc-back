@@ -53,6 +53,7 @@ router.post('/sepa/remittances', controller.createRemittance);
 router.patch('/sepa/remittances/:remittanceId', controller.updateRemittanceStatus);
 router.get('/sepa/remittances/:remittanceId.xml', controller.exportRemittance);
 router.get('/documents/:documentId', controller.getFiscalDocument);
+router.get('/documents/:documentId/source-budget', controller.getFiscalSourceBudget);
 router.get('/export.csv', controller.exportCsv);
 router.get('/export.zip', controller.exportZip);
 router.post('/expenses', controller.createExpense);

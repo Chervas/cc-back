@@ -66,4 +66,23 @@ function buildSeriesSlots({ startAt, count, intervalDays, durationMinutes, timeZ
   });
 }
 
-module.exports = { parseSeriesStart, buildSeriesSlots, resolveLocalInstant };
+// Explicit dates belong to this same series coordinator; no recurrence is
+// inferred when the shared planner places sessions independently.
+function explicitSeriesSlots({ starts, startAt, count, durationMinutes, timeZone, durations, now = new Date() }) {
+  if (!starts || typeof starts !== 'object' || Array.isArray(starts)
+    || Object.keys(starts).length !== count
+    || Object.keys(starts).some(key => !/^[1-9]\d*$/.test(key) || Number(key) > count)) {
+    throw scheduleError('voucher_schedule_dates_invalid', 'Conserva una fecha explícita para cada cita.');
+  }
+  const slots = Array.from({ length: count }, (_, index) => {
+    const start = parseSeriesStart(starts[String(index + 1)], timeZone);
+    if (start <= now || start - now > 366 * 86400000) throw scheduleError('voucher_schedule_start_invalid', 'Elige citas futuras dentro del próximo año.');
+    return { sequence: index + 1, start, end: new Date(+start + (durations?.get(index + 1)?.minutes || durationMinutes) * 60000) };
+  });
+  if (+slots[0].start !== +startAt || slots.some((slot, index) => index && +slot.start < +slots[index - 1].end)) {
+    throw scheduleError('voucher_schedule_dates_invalid', 'Las citas deben conservar su orden y no solaparse.');
+  }
+  return slots;
+}
+
+module.exports = { parseSeriesStart, buildSeriesSlots, explicitSeriesSlots, resolveLocalInstant };
