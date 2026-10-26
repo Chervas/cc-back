@@ -264,7 +264,9 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
         ...(profile.version === 4 ? { attention_visits: attentionVisits.get(id) } : {}) });
       const target = doctors.get(id);
       target.windows.push(...buildDoctorAvailabilityContext({ doctorId: id, clinicaId: clinicId, dc: doctor, dow, fechaLocal: date, timeZone }).docWins);
-      const projectedBlocks = buildDoctorBloqueoRowsForDate(doctorBlocks.filter(row => Number(row.doctor_id) === id), date, timeZone);
+      const projectedBlocks = buildDoctorBloqueoRowsForDate(doctorBlocks.filter(row => Number(row.doctor_id) === id
+        && (row.clinica_id == null || Number(row.clinica_id) === clinicId
+          || row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1)), date, timeZone);
       target.busy.push(...projectedBlocks.map(row => ({ start: row.fecha_inicio, end: row.fecha_fin })));
       if (profile.version === 4) target.absence_windows.push(...projectedBlocks.filter(row => ['ausencia', 'vacaciones'].includes(row.tipo)
         && (row.clinica_id == null || Number(row.clinica_id) === clinicId || row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1))

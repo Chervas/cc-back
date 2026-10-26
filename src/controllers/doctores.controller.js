@@ -6,12 +6,24 @@ const withDoctorCalendarMutation = (doctorId, mutate) => withCalendarMutation({ 
 const { Op } = db.Sequelize;
 const { STAFF_ROLES } = require('../lib/role-helpers');
 const { isFlexibleDoctor } = require('../lib/flexible-agenda');
-const { buildWindowsFromHorarios, inAnyWindow, resolveClinicTimezone, formatDateLocal,
+const { buildWindowsFromHorarios, buildDoctorBloqueoRowsForDate, inAnyWindow, resolveClinicTimezone, formatDateLocal,
   localDateTimeToUtc, dayIndexFromLocalDate } = require('../lib/availability-calendar');
 const { addDays, normalizeDateOnly } = require('../lib/personal-schedule-recurring');
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
 const overlap = (a1, a2, b1, b2) => a1 < b2 && b1 < a2;
+
+async function doctorBlocksForDate({ doctorId, clinicId, date, timeZone, start, end }) {
+  const rows = await db.DoctorBloqueo.findAll({ where: { doctor_id: doctorId, [Op.or]: [
+    { recurrente: 'none', fecha_inicio: { [Op.lt]: end }, fecha_fin: { [Op.gt]: start } },
+    { recurrente: null, fecha_inicio: { [Op.lt]: end }, fecha_fin: { [Op.gt]: start } },
+    { recurrente: { [Op.in]: ['daily', 'weekly', 'monthly'] }, fecha_inicio: { [Op.lt]: end } },
+  ] }, include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }] });
+  const scoped = rows.filter(row => row.clinica_id == null || Number(row.clinica_id) === Number(clinicId)
+    || row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1);
+  return buildDoctorBloqueoRowsForDate(scoped, date, timeZone)
+    .filter(row => overlap(start, end, new Date(row.fecha_inicio), new Date(row.fecha_fin)));
+}
 
 const subtractIntervals = (windows, blocks) => {
   let res = [...windows];
@@ -348,7 +360,8 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     }
     // Blocks
     const blocks = [];
-    const bloqueosDoc = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: dayEnd }, fecha_fin: { [Op.gt]: dayStart } } });
+    const bloqueosDoc = await doctorBlocksForDate({ doctorId: doctor_id, clinicId: dc?.clinica_id,
+      date: fechaLocal, timeZone, start: dayStart, end: dayEnd });
     bloqueosDoc.forEach(b => blocks.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
     const citasDoc = await resourceAppointments({ db, doctorId: doctor_id, start: dayStart, end: dayEnd });
     citasDoc.forEach(c => blocks.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
@@ -380,7 +393,8 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
   const effectiveEnd = end || new Date(start.getTime() + (durMinParam || 30)*60000);
   const inRange = inAnyWindow(buildWindowsFromHorarios(dc?.horarios || [], dow, fechaLocal, timeZone), start, effectiveEnd);
   if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
-  const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: effectiveEnd }, fecha_fin: { [Op.gt]: start } } });
+  const bloqueos = await doctorBlocksForDate({ doctorId: doctor_id, clinicId: dc?.clinica_id,
+    date: fechaLocal, timeZone, start, end: effectiveEnd });
   if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
   const citasDoc = await resourceAppointments({ db, doctorId: doctor_id, start, end: effectiveEnd });
   if (citasDoc.length) conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });

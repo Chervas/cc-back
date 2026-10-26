@@ -173,6 +173,27 @@ test('v4 context derives absences only from scoped typed blocks with recurrence 
   }
 });
 
+test('canonical bookings keep clinic-local blocks local and enforce global or explicitly shared recurring blocks', async () => {
+  const singleV4 = normalizeBookingProfile({ version: 4, phases: [{ ...phase('one'), start_offset_minutes: 0 }] });
+  const recurring = doctorBlock({ recurrente: 'weekly', fecha_inicio: new Date('2029-12-31T09:00:00Z'), fecha_fin: new Date('2029-12-31T09:30:00Z') });
+  for (const bookingProfile of [profile(phase('one')), singleV4]) {
+    for (const [block, mayBook] of [[doctorBlock({ clinica_id: 73 }), true], [doctorBlock(), false],
+      [doctorBlock({ clinica_id: null }), false], [doctorBlock({ clinica_id: 73, aplica_a_todas_clinicas: true }), false],
+      [{ ...recurring, clinica_id: 73 }, true], [recurring, false],
+      [{ ...recurring, excepciones: [{ fecha: '2030-01-07', cancelado: true }] }, true]]) {
+      const f = fixture({ bookingProfile, doctorBlocks: [block] });
+      if (mayBook) {
+        const saved = await f.reserve({ capabilities: relativeCapabilities });
+        assert.equal(saved.doctor_id, 5); assert.equal(saved.clinica_id, 72);
+        assert(f.state.occupancies.some(row => row.resource_key === 'doctor:5'));
+      } else {
+        await assert.rejects(f.reserve({ capabilities: relativeCapabilities }), { code: 'booking_unavailable' });
+        assert.equal(f.state.persists, 0); assert.equal(f.state.appointments.length, 0); assert.equal(f.state.occupancies.length, 0);
+      }
+    }
+  }
+});
+
 test('v4 context does not infer clinical absence from missing or malformed schedule data', async () => {
   for (const doctorHours of [[], [{ ...hours[1], hora_inicio: '99:00' }], [{ ...hours[1], hora_fin: null }],
     [{ ...hours[1], dia_semana: null }], [{ ...hours[1], hora_inicio: '20:00', hora_fin: '08:00' }]]) {

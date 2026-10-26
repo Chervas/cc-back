@@ -175,19 +175,37 @@ test('a failing canonical handler restores request and response methods before p
   assert.equal(req.params,params);assert.equal(req.body,body);assert.equal(res.json,originalJson);
 });
 
-async function legacyAvailability(f,query){
+async function legacyAvailability(f,query,{blocks=[]}={}){
   f.db.DoctorClinica.findOne=async options=>{
     const row=f.full().find(row=>String(row.doctor_id)===String(options.where.doctor_id)
       &&(!options.where.clinica_id||String(row.clinica_id)===String(options.where.clinica_id)));
     return row?(await sharing.projectDoctorClinicas({db:f.db,rows:[row]}))[0]:null;
   };
-  f.db.DoctorBloqueo={findAll:async()=>[]};
+  let blockQuery;
+  const blockMatches=(row,where)=>Reflect.ownKeys(where).every(key=>{
+    if(key===Op.or)return where[key].some(branch=>blockMatches(row,branch));
+    const expected=where[key],actual=row[key];
+    if(expected&&typeof expected==='object'&&!(expected instanceof Date))return Reflect.ownKeys(expected).every(operator=>{
+      if(operator===Op.in)return expected[operator].includes(actual);
+      const value=expected[operator],left=actual instanceof Date||/^\d{4}-\d{2}-\d{2}T/.test(String(actual))?+new Date(actual):actual;
+      const right=value instanceof Date?+value:value;
+      if(operator===Op.lt)return left<right;
+      if(operator===Op.gt)return left>right;
+      if(operator===Op.lte)return left<=right;
+      if(operator===Op.gte)return left>=right;
+      if(operator===Op.ne)return actual!==value;
+      throw Error('Unexpected test query operator');
+    });
+    return expected==null?actual==null:String(actual)===String(expected);
+  });
+  f.db.DoctorBloqueo={findAll:async options=>{blockQuery=options;return blocks.filter(row=>blockMatches(row,options.where));}};
+  f.db.DoctorBloqueoExcepcion={};
   f.db.Instalacion={findByPk:async()=>({id:99,clinica_id:102,activo:true,horarios:[{id:70,dia_semana:1,activo:true,hora_inicio:'07:00',hora_fin:'22:00'}]})};
   const reads=[],deps={'../services/appointmentResourceCalendar.service':{resourceAppointments:async options=>{reads.push(options);return [];},resourceInstallationBlocks:async()=>[]},
     '../lib/installation-professionals':{installationAllowsStaff:()=>true}};
   const c=load('src/controllers/doctores.controller.js',f.db,deps),res=response();
   await c.disponibilidad({query:{doctor_id:'9001',clinica_id:'102',...query}},res);
-  return {res,reads};
+  return {res,reads,blockQuery};
 }
 test('legacy slots honour a biweekly source rule instead of advertising its off-week or obsolete member hours',async()=>{
   const f=fixture({staleMember:true});f.exceptions.splice(0);f.schedules[0].rrule='FREQ=WEEKLY;INTERVAL=2;BYDAY=MO';
@@ -213,4 +231,52 @@ test('legacy availability uses the clinic civil day and timezone for slot bounda
   assert.equal(result.reads[0].end.toISOString(),'2026-10-26T23:00:00.000Z');
   result=await legacyAvailability(f,{inicio:'2026-10-26T09:00:00+01:00',fin:'2026-10-26T10:00:00+01:00'});
   assert.equal(result.res.statusCode,200);assert.equal(result.res.body.available,true);
+});
+
+test('legacy shared-calendar slots and validation respect clinic-local versus global blocks',async()=>{
+  const f=fixture();f.exceptions.splice(0);
+  const local={id:9100,doctor_id:9001,clinica_id:101,aplica_a_todas_clinicas:false,recurrente:'none',
+    fecha_inicio:'2026-10-26T09:00:00Z',fecha_fin:'2026-10-26T10:00:00Z',motivo:'Owned local A'};
+  for(const [block,blockedInB] of [[local,false],[{...local,clinica_id:null},true],
+    [{...local,aplica_a_todas_clinicas:true},true],[{...local,aplica_a_todas_clinicas:1},true]]){
+    for(const clinicId of [101,102]){
+      const blocked=clinicId===101||blockedInB;
+      const slots=await legacyAvailability(f,{clinica_id:String(clinicId),fecha:'2026-10-26',slots:'true',duracion_min:'60'},{blocks:[block]});
+      assert.equal(slots.res.body.slots.length,blocked?2:3);
+      assert.equal(slots.res.body.slots.some(slot=>slot.start==='2026-10-26T09:00:00.000Z'),!blocked);
+      const concrete=await legacyAvailability(f,{clinica_id:String(clinicId),inicio:'2026-10-26T09:00:00Z',fin:'2026-10-26T10:00:00Z'},{blocks:[block]});
+      assert.equal(concrete.res.statusCode,blocked?409:200);
+      assert.equal(concrete.res.body.available,!blocked);
+    }
+  }
+});
+
+test('legacy weekly blocks expand old anchors across DST, honour inclusive until, and load cancellation exceptions',async()=>{
+  const f=fixture();f.exceptions.splice(0);
+  const weekly={id:9200,doctor_id:9001,clinica_id:102,aplica_a_todas_clinicas:false,recurrente:'weekly',recurrente_hasta:'2026-10-26',
+    fecha_inicio:'2026-10-19T08:00:00Z',fecha_fin:'2026-10-19T09:00:00Z',excepciones:[]};
+  let slots=await legacyAvailability(f,{fecha:'2026-10-26',slots:'true',duracion_min:'60'},{blocks:[weekly]});
+  assert.equal(slots.res.body.slots.length,2);assert(!slots.res.body.slots.some(slot=>slot.start==='2026-10-26T09:00:00.000Z'));
+  assert.equal(slots.blockQuery.include[0].as,'excepciones');
+  let concrete=await legacyAvailability(f,{inicio:'2026-10-26T09:00:00Z',fin:'2026-10-26T10:00:00Z'},{blocks:[weekly]});
+  assert.equal(concrete.res.statusCode,409);
+  slots=await legacyAvailability(f,{fecha:'2026-11-02',slots:'true',duracion_min:'60'},{blocks:[weekly]});
+  assert.equal(slots.res.body.slots.length,3,'a block after the inclusive recurrence end must not recur');
+  const cancelled={...weekly,excepciones:[{id:9300,fecha:'2026-10-26',cancelado:true}]};
+  slots=await legacyAvailability(f,{fecha:'2026-10-26',slots:'true',duracion_min:'60'},{blocks:[cancelled]});
+  assert.equal(slots.res.body.slots.length,3);
+  concrete=await legacyAvailability(f,{inicio:'2026-10-26T09:00:00Z',fin:'2026-10-26T10:00:00Z'},{blocks:[cancelled]});
+  assert.equal(concrete.res.statusCode,200);
+});
+
+test('legacy monthly and non-recurring null blocks share canonical projection in slots and concrete validation',async()=>{
+  const f=fixture();f.exceptions.splice(0);f.schedules[0].dia_semana=4;
+  const monthly={id:9400,doctor_id:9001,clinica_id:null,recurrente:'monthly',recurrente_hasta:'2026-11-26',
+    fecha_inicio:'2026-10-26T09:00:00Z',fecha_fin:'2026-10-26T10:00:00Z'};
+  for(const block of [monthly,{...monthly,recurrente:null,fecha_inicio:'2026-11-26T09:00:00Z',fecha_fin:'2026-11-26T10:00:00Z'}]){
+    const slots=await legacyAvailability(f,{fecha:'2026-11-26',slots:'true',duracion_min:'60'},{blocks:[block]});
+    assert.equal(slots.res.body.slots.length,2);
+    const concrete=await legacyAvailability(f,{inicio:'2026-11-26T09:00:00Z',fin:'2026-11-26T10:00:00Z'},{blocks:[block]});
+    assert.equal(concrete.res.statusCode,409);
+  }
 });
