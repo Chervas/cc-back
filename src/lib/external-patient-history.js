@@ -15,6 +15,27 @@ function eurodentEnvelopes(fields) {
     .map(field=>({field,envelope:parse(field.value)})).filter(({envelope:r})=>r?.version==='eurodent_source_record/1'
       && r.source_instance && r.source_table && r.record && !Array.isArray(r.record));
 }
+function arriagaEnvelopes(fields) {
+  return (Array.isArray(fields)?fields:[]).filter(field=>field?.source==='arriaga_excel')
+    .map(field=>({field,envelope:parse(field.value)})).filter(({field,envelope:r})=>{
+      const clinicId=Number(field.clinica_id);
+      return Number.isSafeInteger(clinicId)&&clinicId>0
+        &&r?.version==='arriaga_patient_source_record/1'&&r.provider==='arriaga_excel'
+        &&Number(r.clinic_id)===clinicId&&r.category==='historical'
+        &&typeof r.source_instance==='string'&&r.source_instance.endsWith(`:clinic-${clinicId}`)
+        &&typeof r.source_patient_id==='string'&&/^master-row-[1-9]\d*$/.test(r.source_patient_id)
+        &&typeof r.source_database==='string'&&plainText(r.source_database)
+        &&typeof r.source_table==='string'&&plainText(r.source_table)
+        &&Number.isSafeInteger(r.source_row)&&r.source_row>1
+        &&/^[a-f0-9]{64}$/.test(r.source_key||'')
+        &&/^\d{4}-\d{2}-\d{2}$/.test(r.record_date||'')&&dateOnly(r.record_date)===r.record_date
+        &&r.record&&typeof r.record==='object'&&!Array.isArray(r.record)
+        &&plainText(r.record.service_label||r.record.service_name)
+        &&(!field.archive_source_instance||field.archive_source_instance===r.source_instance)
+        &&(!field.archive_source_patient_id||field.archive_source_patient_id===r.source_patient_id)
+        &&(!field.archive_source_key||field.archive_source_key===r.source_key);
+    });
+}
 function buildExternalPatientHistory(fields,{clinics=[]}={}) {
   const clinicNames=new Map(clinics.map(c=>[Number(c.clinica_id ?? c.id_clinica),plainText(c.nombre_clinica)]));
   const entries=buildClinicCloudPatientHistory(fields,{clinics}).entries.map(entry=>({...entry,provider:'cliniccloud',category:entry.kind==='patient_profile'?'profile':'historical'}));
@@ -50,6 +71,24 @@ function buildExternalPatientHistory(fields,{clinics=[]}={}) {
         :category==='deleted_history'?'Registro conservado como eliminado en origen; no acredita un tratamiento realizado.'
         :category==='profile'?'Datos de origen conservados para consulta. No sustituyen el resumen clínico vigente.'
         :'Registro histórico de origen; las radiografías del otro ordenador no están incluidas en esta exportación.'});
+  }
+  for(const {field,envelope:r} of arriagaEnvelopes(fields)){
+    const record=r.record,items=[];
+    const add=(label,value)=>{value=plainText(value);if(value)items.push({label,value});};
+    add('Servicio registrado',record.service_label||record.service_name);
+    add('Familia',record.service_family);add('Clasificación de origen',record.source_classification);
+    const site={explicit_aju:'Ajuriaguerra · indicada como AJU en origen',explicit_arenal:'Arenal · indicada en origen',default_arenal:'Arenal · asignada cuando el archivo no indica sede'}[record.site_assignment];
+    add('Sede del registro',site);
+    const id=createHash('sha256').update(`${field.clinica_id}:${r.source_instance}:${r.source_key}`).digest('hex').slice(0,24);
+    entries.push({id,provider:'arriaga_excel',source:'Excel Arriaga',kind:'clinical_note',category:'historical',
+      title:plainText(record.service_label||record.service_name),clinic_id:Number(field.clinica_id),
+      clinic_name:clinicNames.get(Number(field.clinica_id))||null,record_date:r.record_date,
+      source_date:dateOnly(r.source_export_date),
+      imported_date:dateOnly(field.last_imported_at instanceof Date?field.last_imported_at.toISOString():field.last_imported_at),
+      author:null,sections:[{label:'Servicio histórico registrado',items}],
+      source_document:{database:plainText(r.source_database),table:plainText(r.source_table),record_id:String(r.source_row),
+        row_sha256:r.row_sha256,batch_sha256:r.bundle_sha256},
+      content_note:'Actividad clínica recogida en el listado de origen.'});
   }
   entries.sort((a,b)=>(b.record_date||'').localeCompare(a.record_date||'')||a.id.localeCompare(b.id));
   return {version:'patient_imported_history_view/1',read_only:true,entries,providers:[...new Set(entries.map(e=>e.provider))]};
@@ -87,7 +126,7 @@ function paginateExternalHistory(history,query={}) {
     &&(!filters.search||fold([e.title,e.author,...e.sections.flatMap(s=>s.items.map(i=>i.value))].join(' ')).includes(fold(filters.search))));
   return {...history,...(scope?{providers:[...new Set(domainEntries.map(entry=>entry.provider))]}:{}),category_counts:categoryCounts,entries:entries.slice(offset,offset+limit),total:entries.length,next_cursor:offset+limit<entries.length?Buffer.from(JSON.stringify({offset:offset+limit,filter:filterHash})).toString('base64url'):null};
 }
-module.exports={eurodentEnvelopes,buildExternalPatientHistory,paginateExternalHistory,categoryFor,validateImportedHistoryScope};
+module.exports={eurodentEnvelopes,arriagaEnvelopes,buildExternalPatientHistory,paginateExternalHistory,categoryFor,validateImportedHistoryScope};
 
 // Clinical access is not financial access. Do this before filtering and totals.
 function redactImportedHistoryFinancials(history,{mayViewFinancial=false}={}) {
@@ -97,7 +136,9 @@ function redactImportedHistoryFinancials(history,{mayViewFinancial=false}={}) {
   return {...history,entries,providers:[...new Set(entries.map(e=>e.provider))],financial_values_visible:false};
 }
 function buildImportedClinicalCatalog(rows) {
-  const catalog=rows[0];
+  // Only Eurodent catalogues contain the original dental graphics contract.
+  // Other providers' retained contexts must not become Eurodent catalogues.
+  const catalog=rows.find(row=>row.source_system==='eurodent');
   if(!catalog)return{version:'imported_clinical_catalog/1',read_only:true,provider:'eurodent',source:'Eurodent',items:[],families:[],source_instance:null,source_zip_sha256:null,imported_date:null};
   // Tratamiento.Familia references the graphic family number, not FamTrat's
   // row PK (the archived family is NumFamilia=99 with ID=26 in the source).

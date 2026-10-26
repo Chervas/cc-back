@@ -20,7 +20,7 @@ function fixture(){
     ['Presupuesto',{ID:'4',Fecha:'2020-01-01',Precio_euro:'17.25'}],
     ['Hist_Borr',{ID:'5',Fecha:'2020-01-01',Tipolin:'T',Obs:'TESTONLY deleted clinical annotation'}],
     ['Hist_Borr',{ID:'6',Fecha:'2020-01-01',Tipolin:'A',Precio_euro:'17.25'}],
-  ].map(([source_table,record],i)=>({id:i+1,clinic_id:67,imported_at:'2026-10-22',record_json:JSON.stringify({
+  ].map(([source_table,record],i)=>({id:i+1,clinic_id:67,source_system:'eurodent',imported_at:'2026-10-22',record_json:JSON.stringify({
     version:'eurodent_source_record/1',source_instance:'testonly-scope-acl',source_database:'TESTONLY.MDB',source_table,source_pk:{ID:record.ID},row_sha256:'a'.repeat(64),record,
   })}));
   const allowed=({actorId,featureKey,clinicId})=>clinicId===67&&state.permissions.get(actorId)?.has(featureKey)===true;

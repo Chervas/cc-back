@@ -51,7 +51,7 @@ test('financial redaction precedes history totals and source catalogue never exp
   const history={entries:[{id:'x',provider:'eurodent',category:'economic',sections:[{items:[{label:'Importe original (€)',value:'500'}]}]},{id:'y',provider:'eurodent',category:'budget',sections:[{items:[{label:'Tratamiento',value:'Obturación'},{label:'Importe original (€)',value:'400'},{label:'Documento en origen',value:'123'}]}]}],providers:['eurodent']};
   const redacted=redactImportedHistoryFinancials(history);assert.equal(redacted.entries.length,1);assert.deepEqual(redacted.entries[0].sections[0].items,[{label:'Tratamiento',value:'Obturación'}]);assert.equal(paginateExternalHistory(redacted).total,1);
   assert.equal(redactImportedHistoryFinancials(history,{mayViewFinancial:true}).entries.length,2);
-  const catalogue=buildImportedClinicalCatalog([{context_json:JSON.stringify({Tratamiento:[{record:{ID:'1',Nombre:'Ficticio',Precio_euro:'999',Familia:'1'}}],FamTrat:[{record:{ID:'1',Familia:'Ficticia'}}],Doctor:[{record:{Nombre:'TESTONLY private doctor'}}],FPago:[{record:{Nombre:'TESTONLY finance'}}]})}]);
+  const catalogue=buildImportedClinicalCatalog([{source_system:'eurodent',context_json:JSON.stringify({Tratamiento:[{record:{ID:'1',Nombre:'Ficticio',Precio_euro:'999',Familia:'1'}}],FamTrat:[{record:{ID:'1',Familia:'Ficticia'}}],Doctor:[{record:{Nombre:'TESTONLY private doctor'}}],FPago:[{record:{Nombre:'TESTONLY finance'}}]})}]);
   assert.equal(catalogue.items.length,1);assert.doesNotMatch(JSON.stringify(catalogue),/999|private doctor|TESTONLY finance|Precio/);
 });
 test('complete category navigation survives an economic first page and filters without leaking financial categories to a clinical role',()=>{
@@ -171,7 +171,7 @@ test('catalogue distinguishes source zero flags from drawable restorations and n
     {ID:'3',Nombre:'TESTONLY apunte económico',Familia:'0',Grafico:'1'},
     {ID:'4',Nombre:'TESTONLY restauración archivada',Familia:'99',FamOldOcu:'2',Grafico:'1'},
   ];
-  const view=buildImportedClinicalCatalog([{context_json:JSON.stringify({Tratamiento:rows.map(record=>({record}))})}]);
+  const view=buildImportedClinicalCatalog([{source_system:'eurodent',context_json:JSON.stringify({Tratamiento:rows.map(record=>({record}))})}]);
   assert.deepEqual(view.items.map(item=>item.graphic),[false,true,false,true]);
   assert.equal(view.items[0].visual_type,null);
   assert.equal(view.items[1].visual_type,'obturacion');
@@ -181,7 +181,7 @@ test('catalogue distinguishes source zero flags from drawable restorations and n
 });
 test('catalogue joins graphic family numbers while retaining source row identities and unregistered zero',()=>{
   const context={FamTrat:[{record:{ID:'26',NumFamilia:'99',Familia:'Tratamientos ocultos'}},{record:{ID:'2',Familia:'Obturación'}},{record:{ID:'8',NumFamilia:null,Familia:'No corresponde al código ocho'}}],Tratamiento:[{record:{ID:'archived',Familia:'99',FamOldOcu:'2',Grafico:'1'}},{record:{ID:'zero',Familia:0,Grafico:'0'}},{record:{ID:'filling',Familia:'2',Grafico:'1'}},{record:{ID:'unregistered',Familia:'8',Grafico:'0'}}]};
-  const view=buildImportedClinicalCatalog([{context_json:JSON.stringify(context)}]);
+  const view=buildImportedClinicalCatalog([{source_system:'eurodent',context_json:JSON.stringify(context)}]);
   assert.deepEqual(view.families[0],{id:'99',source_id:'26',name:'Tratamientos ocultos'});
   assert.equal(view.items[0].family_id,'99');assert.equal(view.items[0].family_name,'Tratamientos ocultos');assert.equal(view.items[0].visual_type,'obturacion');
   assert.equal(view.items[1].family_id,'0');assert.equal(view.items[1].family_name,null);

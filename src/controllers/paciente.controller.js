@@ -1331,12 +1331,15 @@ async function importedPatientContext(req,{requireFinancial=false}={}) {
     attributes: ['field_key','label','value','value_type','source','clinica_id','source_column','last_imported_at'],
     order: [['id','ASC']], raw: true,
   });
-  const imported = await sequelize.query(`SELECT r.id,r.clinic_id,r.record_json,r.imported_at
+  const imported = await sequelize.query(`SELECT r.id,r.clinic_id,r.source_key,r.record_json,r.imported_at,
+      i.source_system,i.source_instance,i.source_patient_id
     FROM PatientImportedSourceRecords r INNER JOIN PatientImportedIdentities i ON i.id=r.identity_id
       AND i.patient_id=r.patient_id AND i.clinic_id=r.clinic_id
     WHERE r.patient_id=:patientId AND r.clinic_id=:clinicId ORDER BY r.id`,
     {replacements:{patientId:paciente.id_paciente,clinicId},type:QueryTypes.SELECT});
-  fields.push(...imported.map(row=>({clinica_id:row.clinic_id,source:'eurodent',field_key:String(row.id),value:row.record_json,last_imported_at:row.imported_at})));
+  fields.push(...imported.map(row=>({clinica_id:row.clinic_id,source:row.source_system,
+    archive_source_instance:row.source_instance,archive_source_patient_id:row.source_patient_id,archive_source_key:row.source_key,
+    field_key:String(row.id),value:row.record_json,last_imported_at:row.imported_at})));
   return { paciente, clinicId, fields, mayViewFinancial };
 }
 exports.getImportedPatientHistory = async (req,res) => {
