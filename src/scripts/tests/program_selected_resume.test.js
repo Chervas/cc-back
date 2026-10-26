@@ -213,6 +213,9 @@ test('manual and ordinary pending DTOs expose selectable origins without requiri
     const f = fixture({ manual }), plan = await f.read();
     assert.equal(plan.resume, null); assert.equal(plan.can_schedule, true); assert.equal(plan.can_resume, true);
     assert.deepEqual(clone(plan.resume_options.map(row => row.from_key)), ['s0', 's1', 's2', 's3']);
+    assert.deepEqual(clone(plan.resume_options.map(row => row.affected_keys)), [
+      ['s0', 's1', 's2', 's3'], ['s1', 's2', 's3'], ['s2', 's3'], ['s3'],
+    ]);
     assert(plan.sessions.every(row => row.start_at === null));
     const preview = await f.propose({ from_date: '2030-01-07', days: 1, session_keys: ['s2'] });
     assert.equal(preview.proposals.length, 1);

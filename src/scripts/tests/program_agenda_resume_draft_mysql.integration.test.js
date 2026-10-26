@@ -22,6 +22,7 @@ test('shared agenda draft resumes the SQL canonical suffix with real capacity, n
         occupancy: clone(await f.physical.occupancy(prefix.id_cita)), voucher: clone(await f.voucher.reload()),
         budget: clone(await f.budget.reload()), versions: await f.all('EconomicBudgetVersion') };
       const mode = await f.resume('s2'), rows = ['s2', 's3', 's4'].map(key => ({ key, placed: false }));
+      assert.deepEqual((await f.read()).resume_options.find(row => row.from_key === 's2').affected_keys, ['s2', 's3', 's4']);
       const before = await f.databaseState();
       const empty = await f.propose({ ...mode, from_date: '2030-01-14', days: 1, draft_strategy: { action: 'initial' } });
       assert.deepEqual(empty.resume.affected_keys, ['s2', 's3', 's4']);

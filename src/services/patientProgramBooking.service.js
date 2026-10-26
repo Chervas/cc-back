@@ -158,12 +158,14 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     if (Number(plan.voucher.available_units) < reserved) fail('program_units_inconsistent', 'Revisa las sesiones disponibles de este programa.');
   }
   function dto(plan, { resumeFromKey = null } = {}) {
+    const asOf = now();
     const pending = plan.sessions.filter(row => ['pending', 'missed'].includes(row.scheduling_status)).length;
     const mode = schedulingMode(plan.snapshot);
-    const legacyResume = mode === 'manual' ? null : resumeInfo(plan, now());
-    const resume = resumeFromKey == null ? legacyResume : resumeSelectionInfo(plan, resumeFromKey, now());
-    const resumeChoices = resumeOptions(plan, now());
-    const active = plan.voucher.status === 'active' && plan.operationallyAuthorized && (!plan.voucher.expires_at || new Date(plan.voucher.expires_at) > now());
+    const legacyResume = mode === 'manual' ? null : resumeInfo(plan, asOf);
+    const resume = resumeFromKey == null ? legacyResume : resumeSelectionInfo(plan, resumeFromKey, asOf);
+    const resumeChoices = resumeOptions(plan, asOf).map(option => ({ ...option,
+      affected_keys: resumeSelectionInfo(plan, option.from_key, asOf).affected_keys }));
+    const active = plan.voucher.status === 'active' && plan.operationallyAuthorized && (!plan.voucher.expires_at || new Date(plan.voucher.expires_at) > asOf);
     // Purchased history stays readable while the relative-step writer is off.
     // This marker cannot turn an incomplete attention plan into a bookable one.
     let bookingRestriction = null;
