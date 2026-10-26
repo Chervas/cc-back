@@ -236,6 +236,45 @@ test('appointment candidates bound patient, clinic, future active and reject unr
   await assert.rejects(service.appointmentCandidates({ id: item.id, clinicId: 10, query: { limit: 51 } }), { statusCode: 400 });
 });
 
+test('appointment candidate zones use the authorized clinic, preserve instants and render DST across pagination', async () => {
+  const { create, service, state } = fixture();
+  const { item } = await create({}, { patientIdentifier: 'pac_shared' });
+  const cases = [
+    ['2026-11-15T08:55:00Z', '09:55'],
+    ['2027-07-15T07:55:00Z', '09:55'],
+    ['2027-03-28T00:55:00Z', '01:55'],
+    ['2027-03-28T01:55:00Z', '03:55'],
+  ];
+  state.appointments = cases.map(([instant], index) => ({ id_cita: 200 + index, clinica_id: 10,
+    paciente_id: 3, estado: 'pendiente', es_provisional: false, inicio: new Date(instant) }));
+  state.appointments.push(
+    { ...state.appointments[0], id_cita: 300, clinica_id: 20 },
+    { ...state.appointments[0], id_cita: 301, paciente_id: 1 },
+  );
+  const seen = []; let cursor;
+  do {
+    const page = await service.appointmentCandidates({ clinicId: 10, id: item.id, query: { limit: 1, cursor } });
+    seen.push(...page.items); cursor = page.next_cursor;
+  } while (cursor);
+  assert.equal(seen.length, cases.length);
+  for (const candidate of seen) {
+    const [instant, local] = cases[candidate.id - 200];
+    assert.equal(candidate.timezone, 'Europe/Madrid');
+    assert.equal(candidate.inicio.toISOString(), new Date(instant).toISOString());
+    assert.equal(new Intl.DateTimeFormat('en-GB', { timeZone: candidate.timezone,
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(candidate.inicio), local);
+  }
+  assert.ok(state.queries.filter(query => query.attributes?.includes('configuracion'))
+    .every(query => query.where.id_clinica === 10));
+  state.clinics[0].configuracion = { timezone: 'Atlantic/Canary' };
+  assert.equal((await service.appointmentCandidates({ clinicId: 10, id: item.id })).items[0].timezone, 'Atlantic/Canary');
+  state.clinics[0].id_clinica = 99;
+  assert.equal((await service.appointmentCandidates({ clinicId: 10, id: item.id })).items[0].timezone, null);
+  await assert.rejects(service.appointmentCandidates({ clinicId: 20, id: item.id }), { code: 'follow_up_not_found' });
+  assert.equal(state.revisions.length, 1);
+  assert.equal(state.transactions, 1);
+});
+
 test('clinic panel window is calculated in backend, earliest due first and date-keyset bounded', async () => {
   const { create, service } = fixture();
   await create({ contact_due_date: '2026-09-08' });

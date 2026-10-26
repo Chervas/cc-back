@@ -383,7 +383,12 @@ function createPatientFollowUpService({ db, now = () => new Date() }) {
       attributes: ['id_cita', 'inicio', 'fin', 'titulo', 'tratamiento_id', 'estado'], order: [['id_cita', 'DESC']], limit: limit + 1,
     });
     const page = appointments.slice(0, limit);
+    const clinic = page.length ? await db.Clinica.findOne({ where: { id_clinica: clinicId },
+      attributes: ['id_clinica', 'configuracion'] }) : null;
+    const timezone = Number(clinic?.id_clinica) === clinicId
+      ? require('./clinicOpeningHours.service').resolveClinicTimeZone(clinic) : null;
     return { items: page.map((appointment) => ({ id: Number(appointment.id_cita), inicio: appointment.inicio, fin: appointment.fin,
+      timezone,
       titulo: appointment.titulo || null, treatment_id: appointment.tratamiento_id ? Number(appointment.tratamiento_id) : null, status: appointment.estado })),
     next_cursor: appointments.length > limit ? makeCursor(page[page.length - 1].id_cita, filters.scope) : null };
   }

@@ -39,15 +39,19 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     const read=(await service.get({clinicId:72,id:linked.item.id})).item;
     assert.equal(read.linked_appointment_timezone,'Europe/Madrid');assert.equal(read.linked_appointment_start.toISOString(),new Date(instant).toISOString());
     assert.equal(new Intl.DateTimeFormat('en-GB',{timeZone:read.linked_appointment_timezone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(read.linked_appointment_start),local);
+    const candidate=(await service.appointmentCandidates({clinicId:72,id:linked.item.id})).items.find(item=>item.id===100);
+    assert.equal(candidate.timezone,'Europe/Madrid');assert.equal(candidate.inicio.toISOString(),new Date(instant).toISOString());
+    assert.equal(new Intl.DateTimeFormat('en-GB',{timeZone:candidate.timezone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(candidate.inicio),local);
     assert.equal(read.version,1);
   }
   assert.equal((await service.list({clinicId:72,patientIdentifier:'OWNED-ONE'})).items.find(item=>item.id===linked.item.id).linked_appointment_timezone,'Europe/Madrid');
   await db.CitaPaciente.update({clinica_id:66},{where:{id_cita:100}});
   const foreign=(await service.get({clinicId:72,id:linked.item.id})).item;
   assert.equal(foreign.linked_appointment_start,null);assert.equal(foreign.linked_appointment_timezone,null);
+  assert.equal((await service.appointmentCandidates({clinicId:72,id:linked.item.id})).items.length,0);
   await db.CitaPaciente.update({clinica_id:72,paciente_id:10},{where:{id_cita:100}});
   assert.equal((await service.get({clinicId:72,id:linked.item.id})).item.linked_appointment_timezone,null);
   assert.equal(await db.PatientFollowUpRevision.count(),revisionCount);
-  report.checks.push('Linked appointment DTO resolves the authorized clinic IANA zone; winter/summer and DST preserve UTC instants and render the booked local hour; list/get remain read-only and cross-clinic/patient links expose neither timestamp nor zone.');
+  report.checks.push('Linked appointment and candidate DTOs resolve the authorized clinic IANA zone; winter/summer and DST preserve UTC instants and render the booked local hour; list/get/candidates remain read-only and cross-clinic/patient links expose neither timestamp nor zone.');
   report.checks.push('Actual follow-up service/models in owned MySQL: independent final episode provenance persists; simultaneous same-episode and mixed legacy-appointment/episode requests create one reminder/revision; current reads preserve replay after a waited report lock; foreign patient rejected; revision failure rolls back; stale version rejected; appointments and final narrative unchanged. No DEV DB or external providers.');
 }).catch(error=>{console.error(error);process.exitCode=1;});
