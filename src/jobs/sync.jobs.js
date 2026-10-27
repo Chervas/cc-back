@@ -1583,10 +1583,10 @@ class MetaSyncJobs {
             }
           }
 
-          // Finish downloading every property in a bounded month before publishing
+          // Finish every property in a <=3-day, month-bounded range before publishing
           // the legacy clinic aggregate. A failed/truncated property must not
           // overwrite a complete aggregate with a partial one.
-          for (const rg of scIngest.monthRanges(fmt(start), fmt(end))) {
+          for (const rg of scIngest.queryRanges(fmt(start), fmt(end))) {
             const queryDailyMap = new Map();
             const topByDate = new Map();
             let intervalComplete = authorizedMappings.length === arr.length;

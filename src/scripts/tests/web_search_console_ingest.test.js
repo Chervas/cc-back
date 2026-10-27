@@ -116,7 +116,7 @@ test('broker tenants keep separate downloads even for one web and connection', a
   assert.equal(downloads, 4);
 });
 
-function jobsFixture({ count = 1, sites = 1, env = {}, storage } = {}) {
+function jobsFixture({ count = 1, sites = 1, env = {}, storage, helper } = {}) {
   const f = database(); Object.assign(f.state, { calls: [], active: true, failQueries: null, truncate: false, revisions: 0, reports: [], storageCalls: [] });
   const mappings = Array.from({ length: count }, (_, index) => ({ id: 91 + index, clinicaId: 71 + index,
     googleConnectionId: 81, siteUrl: 'https://example.invalid/' }));
@@ -137,7 +137,8 @@ function jobsFixture({ count = 1, sites = 1, env = {}, storage } = {}) {
       return { data: { rows: f.state.truncate ? Array(25000).fill(point) : [point] } };
     } },
     env: { WEB_PSI_ENABLED: 'false', WEB_SYNC_RECENT_DAYS: '1', WEB_BACKFILL_DAYS: '1', ...env },
-    overrides: storage ? { '../services/searchConsoleAnalytics.service': storage } : {},
+    overrides: { ...(storage ? { '../services/searchConsoleAnalytics.service': storage } : {}),
+      ...(helper ? { '../lib/searchConsoleIngest': helper } : {}) },
   }).metaSyncJobs;
   jobs._ensureGoogleAccessToken = async () => ({ accessToken: 'FICTITIOUS_OFFLINE_TOKEN', connection: { id: 81 } });
   return { ...f, jobs };
@@ -180,13 +181,13 @@ test('truncated intervals and revocation during a write are not published', asyn
   assert.equal(revoked.state.tables.query.size, 0); assert.equal(revoked.state.tables.agg.size, 0);
 });
 
-test('monthly interval failures leave other complete months intact and are reported as retryable', async () => {
+test('bounded interval failures leave other complete ranges intact and are reported as retryable', async () => {
   const f = jobsFixture({ env: { WEB_SYNC_RECENT_DAYS: '70' } });
   f.state.failQueries = (_url, payload) => payload.startDate.slice(5, 7) === '09';
   const result = await f.jobs.executeWebSync();
   assert.equal(result.status, 'failed'); assert.equal(result.retryable, true);
-  assert.equal(result.report.ingestion.failedIntervals, 1);
-  assert.equal(result.report.ingestion.completedIntervals, 2);
+  assert.equal(result.report.ingestion.failedIntervals, 10);
+  assert.equal(result.report.ingestion.completedIntervals, 14);
   assert([...f.state.tables.query.values()].every(value => value.date.slice(5, 7) !== '09'));
 });
 
@@ -211,15 +212,25 @@ test('compact coverage uses each property observed final bounds and never claims
   const f = jobsFixture({ sites: 2, storage, env: { SC_ANALYTICS_WRITE_ENABLED: 'true', WEB_SYNC_RECENT_DAYS: '6' } });
   f.state.timeseriesRows = url => (url.includes('other1') ? ['2026-10-14', '2026-10-15'] : ['2026-10-15', '2026-10-16'])
     .map(date => ({ keys: [date], clicks: 1, impressions: 3, position: 2 }));
-  f.state.queryRows = () => ['13', '14', '15', '16', '17', '18'].map(day => ({
+  f.state.queryRows = (_url, payload) => ['13', '14', '15', '16', '17', '18'].map(day => ({
     keys: ['2026-10-' + day, 'fictitious query', 'https://example.invalid/page'], clicks: 1, impressions: 3, position: 2
-  }));
+  })).filter(row => row.keys[0] >= payload.startDate && row.keys[0] <= payload.endDate);
   assert.equal((await f.jobs.executeWebSync()).status, 'completed');
-  assert.equal(writes.length, 4);
+  assert.equal(writes.length, 5);
+  assert.deepEqual(writes.filter(request => request.method === 'writeInterval').map(request =>
+    ({ other: request.siteUrl.includes('other1'), start: request.startDate, end: request.endDate })), [
+    { other: false, start: '2026-10-15', end: '2026-10-15' },
+    { other: true, start: '2026-10-14', end: '2026-10-15' },
+    { other: false, start: '2026-10-16', end: '2026-10-16' }
+  ]);
   for (const request of writes) {
     const other = request.siteUrl.includes('other1');
-    assert.equal(request.startDate, other ? '2026-10-14' : '2026-10-15');
-    assert.equal(request.endDate, other ? '2026-10-15' : '2026-10-16');
+    assert(request.startDate >= (other ? '2026-10-14' : '2026-10-15'));
+    assert(request.endDate <= (other ? '2026-10-15' : '2026-10-16'));
+    if (request.method === 'writeTotalsInterval') {
+      assert.equal(request.startDate, other ? '2026-10-14' : '2026-10-15');
+      assert.equal(request.endDate, other ? '2026-10-15' : '2026-10-16');
+    }
     assert(request.rows.every(row => row.keys[0] >= request.startDate && row.keys[0] <= request.endDate));
   }
 });
@@ -434,4 +445,65 @@ test('genuine legacy _readSearchConsole narrows only its own HTTP timeout to the
   await f.jobs._readSearchConsole(asset,{...credentials,accessToken:'FICTITIOUS_OFFLINE_TOKEN'},'timeseries',
     {startDate:'2026-10-18',endDate:'2026-10-18'});
   assert.equal(Object.hasOwn(f.state.calls[1].config,'timeout'),false);
+});
+
+
+test('three-day publication ranges are inclusive, disjoint, and stop at month and leap-day boundaries', () => {
+  const ranges=[...ingest.queryRanges('2024-02-25','2024-03-10')];
+  assert.equal(ingest.QUERY_PUBLICATION_DAYS,3);
+  assert.deepEqual(ranges,[{s:'2024-02-25',e:'2024-02-27'},{s:'2024-02-28',e:'2024-02-29'},
+    {s:'2024-03-01',e:'2024-03-03'},{s:'2024-03-04',e:'2024-03-06'},{s:'2024-03-07',e:'2024-03-09'},{s:'2024-03-10',e:'2024-03-10'}]);
+  const dates=ranges.flatMap(range=>{
+    const output=[];for(let d=day(range.s);d<=day(range.e);d.setUTCDate(d.getUTCDate()+1))output.push(label(d));return output;
+  });
+  assert.equal(dates.length,15);assert.equal(new Set(dates).size,15);assert(dates.includes('2024-02-29'));
+  assert.deepEqual([...ingest.queryRanges('2026-10-01','2026-10-27')],[
+    {s:'2026-10-01',e:'2026-10-03'},{s:'2026-10-04',e:'2026-10-06'},{s:'2026-10-07',e:'2026-10-09'},
+    {s:'2026-10-10',e:'2026-10-12'},{s:'2026-10-13',e:'2026-10-15'},{s:'2026-10-16',e:'2026-10-18'},
+    {s:'2026-10-19',e:'2026-10-21'},{s:'2026-10-22',e:'2026-10-24'},{s:'2026-10-25',e:'2026-10-27'}]);
+});
+
+const rowsForDates = payload => {
+  const rows=[];for(let d=day(payload.startDate);d<=day(payload.endDate);d.setUTCDate(d.getUTCDate()+1))rows.push(point(label(d)));
+  return rows;
+};
+
+test('a month exceeding 40MB can complete separate bounded ranges without expanding the reader budget', async () => {
+  const weightedBytes=json=>JSON.parse(json).length*3000000;
+  const helper=helperWithByteCounter(weightedBytes);
+  const monthly=reader({implementation:helper,raw:async(_a,_c,_family,p)=>response(rowsForDates(p))});
+  await assert.rejects(monthly.read(asset,credentials,{s:'2026-10-02',e:'2026-10-18'}),{code:'search_console_interval_budget_exceeded'});
+  const f=jobsFixture({helper,env:{WEB_SYNC_RECENT_DAYS:'17'}});f.state.queryRows=(_url,p)=>rowsForDates(p);
+  const accepted=await f.jobs.executeWebSync();
+  assert.equal(accepted.status,'completed');assert.equal(accepted.report.ingestion.completedIntervals,6);
+  assert.equal(f.state.tables.query.size,17);assert.equal(f.state.tables.agg.size,17);
+  assert(f.state.calls.filter(call=>call.payload.dimensions.length===3).every(call=>day(call.payload.endDate)-day(call.payload.startDate)<=2*86400000));
+  // A three-day range itself over budget is still rejected; only another
+  // independent complete range may commit. This is not whole-month acceptance.
+  const limited=jobsFixture({helper:helperWithByteCounter(json=>JSON.parse(json).length*14000000),env:{WEB_SYNC_RECENT_DAYS:'17'}});
+  limited.state.queryRows=(_url,p)=>rowsForDates(p);
+  const partial=await limited.jobs.executeWebSync();assert.equal(partial.status,'failed');
+  assert.equal(partial.report.ingestion.failedIntervals,5);assert.equal(partial.report.ingestion.completedIntervals,1);
+  assert.equal(limited.state.tables.query.size,2);
+  assert([...limited.state.tables.query.values()].every(row=>row.date>='2026-10-17'));
+  assert(partial.report.errors.every(error=>error.message==='search_console_interval_budget_exceeded'));
+});
+
+test('a late property or SQL failure rolls back only its three-day range with all properties, and retry is idempotent', async () => {
+  for(const failure of ['property','sql']) {
+    const f=jobsFixture({sites:2,env:{WEB_SYNC_RECENT_DAYS:'18'}});f.state.queryRows=(_url,p)=>rowsForDates(p);
+    if(failure==='property')f.state.failQueries=(url,p)=>url.includes('other1')&&p.startDate==='2026-10-04';
+    else f.state.failWrite=2;
+    const first=await f.jobs.executeWebSync();assert.equal(first.status,'failed');
+    assert.equal(first.report.ingestion.completedIntervals,5);assert.equal(first.report.ingestion.failedIntervals,1);
+    assert.equal(f.state.tables.query.size,15);assert.equal(f.state.tables.agg.size,15);
+    assert([...f.state.tables.query.values()].every(row=>row.date<'2026-10-04'||row.date>'2026-10-06'));
+    assert([...f.state.tables.query.values()].every(row=>row.clicks===2));
+    f.state.failQueries=null;f.state.failWrite=0;
+    const retry=await f.jobs.executeWebSync();assert.equal(retry.status,'completed');
+    assert.equal(retry.report.ingestion.inserted,3);assert.equal(retry.report.ingestion.unchanged,15);
+    assert.equal(f.state.tables.query.size,18);assert.equal(f.state.tables.agg.size,18);
+    assert([...f.state.tables.agg.values()].every(row=>row.queries_top3===1&&row.queries_top10===1));
+    const unchanged=await f.jobs.executeWebSync();assert.equal(unchanged.report.ingestion.written,0);
+  }
 });

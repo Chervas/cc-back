@@ -63,6 +63,19 @@ function* monthRanges(start, end) {
   }
 }
 
+// Publication boundaries are disjoint PT date labels, at most three days,
+// and never cross a calendar month. Each range retains all-property atomicity.
+const QUERY_PUBLICATION_DAYS = 3;
+function* queryRanges(start, end) {
+  for (const month of monthRanges(start, end)) {
+    const last = Date.parse(month.e + 'T00:00:00.000Z');
+    for (let current = Date.parse(month.s + 'T00:00:00.000Z'); current <= last; current += QUERY_PUBLICATION_DAYS * 86400000) {
+      yield { s: new Date(current).toISOString().slice(0, 10),
+        e: new Date(Math.min(current + (QUERY_PUBLICATION_DAYS - 1) * 86400000, last)).toISOString().slice(0, 10) };
+    }
+  }
+}
+
 function mergeQueryRows({ rows, clinicId, siteUrl, queryDailyMap, topByDate, range }) {
   for (const row of rows) {
     const [date, query, page = null] = row.keys || [];
@@ -226,5 +239,5 @@ function backfillDays(config, env) {
   return Math.min(full, revisit);
 }
 
-module.exports = { QUERY_METRICS, metricsEqual, persistChangedRows, monthRanges, mergeQueryRows, queryPayload,
+module.exports = { QUERY_METRICS, metricsEqual, persistChangedRows, monthRanges, queryRanges, QUERY_PUBLICATION_DAYS, mergeQueryRows, queryPayload,
   createDownloadReader, createQueryIntervalReader, QUERY_INTERVAL_LIMITS, backfillDays };
