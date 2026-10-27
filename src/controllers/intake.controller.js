@@ -97,6 +97,7 @@ const {
   resolveIntakeLocationVisibility,
 } = require('../lib/intakeLocations');
 const { detectLegacyJoinChat } = require('../lib/intake-legacy-chat');
+const { detectExternalCookieProviders } = require('../lib/intake-cookie-notice');
 const { inspectSnippetRuntime } = require('../lib/intake-snippet-runtime');
 const {
   buildVerificationConfigHash,
@@ -5632,20 +5633,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
 
   const detectExternalCookieNotice = (htmlToCheck) => {
     const html = String(htmlToCheck || '');
-    const providers = [];
-    const add = (name, pattern) => {
-      if (pattern.test(html) && !providers.includes(name)) providers.push(name);
-    };
-
-    add('Complianz', /cmplz-|complianz/i);
-    add('Cookiebot', /cookiebot|CybotCookiebot/i);
-    add('OneTrust', /onetrust|Optanon/i);
-    add('CookieYes', /cookieyes|cky-consent/i);
-    add('Iubenda', /iubenda/i);
-    add('Didomi', /didomi/i);
-    add('Borlabs Cookie', /borlabs-cookie/i);
-    add('Cookie Notice', /cookie-notice|cn-notice/i);
-    add('GDPR Cookie Compliance', /moove_gdpr|gdpr-cookie-compliance/i);
+    const providers = detectExternalCookieProviders(html);
 
     // Detect an actual default command in served HTML. WP Consent API merely
     // exposes a category API and is not proof that Google Consent Mode is
