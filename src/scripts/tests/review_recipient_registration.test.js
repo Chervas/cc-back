@@ -79,7 +79,7 @@ test('owned MySQL: scoped history, atomic registration, rollback, native history
     await sql.query('CREATE TABLE LeadIntakes (id INT PRIMARY KEY)');
     await sql.query('INSERT INTO Clinicas VALUES (56,5),(57,5),(99,9)');
     await sql.query('CREATE TABLE PatientHistoryCounters (scope_key VARCHAR(64) PRIMARY KEY,next_number BIGINT NOT NULL)');
-    const factories = ['paciente','pacienteclinica','patientcustomfield','patientoperationalevent','marketingpatientlist','marketingpatientlistitem','marketingpatientcontactevent','conversation','message','whatsapptemplate'];
+    const factories = ['paciente','pacienteclinica','patientcustomfield','patientoperationalevent','marketingpatientlist','marketingpatientlistitem','marketingpatientcontactevent','marketingbulksendsetting','conversation','message','whatsapptemplate'];
     const models = Object.fromEntries(factories.map(name => [name,require('../../../models/'+name)(sql,DataTypes)]));
     for (const [name,model] of Object.entries(models)) {
       model.options.indexes?.forEach((index,i) => { index.name=`qa_reg_${name}_${i}`; });
@@ -138,6 +138,32 @@ test('owned MySQL: scoped history, atomic registration, rollback, native history
         assert.equal(Number(numbers[0].n),Number(numbers[0].unique_numbers));
         assert.equal((await captureRecipientRegistration(mysql,{clinicId:56,listId:42})).plan.counts.preserve,3658);
       } finally { await sql.connectionManager.releaseConnection(secondRaw); }
+      const drafts = require('../../services/reviewWizardDraft.service');
+      const registration = require('../../services/reviewRecipientRegistration.service');
+      const db = { sequelize:sql, MarketingBulkSendSetting:models.marketingbulksendsetting,
+        Clinica:{findByPk:async(id,opts)=>(await sql.query('SELECT id_clinica FROM Clinicas WHERE id_clinica=? FOR UPDATE',{replacements:[id],transaction:opts.transaction}))[0][0]} };
+      const ctx = { db,actorId:1,scope:{scope:'clinic',clinicIds:[56]} };
+      assert.equal((await drafts.get(ctx)).revision,0);
+      const saved = await drafts.save({...ctx,expectedRevision:0,state:{reviewStepperIndex:4,reviewDraftSaved:true,reviewSenderName:'TESTONLY',massSendTestPhone:'600000000'}});
+      assert.equal(saved.revision,1); assert.equal(saved.state.massSendTestPhone,undefined);
+      assert.equal((await drafts.get({...ctx,actorId:2})).state,null);
+      assert.equal((await drafts.get({...ctx,scope:{scope:'clinic',clinicIds:[99]}})).state,null);
+      const results = await Promise.allSettled([1,2].map(i=>drafts.save({...ctx,expectedRevision:1,state:{reviewSenderName:'TESTONLY tab '+i}})));
+      assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
+      assert.equal(results.find(r=>r.status==='rejected').reason.status,409);
+      assert.equal((await drafts.get(ctx)).revision,2);
+      assert.equal(await models.marketingbulksendsetting.count({where:{scope_key:'global'}}),0);
+      await models.marketingpatientlist.create({...list,id:43,name:'TESTONLY API registration',scope_type:'clinic'});
+      await models.marketingpatientlistitem.create(row(20000,'602000000',{list_id:43}));
+      const preview = await registration.run({db,clinicId:56,listId:43,actorId:1});
+      const apiResult = await registration.run({db,clinicId:56,listId:43,actorId:1,expectedSha256:preview.sha256,sourceSystem:'unknown',apply:true});
+      assert.equal(apiResult.created,1);
+      assert.equal((await registration.run({db,clinicId:56,listId:43,actorId:1,expectedSha256:preview.sha256,sourceSystem:'unknown',apply:true})).replayed,true);
+      await assert.rejects(registration.run({db,clinicId:99,listId:43,actorId:1,expectedSha256:preview.sha256,sourceSystem:'unknown',apply:true}),e=>e.status===404);
+      const [origin] = await sql.query("SELECT metadata FROM PatientOperationalEvents ORDER BY id DESC LIMIT 1");
+      assert.equal(origin[0].metadata.source_system,'unknown');
+      assert.equal(await models.message.count(),1);
+      report.checks.push('Server draft cross-user/clinic isolation and concurrent CAS; API registration receipt reconciles repeated POST without duplicate patients or transport.');
       report.checks.push('Atomic native-counter registration, group conflicts, failure rollback, immutable source, repeated invocation, actual scoped history SQL, old tests and mobile echoes; no providers/real patients.');
     } finally { await sql.connectionManager.releaseConnection(connection); }
   });

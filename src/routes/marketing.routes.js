@@ -177,6 +177,11 @@ router.post('/reactivation/lists/:id/schedule', marketingReactivationController.
 router.delete('/reactivation/lists/:id', marketingReactivationController.removeList);
 
 // Envíos masivos por listas externas o pacientes actuales
+const reviewWizardController = require('../controllers/reviewWizard.controller');
+router.get('/review-requests/draft', reviewWizardController.getDraft);
+router.put('/review-requests/draft', reviewWizardController.saveDraft);
+router.get('/review-requests/imported-lists/:listId/registration', reviewWizardController.previewRegistration);
+router.post('/review-requests/imported-lists/:listId/registration', reviewWizardController.applyRegistration);
 router.get('/review-requests/summary', marketingBulkSendsController.getReviewRequestSummary);
 router.get('/review-requests/imported-lists', marketingBulkSendsController.listReviewImportedLists);
 router.get('/review-requests/missing-reviews', marketingBulkSendsController.getMissingGoogleReviews);

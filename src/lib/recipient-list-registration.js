@@ -71,9 +71,10 @@ async function captureRecipientRegistration(connection, { clinicId, listId, lock
   return { clinic, list, rows, patients, memberships, plan: planRecipientRegistration({ list, rows, patients, memberships }) };
 }
 
-async function applyRecipientRegistration(connection, { clinicId, listId, expectedSha256, actorId, beforeCommit }) {
+async function applyRecipientRegistration(connection, { clinicId, listId, expectedSha256, actorId, beforeCommit, sourceSystem = 'gesden' }) {
   if (!/^[a-f0-9]{64}$/.test(expectedSha256 || '') || !Number.isSafeInteger(actorId) || actorId <= 0
     || typeof beforeCommit !== 'function') throw Error('RECIPIENT_APPROVAL_AND_PRIVATE_JOURNAL_REQUIRED');
+  if (!['gesden','cliniccloud','other','unknown'].includes(sourceSystem)) throw Error('RECIPIENT_SOURCE_SYSTEM_INVALID');
   const q = async (sql, args = []) => (await connection.query(sql, args))[0];
   const locks = await q('SELECT GET_LOCK(?,0) AS acquired', [`cc-recipient-registration:${clinicId}`]);
   if (Number(locks[0].acquired) !== 1) throw Error('RECIPIENT_REGISTRATION_BUSY');
@@ -112,12 +113,12 @@ async function applyRecipientRegistration(connection, { clinicId, listId, expect
         await q(`INSERT INTO PacienteClinicas (paciente_id,clinica_id,es_principal,createdAt,updatedAt) VALUES
           ${batch.map(() => '(?,?,TRUE,UTC_TIMESTAMP(),UTC_TIMESTAMP())').join(',')}`, batch.flatMap(p => [p.patientId,clinicId]));
         await q(`INSERT INTO PatientCustomFields (paciente_id,clinica_id,field_key,label,value,value_type,source,source_column,last_imported_at,created_at,updated_at) VALUES
-          ${batch.map(() => "(?,?,'gesden_recipient_source','Origen Gesden',?,'json','gesden','recipient_list',UTC_TIMESTAMP(),UTC_TIMESTAMP(),UTC_TIMESTAMP())").join(',')}`,
-        batch.flatMap(p => [p.patientId,clinicId,JSON.stringify({ version:1,list_id:listId,item_id:p.itemId,
-          original_fields:parse(rows.find(r => Number(r.id) === p.itemId).custom_fields), messages_enabled:false,consent_granted:false,appointments_created:false })]));
+          ${batch.map(() => "(?,?,?,?,?,'json',?,'recipient_list',UTC_TIMESTAMP(),UTC_TIMESTAMP(),UTC_TIMESTAMP())").join(',')}`,
+        batch.flatMap(p => [p.patientId,clinicId,sourceSystem === 'gesden' ? 'gesden_recipient_source' : 'recipient_list_source',sourceSystem === 'gesden' ? 'Origen Gesden' : 'Origen del listado',JSON.stringify({ version:1,list_id:listId,item_id:p.itemId,
+          source_system:sourceSystem, original_fields:parse(rows.find(r => Number(r.id) === p.itemId).custom_fields), messages_enabled:false,consent_granted:false,appointments_created:false }),sourceSystem]));
         await q(`INSERT INTO PatientOperationalEvents (patient_id,clinic_id,actor_user_id,event_type,source,channel,metadata,occurred_at,created_at) VALUES
           ${batch.map(() => "(?,?,?,'patient.created','patient_list',NULL,?,UTC_TIMESTAMP(),UTC_TIMESTAMP())").join(',')}`,
-        batch.flatMap(p => [p.patientId,clinicId,actorId,JSON.stringify({ source_system:'gesden',list_id:listId,item_id:p.itemId,registration_sha256:plan.sha256,automation_activated:false })]));
+        batch.flatMap(p => [p.patientId,clinicId,actorId,JSON.stringify({ source_system:sourceSystem,list_id:listId,item_id:p.itemId,registration_sha256:plan.sha256,automation_activated:false })]));
       }
     }
     for (const batch of chunks(links)) {
