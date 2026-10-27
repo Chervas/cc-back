@@ -29,7 +29,7 @@ function matches(value, where = {}) {
     return actual === wanted || String(actual) === String(wanted);
   });
 }
-function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard = false, emitUndoReceipt = false, sensitiveClinics = [10, 20], concurrentMutations = false } = {}) {
+function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard = false, emitUndoReceipt = false, sensitiveClinics = [10, 20], concurrentMutations = false, sharedCalendars = false } = {}) {
   let state = {
     links: [{ id: 201, doctor_id: 2, clinica_id: 10, activo: true, recibe_citas: true },
       { id: 202, doctor_id: 2, clinica_id: 20, activo: true, recibe_citas: true },
@@ -50,6 +50,9 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
   const wrapSchedule = data => Object.assign(Object.create(null), data, {
     get excepciones() { return state.exceptions.filter(row => row.doctor_horario_id === data.id); },
     async update(fields, options) { assert.equal(options.transaction, tx); calls.writes++; Object.assign(data, fields); Object.assign(this, fields); return this; },
+    async save(options) { assert.equal(options.transaction, tx); calls.writes++;
+      for (const key of ['dia_semana', 'hora_inicio', 'hora_fin', 'activo', 'rrule', 'fecha_inicio_vigencia', 'fecha_fin_vigencia']) data[key] = this[key];
+      return this; },
     async destroy(options) { return models.DoctorHorario.destroy({ where: { id: data.id }, ...options }); },
   });
   // Object.assign evaluates getters. Define this accessor after wrapping.
@@ -72,6 +75,7 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
         state.schedules = state.schedules.filter(row => !matches(row, query.where)); state.exceptions = state.exceptions.filter(row => !removed.some(old => old.id === row.doctor_horario_id)); return removed.length; },
     },
     DoctorHorarioExcepcion: {
+      findOne: async query => state.exceptions.find(row => matches(row, query.where)) || null,
       bulkCreate: async (rows, options) => { assert.equal(options.transaction, tx); const created = rows.map(row => ({ id: state.nextId++, ...plain(row) })); state.exceptions.push(...created); return created; },
       upsert: async (fields, options) => { assert.equal(options.transaction, tx); calls.writes++; const original = state.exceptions.find(row => row.doctor_horario_id === fields.doctor_horario_id && row.fecha === fields.fecha);
         if (original) Object.assign(original, plain(fields)); else state.exceptions.push({ id: state.nextId++, ...plain(fields) }); return []; },
@@ -79,10 +83,14 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
     DoctorClinica: {
       findOne: async query => state.links.find(row => matches(row, query.where)) || null,
       findByPk: async id => state.links.find(row => row.id === Number(id)) || null,
-      findAll: async query => state.links.filter(row => matches(row, query.where)).map(row => ({ ...row,
+      findAll: async query => { const rows = state.links.filter(row => matches(row, query.where)).map(row => ({ ...row,
         clinica: { id_clinica: row.clinica_id, nombre_clinica: `Clínica ${row.clinica_id}`, grupoClinicaId: 50,
           configuracion: { timezone: state.timezones[row.clinica_id] || 'Europe/Madrid' } },
-        horarios: state.schedules.filter(h => h.doctor_clinica_id === row.id).map(schedule) })),
+        horarios: state.schedules.filter(h => h.doctor_clinica_id === row.id).map(schedule) }));
+        // The adapter uses the real projection; canonical row ownership is
+        // still asserted against the distinct physical state below.
+        return sharedCalendars && !query.skipSharedScheduleProjection
+          ? require('../../services/personalScheduleSharing.service').projectDoctorClinicas({ db: models, rows, transaction: query.transaction }) : rows; },
     },
     Clinica: { findByPk: async id => ({ id_clinica: Number(id), configuracion: { timezone: state.timezones[id] || 'Europe/Madrid' } }),
       findAll: async () => Object.keys(state.timezones).map(Number).map(id => ({ id_clinica: id, configuracion: { timezone: state.timezones[id] } })) },
@@ -101,7 +109,7 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
       .slice(0, query.limit || Infinity).map(row => ({ ...row, appointment: state.appointments.find(appointment => appointment.id_cita === row.appointment_id) })) },
     DoctorBloqueoExcepcion: {}, Paciente: {}, Instalacion: {}, Tratamiento: {},
   };
-  if (concurrentMutations) {
+  if (concurrentMutations || sharedCalendars) {
     models.Sequelize = { Op };
     const revision = row => row && ({ ...row, update: async (fields, options) => {
       assert.equal(options.transaction, tx); Object.assign(row, fields); return revision(row);
@@ -133,7 +141,7 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
           now: new Date('2027-01-01T00:00:00Z'), realtimeEnabled: false, notify: async () => {} });
       }
       const value = await options.mutate(tx);
-      if (concurrentMutations) await require('../../services/personalCalendarUndo.service').bumpRevisions({ db: models,
+      if (concurrentMutations || sharedCalendars) await require('../../services/personalCalendarUndo.service').bumpRevisions({ db: models,
         doctorIds: [...new Set(options.doctorIds || [options.doctorId])], transaction: tx });
       return emitUndoReceipt ? { value, undo: { token: 'A'.repeat(43), expires_at: '2027-01-01T00:00:20.000Z', label: 'Cambio de disponibilidad' } } : value;
     }
@@ -175,6 +183,80 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
 }
 const copyBody = { source_doctor_id: 2, source_horario_id: 100, source_clinica_id: 10, to_clinica_id: 20 };
 const moveBody = { horario_id: 100, from_clinica_id: 10, to_clinica_id: 20, to_doctor_id: 3 };
+
+function sharedPresenceFixture(options = {}) {
+  const f = fixture({ sharedCalendars: true, realCoverageGuard: true, ...options });
+  f.state().schedules = []; f.state().exceptions = []; f.state().timezones[20] = 'Europe/Madrid';
+  f.state().links.filter(row => row.doctor_id === 2).forEach(row => { row.shared_schedule_source_id = 201; });
+  f.models.ClinicaHorario.findAll = async () => [10, 20].flatMap(clinica_id => [
+    { clinica_id, dia_semana: 1, activo: true, hora_inicio: '09:00', hora_fin: '14:00' },
+    { clinica_id, dia_semana: 1, activo: true, hora_inicio: '16:00', hora_fin: '20:00' },
+  ]);
+  return f;
+}
+const widePresence = { dia_semana: 1, hora_inicio: '06:00', hora_fin: '23:00', activo: true,
+  rrule: 'FREQ=WEEKLY;COUNT=3', fecha_inicio_vigencia: '2027-01-04', fecha_fin_vigencia: '2027-01-18' };
+
+test('a new continuous presence bar created from a shared member spans closed periods and projects one canonical row into both clinics', async () => {
+  const f = sharedPresenceFixture();
+  const result = await f.call('createHorarioClinica', widePresence, { id: '2', clinicaId: '20' });
+  assert.equal(result.statusCode, 201, JSON.stringify(result));
+  assert.equal(f.state().schedules.length, 1); assert.equal(f.state().schedules[0].doctor_clinica_id, 201);
+  const view = await f.call('getScheduleForPersonal', {}, { id: '2' });
+  assert.equal(view.statusCode, 200, JSON.stringify(view));
+  for (const clinic of view.body.clinicas) {
+    assert.equal(clinic.horarios.length, 1); assert.equal(clinic.horarios[0].id, result.body.id);
+    assert.equal(clinic.horarios[0].hora_inicio, '06:00'); assert.equal(clinic.horarios[0].hora_fin, '23:00');
+    assert.equal(clinic.horarios_expandidos[0].hora_inicio, '06:00'); assert.equal(clinic.horarios_expandidos[0].hora_fin, '23:00');
+    assert.equal(clinic.horarios_apertura.length, 2, 'Opening windows remain distinct from continuous presence');
+  }
+  assert.equal(f.state().schedules.filter(row => row.doctor_clinica_id === 202).length, 0);
+});
+
+test('patch and closed-day exception edits through a shared member preserve canonical identity without an opening-hour margin', async () => {
+  const f = sharedPresenceFixture();
+  const created = await f.call('createHorarioClinica', { ...widePresence, dia_semana: 2,
+    fecha_inicio_vigencia: '2027-01-05', fecha_fin_vigencia: '2027-01-19' }, { id: '2', clinicaId: '20' });
+  assert.equal(created.statusCode, 201, JSON.stringify(created));
+  const id = created.body.id;
+  const patched = await f.call('patchHorarioClinica', { hora_inicio: '04:30', hora_fin: '23:45' },
+    { id: '2', clinicaId: '20', horarioId: String(id) });
+  assert.equal(patched.statusCode, 200, JSON.stringify(patched));
+  assert.equal(f.state().schedules[0].id, id); assert.equal(f.state().schedules[0].doctor_clinica_id, 201);
+  assert.equal(f.state().schedules[0].hora_inicio, '04:30'); assert.equal(f.state().schedules[0].hora_fin, '23:45');
+  const exception = await f.call('createHorarioExcepcion', { fecha: '2027-01-05', cancelado: false,
+    hora_inicio_override: '03:00', hora_fin_override: '23:59' }, { id: '2', clinicaId: '20', horarioId: String(id) });
+  assert.equal(exception.statusCode, 201, JSON.stringify(exception));
+  assert.equal(f.state().exceptions[0].doctor_horario_id, id);
+  const view = await f.call('getScheduleForPersonal', {}, { id: '2' });
+  for (const clinic of view.body.clinicas) {
+    const shifted = clinic.horarios_expandidos.find(row => row.fecha === '2027-01-05');
+    assert.equal(shifted.hora_inicio, '03:00'); assert.equal(shifted.hora_fin, '23:59');
+  }
+});
+
+test('shared occurrence movement and append replication write only the source and retain recurrence exceptions', async () => {
+  const f = sharedPresenceFixture();
+  const created = await f.call('createHorarioClinica', widePresence, { id: '2', clinicaId: '20' });
+  const id = created.body.id;
+  const moved = await f.call('moveHorarioClinica', { horario_id: id, from_clinica_id: 20, to_clinica_id: 10,
+    to_doctor_id: 2, source_fecha: '2027-01-04', target_fecha: '2027-01-05', hora_inicio: '05:00', hora_fin: '23:30' }, { id: '2' });
+  assert.equal(moved.statusCode, 200, JSON.stringify(moved));
+  assert.equal(f.state().schedules.find(row => row.id === id).rrule, widePresence.rrule);
+  assert.equal(f.state().exceptions.find(row => row.doctor_horario_id === id && row.fecha === '2027-01-04').cancelado, true);
+  const replicated = await f.call('appendHorariosClinica', { horarios: [
+    { ...widePresence, dia_semana: 3, rrule: null, fecha_inicio_vigencia: '2027-01-06', fecha_fin_vigencia: '2027-01-06' },
+    { ...widePresence, dia_semana: 5, rrule: null, fecha_inicio_vigencia: '2027-01-08', fecha_fin_vigencia: '2027-01-08' },
+  ] }, { id: '2', clinicaId: '20' });
+  assert.equal(replicated.statusCode, 200, JSON.stringify(replicated));
+  assert.equal(f.state().schedules.length, 4); assert(f.state().schedules.every(row => row.doctor_clinica_id === 201));
+  const duplicated = await f.call('copyHorarioClinica', { source_doctor_id: 2, source_horario_id: id,
+    source_clinica_id: 20, to_clinica_id: 10 }, { id: '2' });
+  assert.equal(duplicated.statusCode, 409); assert.equal(duplicated.body.code, 'SAME_SHARED_SCHEDULE');
+  assert.equal(f.state().schedules.length, 4);
+  const view = await f.call('getScheduleForPersonal', {}, { id: '2' });
+  assert.deepEqual(view.body.clinicas[0].horarios.map(row => row.id), view.body.clinicas[1].horarios.map(row => row.id));
+});
 
 test('copy preserves bounded recurrence and both canceled and overridden exceptions', async () => {
   const f = fixture(); const result = await f.call('copyHorarioClinica', copyBody);
@@ -356,12 +438,15 @@ test('schedule DTO conceals shared clinic names and membership outside the actor
   assert(!JSON.stringify(restricted.body).includes('Hidden fictitious clinic'));
 });
 
-test('copy validates exception override hours against destination opening and rolls back every copied row', async () => {
+test('copy preserves presence and exception overrides outside destination opening hours', async () => {
   const f = fixture(); const override = f.state().exceptions.find(row => row.id === 901);
-  override.hora_inicio_override = '21:00'; override.hora_fin_override = '23:30'; const before = plain(f.state());
+  override.hora_inicio_override = '21:00'; override.hora_fin_override = '23:30';
   const result = await f.call('copyHorarioClinica', copyBody);
-  assert.equal(result.statusCode, 422, JSON.stringify(result)); assert.equal(result.body.code, 'SCHEDULE_OUT_OF_EFFECTIVE_AVAILABILITY');
-  assert.deepEqual(plain(f.state()), before);
+  assert.equal(result.statusCode, 201, JSON.stringify(result));
+  const copied = result.body.copied.horario;
+  assert.equal(copied.excepciones.find(row => row.fecha === override.fecha).hora_inicio_override, '21:00');
+  assert.equal(copied.excepciones.find(row => row.fecha === override.fecha).hora_fin_override, '23:30');
+  assert.equal(f.state().schedules.length, 3);
 });
 
 test('all-day create and edit expose inclusive dates without extending a reopened block', async () => {

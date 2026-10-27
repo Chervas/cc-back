@@ -46,6 +46,13 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report, registerOwnedLoopbac
     payload: { expected_version: 1, start_at: '2030-01-07T09:00:00Z', count: 2, interval_days: 7, duration_minutes: 45, doctor_id: 1, installation_id: 101, ...patch } }));
   const seal = (request, proposal) => ({ ...request, payload: { ...request.payload, booking_request_key: proposal.booking_request_key, booking_request_sha256: proposal.booking_request_sha256 } });
   const counts = async () => ({ ...await base.counts(), events: await db.EconomicBudgetEvent.count(), receipts: await db.PatientOperationalEvent.count(), vouchers: await db.PatientVoucher.count(), movements: await db.PatientVoucherMovement.count(), payments: await db.EconomicPayment.count(), wallet: await db.PatientWalletEntry.count() });
+  const readOnlyGrid = async (agenda, scope, payload) => {
+    const before = await counts(), run = sql.query;
+    sql.query = function (...args) { assert.match(typeof args[0] === 'string' ? args[0] : args[0]?.query,
+      /^\s*SELECT\b/i, 'Origin grid cannot issue DML, locks or transaction commands'); return run.apply(this, args); };
+    try { return await agenda.availabilityGrid({ ...scope, payload }); }
+    finally { sql.query = run; assert.deepEqual(await counts(), before); }
+  };
   const b = await budget(), original = (await b.reload()).toJSON(), request = input(b);
   const resources = await service.resources({ publicId: b.public_id, lineKey: 'three-sessions', actorId: 1 });
   assert(resources.doctors.some(row => row.id === 1)); assert(resources.installations.some(row => row.id === 101));
@@ -91,7 +98,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report, registerOwnedLoopbac
   assert.equal((await service.create(rollbackSeal)).created.length, 2);
   report.checks.push('A failure on the second slot rolls back the first appointment, occupancy, budget links and committed receipt; exact retry reserves the complete series once.');
   const agendaModule = load(require.resolve('../../services/appointmentAgendaOrigin.service'), {
-    './treatmentBookingProfile.service': { ...profile,
+    './treatmentBookingProfile.service': { ...profile, bookingCapabilities: () => base.capabilities,
       requireOperationalProfile: (treatment, options) => profile.requireOperationalProfile(treatment, { ...options, capabilities: base.capabilities }) },
     './appointmentBookingAvailability.service': { ...availability, loadBookingContext: options => availability.loadBookingContext({ ...options, equipmentEnabled: true }) },
   });
@@ -124,6 +131,15 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report, registerOwnedLoopbac
   assert.equal((await agenda.book(agendaInput)).data.replayed, true); assert.deepEqual(await counts(), afterAgenda);
   const proposalBudget = await budget({ patient_id: 1, treatmentId: 4 }), proposalScope = { ...scope, publicId: proposalBudget.public_id, patientId: 1 };
   const proposalRead = await agenda.read(proposalScope), beforeDraft = await counts();
+  const gridBody = { expected_version: 1, snapshot_sha256: proposalRead.snapshot_sha256, plan_revision: proposalRead.plan_revision,
+    active_key: 'pending_1', sessions: proposalRead.sessions.map(row => ({ key: row.key, placed: false })),
+    grid: { dates: ['2027-04-05'], mode: 'doctor', column_ids: [1], context_instalacion_id: 101, from_local: '09:00', to_local: '13:00', granularity_min: 5 } };
+  const conceptGrid = await readOnlyGrid(agenda, proposalScope, gridBody);
+  assert.equal(conceptGrid.source.budget_id, proposalBudget.public_id); assert.equal(conceptGrid.source.line_key, 'three-sessions');
+  assert.equal(conceptGrid.duracion_min, 30); assert(conceptGrid.rows[0].slots.length);
+  await assert.rejects(readOnlyGrid(agenda, { ...proposalScope, patientId: 2 }, gridBody), { code: 'agenda_origin_not_found' });
+  await assert.rejects(readOnlyGrid(agenda, proposalScope, { ...gridBody, plan_revision: '0'.repeat(64) }), { code: 'program_grid_plan_changed' });
+  report.checks.push('Budget-concept availability grid uses the canonical treatment/session and source identity, enforces patient/revision scope, emits full-minute slots and performs SELECT only.');
   const draft = await agenda.propose({ ...proposalScope, payload: { from_date: '2027-04-05', days: 90,
     draft_strategy: { action: 'cascade', pivot_key: 'pending_1', start_local: '2027-04-05T10:00',
       sessions: proposalRead.sessions.map(row => ({ key: row.key, placed: false })) } } });
@@ -144,6 +160,23 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report, registerOwnedLoopbac
     name: 'Bono clásico ficticio', status: 'active', total_units: 3, available_units: 3, sold_amount: 300 });
   const voucherScope = { kind: 'voucher', publicId: voucher.public_id, clinicId: 100, patientId: 4, actorId: 1 };
   const voucherRead = await agenda.read(voucherScope), voucherBefore = await counts();
+  const voucherGrid = await readOnlyGrid(agenda, voucherScope, { snapshot_sha256: voucherRead.snapshot_sha256,
+    plan_revision: voucherRead.plan_revision, active_key: 'pending_1', sessions: voucherRead.sessions.map(row => ({ key: row.key, placed: false, duration_minutes: 40,
+      selections: { visit: { doctor_id: 1, installation_id: 101 } } })),
+    grid: { dates: ['2027-03-01'], mode: 'doctor', column_ids: [1], context_instalacion_id: 101, from_local: '09:00', to_local: '13:00', granularity_min: 5 } });
+  assert.equal(voucherGrid.source.voucher_id, voucher.public_id); assert.equal(voucherGrid.duracion_min, 40);
+  assert(voucherGrid.rows[0].slots.every(row => Date.parse(row.end_utc) - Date.parse(row.start_utc) === 40 * 60000));
+  const legacyAll = { snapshot_sha256: voucherRead.snapshot_sha256, plan_revision: voucherRead.plan_revision, active_key: 'pending_1',
+    sessions: voucherRead.sessions.map(row => ({ key: row.key, placed: false, duration_minutes: 40 })),
+    grid: { dates: ['2027-03-01'], mode: 'installation', column_ids: [101, 102], peer_doctor_ids: [1, 2],
+      from_local: '09:00', to_local: '13:00', granularity_min: 5 } };
+  const legacyAllGrid = await readOnlyGrid(agenda, voucherScope, legacyAll);
+  assert(legacyAllGrid.rows.some(row => Object.values(row.slots_by_doctor).some(slots => slots.length)));
+  assert(legacyAllGrid.rows.every(row => Object.values(row.slots_by_doctor).every(slots => slots.every(slot =>
+    Date.parse(slot.end_utc) - Date.parse(slot.start_utc) === 40 * 60000))));
+  const implicitAll = await readOnlyGrid(agenda, voucherScope, { ...legacyAll, grid: { ...legacyAll.grid, peer_doctor_ids: undefined } });
+  assert(implicitAll.rows.some(row => Object.values(row.slots_by_doctor).some(slots => slots.length)));
+  report.checks.push('Classic voucher grid derives its legacy resource view server-side, respects chosen variable duration, preserves source identity and performs SELECT only.');
   assert.equal(voucherRead.booking_replay_supported, false); assert.equal(voucherRead.sessions[0].booking_profile.phases[0].key, 'visit');
   const legacyRow = (key, start_at, doctor_id, installation_id, duration_minutes) => ({ key, start_at, duration_minutes,
     selections: { visit: { doctor_id, installation_id } }, priority_acknowledged: false });
@@ -198,6 +231,18 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report, registerOwnedLoopbac
     assert.equal((await send(path.replace('clinic_id=100', 'clinic_id=200'))).status, 403);
     assert.equal((await send(path.replace('patient_id=1', 'patient_id=2'))).status, 404);
     assert.equal((await send(path, 'GET', undefined, 9)).status, 403);
+    const gridPath = path.split('/agenda-plan')[0] + '/agenda-availability-grid';
+    const httpGridBody = { ...gridBody, clinic_id: 100, patient_id: 1 };
+    const httpGrid = await send(gridPath, 'POST', httpGridBody);
+    assert.equal(httpGrid.status, 200); assert.match(httpGrid.headers['cache-control'], /private.*no-store/);
+    assert.equal(httpGrid.body.source.budget_id, proposalBudget.public_id);
+    assert.equal((await send(gridPath, 'POST', { ...httpGridBody, clinic_id: 200 })).status, 403);
+    assert.equal((await send(gridPath, 'POST', { ...httpGridBody, patient_id: 2 })).status, 404);
+    assert.equal((await send(gridPath, 'POST', httpGridBody, 9)).status, 403);
+    assert.equal((await send(gridPath, 'POST', { ...httpGridBody, plan_revision: '0'.repeat(64) })).status, 409);
+    assert.equal((await send(gridPath, 'POST', { ...httpGridBody, ignoreAppointmentIds: [1] })).status, 400);
+    assert.deepEqual(await counts(), beforeHttp);
+    report.checks.push('Native origin-grid HTTP route keeps clinic/patient/portal ACL, no-store, stale revision and strict request rejection without domain writes.');
     const bookingPath = path.split('/agenda-plan')[0] + '/agenda-appointments';
     const post = { clinic_id: 100, patient_id: 1, expected_version: 1, actorId: 3, request_key: crypto.randomUUID(),
       snapshot_sha256: response.body.snapshot_sha256, plan_revision: response.body.plan_revision,

@@ -74,6 +74,7 @@ test('program booking needs all four coordinated gates, never just the old econo
   const api = createPatientProgramBookingService({ db: {}, enabled: () => false });
   await assert.rejects(api.read({ publicId: 'x', clinicId: 82 }), { code: 'program_booking_disabled' });
   await assert.rejects(api.propose({}), { code: 'program_booking_disabled' });
+  await assert.rejects(api.availabilityGrid({}), { code: 'program_booking_disabled' });
   await assert.rejects(api.book({}), { code: 'program_booking_disabled' });
 });
 test('virtual series occupancy blocks both cabins at their phase time and patient for the entire visit', () => {
@@ -102,7 +103,7 @@ test('historical program appointments retain canonical purchased treatment conte
 test('HTTP planning requires patient sensitive access and calendar permission before serving composition', async () => {
   const fs = require('node:fs'), vm = require('node:vm');
   const source = fs.readFileSync(require.resolve('../../controllers/patientEconomics.controller'), 'utf8');
-  const code = source.slice(source.indexOf('async function programContext('), source.indexOf('exports.getProgramPlan'));
+  const code = source.slice(source.indexOf('async function programContext('), source.indexOf('async function agendaOriginContext('));
   const checks = [];
   const fn = vm.runInNewContext(`(${code})`, { requireVoucherFeature: async (_, feature) => { checks.push(feature); return 82; },
     requireClinicFeature: async (_, feature) => { checks.push(feature); if (feature === 'patients.sensitive.view') throw Object.assign(new Error('forbidden'), { statusCode: 403 }); }, actorId: () => 1 });

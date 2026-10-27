@@ -5,7 +5,7 @@
 const replay = require('../lib/voucher-booking-replay');
 const { resolveClinicTimezone } = require('../lib/availability-calendar');
 const { civilLocal } = require('../lib/program-reschedule');
-const { loadScopedTreatment, requireOperationalProfile } = require('./treatmentBookingProfile.service');
+const { loadScopedTreatment, requireOperationalProfile, bookingCapabilities } = require('./treatmentBookingProfile.service');
 const { bookingProfileDurationMinutes, normalizeBookingProfile } = require('../lib/booking-profile');
 const { loadBookingContext, solutionsForCalendar } = require('./appointmentBookingAvailability.service');
 const { solveBookingProfile } = require('../lib/booking-profile-solver');
@@ -112,6 +112,14 @@ function createService({ db = require('../../models'), concepts = require('./eco
       solve: solveBookingProfile, slots: solutionsForCalendar, addVirtualBusy,
       supportIds: () => [], supportAvailable: () => true, assessment: () => null });
   }
+  async function availabilityGrid(input) {
+    if (!bookingCapabilities().simple) fail('booking_profile_runtime_unavailable', 'La disponibilidad operativa aún no está habilitada en este entorno.', 503);
+    const plan = await load(input);
+    if (!plan.can_schedule) fail('agenda_origin_not_schedulable', 'Este origen no admite nuevas citas.');
+    if (input.payload?.mode != null && input.payload.mode !== 'initial') fail('agenda_origin_planner_mismatch', 'Este origen conserva su planificación de sesiones pendientes.');
+    return require('./programAgendaAvailability.service').availabilityGrid({ db, plan, payload: input.payload,
+      eligible: plan.sessions, revision: plan.revision, actorId: plan.actorId, now: now(), contextFor, addVirtualBusy });
+  }
   function seriesPayload(input) {
     const body = input.payload || {}, sessions = body.sessions;
     replay.key(body.request_key); replay.sha(body.snapshot_sha256); replay.sha(body.plan_revision);
@@ -174,8 +182,8 @@ function createService({ db = require('../../models'), concepts = require('./eco
       sessions: receipt.created.map((row, index) => ({ key: body.sessions[index].key, appointment_id: Number(row.id),
         start_at: new Date(row.start_at).toISOString(), end_at: new Date(row.end_at).toISOString(), action: 'created' })) } };
   }
-  return { read, propose, book };
+  return { read, propose, availabilityGrid, book };
 }
 let singleton;
 const current = () => singleton ||= createService();
-module.exports = { createService, ...Object.fromEntries(['read', 'propose', 'book'].map(method => [method, input => current()[method](input)])) };
+module.exports = { createService, ...Object.fromEntries(['read', 'propose', 'availabilityGrid', 'book'].map(method => [method, input => current()[method](input)])) };

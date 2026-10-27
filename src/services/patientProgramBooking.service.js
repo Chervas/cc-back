@@ -219,6 +219,23 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
   }
   async function read(options) { return dto(await load(options)); }
 
+  async function availabilityGrid(options) {
+    const plan = await load(options); assertSchedulable(plan);
+    const payload = options.payload || {};
+    if (payload.mode != null && !['initial', 'resume', 'reschedule'].includes(payload.mode)) fail('program_grid_invalid', 'Actualiza el modo de planificación.', null, 400);
+    const reschedule = payload.mode === 'reschedule' ? rescheduleInput(payload) : null;
+    const resume = payload.mode === 'resume' ? resumeInput(payload) : null;
+    if (!reschedule && !resume && ['replan_from_key', 'expected_plan_revision', 'reschedule_scope', 'reschedule_reason'].some(key => payload[key] != null)) {
+      fail('program_grid_invalid', 'Actualiza el modo de planificación.', null, 400);
+    }
+    if (reschedule || resume) assertRevision(plan, (reschedule || resume).expected_plan_revision);
+    else if (schedulingMode(plan.snapshot) !== 'manual' && resumeInfo(plan, now())) fail('program_resume_required', 'Retoma el programa para revisar las sesiones y sus fechas.');
+    const eligible = reschedule ? rescheduleSessions(plan, reschedule, now())
+      : resume ? resumeSessions(plan, resume.replan_from_key, now()) : plan.sessions.filter(row => row.scheduling_status === 'pending').slice(0, 30);
+    return require('./programAgendaAvailability.service').availabilityGrid({ db, plan, payload, eligible,
+      revision: planRevision(plan), actorId: options.actorId, now: now(), contextFor, addVirtualBusy, supportIds, supportAvailable });
+  }
+
   function fixedSessions(plan, pending, selectedKeys, payload) {
     const fixed = payload.fixed_sessions || [];
     if (!Array.isArray(fixed) || fixed.length > 30 || new Set(fixed.map(row => row?.key)).size !== fixed.length) fail('program_search_invalid', 'Revisa las fechas conservadas.', null, 400);
@@ -673,7 +690,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
       return result;
     });
   }
-  return { read, propose, book, linkAppointment };
+  return { read, propose, availabilityGrid, book, linkAppointment };
 }
 
 // Existing voucher ledger remains the ONLY economic source of consumed units.
@@ -701,4 +718,5 @@ let instance;
 const service = () => instance || (instance = createPatientProgramBookingService({ db: require('../../models') }));
 module.exports = { createPatientProgramBookingService, consumeProgramSession, addVirtualBusy,
   read: options => service().read(options), propose: options => service().propose(options), book: options => service().book(options),
+  availabilityGrid: options => service().availabilityGrid(options),
   linkAppointment: options => service().linkAppointment(options) };

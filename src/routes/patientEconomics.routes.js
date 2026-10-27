@@ -31,6 +31,7 @@ router.post('/budgets/:budgetId/concepts/:lineKey/appointment-plan', controller.
 router.post('/budgets/:budgetId/concepts/:lineKey/appointments', controller.createConceptAppointments);
 router.get('/budgets/:budgetId/concepts/:lineKey/agenda-plan', controller.getAgendaOriginPlan);
 router.post('/budgets/:budgetId/concepts/:lineKey/agenda-proposals', controller.proposeAgendaOriginPlan);
+router.post('/budgets/:budgetId/concepts/:lineKey/agenda-availability-grid', controller.getAgendaOriginAvailabilityGrid);
 router.post('/budgets/:budgetId/concepts/:lineKey/agenda-appointments', controller.bookAgendaOriginPlan);
 router.get('/budgets/:budgetId/appointment-links', controller.getBudgetAppointmentLinks);
 router.post('/budgets/:budgetId/appointment-links', controller.linkBudgetAppointment);
@@ -51,9 +52,11 @@ router.post('/vouchers/:voucherId/appointment-plan', controller.previewVoucherAp
 router.post('/vouchers/:voucherId/appointments', controller.createVoucherAppointments);
 router.get('/vouchers/:voucherId/agenda-plan', controller.getAgendaOriginPlan);
 router.post('/vouchers/:voucherId/agenda-proposals', controller.proposeAgendaOriginPlan);
+router.post('/vouchers/:voucherId/agenda-availability-grid', controller.getAgendaOriginAvailabilityGrid);
 router.post('/vouchers/:voucherId/agenda-appointments', controller.bookAgendaOriginPlan);
 router.get('/vouchers/:voucherId/program-plan', controller.getProgramPlan);
 router.post('/vouchers/:voucherId/program-proposals', controller.proposeProgramPlan);
+router.post('/vouchers/:voucherId/program-availability-grid', controller.getProgramAvailabilityGrid);
 router.post('/vouchers/:voucherId/program-appointments', controller.reserveProgramPlan);
 router.post('/vouchers/:voucherId/program-appointment-links', controller.linkProgramAppointment);
 router.get('/templates', controller.listTemplates);

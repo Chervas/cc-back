@@ -158,6 +158,10 @@ exports.proposeAgendaOriginPlan = asyncHandler(async (req, res) => {
   res.set('Cache-Control', 'private, no-store');
   res.json(await require('../services/appointmentAgendaOrigin.service').propose(await agendaOriginContext(req)));
 });
+exports.getAgendaOriginAvailabilityGrid = asyncHandler(async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.json(await require('../services/appointmentAgendaOrigin.service').availabilityGrid(await agendaOriginContext(req)));
+});
 exports.bookAgendaOriginPlan = asyncHandler(async (req, res) => {
   res.set('Cache-Control', 'private, no-store');
   const context = await agendaOriginContext(req, true);
@@ -179,6 +183,10 @@ exports.bookAgendaOriginPlan = asyncHandler(async (req, res) => {
 });
 exports.getProgramPlan = asyncHandler(async (req, res) => res.json(await programBooking.read(await programContext(req))));
 exports.proposeProgramPlan = asyncHandler(async (req, res) => res.json(await programBooking.propose(await programContext(req))));
+exports.getProgramAvailabilityGrid = asyncHandler(async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.json(await programBooking.availabilityGrid(await programContext(req)));
+});
 exports.reserveProgramPlan = asyncHandler(async (req, res) => {
   const context = await programContext(req, true);
   const result = await programBooking.book(context);

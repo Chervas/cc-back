@@ -2822,23 +2822,8 @@ async function validateHorarioExceptionCandidate({ targetUserId, clinicaId, hora
         }
     }
 
-    const effectiveErrors = await validateHorariosAgainstEffectiveAvailability(Number(targetUserId), Number(clinicaId), [{
-        dia_semana: new Date(`${fecha}T12:00:00Z`).getUTCDay(),
-        hora_inicio,
-        hora_fin,
-        activo: true,
-    }]);
-    if (effectiveErrors.length) {
-        return {
-            status: 422,
-            body: {
-                message: 'Algunos tramos del horario están fuera del horario permitido en la clínica.',
-                code: 'SCHEDULE_OUT_OF_EFFECTIVE_AVAILABILITY',
-                errors: effectiveErrors,
-            },
-        };
-    }
-
+    // Presence may span clinic closures. Appointment availability intersects
+    // this calendar with the clinic's opening hours separately.
     return null;
 }
 
@@ -3934,27 +3919,8 @@ async function validateSingleHorarioCandidate({ targetUserId, clinicaId, candida
         };
     }
 
-    const openingCandidates = [candidateHorario, ...(candidateHorario.excepciones || [])
-        .filter(exception => !exception.cancelado && matchesHorarioOnDate(candidateHorario, exception.fecha))
-        .map(exception => ({ ...candidateHorario, hora_inicio: exception.hora_inicio_override || candidateHorario.hora_inicio,
-            hora_fin: exception.hora_fin_override || candidateHorario.hora_fin }))];
-    const effectiveErrors = await validateHorariosAgainstEffectiveAvailability(
-        Number(targetUserId),
-        Number(clinicaId),
-        openingCandidates,
-        transaction,
-    );
-    if (effectiveErrors.length) {
-        return {
-            status: 422,
-            body: {
-                message: 'Algunos tramos del horario están fuera del horario permitido en la clínica.',
-                code: 'SCHEDULE_OUT_OF_EFFECTIVE_AVAILABILITY',
-                errors: effectiveErrors,
-            },
-        };
-    }
-
+    // A staff shift records presence, including preparation or work while the
+    // clinic is closed. Reservable windows still use clinic opening hours.
     return null;
 }
 
@@ -4665,96 +4631,6 @@ exports.mergeHorariosClinica = async (req, res) => {
         return res.status(500).json({ message: 'Error merging horarios', error: error.message });
     }
 };
-
-/**
- * Valida que los horarios candidatos estén contenidos dentro del horario permitido
- * por la clínica (apertura del centro).
- * Se aplica siempre: todos los horarios por clínica son explícitos.
- *
- * @param {number} _targetUserId
- * @param {number} clinicaId
- * @param {Array<{dia_semana:number, hora_inicio:string, hora_fin:string, activo:boolean}>} horarios
- * @returns {Promise<Array<{dia_semana:number, hora_inicio:string, hora_fin:string, reason:string}>>} errors (empty = valid)
- */
-async function validateHorariosAgainstEffectiveAvailability(_targetUserId, clinicaId, horarios, transaction = null) {
-    const errors = [];
-    const activeHorarios = (horarios || []).filter((h) => h && h.activo !== false);
-    if (!activeHorarios.length) return errors;
-
-    function mergeMinuteIntervals(intervals) {
-        if (!intervals || !intervals.length) return [];
-        const sorted = [...intervals].sort((a, b) => a.startMin - b.startMin);
-        const merged = [{ ...sorted[0] }];
-        for (let i = 1; i < sorted.length; i++) {
-            const last = merged[merged.length - 1];
-            if (sorted[i].startMin <= last.endMin) {
-                last.endMin = Math.max(last.endMin, sorted[i].endMin);
-            } else {
-                merged.push({ ...sorted[i] });
-            }
-        }
-        return merged;
-    }
-
-    const clinicaHorariosMap = await getClinicaHorariosMap([clinicaId], transaction);
-    const clinicaHorarios = clinicaHorariosMap.get(Number(clinicaId)) || [];
-
-    const openingRawByDay = new Map();
-    for (const row of clinicaHorarios) {
-        if (row.activo === false) continue;
-        const dia = normalizeDiaSemana(row.dia_semana);
-        if (dia == null) continue;
-        const startMin = hmToMinutes(row.hora_inicio);
-        const endMin = hmToMinutes(row.hora_fin);
-        if (startMin == null || endMin == null || startMin >= endMin) continue;
-        const list = openingRawByDay.get(dia) || [];
-        list.push({ startMin, endMin });
-        openingRawByDay.set(dia, list);
-    }
-
-    const openingByDay = new Map();
-    for (const [dia, intervals] of openingRawByDay.entries()) {
-        openingByDay.set(dia, mergeMinuteIntervals(intervals));
-    }
-
-    function isContainedInIntervals(intervals, startMin, endMin) {
-        if (!intervals || !intervals.length) return false;
-        return intervals.some((iv) => iv.startMin <= startMin && iv.endMin >= endMin);
-    }
-
-    function buildAllowedIntervals(intervals) {
-        if (!intervals || !intervals.length) return [];
-        const allowed = intervals.map((iv) => ({ ...iv }));
-        const first = allowed[0];
-        const last = allowed[allowed.length - 1];
-        first.startMin = Math.max(0, first.startMin - 60);
-        last.endMin = Math.min(24 * 60, last.endMin + 60);
-        return allowed;
-    }
-
-    for (const h of activeHorarios) {
-        const dia = normalizeDiaSemana(h.dia_semana);
-        const inicio = normalizeHm(h.hora_inicio);
-        const fin = normalizeHm(h.hora_fin);
-        if (dia == null || !inicio || !fin) continue;
-
-        const startMin = hmToMinutes(inicio);
-        const endMin = hmToMinutes(fin);
-        if (startMin == null || endMin == null || startMin >= endMin) continue;
-
-        const openingIntervals = openingByDay.get(dia);
-        if (!openingIntervals || !openingIntervals.length) {
-            errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'CLINIC_CLOSED_DAY' });
-            continue;
-        }
-        const allowedIntervals = buildAllowedIntervals(openingIntervals);
-        if (!isContainedInIntervals(allowedIntervals, startMin, endMin)) {
-            errors.push({ dia_semana: dia, hora_inicio: inicio, hora_fin: fin, reason: 'OUTSIDE_CLINIC_OPENING' });
-        }
-    }
-
-    return errors;
-}
 
 exports.updateHorariosClinicaForCurrent = async (req, res) => {
     req.params.id = String(req.userData?.userId || '');
