@@ -99,16 +99,107 @@ function queryPayload(map) {
   }));
 }
 
+// Date labels remain Search Console PT calendar dates; UTC arithmetic only
+// divides those labels and never converts them to the server's local timezone.
+const QUERY_INTERVAL_LIMITS = Object.freeze({ rowLimit: 25000, maxDays: 31, maxDownloads: 32, maxCachedIntervals: 2,
+  maxBytes: 40000000, timeoutMs: 450000 });
+const intervalError = (code, range) => Object.assign(Error(code), { code, ...(range ? { range: { ...range } } : {}) });
+function downloadKey(asset, credentials, payload) {
+  const authority = credentials.brokerContext ? ['broker', asset.clinicaId, asset.googleConnectionId,
+    asset.broker_read_connection_ref, asset.broker_read_asset_ref] : ['legacy', asset.googleConnectionId];
+  return JSON.stringify([asset.siteUrl, authority, payload]);
+}
+
+// Small properties retain one range request. Once that authority/property
+// saturates, daily PT labels are used for this and later ranges in this job.
+// No partial range can be returned/published. A saturated day remains terminal.
+function createQueryIntervalReader({ read, validate, onSplit = () => {}, onReuse = () => {},
+  onIncompleteReuse = () => {}, now = () => Date.now() }) {
+  const cached = new Map(), dense = new Set(), incomplete = new Map(); let cachedBytes = 0;
+  const dropOldest = () => { const key = cached.keys().next().value; cachedBytes -= cached.get(key).bytes; cached.delete(key); };
+  return async (asset, credentials, range) => {
+    const parse = value => {
+      if (typeof value !== 'string' || !/^20\d\d-\d\d-\d\d$/.test(value)) throw intervalError('search_console_range_invalid');
+      const ms = Date.parse(value + 'T00:00:00.000Z');
+      if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 10) !== value) throw intervalError('search_console_range_invalid');
+      return ms;
+    };
+    const start = parse(range.s), end = parse(range.e);
+    if (end < start || end - start >= QUERY_INTERVAL_LIMITS.maxDays * 86400000) throw intervalError('search_console_range_invalid');
+    const deadline = now() + QUERY_INTERVAL_LIMITS.timeoutMs;
+    const beforeExecute = () => {
+      const remaining = deadline - now();
+      if (remaining < 1) throw intervalError('search_console_interval_budget_exceeded');
+      return { timeoutMs: Math.min(30000, remaining) };
+    };
+    beforeExecute(); await validate(asset, credentials); beforeExecute();
+    const key = downloadKey(asset, credentials, range), authority = downloadKey(asset, credentials, {});
+    const previous = cached.get(key) || incomplete.get(key);
+    if (previous) {
+      await validate(previous.asset, previous.credentials); await validate(asset, credentials); beforeExecute();
+      if (incomplete.has(key)) {
+        onIncompleteReuse(); throw intervalError('search_console_interval_truncated', previous.range);
+      }
+      cached.delete(key); cached.set(key, previous); onReuse(); return previous.intervals;
+    }
+    const intervals = []; let downloads = 0, bytes = 0, retainedBytes = 0;
+    const request = async (s, e) => {
+      beforeExecute();
+      if (++downloads > QUERY_INTERVAL_LIMITS.maxDownloads) throw intervalError('search_console_interval_budget_exceeded');
+      const response = await read(asset, credentials, 'queries', { startDate: s, endDate: e }, { beforeExecute });
+      beforeExecute();
+      const rows = response?.data?.rows;
+      if (!Array.isArray(rows) || rows.length > QUERY_INTERVAL_LIMITS.rowLimit) throw intervalError('search_console_response_invalid');
+      const responseBytes = Buffer.byteLength(JSON.stringify(rows)); bytes += responseBytes;
+      if (bytes > QUERY_INTERVAL_LIMITS.maxBytes) throw intervalError('search_console_interval_budget_exceeded');
+      for (const row of rows) {
+        const date = row?.keys?.[0];
+        if (typeof date !== 'string' || date < s || date > e) throw intervalError('search_console_response_range_invalid');
+      }
+      // The cache and in-progress response share one 40MB logical-row budget.
+      // Discarded saturated parents never enter the cache or published rows.
+      while (cached.size && cachedBytes + retainedBytes + responseBytes > QUERY_INTERVAL_LIMITS.maxBytes) dropOldest();
+      if (response.data.rowLimitReached === true || rows.length === QUERY_INTERVAL_LIMITS.rowLimit) {
+        dense.add(authority);
+        if (s === e) throw intervalError('search_console_interval_truncated', { s, e });
+        return false;
+      }
+      retainedBytes += responseBytes; intervals.push({ s, e, rows }); return true;
+    };
+    try {
+      if (!dense.has(authority) && await request(range.s, range.e)) {
+        // A small property's existing single-read path remains unchanged.
+      } else {
+        onSplit();
+        for (let date = start; date <= end; date += 86400000) {
+          const label = new Date(date).toISOString().slice(0, 10);
+          await request(label, label);
+        }
+      }
+      await validate(asset, credentials); beforeExecute();
+      while (cached.size >= QUERY_INTERVAL_LIMITS.maxCachedIntervals) dropOldest();
+      cached.set(key, { intervals, bytes: retainedBytes, asset, credentials }); cachedBytes += retainedBytes;
+      return intervals;
+    } catch (error) {
+      // Only a proven capped day is memoized, never a timeout/provider error or
+      // partial rows. Other mappings revalidate both authorities and still fail.
+      if (error?.code === 'search_console_interval_truncated') {
+        if (incomplete.size >= QUERY_INTERVAL_LIMITS.maxCachedIntervals) incomplete.delete(incomplete.keys().next().value);
+        incomplete.set(key, { range: error.range, asset, credentials });
+      }
+      throw error;
+    }
+  };
+}
+
 // A single bounded response per family. No errors, tokens or row values enter
 // cache keys or operational reports; credential references stay in this job.
 // Broker tenants remain independent even when the property is shared.
 function createDownloadReader({ read, validate, onDownload = () => {}, onReuse = () => {} }) {
   const cached = new Map();
-  return async (asset, credentials, family, payload) => {
+  return async (asset, credentials, family, payload, options = {}) => {
     await validate(asset, credentials);
-    const authority = credentials.brokerContext ? ['broker', asset.clinicaId, asset.googleConnectionId,
-      asset.broker_read_connection_ref, asset.broker_read_asset_ref] : ['legacy', asset.googleConnectionId];
-    const key = JSON.stringify([asset.siteUrl, authority, payload]);
+    const key = downloadKey(asset, credentials, payload);
     const previous = cached.get(family);
     if (previous?.key === key) {
       await validate(previous.asset, previous.credentials);
@@ -116,7 +207,7 @@ function createDownloadReader({ read, validate, onDownload = () => {}, onReuse =
       onReuse(); return previous.result;
     }
     cached.delete(family);
-    const result = await read(asset, credentials, family, payload);
+    const result = await read(asset, credentials, family, payload, options);
     await validate(asset, credentials);
     onDownload();
     // Inspection is not shared. Query responses remain bounded by the existing
@@ -136,4 +227,4 @@ function backfillDays(config, env) {
 }
 
 module.exports = { QUERY_METRICS, metricsEqual, persistChangedRows, monthRanges, mergeQueryRows, queryPayload,
-  createDownloadReader, backfillDays };
+  createDownloadReader, createQueryIntervalReader, QUERY_INTERVAL_LIMITS, backfillDays };

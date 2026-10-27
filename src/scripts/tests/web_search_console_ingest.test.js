@@ -127,8 +127,8 @@ function jobsFixture({ count = 1, sites = 1, env = {}, storage } = {}) {
     request: async (_connection, send) => send(), safe: () => 'google_credentials_unavailable' };
   const jobs = loadBusinessProfileJobs({ models: f.models, credentials, clockDate: FixtureClockDate,
     searchConsole: { prepare: async () => { if (!f.state.active) throw Error('REVOKED'); return null; } },
-    legacyHttp: { post: async (url, payload) => {
-      f.state.calls.push({ url, payload });
+    legacyHttp: { post: async (url, payload, config) => {
+      f.state.calls.push({ url, payload, config });
       if (payload.dimensions.length === 1 && f.state.timeseriesRows) return { data: { rows: f.state.timeseriesRows(url, payload) } };
       if (payload.dimensions.length === 1) return { data: { rows: [{ keys: [payload.startDate], clicks: 1, impressions: 3, ctr: 1 / 3, position: 1.2344 }] } };
       if (f.state.failQueries?.(url, payload)) throw Error('FICTITIOUS_PROVIDER_FAILURE');
@@ -232,4 +232,206 @@ test('an empty final timeseries publishes no compact interval and cannot overwri
   const result = await f.jobs.executeWebSync();
   assert.equal(result.status, 'completed'); assert.equal(writes, 0);
   assert.equal(result.report.ingestion.compactCoverage[0].lastObservedFinalDate, null);
+});
+
+
+// Dense Search Console intervals: all fixtures are fictitious and all real I/O is denied.
+const fs = require('node:fs'), vm = require('node:vm');
+const deny = () => { throw Error('REAL_IO_FORBIDDEN_IN_SC_OFFLINE_QA'); };
+for (const key of ['spawn','spawnSync','exec','execSync','execFile','execFileSync','fork']) require('node:child_process')[key] = deny;
+require('node:dgram').createSocket = deny;
+for (const key of ['writeFile','writeFileSync','appendFile','appendFileSync','unlink','unlinkSync','rename','renameSync','mkdir','mkdirSync','rmdir','rmdirSync','rm','rmSync','truncate','truncateSync','createWriteStream']) fs[key] = deny;
+const originalOpen = fs.openSync; fs.openSync = (filename, flags, ...args) => {
+  if (!(flags === 0 || typeof flags === 'string' && !/[wax+]/.test(flags))) deny();
+  return originalOpen(filename, flags, ...args);
+};
+const asset = { id: 91, clinicaId: 71, googleConnectionId: 81, siteUrl: 'https://example.invalid/' };
+const credentials = { connection: { id: 81 } };
+const day = value => new Date(value + 'T00:00:00.000Z');
+const label = value => value.toISOString().slice(0, 10);
+const point = (date, index = 0) => ({ keys: [date, 'fictitious ' + index, 'https://example.invalid/p' + index], clicks: 1, impressions: 3, position: 2 });
+const full = date => Array(25000).fill(point(date));
+function reader({ raw, validate = async () => {}, now, implementation = ingest }) {
+  const state = { calls: [], reused: 0, splits: 0, incompleteReused: 0 };
+  const download = implementation.createDownloadReader({ validate, read: async (a, c, family, payload, options) => {
+    state.calls.push({ a, family, payload, options });
+    return raw(a, c, family, payload, options);
+  } });
+  const read = implementation.createQueryIntervalReader({ read: download, validate, now,
+    onReuse: () => { state.reused++; }, onIncompleteReuse: () => { state.incompleteReused++; }, onSplit: () => { state.splits++; } });
+  return { state, read };
+}
+const response = (rows, rowLimitReached = false) => ({ data: { rows, rowLimitReached } });
+const dailyRows = Array.from({ length: 3 }, (_, index) => Array.from({ length: 10000 }, (_, row) => point('2026-10-' + (16 + index), row)));
+const subset = payload => dailyRows.flat().filter(row => row.keys[0] >= payload.startDate && row.keys[0] <= payload.endDate).slice(0, 25000);
+
+test('a genuine 30000-row three-day interval splits inclusively without overlap and discards capped parent rows', async () => {
+  const f = reader({ raw: async (_a,_c,_family,payload) => response(subset(payload)) });
+  const intervals = await f.read(asset, credentials, { s: '2026-10-16', e: '2026-10-18' });
+  assert.deepEqual(intervals.map(({ s,e,rows }) => ({ s,e,count:rows.length })), [
+    { s:'2026-10-16',e:'2026-10-16',count:10000 },{ s:'2026-10-17',e:'2026-10-17',count:10000 },{ s:'2026-10-18',e:'2026-10-18',count:10000 }]);
+  assert.equal(intervals.flatMap(x => x.rows).length, 30000);
+  assert.equal(new Set(intervals.flatMap(x => x.rows).map(x => JSON.stringify(x.keys))).size,30000);
+  assert.equal(f.state.calls.length,4); assert.equal(f.state.splits,1);
+  assert(f.state.calls.every(c => Object.keys(c.payload).sort().join(',') === 'endDate,startDate'));
+});
+
+test('the complete >25000-row parent is reused for four legacy mappings with current authority checks', async () => {
+  const checked = new Set(); let revoked;
+  const f = reader({ raw: async (_a,_c,_family,payload) => response(subset(payload)), validate: async a => {
+    checked.add(a.id); if (a.id === revoked) throw Error('REVOKED');
+  } });
+  const range = { s:'2026-10-16',e:'2026-10-18' };
+  for (let i=0;i<4;i++) assert.equal((await f.read({ ...asset,id:91+i,clinicaId:71+i },credentials,range)).flatMap(x=>x.rows).length,30000);
+  assert.equal(f.state.calls.length,4);assert.equal(f.state.reused,3);assert.equal(checked.size,4);
+  revoked=91;
+  await assert.rejects(f.read({ ...asset,id:94,clinicaId:74 },credentials,range), /REVOKED/);
+  assert.equal(f.state.calls.length,4);
+});
+
+test('broker tenants never reuse a completed parent across mappings and never invoke legacy fallback', async () => {
+  const f = reader({ raw: async (_a,c,_family,p) => { assert(c.brokerContext); return response([point(p.startDate)]); } });
+  for (let i=0;i<2;i++) await f.read({ ...asset,id:91+i,clinicaId:71+i,broker_read_connection_ref:'conn',broker_read_asset_ref:'property' },
+    { brokerContext:{} },{ s:'2026-10-16',e:'2026-10-18' });
+  assert.equal(f.state.calls.length,2);assert.equal(f.state.reused,0);
+});
+
+test('a capped day stays terminal and is memoized without rows so the same job does not redownload it', async () => {
+  const f = reader({ raw: async (_a,_c,_family,p) => response(full(p.startDate),false) });
+  for (let i=0;i<2;i++) await assert.rejects(f.read(asset,credentials,{s:'2026-10-16',e:'2026-10-18'}), e => {
+    assert.equal(e.code,'search_console_interval_truncated');assert.deepEqual(e.range,{s:'2026-10-16',e:'2026-10-16'});return true;
+  });
+  assert.equal(f.state.calls.filter(c=>c.payload.endDate==='2026-10-18'&&c.payload.startDate==='2026-10-16').length,1);
+  assert.equal(f.state.reused,0);assert.equal(f.state.incompleteReused,1);
+});
+
+test('real executeWebSync publishes the 30000 complete rows once and an unchanged retry writes nothing', async () => {
+  const f = jobsFixture({env:{WEB_SYNC_RECENT_DAYS:'3'}});f.state.queryRows=(_url,payload)=>subset(payload);
+  const result = await f.jobs.executeWebSync();
+  assert.equal(result.status,'completed');assert.equal(result.report.ingestion.completedIntervals,1);
+  assert.equal(result.report.ingestion.splitIntervals,1);assert.equal(result.report.ingestion.written,30000);
+  assert.equal(f.state.tables.query.size,30000);assert.equal(f.state.tables.agg.size,3);
+  const retry=await f.jobs.executeWebSync();assert.equal(retry.status,'completed');
+  assert.equal(retry.report.ingestion.written,0);assert.equal(retry.report.ingestion.unchanged,30000);
+});
+
+test('a late child failure leaves prior monthly SQL and compact detail coverage unchanged', async () => {
+  const compact=[];const storage={writeInterval:async request=>compact.push(request),writeTotalsInterval:async()=>{}};
+  const f=jobsFixture({env:{WEB_SYNC_RECENT_DAYS:'3',SC_ANALYTICS_WRITE_ENABLED:'true'},storage});
+  f.state.queryRows=(_url,payload)=>subset(payload);
+  const prior={clinica_id:71,date:'2026-10-16',query_hash:'PRIOR',page_url_hash:'PRIOR',clicks:8};
+  f.state.tables.query.set('prior',{...prior});
+  f.state.failQueries=(_url,p)=>p.startDate==='2026-10-18'&&p.endDate==='2026-10-18';
+  const failed=await f.jobs.executeWebSync();
+  assert.equal(failed.status,'failed');assert.equal(failed.report.ingestion.failedIntervals,1);
+  assert.equal(f.state.tables.query.size,1);assert.deepEqual(f.state.tables.query.get('prior'),prior);
+  assert.equal(f.state.tables.agg.size,0);assert.equal(f.state.writes.length,0);assert.equal(compact.length,0);
+});
+
+test('enabled compact storage receives only complete bounded leaves, while default flags stay off', async () => {
+  const requests=[];const storage={writeInterval:async r=>requests.push(r),writeTotalsInterval:async()=>{}};
+  const f=jobsFixture({env:{WEB_SYNC_RECENT_DAYS:'3',SC_ANALYTICS_WRITE_ENABLED:'true'},storage});
+  f.state.timeseriesRows=()=>['2026-10-16','2026-10-17','2026-10-18'].map(date=>({keys:[date],clicks:1,impressions:3,position:2}));
+  f.state.queryRows=(_url,p)=>subset(p);
+  assert.equal((await f.jobs.executeWebSync()).status,'completed');
+  assert.equal(requests.length,3);assert(requests.every(x=>x.complete===true&&x.rowLimitReached===false&&x.rows.length<25000));
+  assert.deepEqual(requests.map(x=>[x.startDate,x.endDate]),[['2026-10-16','2026-10-16'],['2026-10-17','2026-10-17'],['2026-10-18','2026-10-18']]);
+});
+
+function helperWithByteCounter(byteLength) {
+  const module={exports:{}};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../../lib/searchConsoleIngest'),'utf8'),{
+    module,exports:module.exports,Buffer:{byteLength},require:name=>name==='sequelize'?require('sequelize'):
+      name==='node:crypto'?require('node:crypto'):(()=>{throw Error('UNEXPECTED_DEPENDENCY');})(),Date
+  },{filename:'genuine-candidate-helper-byte-counter.fixture',timeout:2000});
+  return module.exports;
+}
+
+test('the original 40MB aggregate byte budget includes discarded parents and completed siblings', async () => {
+  const implementation=helperWithByteCounter(()=>16000000);
+  const f=reader({implementation,raw:async(_a,_c,_fam,p)=>response(p.startDate===p.endDate?[point(p.startDate)]:full(p.startDate))});
+  await assert.rejects(f.read(asset,credentials,{s:'2026-10-16',e:'2026-10-17'}),{code:'search_console_interval_budget_exceeded'});
+  assert.equal(f.state.calls.length,3);assert.equal(f.state.reused,0);
+});
+
+test('the aggregate 450s deadline is propagated to genuine broker before each page and prevents another send', async () => {
+  const {searchConsoleFixture}=require('./fixtures/search_console_broker.fixture');
+  const f=searchConsoleFixture(),context=await f.service.prepare(f.mapping);
+  f.state.response=()=>({rows:Array.from({length:500},(_,i)=>point('2026-10-16',i)),nextPageToken:'FICTITIOUS_CURSOR',rowLimitReached:false});
+  f.state.afterCall=()=>{f.state.at+=450001;};
+  const r=reader({now:()=>f.state.at,raw:(a,c,family,p,options)=>f.service.read(a,c.brokerContext,family,p,options)});
+  await assert.rejects(r.read(f.mapping,{brokerContext:context},{s:'2026-10-16',e:'2026-10-17'}),{code:'search_console_interval_budget_exceeded'});
+  assert.equal(f.state.calls.length,1);
+});
+
+test('legacy HTTP receives only a tighter remaining timeout; post-response overrun cannot publish', async () => {
+  let at=1000;
+  const r=reader({now:()=>at,raw:async(_a,_c,_fam,p,{beforeExecute})=>{
+    at=450990;assert.equal(beforeExecute().timeoutMs,10);at=451001;return response([point(p.startDate)]);
+  }});
+  await assert.rejects(r.read(asset,credentials,{s:'2026-10-16',e:'2026-10-16'}),{code:'search_console_interval_budget_exceeded'});
+  assert.equal(r.state.calls.length,1);
+});
+
+test('splitting leap-day labels is disjoint and retains all dates without timezone conversion; 31 days means at most32 reads and dense follow-up skips the parent', async () => {
+  const implementation=helperWithByteCounter(()=>1);
+  const f=reader({implementation,raw:async(_a,_c,_fam,p)=>response(p.startDate===p.endDate?[point(p.startDate)]:full(p.startDate))});
+  const leap=await f.read(asset,credentials,{s:'2024-02-28',e:'2024-03-01'});
+  assert.deepEqual(Array.from(leap,x=>x.s),['2024-02-28','2024-02-29','2024-03-01']);
+  const before=f.state.calls.length;
+  const days=await f.read(asset,credentials,{s:'2026-10-01',e:'2026-10-31'});
+  assert.equal(days.length,31);assert.equal(f.state.calls.length-before,31);
+  await assert.rejects(f.read(asset,credentials,{s:'2026-10-01',e:'2026-11-01'}),{code:'search_console_range_invalid'});
+  await assert.rejects(f.read(asset,credentials,{s:'2026-02-30',e:'2026-03-01'}),{code:'search_console_range_invalid'});
+});
+
+test('child responses outside their inclusive dates are rejected before any complete parent is returned', async () => {
+  const f=reader({raw:async()=>response([point('2026-10-15')])});
+  await assert.rejects(f.read(asset,credentials,{s:'2026-10-16',e:'2026-10-18'}),{code:'search_console_response_range_invalid'});
+});
+
+
+test('Sep then Oct is downloaded once for four shared legacy mappings; known density skips the October parent', async () => {
+  const f=reader({raw:async(_a,_c,_family,p)=>{
+    const rows=[];
+    for(let date=day(p.startDate);date<=day(p.endDate);date.setUTCDate(date.getUTCDate()+1)) {
+      const count=label(date).startsWith('2026-09')?10000:1000;
+      for(let i=0;i<count&&rows.length<25000;i++)rows.push(point(label(date),i));
+    }
+    return response(rows);
+  }});
+  const ranges=[{s:'2026-09-28',e:'2026-09-30'},{s:'2026-10-01',e:'2026-10-27'}];
+  for(let i=0;i<4;i++)for(const range of ranges){
+    const rows=(await f.read({...asset,id:91+i,clinicaId:71+i},credentials,range)).flatMap(x=>x.rows);
+    assert.equal(rows.length,range.s.startsWith('2026-09')?30000:27000);
+  }
+  assert.equal(f.state.calls.length,31);assert.equal(f.state.reused,6);
+  assert(!f.state.calls.some(x=>x.payload.startDate==='2026-10-01'&&x.payload.endDate==='2026-10-27'));
+});
+
+test('LRU holds at most two parents and evicts by the combined 40000000-byte cache budget', async () => {
+  const ranges=[1,2,3].map(i=>({s:'2026-10-0'+i,e:'2026-10-0'+i}));
+  const large=reader({implementation:helperWithByteCounter(()=>21000000),raw:async(_a,_c,_fam,p)=>response([point(p.startDate)])});
+  await large.read(asset,credentials,ranges[0]);await large.read(asset,credentials,ranges[1]);await large.read(asset,credentials,ranges[0]);
+  assert.equal(large.state.calls.length,3);assert.equal(large.state.reused,0);
+  const small=reader({implementation:helperWithByteCounter(()=>1000000),raw:async(_a,_c,_fam,p)=>response([point(p.startDate)])});
+  for(const index of [0,1,0,2,1])await small.read(asset,credentials,ranges[index]);
+  assert.equal(small.state.calls.length,4);assert.equal(small.state.reused,1);
+});
+
+test('provider/unknown failures are not cached as complete or as canonical capped days', async () => {
+  const f=reader({raw:async()=>{throw Error('FICTITIOUS_PROVIDER_FAILURE');}});
+  for(let i=0;i<2;i++)await assert.rejects(f.read(asset,credentials,{s:'2026-10-16',e:'2026-10-18'}),/FICTITIOUS_PROVIDER_FAILURE/);
+  assert.equal(f.state.calls.length,2);assert.equal(f.state.reused,0);assert.equal(f.state.incompleteReused,0);
+});
+
+
+test('genuine legacy _readSearchConsole narrows only its own HTTP timeout to the remaining shared deadline', async () => {
+  const f=jobsFixture();
+  await f.jobs._readSearchConsole(asset,{...credentials,accessToken:'FICTITIOUS_OFFLINE_TOKEN'},'queries',
+    {startDate:'2026-10-18',endDate:'2026-10-18'},{beforeExecute:()=>({timeoutMs:7})});
+  assert.equal(f.state.calls[0].config.timeout,7);
+  await f.jobs._readSearchConsole(asset,{...credentials,accessToken:'FICTITIOUS_OFFLINE_TOKEN'},'timeseries',
+    {startDate:'2026-10-18',endDate:'2026-10-18'});
+  assert.equal(Object.hasOwn(f.state.calls[1].config,'timeout'),false);
 });

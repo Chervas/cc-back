@@ -1466,7 +1466,7 @@ class MetaSyncJobs {
         errors: [],
         rowLimits: [],
         ingestion: {
-          downloads: 0, reusedDownloads: 0, completedIntervals: 0, failedIntervals: 0,
+          downloads: 0, reusedDownloads: 0, splitIntervals: 0, reusedIncompleteIntervals: 0, completedIntervals: 0, failedIntervals: 0,
           received: 0, inserted: 0, updated: 0, unchanged: 0, written: 0,
           candidateWritesBefore: 0, actualWritesAfter: 0, compactCoverage: [],
           storageWriteEnabled: process.env.SC_ANALYTICS_WRITE_ENABLED === 'true',
@@ -1504,6 +1504,12 @@ class MetaSyncJobs {
         read: (...args) => this._readSearchConsole(...args),
         validate: (...args) => this._assertSearchConsoleMapping(...args),
         onDownload: () => { report.ingestion.downloads++; },
+        onReuse: () => { report.ingestion.reusedDownloads++; }
+      });
+      const readQueryIntervals = scIngest.createQueryIntervalReader({
+        read: readSearchConsole, validate: (...args) => this._assertSearchConsoleMapping(...args),
+        onSplit: () => { report.ingestion.splitIntervals++; },
+        onIncompleteReuse: () => { report.ingestion.reusedIncompleteIntervals++; },
         onReuse: () => { report.ingestion.reusedDownloads++; }
       });
       const analyticsStore = report.ingestion.storageWriteEnabled
@@ -1586,31 +1592,33 @@ class MetaSyncJobs {
             let intervalComplete = authorizedMappings.length === arr.length;
             for (const { asset: a, credentials } of authorizedMappings) {
               try {
-                const respQ = await readSearchConsole(a, credentials, 'queries', { startDate: rg.s, endDate: rg.e });
-                const rowsQ = respQ.data?.rows || [];
-                const truncated = respQ.data?.rowLimitReached === true
-                  || (!credentials.brokerContext && rowsQ.length >= 25000);
-                if (truncated) {
-                  report.rowLimits.push({ clinicaId, siteUrl: a.siteUrl, start: rg.s, end: rg.e, limit: 25000 });
-                  throw Object.assign(Error('search_console_interval_truncated'), { code: 'search_console_interval_truncated' });
+                const intervals = await readQueryIntervals(a, credentials, rg);
+                for (const interval of intervals) {
+                  scIngest.mergeQueryRows({ rows: interval.rows, clinicId: clinicaId, siteUrl: a.siteUrl,
+                    queryDailyMap, topByDate, range: interval });
                 }
-                scIngest.mergeQueryRows({ rows: rowsQ, clinicId: clinicaId, siteUrl: a.siteUrl,
-                  queryDailyMap, topByDate, range: rg });
                 if (analyticsStore) {
-                  const finalRange = finalRangeByMapping.get(a.id);
-                  if (finalRange && rg.s <= finalRange.end && rg.e >= finalRange.start) {
-                    const compactEnd = rg.e < finalRange.end ? rg.e : finalRange.end;
-                    const compactStart = rg.s > finalRange.start ? rg.s : finalRange.start;
-                    await analyticsStore.writeInterval({ mapping: a, siteUrl: a.siteUrl, startDate: compactStart, endDate: compactEnd,
-                      rows: rowsQ.filter(row => row.keys?.[0] >= compactStart && row.keys?.[0] <= compactEnd), complete: true, rowLimitReached: false,
-                      validate: () => this._assertSearchConsoleMapping(a, credentials) });
+                  for (const interval of intervals) {
+                    const rowsQ = interval.rows;
+                    const finalRange = finalRangeByMapping.get(a.id);
+                    if (finalRange && interval.s <= finalRange.end && interval.e >= finalRange.start) {
+                      const compactEnd = interval.e < finalRange.end ? interval.e : finalRange.end;
+                      const compactStart = interval.s > finalRange.start ? interval.s : finalRange.start;
+                      await analyticsStore.writeInterval({ mapping: a, siteUrl: a.siteUrl, startDate: compactStart, endDate: compactEnd,
+                        rows: rowsQ.filter(row => row.keys?.[0] >= compactStart && row.keys?.[0] <= compactEnd), complete: true, rowLimitReached: false,
+                        validate: () => this._assertSearchConsoleMapping(a, credentials) });
+                    }
                   }
                 }
               } catch (error) {
                 intervalComplete = false;
+                if (error?.code === 'search_console_interval_truncated') {
+                  report.rowLimits.push({ clinicaId, siteUrl: a.siteUrl, start: error.range?.s || rg.s,
+                    end: error.range?.e || rg.e, limit: 25000 });
+                }
                 report.errors.push({ clinicaId, siteUrl: a.siteUrl, phase: 'queries', start: rg.s, end: rg.e,
-                  message: error?.code === 'search_console_interval_truncated'
-                    ? 'search_console_interval_truncated' : googleLegacyCredentials.safe(error) });
+                  message: ['search_console_interval_truncated', 'search_console_interval_budget_exceeded'].includes(error?.code)
+                    ? error.code : googleLegacyCredentials.safe(error) });
               }
             }
             if (!intervalComplete) { report.ingestion.failedIntervals++; continue; }
@@ -3219,11 +3227,11 @@ class MetaSyncJobs {
     if (!credentials.brokerContext) await googleLegacyCredentials.assert(credentials.connection);
   }
 
-  async _readSearchConsole(asset, credentials, family, payload) {
+  async _readSearchConsole(asset, credentials, family, payload, { beforeExecute } = {}) {
     // Revalidate the independent registry even for a previously prepared token.
     await this._assertSearchConsoleMapping(asset, credentials);
-    if (credentials.brokerContext) return searchConsoleBroker.read(asset, credentials.brokerContext, family, payload);
-    return googleLegacyCredentials.request(credentials.connection, () => {
+    if (credentials.brokerContext) return searchConsoleBroker.read(asset, credentials.brokerContext, family, payload, { beforeExecute });
+    return googleLegacyCredentials.request(credentials.connection, async () => {
       if (family === 'inspection') {
         const siteUrl = asset.siteUrl;
         const inspectionUrl = siteUrl.startsWith('http') ? siteUrl : 'https://' + siteUrl.replace('sc-domain:', '');
@@ -3232,8 +3240,9 @@ class MetaSyncJobs {
       }
       if (!['timeseries', 'queries'].includes(family)) throw new Error('search_console_operation_invalid');
       const url = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(asset.siteUrl)}/searchAnalytics/query`;
+      const budget = await beforeExecute?.();
       return syncHttp.post(url, { ...payload, dimensions: family === 'timeseries' ? ['date'] : ['date', 'query', 'page'], rowLimit: 25000 },
-        { headers: { Authorization: `Bearer ${credentials.accessToken}` } });
+        { headers: { Authorization: `Bearer ${credentials.accessToken}` }, ...(budget ? { timeout: Math.min(SYNC_PROVIDER_HTTP_TIMEOUT_MS, budget.timeoutMs) } : {}) });
     });
   }
 
