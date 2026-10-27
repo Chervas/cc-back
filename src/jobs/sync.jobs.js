@@ -1617,7 +1617,8 @@ class MetaSyncJobs {
                     end: error.range?.e || rg.e, limit: 25000 });
                 }
                 report.errors.push({ clinicaId, siteUrl: a.siteUrl, phase: 'queries', start: rg.s, end: rg.e,
-                  message: ['search_console_interval_truncated', 'search_console_interval_budget_exceeded'].includes(error?.code)
+                  message: ['search_console_interval_truncated', 'search_console_interval_budget_exceeded',
+                    'search_console_response_invalid', 'search_console_response_range_invalid', 'search_console_range_invalid'].includes(error?.code)
                     ? error.code : googleLegacyCredentials.safe(error) });
               }
             }

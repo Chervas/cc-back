@@ -129,6 +129,7 @@ function jobsFixture({ count = 1, sites = 1, env = {}, storage, helper } = {}) {
     searchConsole: { prepare: async () => { if (!f.state.active) throw Error('REVOKED'); return null; } },
     legacyHttp: { post: async (url, payload, config) => {
       f.state.calls.push({ url, payload, config });
+      if (f.state.rawResponse) return f.state.rawResponse(url, payload);
       if (payload.dimensions.length === 1 && f.state.timeseriesRows) return { data: { rows: f.state.timeseriesRows(url, payload) } };
       if (payload.dimensions.length === 1) return { data: { rows: [{ keys: [payload.startDate], clicks: 1, impressions: 3, ctr: 1 / 3, position: 1.2344 }] } };
       if (f.state.failQueries?.(url, payload)) throw Error('FICTITIOUS_PROVIDER_FAILURE');
@@ -506,4 +507,51 @@ test('a late property or SQL failure rolls back only its three-day range with al
     assert([...f.state.tables.agg.values()].every(row=>row.queries_top3===1&&row.queries_top10===1));
     const unchanged=await f.jobs.executeWebSync();assert.equal(unchanged.report.ingestion.written,0);
   }
+});
+
+
+test('Google HTTP200 omitted rows is a valid empty direct response; null or absent HTTP identity is not', async () => {
+  const f=reader({raw:async()=>({status:200,data:{}})});
+  assert.deepEqual(await f.read(asset,credentials,{s:'2026-10-16',e:'2026-10-18'}),[
+    {s:'2026-10-16',e:'2026-10-18',rows:[]}]);
+  const metadata=reader({raw:async()=>({status:200,data:{responseAggregationType:'byPage'}})});
+  assert.equal((await metadata.read(asset,credentials,{s:'2026-10-18',e:'2026-10-18'}))[0].rows.length,0);
+  const broker=reader({raw:async()=>({status:200,data:{}})});
+  await assert.rejects(broker.read({...asset,broker_read_connection_ref:'connection',broker_read_asset_ref:'property'},
+    {brokerContext:{}},{s:'2026-10-18',e:'2026-10-18'}),{code:'search_console_response_invalid'});
+});
+
+test('genuine sync with empty HTTP200 totals and queries writes no metrics or false zero coverage and preserves prior data', async () => {
+  const compact=[];const storage={writeTotalsInterval:async request=>compact.push(request),writeInterval:async request=>compact.push(request)};
+  const f=jobsFixture({storage,env:{SC_ANALYTICS_WRITE_ENABLED:'true'}});
+  assert.equal((await f.jobs.executeWebSync()).status,'completed');
+  const before=structuredClone(f.state.tables);assert.equal(f.state.tables.query.size,1);assert.equal(compact.length,2);
+  compact.length=0;f.state.writes.length=0;f.state.rawResponse=()=>({status:200,data:{}});
+  const empty=await f.jobs.executeWebSync();assert.equal(empty.status,'completed');
+  assert.equal(empty.report.ingestion.received,0);assert.equal(empty.report.ingestion.written,0);
+  assert.equal(f.state.writes.length,0);assert.equal(compact.length,0);assert.deepEqual(f.state.tables,before);
+  assert.equal(empty.report.ingestion.compactCoverage[0].firstObservedFinalDate,null);
+  assert.equal(empty.report.ingestion.compactCoverage[0].lastObservedFinalDate,null);
+});
+
+test('malformed or error query responses fail with a finite technical code, without zero rows or provider details', async () => {
+  const bad=[null,{status:200,data:null},{status:200,data:[]},{status:200,data:'malformed'},
+    {status:200,data:{rows:null}},{status:200,data:{rows:{}}},{status:200,data:{rows:undefined}},
+    {status:200,data:{error:{message:'FICTITIOUS_PRIVATE_PROVIDER_DETAIL'}}},
+    {status:200,data:{error:null,rows:[]}},{status:204,data:{}},{status:500,data:{}},{data:{}}];
+  for(const value of bad){
+    const f=jobsFixture();f.state.rawResponse=(_url,p)=>p.dimensions.length===1?{status:200,data:{}}:value;
+    const failed=await f.jobs.executeWebSync();assert.equal(failed.status,'failed');
+    assert.equal(failed.report.ingestion.failedIntervals,1);assert.equal(f.state.tables.query.size,0);
+    assert.equal(f.state.tables.agg.size,0);assert.equal(f.state.writes.length,0);
+    assert.deepEqual(Array.from(failed.report.errors,e=>e.message),['search_console_response_invalid']);
+    assert(!JSON.stringify(failed.report).includes('FICTITIOUS_PRIVATE_PROVIDER_DETAIL'));
+  }
+});
+
+test('an out-of-range query row reports its bounded technical code and never impersonates a credential failure', async () => {
+  const f=jobsFixture();f.state.queryRows=()=>[point('2026-10-17')];
+  const result=await f.jobs.executeWebSync();assert.equal(result.status,'failed');
+  assert.deepEqual(Array.from(result.report.errors,e=>e.message),['search_console_response_range_invalid']);
+  assert.equal(f.state.tables.query.size,0);assert.equal(f.state.tables.agg.size,0);
 });

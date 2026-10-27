@@ -161,7 +161,12 @@ function createQueryIntervalReader({ read, validate, onSplit = () => {}, onReuse
       if (++downloads > QUERY_INTERVAL_LIMITS.maxDownloads) throw intervalError('search_console_interval_budget_exceeded');
       const response = await read(asset, credentials, 'queries', { startDate: s, endDate: e }, { beforeExecute });
       beforeExecute();
-      const rows = response?.data?.rows;
+      const data = response?.data;
+      if (!data || typeof data !== 'object' || Array.isArray(data) || 'error' in data
+        || response.status !== undefined && response.status !== 200) throw intervalError('search_console_response_invalid');
+      // Google omits rows for a successful empty result. Only the direct
+      // HTTP200 legacy response may omit it; null/malformed rows stay invalid.
+      const rows = !('rows' in data) && response.status === 200 && !credentials.brokerContext ? [] : data.rows;
       if (!Array.isArray(rows) || rows.length > QUERY_INTERVAL_LIMITS.rowLimit) throw intervalError('search_console_response_invalid');
       const responseBytes = Buffer.byteLength(JSON.stringify(rows)); bytes += responseBytes;
       if (bytes > QUERY_INTERVAL_LIMITS.maxBytes) throw intervalError('search_console_interval_budget_exceeded');
