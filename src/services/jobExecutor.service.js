@@ -283,12 +283,12 @@ async function runAutomationFlowV2Job(payload = {}, _job, jobClaim) {
   };
 }
 
-async function runWhatsappTemplateCreateJob(payload = {}) {
+async function runWhatsappTemplateCreateJob(payload = {}, jobRequest = null) {
   if (payload.mode === 'reconcile_clinic_custom') {
     return { status: 'completed', result: await whatsappTemplatesService.reconcileClinicCustomTemplates(payload) };
   }
-  if (payload.mode === 'propagate_catalog_item') {
-    return {status:'completed',result:await whatsappTemplatesService.propagateCatalogTemplateToAllClinics(payload)};
+  if (['propagate_catalog_item', 'propagate_catalog_target'].includes(payload.mode)) {
+    return whatsappTemplatesService.runCatalogPropagationJob(payload, jobRequest);
   }
   const wabaId = String(payload.wabaId || payload.waba_id || '').trim();
   if (!wabaId) {
@@ -577,7 +577,7 @@ const JOB_HANDLERS = {
   business_profile_review_match: async (payload = {}) => googleReviewMatchService.runBusinessProfileReviewMatchJob(payload),
   whatsapp_coexistence_sync_contacts: async (payload = {}) => whatsappCoexistenceService.runContactsSyncJob(payload),
   whatsapp_coexistence_sync_history: async (payload = {}) => whatsappCoexistenceService.runHistorySyncJob(payload),
-  whatsapp_template_create: async (payload = {}) => runWhatsappTemplateCreateJob(payload),
+  whatsapp_template_create: async (payload = {}, jobRequest) => runWhatsappTemplateCreateJob(payload, jobRequest),
   whatsapp_template_sync_delayed: async (payload = {}) => whatsappTemplatesService.runDelayedSyncTemplatesJob(payload),
   whatsapp_language_rollout: async (payload = {}, jobRequest = null) => (
     require('./whatsappLanguageRollout.service').runRolloutJob(payload, jobRequest)

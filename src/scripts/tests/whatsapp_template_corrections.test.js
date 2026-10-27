@@ -43,6 +43,17 @@ test('native job routes custom reconciliation only to the scoped reconciler, nev
   const payload={mode:'reconcile_clinic_custom',wabaId:'TESTONLY',clinicId:58,assignmentScope:'clinic'};
   assert.equal((await run(payload)).status,'completed');assert.equal(calls[0],payload);
 });
+test('native propagation routes its coordinator and account children with the actual claimed JobRequest',async()=>{
+  const calls=[],claim={id:1,status:'running',attempts:1};
+  const run=sourceFunction('../../services/jobExecutor.service','runWhatsappTemplateCreateJob',{
+    whatsappTemplatesService:{runCatalogPropagationJob:async(payload,job)=>{calls.push([payload,job]);return {status:'waiting',backoffMs:30000};},
+      propagateCatalogTemplateToAllClinics:()=>assert.fail('global provider loop must not run inside the parent')},
+  });
+  for(const mode of ['propagate_catalog_item','propagate_catalog_target']) {
+    const payload={mode,templateCatalogId:20};const result=await run(payload,claim);
+    assert.equal(result.status,'waiting');assert.equal(calls.at(-1)[0],payload);assert.equal(calls.at(-1)[1],claim);
+  }
+});
 test('catalog activation also reconciles custom templates under its lease, but selective template updates never do',async()=>{
   let custom=0,releases=0;
   const create=sourceFunction('../../services/whatsappTemplates.service','createTemplatesFromCatalog',{
@@ -162,4 +173,41 @@ test('native catalog provisioning checkpoints before POST, never repeats unknown
   const retry=await create(input);assert.equal(retry.submitted,0);assert.equal(calls,2);
   rows[0].rejection_reason='not_started';failJob=true;await assert.rejects(create({...input,catalogTemplateIds:[1]}),/job failed/);assert.equal(calls,2);
   failJob=false;await create({...input,catalogTemplateIds:[1]});assert.equal(calls,3);assert.equal(rows[0].name,'TESTONLY_a');
+});
+test('account propagation pins ordinary catalog submissions, never repeats an uncertain POST and reconciles its original remote identity',async()=>{
+  const rows=[],events=[];let calls=0,remoteFound=false;
+  const template={id:20,name:'TESTONLY_appointment',is_active:true,is_generic:true};
+  const propagate=sourceFunction('../../services/whatsappTemplates.service','propagateCatalogTemplateToAllClinics',{
+    getCatalogTemplateById:async()=>template,Op:{in:Symbol('in')},
+    Clinica:{findAll:async()=>[{id_clinica:1,configuracion:{}}]},
+    normalizeDisciplines:()=>[],templateAppliesToDisciplines:()=>true,getCatalogTechnicalFamilyName:()=>template.name,
+    getCatalogTemplateLanguage:()=> 'es',cleanString:v=>String(v||'').trim(),
+    syncTemplatesForWaba:async()=>{if(remoteFound)Object.assign(rows[0],{meta_template_id:'TESTONLY_meta',status:'APPROVED'});},
+    loadTemplateFamilyRows:async()=>rows,findSameContractRemoteTemplate:({familyRows})=>familyRows.find(r=>r.meta_template_id),
+    findPreparedCatalogSubmission:({familyRows})=>familyRows.find(r=>['unknown','not_started'].includes(r.rejection_reason)),
+    CATALOG_SUBMISSION_NOT_STARTED:'not_started',CATALOG_SUBMISSION_UNCONFIRMED:'unknown',
+    resolveNextTechnicalTemplateName:n=>n+'_v2',buildTemplateForTechnicalName:(t,name)=>({...t,name}),
+    prepareTemplateImageHeaderForMeta:async({template})=>({template}),getImageHeaderSampleIssue:()=>null,
+    WHATSAPP_TEMPLATE_STATUS:{LOCAL_PENDING:'PENDING_LOCAL'},DEFAULT_PROPAGATE_RESYNC_DELAY_MINUTES:12,
+    upsertConnectedTemplateForWaba:async input=>{
+      let row=rows.find(r=>r.name===input.technicalName);if(!row){row={name:input.technicalName};rows.push(row);}
+      Object.assign(row,{rejection_reason:input.rejectionReason,meta_template_id:input.metaTemplateId,status:input.status});
+      events.push(input.rejectionReason);
+    },
+    enqueueSyncTemplatesJob:async()=>{events.push('sync');},
+    createTemplateInMeta:async()=>{calls++;assert.deepEqual(events.slice(-3),['not_started','sync','unknown']);
+      throw Object.assign(Error('TESTONLY timeout'),{code:'provider_timeout'});},
+    isDuplicateTemplateNameError:()=>false,templateSyncState:{blockedCode:()=>null},
+    isRetryableMetaError:e=>e.retryable||e.code==='provider_timeout',
+    upsertClinicOverrideTemplateForClinic:async()=>({action:'updated',row:{id:100}}),
+    mapRemoteStatusToLocalStatus:v=>v,recomposeAutomationsUsingTemplate:async()=>({}),
+    isReviewRequestTemplateFamily:()=>false,
+    require:name=>{assert.equal(name,'./whatsapp.service');return {getClinicConfig:async()=>({wabaId:'101',authorizedBroker:true})};},
+  });
+  const input={templateCatalogId:20,clinicIds:[1],wabaIds:['101'],updateCatalogPropagationState:false,enqueueFollowupSync:false,
+    logger:{info(){},warn(){},error(){}}};
+  await assert.rejects(propagate(input),/timeout/);assert.equal(calls,1);const name=rows[0].name;
+  await assert.rejects(propagate(input),/catalog_submission_unconfirmed/);assert.equal(calls,1);assert.equal(rows[0].name,name);
+  remoteFound=true;const recovered=await propagate(input);assert.equal(recovered.errors.length,0);assert.equal(recovered.created_in_meta,0);
+  assert.equal(calls,1);assert.equal(rows[0].meta_template_id,'TESTONLY_meta');
 });

@@ -2769,11 +2769,19 @@ async function propagateCatalogTemplateToAllClinics({
   wabaIds = null,
   updateCatalogPropagationState = true,
   enqueueFollowupSync = true,
+  expectedCatalogDigest = null,
 } = {}) {
   const template = await getCatalogTemplateById(templateCatalogId);
   if (!template) {
     throw new Error('catalog_not_found');
   }
+  const assertCatalogCurrent = async () => {
+    if (expectedCatalogDigest && require('../lib/whatsapp-catalog-propagation').catalogDigest(
+      await getCatalogTemplateById(templateCatalogId)) !== expectedCatalogDigest) {
+      throw Object.assign(Error('catalog_propagation_source_changed'), { code: 'catalog_propagation_source_changed' });
+    }
+  };
+  await assertCatalogCurrent();
 
   const sourceUpdatedAtTs = sourceUpdatedAt ? new Date(sourceUpdatedAt).getTime() : null;
   const scopedClinicIds = Array.isArray(clinicIds)
@@ -2890,7 +2898,11 @@ async function propagateCatalogTemplateToAllClinics({
           continue;
         }
 
-        const preparedSubmission = findPreparedReviewSubmission({ familyRows, wabaId, template });
+        const preparedSubmission = findPreparedCatalogSubmission({ familyRows, wabaId, template });
+        if (preparedSubmission && preparedSubmission.rejection_reason !== CATALOG_SUBMISSION_NOT_STARTED) {
+          await enqueueSyncTemplatesJob({ wabaId }, { delayMs: 15 * 60 * 1000 });
+          throw Object.assign(Error('catalog_submission_unconfirmed'), { code: 'catalog_submission_unconfirmed', retryable: true });
+        }
         const technicalName = preparedSubmission?.name || (familyRows.length
           ? resolveNextTechnicalTemplateName(familyName, familyRows)
           : familyName);
@@ -2937,11 +2949,14 @@ async function propagateCatalogTemplateToAllClinics({
 
         let metaResp;
         try {
-          if (isReviewRequestTemplateFamily(template) && !isReviewReminderTemplateFamily(template)) {
-            await upsertConnectedTemplateForWaba({ wabaId, template, technicalName,
-              status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, metaTemplateId: null,
-              rejectionReason: REVIEW_SUBMISSION_UNCONFIRMED });
-          }
+          await assertCatalogCurrent();
+          await upsertConnectedTemplateForWaba({ wabaId, template, technicalName,
+            status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, metaTemplateId: null,
+            rejectionReason: CATALOG_SUBMISSION_NOT_STARTED });
+          await enqueueSyncTemplatesJob({ wabaId }, { delayMs: 15 * 60 * 1000 });
+          await upsertConnectedTemplateForWaba({ wabaId, template, technicalName,
+            status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, metaTemplateId: null,
+            rejectionReason: CATALOG_SUBMISSION_UNCONFIRMED });
           metaResp = await createTemplateInMeta({
             wabaId,
             accessToken: clinicConfig.accessToken,
@@ -2949,6 +2964,11 @@ async function propagateCatalogTemplateToAllClinics({
             language,
           });
         } catch (createError) {
+          if (createError?.code === 'rate_limited' || createError?.response?.status === 429 || templateSyncState.blockedCode(createError)) {
+            await upsertConnectedTemplateForWaba({ wabaId, template, technicalName,
+              status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, metaTemplateId: null,
+              rejectionReason: CATALOG_SUBMISSION_NOT_STARTED });
+          }
           // Meta no ofrece una clave de idempotencia para esta operación. La
           // identidad estable es nombre técnico + idioma. Si el proceso cae
           // después del HTTP 200 y antes del checkpoint local, el reintento
@@ -3438,9 +3458,12 @@ async function enqueueCreateTemplatesJob(data) {
 
 async function enqueuePropagateCatalogTemplateJob(data) {
   if (require('../lib/whatsappAuthorizedBrokerClient').configuration()) {
+    const catalog = await getCatalogTemplateById(data.templateCatalogId);
+    if (!catalog) throw Error('catalog_not_found');
+    const generation = require('../lib/whatsapp-catalog-propagation').catalogDigest(catalog);
     const {job}=await jobRequestsService.enqueueUniqueJobRequest({type:'whatsapp_template_create',priority:'normal',origin:'whatsapp_catalog_propagation',maxAttempts:3,
-      dedupeScope:'propagate:'+require('node:crypto').createHash('sha256').update(JSON.stringify(data)).digest('hex')+':'+Math.floor(Date.now()/60000),
-      payload:{...data,mode:'propagate_catalog_item'}});
+      dedupeScope:`propagate:${data.templateCatalogId}:${generation}`,
+      payload:{...data,catalogGeneration:generation,mode:'propagate_catalog_item'}});
     return job;
   }
   return queues.whatsappTemplateCreate.add('propagate_catalog_item', data, {
@@ -3449,6 +3472,73 @@ async function enqueuePropagateCatalogTemplateJob(data) {
     removeOnComplete: true,
     removeOnFail: false,
   });
+}
+
+function catalogPropagationCoordinator() {
+  const { createPropagation, catalogDigest } = require('../lib/whatsapp-catalog-propagation');
+  return createPropagation({
+    JobRequest: db.JobRequest, sequelize: db.sequelize, loadCatalog: getCatalogTemplateById,
+    listClinics: clinicIds => Clinica.findAll({ ...(Array.isArray(clinicIds)
+      ? { where: { id_clinica: { [Op.in]: clinicIds } } } : {}),
+      attributes: ['id_clinica', 'configuracion'], order: [['id_clinica', 'ASC']], raw: true }),
+    resolveConfig: clinicId => require('./whatsapp.service').getClinicConfig(clinicId),
+    applies: (template, clinic) => templateAppliesToDisciplines(template,
+      normalizeDisciplines(clinic.configuracion?.disciplinas).length ? normalizeDisciplines(clinic.configuracion.disciplinas) : ['dental']),
+    enqueue: (...args) => jobRequestsService.enqueueUniqueJobRequest(...args),
+    propagate: propagateCatalogTemplateToAllClinics,
+    acquireLease: wabaId => acquireWabaCatalogCreationLease(wabaId, { sequelizeInstance: db.sequelize, waitSeconds: 0 }),
+    extraTargets: async (template, payload) => {
+      if (!isReviewRequestTemplateFamily(template) || isReviewReminderTemplateFamily(template)) return [];
+      const broker = require('../lib/whatsappAuthorizedBrokerClient'), targets = new Map();
+      for (const candidate of broker.configuration()?.bindings || []) {
+        if (!candidate.sendEnabled || targets.has(candidate.wabaId)
+          || payload.clinicIds && !payload.clinicIds.includes(candidate.clinicId)
+          || payload.wabaIds && !payload.wabaIds.map(String).includes(String(candidate.wabaId))) continue;
+        try {
+          const binding = await brokerTemplateBinding(candidate.wabaId, candidate.clinicId);
+          if (!binding) continue;
+          const asset = await ClinicMetaAsset.findByPk(binding.assetId);
+          if (!asset || require('../lib/whatsappManualDisconnect').current(asset, binding)
+            || asset.additionalData?.whatsappHealth?.can_send === false) continue;
+          targets.set(candidate.wabaId, { key: 'waba:' + candidate.wabaId, wabaId: String(candidate.wabaId),
+            clinicIds: [candidate.clinicId], provisioning: { clinicId: asset.assignmentScope === 'clinic' ? Number(asset.clinicaId) : null,
+              groupId: asset.grupoClinicaId || null, assignmentScope: asset.assignmentScope } });
+        } catch (_) {
+          targets.set(candidate.wabaId, { key: 'waba:' + candidate.wabaId, wabaId: String(candidate.wabaId),
+            clinicIds: [candidate.clinicId], planningError: true });
+        }
+      }
+      return [...targets.values()];
+    },
+    provisionSecondary: async ({ target, catalogId, generation }) => {
+      const asset = await resolveWabaAssetById(target.wabaId), scope = target.provisioning;
+      if (!asset || asset.assignmentScope !== scope.assignmentScope
+        || Number(asset.clinicaId || 0) !== Number(scope.clinicId || 0) && scope.assignmentScope === 'clinic'
+        || Number(asset.grupoClinicaId || 0) !== Number(scope.groupId || 0)) throw Error('catalog_propagation_routing_changed');
+      if (require('../lib/whatsapp-catalog-propagation').catalogDigest(await getCatalogTemplateById(catalogId)) !== generation) {
+        throw Error('catalog_propagation_source_changed');
+      }
+      return createTemplatesFromCatalog({ wabaId: target.wabaId, ...scope, catalogTemplateIds: [catalogId] });
+    },
+    settleCatalog: async ({ catalogId, generation, parentId, runtimeNamespace, state }) => db.sequelize.transaction(async transaction => {
+      const catalog = await WhatsappTemplateCatalog.findByPk(catalogId, { transaction, lock: transaction.LOCK.UPDATE,
+        include: [{ model: WhatsappTemplateCatalogDiscipline, as: 'disciplinas' }] });
+      if (!catalog || catalogDigest(catalog) !== generation) return;
+      const newer = await db.JobRequest.findOne({ where: { type: 'whatsapp_template_create', origin: 'whatsapp_catalog_propagation',
+        id: { [Op.gt]: parentId }, [Op.and]: [
+          db.sequelize.where(db.sequelize.json('payload.templateCatalogId'), catalogId),
+          db.sequelize.where(db.sequelize.json('payload.__runtime_namespace'), runtimeNamespace),
+        ] }, transaction });
+      if (newer) return;
+      await catalog.update({ propagation_state: state, ...(state === 'completed' ? { last_propagated_at: new Date() } : {}) },
+        { transaction, silent: true });
+    }),
+  });
+}
+
+async function runCatalogPropagationJob(payload, job) {
+  const coordinator = catalogPropagationCoordinator();
+  return payload.mode === 'propagate_catalog_target' ? coordinator.target(payload, job) : coordinator.parent(payload, job);
 }
 
 function buildDelayedSyncJobId({ wabaId, delayMs, dedupeWindowMs }) {
@@ -3659,6 +3749,7 @@ async function enqueueSyncForAllWabas(options = {}) {
 }
 
 module.exports = {
+  runCatalogPropagationJob,
   enqueueCustomTemplateReconciliation,
   reconcileClinicCustomTemplates,
   createTemplatesFromCatalog,
