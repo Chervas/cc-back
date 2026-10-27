@@ -10,6 +10,29 @@ function sourceFunction(file,name,dependencies){
 }
 function response(){return {statusCode:200,status(v){this.statusCode=v;return this;},json(v){this.body=v;return this;}};}
 const ownership=require('../../lib/whatsapp-template-ownership');
+test('administrative selective preparation preserves exact sender scope and uses the existing checkpointed catalog job',async()=>{
+  let admin=true,accesses=0,resolutions=0;const queued=[];
+  const prepare=sourceFunction('../../controllers/whatsapp.controller','createTemplatesFromCatalog',{
+    assertAdmin:(_req,res)=>{if(!admin)res.status(403).json({error:'forbidden'});return admin;},
+    assertWhatsappTemplateClinicAccess:async()=>{accesses++;},
+    resolveWabaFromContext:async input=>{resolutions++;assert.equal(input.clinicId,72);return {
+      wabaId:'TESTONLY_waba',clinicaId:72,grupoClinicaId:29,assignmentScope:'clinic'};},
+    require:name=>{assert.equal(name,'../services/whatsappTemplates.service');return {enqueueCreateTemplatesJob:async input=>{queued.push(input);return {id:1};}};},
+  });
+  const req={query:{clinic_id:'72'},body:{catalog_template_ids:[20,28,29,30,20]},userData:{userId:1}};
+  const res=response();await prepare(req,res);assert.equal(res.statusCode,200);assert.equal(res.body.jobId,1);
+  assert.deepEqual([...queued[0].catalogTemplateIds],[20,28,29,30]);
+  assert.equal(queued[0].wabaId,'TESTONLY_waba');assert.equal(queued[0].clinicId,72);assert.equal(queued[0].assignmentScope,'clinic');
+  assert.equal(accesses,1);assert.equal(resolutions,1);
+  for(const ids of [[],[0],[-1],['20'],[20.1],null,{},Array(101).fill(20)]){
+    const invalid=response();await prepare({...req,body:{catalog_template_ids:ids}},invalid);
+    assert.equal(invalid.statusCode,400);assert.equal(invalid.body.error,'catalog_template_ids_invalid');
+  }
+  admin=false;const denied=response();await prepare(req,denied);assert.equal(denied.statusCode,403);
+  assert.equal(queued.length,1);assert.equal(accesses,1);assert.equal(resolutions,1);
+  const ordinary=response();await prepare({...req,body:{}},ordinary);assert.equal(ordinary.statusCode,200);
+  assert.equal(queued[1].catalogTemplateIds,undefined);
+});
 test('native job routes custom reconciliation only to the scoped reconciler, never to catalog propagation',async()=>{
   const calls=[];
   const run=sourceFunction('../../services/jobExecutor.service','runWhatsappTemplateCreateJob',{

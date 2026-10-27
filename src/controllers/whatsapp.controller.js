@@ -1870,6 +1870,16 @@ exports.deleteTemplate = async (req, res) => {
 
 exports.createTemplatesFromCatalog = async (req, res) => {
   try {
+    const catalogTemplateIds = req.body?.catalog_template_ids;
+    if (catalogTemplateIds !== undefined) {
+      // Administrative recovery may prepare a reviewed subset through the same
+      // leased/checkpointed provisioner used at connection time.
+      if (!assertAdmin(req, res)) return;
+      if (!Array.isArray(catalogTemplateIds) || !catalogTemplateIds.length || catalogTemplateIds.length > 100
+        || catalogTemplateIds.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+        return res.status(400).json({ error: 'catalog_template_ids_invalid' });
+      }
+    }
     const clinicId = req.query.clinic_id ? Number(req.query.clinic_id) : null;
     const phoneNumberId = req.query.phone_number_id || null;
     const userId = req.userData?.userId;
@@ -1892,6 +1902,7 @@ exports.createTemplatesFromCatalog = async (req, res) => {
       clinicId: asset.clinicaId || null,
       groupId: asset.grupoClinicaId || null,
       assignmentScope: asset.assignmentScope || 'clinic',
+      ...(catalogTemplateIds !== undefined ? { catalogTemplateIds: [...new Set(catalogTemplateIds)] } : {}),
     });
     return res.json({ success: true, jobId: job?.id || null });
   } catch (err) {
