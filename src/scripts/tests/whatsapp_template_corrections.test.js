@@ -175,7 +175,7 @@ test('native catalog provisioning checkpoints before POST, never repeats unknown
   failJob=false;await create({...input,catalogTemplateIds:[1]});assert.equal(calls,3);assert.equal(rows[0].name,'TESTONLY_a');
 });
 test('account propagation pins ordinary catalog submissions, never repeats an uncertain POST and reconciles its original remote identity',async()=>{
-  const rows=[],events=[];let calls=0,remoteFound=false;
+  const rows=[],events=[];let calls=0,remoteFound=false,discovered=null;
   const template={id:20,name:'TESTONLY_appointment',is_active:true,is_generic:true};
   const propagate=sourceFunction('../../services/whatsappTemplates.service','propagateCatalogTemplateToAllClinics',{
     getCatalogTemplateById:async()=>template,Op:{in:Symbol('in')},
@@ -184,6 +184,7 @@ test('account propagation pins ordinary catalog submissions, never repeats an un
     getCatalogTemplateLanguage:()=> 'es',cleanString:v=>String(v||'').trim(),
     syncTemplatesForWaba:async()=>{if(remoteFound)Object.assign(rows[0],{meta_template_id:'TESTONLY_meta',status:'APPROVED'});},
     loadTemplateFamilyRows:async()=>rows,findSameContractRemoteTemplate:({familyRows})=>familyRows.find(r=>r.meta_template_id),
+    findReconciledCatalogTemplate:()=>discovered,
     findPreparedCatalogSubmission:({familyRows})=>familyRows.find(r=>['unknown','not_started'].includes(r.rejection_reason)),
     CATALOG_SUBMISSION_NOT_STARTED:'not_started',CATALOG_SUBMISSION_UNCONFIRMED:'unknown',
     resolveNextTechnicalTemplateName:n=>n+'_v2',buildTemplateForTechnicalName:(t,name)=>({...t,name}),
@@ -210,4 +211,8 @@ test('account propagation pins ordinary catalog submissions, never repeats an un
   await assert.rejects(propagate(input),/catalog_submission_unconfirmed/);assert.equal(calls,1);assert.equal(rows[0].name,name);
   remoteFound=true;const recovered=await propagate(input);assert.equal(recovered.errors.length,0);assert.equal(recovered.created_in_meta,0);
   assert.equal(calls,1);assert.equal(rows[0].meta_template_id,'TESTONLY_meta');
+  rows.length=0;remoteFound=false;
+  discovered={name:'TESTONLY_appointment_v9',meta_template_id:'TESTONLY_prior_unknown',status:'APPROVED'};
+  const listed=await propagate(input);assert.equal(listed.recovered_from_remote_list,1);assert.equal(calls,1);
+  assert.equal(rows[0].meta_template_id,'TESTONLY_prior_unknown');
 });

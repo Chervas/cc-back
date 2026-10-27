@@ -636,6 +636,18 @@ function findSameContractRemoteTemplate({ familyRows, wabaId, template }) {
   return matches[0] || null;
 }
 
+function findReconciledCatalogTemplate(template, wabaId, items) {
+  const family = getCatalogTechnicalFamilyName(template);
+  const locale = normalizeWhatsappLocale(getCatalogTemplateLanguage(template));
+  const candidates = (Array.isArray(items) ? items : []).filter(row =>
+    isTechnicalTemplateFamilyName(family, row.name)
+    && normalizeWhatsappLocale(row.language) === locale
+    && cleanString(row.category).toUpperCase() === cleanString(template.category).toUpperCase()
+    && ['APPROVED', 'PENDING', 'IN_REVIEW'].includes(cleanString(row.status).toUpperCase()))
+    .map(row => ({ ...row, waba_id: String(wabaId), meta_template_id: row.id }));
+  return findSameContractRemoteTemplate({ familyRows: candidates, wabaId, template });
+}
+
 function buildTemplateForTechnicalName(template, technicalName) {
   const baseTemplate = template?.toJSON ? template.toJSON() : template;
   return {
@@ -2822,6 +2834,7 @@ async function propagateCatalogTemplateToAllClinics({
       errors: [],
     };
     const syncedWabas = new Set();
+    const remoteInventories = new Map();
     const followupSyncs = new Map();
     const affectedTemplateInstances = new Map();
 
@@ -2856,7 +2869,8 @@ async function propagateCatalogTemplateToAllClinics({
         }
 
         if (!syncedWabas.has(wabaId) && (clinicConfig.accessToken || clinicConfig.authorizedBroker)) {
-          await syncTemplatesForWaba({ wabaId, accessToken: clinicConfig.accessToken });
+          const items = await syncTemplatesForWaba({ wabaId, accessToken: clinicConfig.accessToken });
+          remoteInventories.set(wabaId, items);
           syncedWabas.add(wabaId);
         }
 
@@ -2873,7 +2887,18 @@ async function propagateCatalogTemplateToAllClinics({
         }
 
         const familyRows = await loadTemplateFamilyRows({ clinicId, wabaId, template });
-        const sameContractRemoteTemplate = findSameContractRemoteTemplate({ familyRows, wabaId, template });
+        let sameContractRemoteTemplate = findSameContractRemoteTemplate({ familyRows, wabaId, template });
+        if (!sameContractRemoteTemplate) {
+          const remote = findReconciledCatalogTemplate(template, wabaId, remoteInventories.get(wabaId));
+          if (remote) {
+            await assertCatalogCurrent();
+            await upsertConnectedTemplateForWaba({ wabaId, template, technicalName: remote.name,
+              status: mapRemoteStatusToLocalStatus(remote.status), metaTemplateId: remote.meta_template_id,
+              rejectionReason: null });
+            sameContractRemoteTemplate = remote;
+            summary.recovered_from_remote_list = (summary.recovered_from_remote_list || 0) + 1;
+          }
+        }
 
         if (sameContractRemoteTemplate) {
           const result = await upsertClinicOverrideTemplateForClinic({
@@ -3434,6 +3459,7 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
   await enqueueStalePendingTemplateResubmissions({ wabaId, now });
   await whatsappInboxAdminSync.markReconciled(wabaId, syncStartedAt);
   await require('./patientMobileVerificationLifecycle.service').signal();
+  return items;
 }
 
 async function enqueueCreateTemplatesJob(data) {
@@ -3770,6 +3796,7 @@ module.exports = {
     reconcileCustomReplacement,
     replaceTemplateInEditableBulkSends,
     findSameContractRemoteTemplate,
+    findReconciledCatalogTemplate,
     isStaleReviewRequestTemplate,
     hasApprovedReviewReplacement,
     findApprovedReviewReplacement,

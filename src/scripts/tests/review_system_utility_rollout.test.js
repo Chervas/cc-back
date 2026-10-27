@@ -178,3 +178,12 @@ test('an uncertain review creation pins the same technical name and exact WABA/c
     assert.equal(find([other]), null);
   }
 });
+test('explicit propagation reconciles an untracked provider receipt only for the exact current family, locale, category and components', () => {
+  const remote = { ...replacement, id: '1122334455', category: 'UTILITY' };
+  const find = rows => service._test.findReconciledCatalogTemplate(catalog, '9988776655', rows);
+  const adopted = find([remote]);
+  assert.equal(adopted.meta_template_id, remote.id); assert.equal(adopted.waba_id, '9988776655');
+  for (const candidate of [{ ...remote, name: 'foreign_family_v11' }, { ...remote, language: 'ca' },
+    { ...remote, status: 'REJECTED' }, { ...remote, category: 'MARKETING' },
+    { ...remote, components: [{ type: 'BODY', text: 'TESTONLY different body' }] }]) assert.equal(find([candidate]), null);
+});
