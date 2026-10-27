@@ -50,4 +50,15 @@ async function run({ db, clinicId, listId, actorId, expectedSha256, sourceSystem
     throw error;
   } finally { await db.sequelize.connectionManager.releaseConnection(raw); }
 }
-module.exports = { projection, run };
+async function unsafeLinkedItems({ db,clinicId,listId }) {
+  const raw = await db.sequelize.connectionManager.getConnection(), connection = raw.promise();
+  try {
+    await connection.beginTransaction();
+    const snapshot = await captureRecipientRegistration(connection,{ clinicId,listId });
+    return new Set(snapshot.plan.operations.filter(op => op.action === 'review').map(op => op.itemId));
+  } finally {
+    try { await connection.rollback(); }
+    finally { await db.sequelize.connectionManager.releaseConnection(raw); }
+  }
+}
+module.exports = { projection, run, unsafeLinkedItems };

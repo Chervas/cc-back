@@ -163,6 +163,8 @@ test('owned MySQL: scoped history, atomic registration, rollback, native history
       const [origin] = await sql.query("SELECT metadata FROM PatientOperationalEvents ORDER BY id DESC LIMIT 1");
       assert.equal(origin[0].metadata.source_system,'unknown');
       assert.equal(await models.message.count(),1);
+      await models.paciente.create({public_id:'pac_testonly_duplicate',nombre:'TESTONLY Duplicate',apellidos:'',telefono_movil:'+34602000000',clinica_id:56});
+      assert((await registration.unsafeLinkedItems({db,clinicId:56,listId:43})).has(20000));
       report.checks.push('Server draft cross-user/clinic isolation and concurrent CAS; API registration receipt reconciles repeated POST without duplicate patients or transport.');
       report.checks.push('Atomic native-counter registration, group conflicts, failure rollback, immutable source, repeated invocation, actual scoped history SQL, old tests and mobile echoes; no providers/real patients.');
     } finally { await sql.connectionManager.releaseConnection(connection); }

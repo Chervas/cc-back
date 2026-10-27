@@ -11,7 +11,8 @@ const chunks = (rows, size = 200) => Array.from({ length: Math.ceil(rows.length 
 function planRecipientRegistration({ list, rows, patients, memberships }) {
   const clinicId = Number(list.clinica_id);
   const criteria = parse(list.criteria);
-  if (!clinicId || list.objective_id !== 'mass_sends' || list.source !== 'imported_file'
+  const importedSource = list.source === 'imported_file' || (list.source === 'saved_recipient_list' && !!criteria.import_file_name);
+  if (!clinicId || list.objective_id !== 'mass_sends' || !importedSource
     || list.status === 'archived' || criteria.record_kind !== 'recipient_list' || criteria.review_request) throw Error('RECIPIENT_SOURCE_REQUIRED');
   const clinics = new Map(patients.map(p => [Number(p.id_paciente), new Set([Number(p.clinica_id)])]));
   for (const m of memberships) clinics.get(Number(m.paciente_id))?.add(Number(m.clinica_id));

@@ -32,6 +32,7 @@ const {
 } = require('../lib/review-automation-config');
 const marketingOptOutService = require('./marketingOptOut.service');
 const reviewResponseClassification = require('./reviewResponseClassification.service');
+const reviewRecipientRegistrationService = require('./reviewRecipientRegistration.service');
 const jobRequestsService = require('./jobRequests.service');
 const { isGlobalAdmin } = require('../lib/role-helpers');
 const { getIO } = require('./socket.service');
@@ -3723,7 +3724,12 @@ async function buildReviewItemsFromImportedList(scope, body = {}) {
     getReviewRequestHistory(scope),
   ]);
 
-  const items = excludePreviouslyRequestedReviews(mapReviewItemsFromImportedListBase(rows, importedList, history.patientIds), history).map(item => {
+  const unsafeLinks = importedList.objective_id === OBJECTIVE_ID
+    ? await reviewRecipientRegistrationService.unsafeLinkedItems({ db,clinicId:Number(importedList.clinica_id),listId:importedListId }) : new Set();
+  const items = excludePreviouslyRequestedReviews(mapReviewItemsFromImportedListBase(rows, importedList, history.patientIds), history).map((item,index) => {
+    if (!String(item.status).startsWith('excluded') && unsafeLinks.has(Number(rows[index]?.id))) {
+      return { ...item,status:'excluded_registration_review',selected:false,exclusion_reason:'vinculacion_por_revisar',reason:'La vinculación del contacto necesita revisión antes de solicitar una reseña.' };
+    }
     if (importedList.objective_id !== OBJECTIVE_ID || item.paciente_id || String(item.status).startsWith('excluded')) return item;
     return { ...item, status: 'excluded_no_patient', selected: false, exclusion_reason: 'sin_ficha_paciente',
       reason: 'El contacto importado no está vinculado a una ficha de paciente de la clínica.' };

@@ -48,20 +48,20 @@ test('metadata selector is scoped and returns no recipients, payloads or deliver
   assert.deepEqual(Object.keys(result.items[0]).sort(), ['id', 'name', 'total']);
   assert.equal(result.items[0].total, 4);
 });
-function audienceFixture(list = row()) {
+function audienceFixture(list = row(), unsafeLinks = new Set()) {
   const calls = [], scope = { scope: 'clinic', clinicIds: [66] };
   const map = native(file, 'mapReviewItemsFromImportedListBase', { normalizeText,
     normalizeKey: value => String(value || '').toLowerCase(), resolveLastAttendedAppointmentDate: item => item.last_visit_at || null });
-  const deps = { Op, OBJECTIVE_ID: 'mass_sends', parseReviewImportListId: input => Number(input.review_import_list_id) || null,
+  const deps = { reviewRecipientRegistrationService:{unsafeLinkedItems:async()=>unsafeLinks}, db:{}, Op, OBJECTIVE_ID: 'mass_sends', parseReviewImportListId: input => Number(input.review_import_list_id) || null,
     scopeToWhere: () => ({ clinica_id: 66 }), isReviewImportedListEligible: eligible,
     MarketingPatientList: { findOne: async input => { assert.equal(input.where.clinica_id, 66); return list; } },
     MarketingPatientListItem: { findAll: async input => {
       assert.equal(input.where.list_id, 41); assert.deepEqual(Array.from(input.where[Op.or][0].clinica_id[Op.in]), [66]);
       return [
-        { paciente_id: 1, clinica_id: 66, name: 'TESTONLY previous', status: 'ready' },
-        { paciente_id: 2, clinica_id: 66, name: 'TESTONLY opted out', status: 'excluded_opt_out' },
-        { paciente_id: 3, clinica_id: 66, name: 'TESTONLY future', status: 'excluded_future_appointment' },
-        { paciente_id: null, clinica_id: 66, name: 'TESTONLY unlinked', status: 'ready' },
+        { id:11, paciente_id: 1, clinica_id: 66, name: 'TESTONLY previous', status: 'ready' },
+        { id:12, paciente_id: 2, clinica_id: 66, name: 'TESTONLY opted out', status: 'excluded_opt_out' },
+        { id:13, paciente_id: 3, clinica_id: 66, name: 'TESTONLY future', status: 'excluded_future_appointment' },
+        { id:14, paciente_id: null, clinica_id: 66, name: 'TESTONLY unlinked', status: 'ready' },
       ];
     } },
     getReviewRequestHistory: async () => ({ patientIds:new Set([1]),phoneKeys:new Set() }),
@@ -152,4 +152,9 @@ test('owned MySQL proves clinic/group filtering and preserves source lists and r
     assert.equal(await snapshot(), before);
     report.checks.push('Native metadata/candidate queries against owned MySQL; own/group scopes, review exclusions, unlinked contacts, foreign IDs and source immutability; no transport or real patients.');
   });
+});
+
+test('an ambiguous or stale saved link stays excluded even when a patient id was present', async () => {
+  const f = audienceFixture(row({ objective_id:'mass_sends', criteria:{record_kind:'recipient_list'} }), new Set([13]));
+  const items = await f.run(); assert.equal(items[2].status,'excluded_registration_review'); assert.equal(items[2].selected,false);
 });
