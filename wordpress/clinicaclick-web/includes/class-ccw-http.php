@@ -39,6 +39,14 @@ final class CCW_HTTP
             throw new CCW_Error('ccw_desired_state_too_large', 'La respuesta de control está vacía o supera el límite permitido.');
         }
         $decoded = CCW_JSON::decode_object($body, 'ccw_desired_state_json_invalid');
+        // Associative decoding collapses {} and [] in PHP. Preserve the empty
+        // signed routes map exactly as it appeared on the wire, before Ed25519
+        // verification. Never reinterpret an actual JSON list as an object.
+        $wire = json_decode($body);
+        $wire_routes = $wire->desired_state->registry_configuration->routes ?? null;
+        if (is_object($wire_routes) && get_object_vars($wire_routes) === array()) {
+            $decoded['desired_state']['registry_configuration']['routes'] = new stdClass();
+        }
         $etag_value = (string) wp_remote_retrieve_header($response, 'etag');
         if ($etag_value !== '' && strlen($etag_value) <= 256 && !preg_match('/[\r\n]/', $etag_value)) {
             $decoded['_http_etag'] = $etag_value;

@@ -30,6 +30,9 @@ final class CCW_JSON
     private static function normalize($value)
     {
         if (is_object($value)) {
+            if (get_object_vars($value) === array()) {
+                return new stdClass();
+            }
             $value = get_object_vars($value);
         }
         if (is_string($value)) {

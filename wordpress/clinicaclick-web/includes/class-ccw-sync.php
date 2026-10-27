@@ -295,7 +295,9 @@ final class CCW_Sync
             );
         }
         $local = $this->cache->route_registry();
-        $registry_hash = hash('sha256', CCW_JSON::canonical($registry));
+        // Use the hash just verified against the signed wire representation.
+        // The normalized local registry represents its empty map as an array.
+        $registry_hash = (string) $desired['registry_configuration_envelope']['manifest_sha256'];
         $local_sequence = (int) ($local['sequence'] ?? 0);
         if ((int) $registry['sequence'] < $local_sequence) {
             throw new CCW_Error('ccw_registry_replay_blocked', 'Se ha rechazado un registro firmado anterior.');

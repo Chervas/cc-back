@@ -912,8 +912,9 @@ final class CCW_Manifest
             || (int) ($registry['schema_version'] ?? 0) !== 2
             || !hash_equals((string) $installation_id, (string) ($registry['installation_id'] ?? ''))
             || (int) ($registry['sequence'] ?? 0) < 1
-            || !is_array($registry['routes'] ?? null)
-            || count($registry['routes']) > 20
+            || !(is_array($registry['routes'] ?? null)
+                || (is_object($registry['routes'] ?? null) && get_object_vars($registry['routes']) === array()))
+            || count((array) $registry['routes']) > 20
         ) {
             throw new CCW_Error('ccw_registry_contract_invalid', 'El registro firmado no corresponde a esta instalación.');
         }

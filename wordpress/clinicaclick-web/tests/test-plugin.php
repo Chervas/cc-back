@@ -574,7 +574,7 @@ function ccw_test_install_remote_v2(
         'installation_id' => $installation,
         'sequence' => (int) $sequence,
         'measurement' => $measurement,
-        'routes' => $registry_routes,
+        'routes' => $registry_routes ?: new stdClass(),
     );
     $desired = array(
         'schema_version' => 2,

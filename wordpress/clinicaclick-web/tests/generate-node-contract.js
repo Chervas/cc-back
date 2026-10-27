@@ -52,6 +52,13 @@ const runtime = {
   },
 };
 const signingOptions = { privateKeyPem, publicKeyPem };
+const registry = {
+  schema_version: 2,
+  installation_id: runtime.installation_id,
+  sequence: 2,
+  measurement: { enabled: false },
+  routes: {},
+};
 
 process.stdout.write(JSON.stringify({
   descriptor: {
@@ -64,4 +71,6 @@ process.stdout.write(JSON.stringify({
   manifest_envelope: signWebArtifactManifest(manifest, signingOptions),
   runtime,
   runtime_envelope: signWebArtifactManifest(runtime, signingOptions),
+  registry_configuration: registry,
+  registry_configuration_envelope: signWebArtifactManifest(registry, signingOptions),
 }));
