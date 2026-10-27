@@ -29,6 +29,14 @@ const RESPONSES = [
     es: ['Gracias por avisarnos. Revisamos la agenda y te decimos la disponibilidad cuanto antes.',
       'Gracias por avisarnos, {{paciente.nombre}}. Revisamos la agenda y te escribimos en breve con alternativas.'],
   },
+  {
+    es: ['¡Gracias {{paciente.nombre}}! Hasta mañana',
+      'Perfecto, {{paciente.nombre}}. Hasta mañana.'],
+    ca: ['Gràcies, {{paciente.nombre}}! Fins demà',
+      'Perfecte, {{paciente.nombre}}. Fins demà.'],
+    en: ['Thank you, {{paciente.nombre}}! See you tomorrow',
+      'Perfect, {{paciente.nombre}}. See you tomorrow.'],
+  },
 ];
 
 function updateAppointmentMessages(source) {

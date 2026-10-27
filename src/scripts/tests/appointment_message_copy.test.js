@@ -45,6 +45,33 @@ test('publication accepts only exact copy update and rejects a graph, scope, pro
   assert.equal(publication.planEntry({ ...s, trigger_type: 'patient.mobile_verification_requested' }), null);
 });
 
+test('tomorrow acknowledgement changes only its exact copy and preserves custom translations and suppression', () => {
+  const s = source();
+  const copy = RESPONSES.find(row => row.es[0] === '¡Gracias {{paciente.nombre}}! Hasta mañana');
+  const node = s.nodes[0];
+  node.config.manual_message_text = copy.es[0];
+  node.config.language_routing.variants.ca.manual_message_text = copy.ca[0];
+  node.config.language_routing.variants.en.manual_message_text = 'TESTONLY custom reply';
+  node.config.suppress_if_human_replied = true;
+  node.config.suppress_if_response_needed = true;
+  const before = structuredClone(s), next = updateAppointmentMessages(s);
+  assert.deepEqual(s, before);
+  assert.equal(next.nodes[0].config.manual_message_text, 'Perfecto, {{paciente.nombre}}. Hasta mañana.');
+  assert.equal(next.nodes[0].config.language_routing.variants.ca.manual_message_text, 'Perfecte, {{paciente.nombre}}. Fins demà.');
+  assert.equal(next.nodes[0].config.language_routing.variants.en.manual_message_text, 'TESTONLY custom reply');
+  const restored = structuredClone(next);
+  restored.nodes[0].config.manual_message_text = node.config.manual_message_text;
+  restored.nodes[0].config.language_routing = structuredClone(node.config.language_routing);
+  assert.deepEqual(restored, before);
+  assert.deepEqual(updateAppointmentMessages(next), next);
+  const plan = publication.planEntry(s);
+  assert.deepEqual(publication.preservedNodes(s, plan.body), next.nodes);
+  assert.equal(plan.body.is_active, false);
+  const changed = structuredClone(plan.body);
+  changed.nodes[0].config.suppress_if_response_needed = false;
+  assert.throws(() => publication.preservedNodes(s, changed), { statusCode: 409 });
+});
+
 test('minimal translated reminder keeps its question and all five parameter meanings', () => {
   const names = ['nombre_paciente', 'hora_cita', 'nombre_clinica', 'direccion_clinica', 'telefono_clinica'];
   for (const locale of ['es', 'ca', 'en']) {

@@ -281,8 +281,11 @@ test('si Bedrock falla, la receta canónica deriva a revisión manual sin cambia
   assert.equal(buildSafeAppointmentAiFailureOutput('review_response_classifier', new Error('offline')), null);
 });
 
-test('las nueve respuestas manuales reales tienen traducción ca/en', () => {
-  assert.equal(rollout.MANUAL_TRANSLATION_ROWS.length, 9);
+test('las respuestas manuales reales y el nuevo cierre de mañana tienen traducción ca/en', () => {
+  assert.equal(rollout.translateManualMessage('Perfecto, {{paciente.nombre}}. Hasta mañana.', 'ca'),
+    'Perfecte, {{paciente.nombre}}. Fins demà.');
+  assert.equal(rollout.translateManualMessage('Perfecto, {{paciente.nombre}}. Hasta mañana.', 'en'),
+    'Perfect, {{paciente.nombre}}. See you tomorrow.');
   for (const row of rollout.MANUAL_TRANSLATION_ROWS) {
     assert.equal(rollout.translateManualMessage(row.es, 'ca'), row.ca);
     assert.equal(rollout.translateManualMessage(row.es, 'en'), row.en);

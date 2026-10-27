@@ -64,6 +64,11 @@ const MANUAL_TRANSLATION_ROWS = Object.freeze([
     en: 'Thank you, {{paciente.nombre}}! See you tomorrow',
   },
   {
+    es: 'Perfecto, {{paciente.nombre}}. Hasta mañana.',
+    ca: 'Perfecte, {{paciente.nombre}}. Fins demà.',
+    en: 'Perfect, {{paciente.nombre}}. See you tomorrow.',
+  },
+  {
     es: '¡Hasta ahora!',
     ca: 'Fins ara!',
     en: 'See you shortly!',
