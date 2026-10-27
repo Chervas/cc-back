@@ -72,6 +72,25 @@ withIsolatedCampaignMysql(async owned => {
       assert.equal(result.rows[0].ok, true); assert.equal(result.rows[0].slots.length, 0); assert(result.rows[0].unavailable_intervals.length); }
     finally { await db.DoctorClinica.update({ activo: true }, { where: { doctor_id: 3, clinica_id: 100 } }); }
   });
+  await check('installationcolumnidentityprevailsovercontradictorysame-clinicroomcontext', async () => {
+    const payload = await current(); payload.grid = { ...payload.grid, mode: 'installation', column_ids: [101, 103],
+      context_instalacion_id: 101, context_doctor_id: 1 };
+    const { result } = await grid(payload);
+    assert.deepEqual(result.rows.map(row => row.column_id), ['101', '103']);
+    assert(at(result, '2030-01-07T09:00:00.000Z'), 'The compatible room column remains available');
+    assert.equal(result.rows[1].slots.length, 0, 'An incompatible room must not inherit the context room availability');
+    assert(result.rows[1].unavailable_intervals.some(interval => interval.resource_conflicts.some(conflict =>
+      conflict.resource_id === 103 && conflict.details.reason_key === 'incompatible_installation')));
+  });
+  await check('doctorcolumnidentityprevailsovercontradictorysame-clinicdoctorcontext', async () => {
+    const payload = await current(); payload.grid = { ...payload.grid, column_ids: [1, 3], context_doctor_id: 1 };
+    const { result } = await grid(payload);
+    assert.deepEqual(result.rows.map(row => row.column_id), ['1', '3']);
+    assert(at(result, '2030-01-07T09:00:00.000Z'), 'The configured professional column remains available');
+    assert.equal(result.rows[1].slots.length, 0, 'An incompatible doctor must not inherit the context doctor availability');
+    assert(result.rows[1].unavailable_intervals.some(interval => interval.resource_conflicts.some(conflict =>
+      conflict.resource_id === 3 && conflict.details.reason_key === 'incompatible_staff')));
+  });
   await check('clinicalopeningstillboundsgridwhilestaffpresenceextendsacrossclosures', async () => {
     await db.DoctorHorario.update({ hora_inicio: '05:00', hora_fin: '23:00' }, { where: { dia_semana: 1 } });
     const payload = await current(); payload.grid.from_local = '06:00'; payload.grid.to_local = '23:00';

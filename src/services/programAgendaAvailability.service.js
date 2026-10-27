@@ -146,7 +146,7 @@ async function availabilityGrid({ db, plan, payload, eligible, revision, actorId
   const fixed = id => positive(id) ? id : null;
   function columnPairs(id) {
     const doctor = grid.mode === 'doctor' ? id : fixed(grid.context_doctor_id);
-    const room = fixed(grid.context_instalacion_id) || (grid.mode === 'installation' ? id : fixed(grid.preferred_instalacion_id));
+    const room = grid.mode === 'installation' ? id : fixed(grid.context_instalacion_id) || fixed(grid.preferred_instalacion_id);
     const peers = grid.mode === 'doctor' && !room ? grid.peer_instalacion_ids : grid.mode === 'installation' && !doctor
       ? grid.peer_doctor_ids.length ? grid.peer_doctor_ids : plan.legacy ? phase.professionals.ids : [] : [];
     return { doctor, room, peers, pairs: peers.length ? peers.map(peer => [doctor || peer, room || peer]) : [[doctor, room]] };
