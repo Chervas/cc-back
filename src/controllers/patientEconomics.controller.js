@@ -140,7 +140,7 @@ async function programContext(req, write = false) {
   const clinicId = await requireVoucherFeature(req, write ? 'patients.edit' : 'patients.view');
   await requireClinicFeature(req, 'patients.sensitive.view', clinicId);
   await requireClinicFeature(req, write ? 'appointments.manage' : 'appointments.view', clinicId);
-  return { publicId: req.params.voucherId, clinicId, actorId: actorId(req), payload: req.body };
+  return { publicId: req.params.voucherId, clinicId, actorId: actorId(req), payload: req.body, readableBlockClinicIds: await getAccessibleClinicIdsForFeature({ actorId: actorId(req), featureKey: 'team.view' }) };
 }
 async function agendaOriginContext(req, writing = false) {
   const source = req.method === 'GET' ? req.query : req.body;
@@ -148,7 +148,7 @@ async function agendaOriginContext(req, writing = false) {
   await requireClinicFeature(req, writing ? 'appointments.manage' : 'appointments.view', clinicId);
   return { kind: req.params.budgetId ? 'budget_concept' : 'voucher',
     publicId: req.params.budgetId || req.params.voucherId, lineKey: req.params.lineKey,
-    clinicId, patientId: source?.patient_id, actorId: actorId(req), payload: req.body };
+    clinicId, patientId: source?.patient_id, actorId: actorId(req), payload: req.body, readableBlockClinicIds: await getAccessibleClinicIdsForFeature({ actorId: actorId(req), featureKey: 'team.view' }) };
 }
 exports.getAgendaOriginPlan = asyncHandler(async (req, res) => {
   res.set('Cache-Control', 'private, no-store');

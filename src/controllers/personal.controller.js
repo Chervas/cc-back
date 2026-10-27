@@ -39,7 +39,83 @@ const { withCalendarMutation, sendCalendarMutationError, assertDoctorIdentityMut
 const withDoctorCalendarMutation = (doctorId, mutate) => withCalendarMutation({ protectLegacyAppointments: true, db: require('../../models'), doctorId, mutate });
 const personalCalendarUndo = require('../services/personalCalendarUndo.service');
 const scheduleSharing = require('../services/personalScheduleSharing.service');
+const personalBlockScope = require('../lib/personal-block-scope');
 const scheduleDb = () => require('../../models');
+
+async function personalBlockScopeContext(doctorId, transaction = null) {
+    return personalBlockScope.loadPersonalBlockScopes({ db: scheduleDb(), doctorIds: [Number(doctorId)], transaction });
+}
+async function canEditPersonalBlockScope(actorId, doctorId, metadata) {
+    return personalBlockScope.checkPersonalBlockScopePermissions(metadata, id => canEditBloqueos(actorId, doctorId, id));
+}
+function personalBlockPinState(block) {
+    const row = block.toJSON ? block.toJSON() : block;
+    const instant = value => value == null ? null : new Date(value).toISOString();
+    return { id: Number(row.id), doctor_id: Number(row.doctor_id), clinica_id: row.clinica_id == null ? null : Number(row.clinica_id),
+        aplica_a_todas_clinicas: row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1,
+        fecha_inicio: instant(row.fecha_inicio), fecha_fin: instant(row.fecha_fin),
+        tipo: row.tipo || 'ausencia', motivo: row.motivo || '', recurrente: row.recurrente || 'none',
+        recurrente_hasta: row.recurrente_hasta == null ? null : String(row.recurrente_hasta).slice(0,10) };
+}
+async function pinPersonalBlockAccess(req, actorId, doctorId, block) {
+    const scopes = await personalBlockScopeContext(doctorId), metadata = scopes.metadata(block);
+    if (!await canEditPersonalBlockScope(actorId, doctorId, metadata)) return false;
+    const revision = scheduleDb().PersonalCalendarRevision
+        ? await scheduleDb().PersonalCalendarRevision.findByPk(Number(doctorId)) : null;
+    (req.personalBlockScopePins ||= []).push({ doctorId: Number(doctorId),
+        block: { doctor_id: Number(doctorId), clinica_id: block.clinica_id ?? null,
+            aplica_a_todas_clinicas: block.aplica_a_todas_clinicas === true || block.aplica_a_todas_clinicas === 1 },
+        ...(Number.isSafeInteger(Number(block.id)) && Number(block.id)>0 ? { persistedState: personalBlockPinState(block) } : {}),
+        metadata, revision: String(revision?.revision || '0') });
+    return true;
+}
+async function validatePersonalBlockScopePins(req, transaction) {
+    for (const pin of req.personalBlockScopePins || []) {
+        // A SELECT may have returned an old Sequelize instance before the
+        // revision was captured. Re-read the actual definition under the
+        // doctor's calendar mutex; revision equality alone cannot prove that
+        // the earlier row and ACL decision refer to that revision.
+        const current = pin.persistedState ? await DoctorBloqueo.findOne({
+            where: { id: pin.persistedState.id, doctor_id: pin.doctorId }, transaction,
+            ...(transaction.LOCK?.UPDATE ? { lock: transaction.LOCK.UPDATE } : {}),
+        }) : null;
+        if (pin.persistedState && (!current || JSON.stringify(personalBlockPinState(current)) !== JSON.stringify(pin.persistedState)))
+            rejectPersonalScheduleTransfer(409, { code: 'personal_block_scope_stale', message: 'El bloqueo ha cambiado. Actualiza la vista antes de guardar.' });
+        const scopes = await personalBlockScopeContext(pin.doctorId, transaction), metadata = scopes.metadata(current || pin.block);
+        const revision = scheduleDb().PersonalCalendarRevision
+            ? await scheduleDb().PersonalCalendarRevision.findByPk(pin.doctorId, { transaction }) : null;
+        if (JSON.stringify(metadata) !== JSON.stringify(pin.metadata) || String(revision?.revision || '0') !== pin.revision)
+            rejectPersonalScheduleTransfer(409, { code: 'personal_block_scope_stale', message: 'El vínculo del bloqueo ha cambiado. Actualiza la vista antes de guardar.' });
+        if (!await canEditPersonalBlockScope(Number(req.userData?.userId), pin.doctorId, metadata))
+            rejectPersonalScheduleTransfer(403, { message: 'No tienes permiso para modificar el bloqueo en todas las clínicas vinculadas.' });
+    }
+}
+function blockScopeFields(block) {
+    return block?.scope ? { scope: block.scope, canonical_clinica_id: block.canonical_clinica_id ?? null,
+        effective_clinic_ids: block.effective_clinic_ids || [], can_edit: block.can_edit === true,
+        ...(block.motivo_redacted ? { motivo_redacted: true } : {}) } : {};
+}
+async function personalBlocksForActor(actorId, doctorId, blocks, { clinicId = null, scopes = null } = {}) {
+    scopes ||= await personalBlockScopeContext(doctorId);
+    const unrestricted = isAdmin(actorId) || Number(actorId) === Number(doctorId);
+    const visible = unrestricted ? null : await getAccessibleClinicIdsForUser(actorId);
+    const permissionCache = new Map();
+    const permitted = metadata => {
+        const key = JSON.stringify(metadata);
+        if (!permissionCache.has(key)) permissionCache.set(key, canEditPersonalBlockScope(actorId, doctorId, metadata));
+        return permissionCache.get(key);
+    };
+    const selected = Number.isFinite(Number(clinicId)) && clinicId != null ? scopes.filter(blocks, clinicId) : blocks;
+    const output = [];
+    for (const value of selected) {
+        const row = value.toJSON ? value.toJSON() : value, metadata = scopes.metadata(row);
+        if (!unrestricted && metadata.scope !== 'global' && !metadata.effective_clinic_ids.some(id => visible.includes(id))) continue;
+        const privateReason = !unrestricted && row.clinica_id != null && !visible.includes(Number(row.clinica_id));
+        output.push({ ...row, ...metadata, can_edit: await permitted(metadata),
+            ...(privateReason ? { tipo: 'ausencia', motivo: '', motivo_redacted: true } : {}) });
+    }
+    return output;
+}
 
 async function scheduleSharingContext(doctorId, clinicId, transaction = null) {
     const dc = await DoctorClinica.findOne({ where: { doctor_id: Number(doctorId), clinica_id: Number(clinicId) },
@@ -98,6 +174,7 @@ async function withPersonalAvailabilityMutation(req, doctorIds, mutate) {
         doctorIds: Array.isArray(doctorIds) ? doctorIds.map(Number) : [Number(doctorIds)],
         undoContext: { actorId: Number(req.userData?.userId) }, mutate: async transaction => {
             await validateSharedSchedulePins(req, transaction);
+            await validatePersonalBlockScopePins(req, transaction);
             return mutate(transaction);
         } });
     if (result && Object.prototype.hasOwnProperty.call(result, 'value') && Object.prototype.hasOwnProperty.call(result, 'undo')) {
@@ -798,6 +875,7 @@ function serializeBloqueo(bloqueo, timeZone = DEFAULT_TIMEZONE) {
             : [],
         created_at: bloqueo.created_at,
         updated_at: bloqueo.updated_at,
+        ...blockScopeFields(bloqueo),
     };
 }
 
@@ -1807,18 +1885,13 @@ exports.getPersonalBloqueosPermissions = async (req, res) => {
         const canCreateGlobal = await canEditBloqueos(actorId, targetUserId, null);
         const targetClinicIds = await getAccessibleClinicIdsForUser(targetUserId);
 
-        let allowedClinicIds = [];
-        if (isAdmin(actorId) || Number(actorId) === Number(targetUserId)) {
-            allowedClinicIds = targetClinicIds;
-        } else {
-            const decisions = await Promise.all(targetClinicIds.map(async (clinicId) => ({
-                clinicId,
-                allowed: await canEditBloqueos(actorId, targetUserId, clinicId),
-            })));
-            allowedClinicIds = decisions
-                .filter((decision) => decision.allowed)
-                .map((decision) => decision.clinicId);
-        }
+        const scopes = await personalBlockScopeContext(targetUserId);
+        const decisions = await Promise.all(targetClinicIds.map(async (clinicId) => ({
+            clinicId,
+            allowed: await canEditPersonalBlockScope(actorId, targetUserId,
+                scopes.metadata({ doctor_id: targetUserId, clinica_id: clinicId })),
+        })));
+        const allowedClinicIds = decisions.filter(decision => decision.allowed).map(decision => decision.clinicId);
 
         return res.json({
             can_write_bloqueos: allowedClinicIds.length > 0 || !!canCreateGlobal,
@@ -1826,6 +1899,7 @@ exports.getPersonalBloqueosPermissions = async (req, res) => {
             allowed_clinic_ids_for_bloqueos: allowedClinicIds,
         });
     } catch (error) {
+        if (sendPersonalScheduleTransferError(error, res)) return;
         console.error('[personal.getPersonalBloqueosPermissions] Error:', error);
         return res.status(500).json({ message: 'Error retrieving bloqueos permissions', error: error.message });
     }
@@ -1863,12 +1937,6 @@ exports.getPersonalBloqueos = async (req, res) => {
         const toDate = buildDateTime(toRaw, null, '23:59', queryTimezone);
 
         const where = { doctor_id: targetUserId };
-        if (Number.isFinite(clinicaId)) {
-            where[Op.or] = [
-                { clinica_id: clinicaId },
-                { clinica_id: null },
-            ];
-        }
         if (fromDate && toDate) {
             where[Op.and] = [
                 { fecha_inicio: { [Op.lte]: toDate } },
@@ -1886,11 +1954,13 @@ exports.getPersonalBloqueos = async (req, res) => {
             order: [['fecha_inicio', 'ASC']],
         });
 
-        const timezoneMap = await buildClinicTimezoneMap(rows.map((r) => r.clinica_id));
+        const visibleRows = await personalBlocksForActor(actorId, targetUserId, rows, { clinicId: clinicaId });
+        const timezoneMap = await buildClinicTimezoneMap(visibleRows.map((r) => r.clinica_id));
         return res.json(
-            rows.map((row) => serializeBloqueo(row, timezoneForClinicId(row.clinica_id, timezoneMap)))
+            visibleRows.map((row) => serializeBloqueo(row, timezoneForClinicId(row.clinica_id, timezoneMap)))
         );
     } catch (error) {
+        if (sendPersonalScheduleTransferError(error, res)) return;
         console.error('[personal.getPersonalBloqueos] Error:', error);
         return res.status(500).json({ message: 'Error retrieving personal bloqueos', error: error.message });
     }
@@ -1914,7 +1984,7 @@ exports.createPersonalBloqueo = async (req, res) => {
         }
 
         const clinicaId = parseIntOrNull(req.body?.clinica_id ?? req.body?.clinic_id);
-        const canEdit = await canEditBloqueos(actorId, targetUserId, clinicaId);
+        const canEdit = await pinPersonalBlockAccess(req, actorId, targetUserId, { doctor_id: targetUserId, clinica_id: clinicaId });
         if (!canEdit) {
             return res.status(403).json({ message: 'Forbidden' });
         }
@@ -1970,7 +2040,8 @@ exports.createPersonalBloqueo = async (req, res) => {
             creado_por: actorId,
         }, { transaction }));
 
-        const serialized = serializeBloqueo(bloqueo, clinicTimezone);
+        const [visibleBlock] = await personalBlocksForActor(actorId, targetUserId, [bloqueo]);
+        const serialized = serializeBloqueo(visibleBlock, clinicTimezone);
 
         return res.status(201).json(availabilityResponse(req, serialized));
     } catch (error) {
@@ -2024,9 +2095,18 @@ exports.updatePersonalBloqueo = async (req, res) => {
         }
 
         const currentClinicaId = bloqueo.clinica_id ?? null;
+        // A projection in another member is the SAME block, not a move of its
+        // ownership. Moving out of the group or selecting global stays explicit.
+        if (hasClinicaField && clinicaId != null && currentClinicaId != null) {
+            const scopes = await personalBlockScopeContext(targetUserId), currentScope = scopes.metadata(bloqueo);
+            if (currentScope.scope === 'linked' && currentScope.effective_clinic_ids.includes(Number(clinicaId)))
+                clinicaId = currentClinicaId;
+        }
+        const nextGlobal = hasClinicaField ? clinicaId == null
+            : bloqueo.clinica_id == null || bloqueo.aplica_a_todas_clinicas === true || bloqueo.aplica_a_todas_clinicas === 1;
         const [canEditCurrent, canEditDestination] = await Promise.all([
-            canEditBloqueos(actorId, targetUserId, currentClinicaId),
-            canEditBloqueos(actorId, targetUserId, clinicaId),
+            pinPersonalBlockAccess(req, actorId, targetUserId, bloqueo),
+            pinPersonalBlockAccess(req, actorId, targetUserId, { doctor_id: targetUserId, clinica_id: clinicaId, aplica_a_todas_clinicas: nextGlobal }),
         ]);
         if (!canEditCurrent || !canEditDestination) {
             return res.status(403).json({ message: 'Forbidden' });
@@ -2063,7 +2143,7 @@ exports.updatePersonalBloqueo = async (req, res) => {
         if (recurrenceFields.error) return res.status(400).json({ message: recurrenceFields.error });
 
         const overlapCita = await findPersonalBlockAppointmentConflict({
-            doctorId: targetUserId, clinicaId, start: fechaInicio, end: fechaFin,
+            doctorId: targetUserId, clinicaId, start: fechaInicio, end: fechaFin, aplica_a_todas_clinicas: nextGlobal,
         });
 
         if (overlapCita) {
@@ -2081,10 +2161,11 @@ exports.updatePersonalBloqueo = async (req, res) => {
             tipo: tipo || 'ausencia',
             motivo: (req.body?.motivo ?? bloqueo.motivo ?? '').toString().slice(0, 255),
             ...recurrenceFields,
-            aplica_a_todas_clinicas: clinicaId == null ? true : false,
+            aplica_a_todas_clinicas: nextGlobal,
         }, { transaction }));
 
-        return res.json(availabilityResponse(req, serializeBloqueo(bloqueo, clinicTimezone)));
+        const [visibleBlock] = await personalBlocksForActor(actorId, targetUserId, [bloqueo]);
+        return res.json(availabilityResponse(req, serializeBloqueo(visibleBlock, clinicTimezone)));
     } catch (error) {
         if (personalCalendarUndo.sendUndoError(error, res) || sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
         console.error('[personal.updatePersonalBloqueo] Error:', error);
@@ -2117,7 +2198,7 @@ exports.deletePersonalBloqueo = async (req, res) => {
             return res.status(404).json({ message: 'Bloqueo no encontrado' });
         }
 
-        const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
+        const canEdit = await pinPersonalBlockAccess(req, actorId, targetUserId, bloqueo);
         if (!canEdit) {
             return res.status(403).json({ message: 'Forbidden' });
         }
@@ -2155,7 +2236,7 @@ exports.getPersonalBloqueoExcepciones = async (req, res) => {
         });
         if (!bloqueo) return res.status(404).json({ message: 'Bloqueo no encontrado' });
 
-        const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
+        const canEdit = await pinPersonalBlockAccess(req, actorId, targetUserId, bloqueo);
         if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
 
         const rows = await DoctorBloqueoExcepcion.findAll({
@@ -2188,7 +2269,7 @@ exports.createPersonalBloqueoExcepcion = async (req, res) => {
         });
         if (!bloqueo) return res.status(404).json({ message: 'Bloqueo no encontrado' });
 
-        const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
+        const canEdit = await pinPersonalBlockAccess(req, actorId, targetUserId, bloqueo);
         if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
 
         const payload = normalizeBloqueoExceptionInput(req.body || {});
@@ -2232,7 +2313,7 @@ exports.patchPersonalBloqueoExcepcion = async (req, res) => {
         });
         if (!bloqueo) return res.status(404).json({ message: 'Bloqueo no encontrado' });
 
-        const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
+        const canEdit = await pinPersonalBlockAccess(req, actorId, targetUserId, bloqueo);
         if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
 
         const exception = await DoctorBloqueoExcepcion.findOne({
@@ -2278,7 +2359,7 @@ exports.deletePersonalBloqueoExcepcion = async (req, res) => {
         });
         if (!bloqueo) return res.status(404).json({ message: 'Bloqueo no encontrado' });
 
-        const canEdit = await canEditBloqueos(actorId, targetUserId, bloqueo.clinica_id ?? null);
+        const canEdit = await pinPersonalBlockAccess(req, actorId, targetUserId, bloqueo);
         if (!canEdit) return res.status(403).json({ message: 'Forbidden' });
 
         const deleted = await withPersonalAvailabilityMutation(req, targetUserId, transaction => DoctorBloqueoExcepcion.destroy({
@@ -3079,18 +3160,12 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
 
     // Bloqueos: limitar a las clínicas visibles (o global) cuando no es admin / self
     const bloqueosWhere = { doctor_id: targetUserId };
-    if (!isAdmin(actorId) && Number(actorId) !== Number(targetUserId) && allowedClinicIds.length) {
-        bloqueosWhere[Op.or] = [
-            { clinica_id: null },
-            { clinica_id: { [Op.in]: allowedClinicIds } },
-        ];
-    }
-
-    const bloqueos = await DoctorBloqueo.findAll({
+    const blockDefinitions = await DoctorBloqueo.findAll({
         where: bloqueosWhere,
         include: [{ model: DoctorBloqueoExcepcion, as: 'excepciones' }],
         order: [['fecha_inicio', 'ASC']],
     });
+    const bloqueos = await personalBlocksForActor(actorId, targetUserId, blockDefinitions);
     const timezoneMap = await buildClinicTimezoneMap(bloqueos.map((b) => b.clinica_id));
     const bloqueoExceptionMap = buildBloqueoExceptionMap(
         bloqueos.flatMap((b) => Array.isArray(b.excepciones) ? b.excepciones : [])
@@ -3123,14 +3198,15 @@ async function buildScheduleResponse(actorId, targetUserId, query = {}) {
 }
 
 async function sharingPermissions(actorId, doctorId, clinicIds) {
-    for (const clinicId of clinicIds) if (!await canEditHorarios(actorId, doctorId, clinicId)) return false;
+    for (const clinicId of clinicIds) if (!await canEditHorarios(actorId, doctorId, clinicId)
+        || !await canEditBloqueos(actorId, doctorId, clinicId)) return false;
     return true;
 }
 
 async function sharingStateForActor(actorId, doctorId, state) {
     const allowed = new Set((await getAllowedClinicIdsForActorTarget(actorId, doctorId)).map(Number));
     const clinicas = await Promise.all((state.clinicas || []).filter(row => allowed.has(Number(row.clinica_id)))
-        .map(async row => ({ ...row, can_view: true, can_edit: await canEditHorarios(actorId, doctorId, row.clinica_id) })));
+        .map(async row => ({ ...row, can_view: true, can_edit: await sharingPermissions(actorId, doctorId, [row.clinica_id]) })));
     const groups = (state.groups || []).filter(group => group.clinic_ids.every(id => allowed.has(Number(id))));
     const editable = new Set(clinicas.filter(row => row.active && row.can_edit).map(row => Number(row.clinica_id)));
     return { ...state, clinicas, groups, can_manage: editable.size >= 2
@@ -3257,15 +3333,18 @@ exports.previewHorarioImpact = async (req, res) => {
         }
 
         const isBlockImpact = ['block', 'create_block', 'update_block'].includes(req.body?.action);
+        const blockAnchor = req.body?.aplica_a_todas_clinicas === true ? null : clinicaId;
         const canEdit = isBlockImpact
-            ? await canEditBloqueos(actorId, targetUserId, req.body?.aplica_a_todas_clinicas === true ? null : clinicaId)
+            ? await pinPersonalBlockAccess(req, actorId, targetUserId, { doctor_id: targetUserId, clinica_id: blockAnchor })
             : await pinSharedScheduleAccess(req, actorId, targetUserId, clinicaId);
         if (!canEdit) {
             return res.status(403).json({ message: 'Forbidden' });
         }
 
         const impactContext = !isBlockImpact ? await scheduleSharingContext(targetUserId, clinicaId) : null;
-        const impactClinicIds = impactContext?.clinicIds || [clinicaId];
+        const blockScopes = isBlockImpact ? await personalBlockScopeContext(targetUserId) : null;
+        const blockMetadata = blockScopes?.metadata({ doctor_id: targetUserId, clinica_id: blockAnchor });
+        const impactClinicIds = blockMetadata?.effective_clinic_ids || impactContext?.clinicIds || [clinicaId];
         if (['delete_row', 'delete-row'].includes(req.body?.action)) {
             const clinicTimezone = await getClinicTimezoneById(clinicaId);
             const appointments = (await Promise.all(impactClinicIds.map(impactId => findFutureAppointmentsForRowImpact({ actorId,
@@ -3334,7 +3413,8 @@ exports.previewHorarioImpact = async (req, res) => {
 
         const appointments = ['block', 'create_block', 'update_block'].includes(req.body?.action)
             && ['daily', 'weekly', 'monthly'].includes(req.body?.recurrente)
-            ? await findAppointmentsForRecurringBlockImpact({ actorId, doctorId: targetUserId, clinicaId, body: req.body, timeZone: clinicTimezone })
+            ? (await Promise.all(impactClinicIds.map(impactId => findAppointmentsForRecurringBlockImpact({ actorId,
+                doctorId: targetUserId, clinicaId: impactId, body: req.body, timeZone: clinicTimezone })))).flat()
             : (await Promise.all(impactClinicIds.map(impactId => findAppointmentsForImpact({
             actorId, doctorId: targetUserId, clinicaId: impactId, intervals, timeZone: clinicTimezone,
         })))).flat();
@@ -3345,6 +3425,7 @@ exports.previewHorarioImpact = async (req, res) => {
             intervals,
             appointments,
             clinic_timezone: clinicTimezone,
+            ...(blockMetadata || {}),
         });
     } catch (error) {
         if (sendPersonalScheduleTransferError(error, res) || sendCalendarMutationError(error, res)) return;
@@ -3515,7 +3596,9 @@ async function loadAppointmentsForScheduleRange({ actorId, doctorId, clinicIds, 
     });
 }
 
-async function findPersonalBlockAppointmentConflict({ doctorId, clinicaId, start, end }) {
+async function findPersonalBlockAppointmentConflict({ doctorId, clinicaId, start, end, aplica_a_todas_clinicas = false }) {
+    const scopes = await personalBlockScopeContext(doctorId);
+    const definition = { doctor_id: doctorId, clinica_id: clinicaId, aplica_a_todas_clinicas };
     // Keep resource-calendar reads within its bounded contract for long leave.
     // The future reservation guard still validates the mutation atomically.
     for (let from = new Date(start); from < end;) {
@@ -3523,7 +3606,7 @@ async function findPersonalBlockAppointmentConflict({ doctorId, clinicaId, start
         const rows = await require('../services/appointmentResourceCalendar.service').resourceAppointments({
             db: require('../../models'), doctorId, start: from, end: to,
         });
-        const conflict = rows.find(row => clinicaId == null || Number(row.clinica_id) === Number(clinicaId));
+        const conflict = rows.find(row => scopes.applies(definition, row.clinica_id));
         if (conflict) return { id_cita: Number(conflict.id_cita), inicio: conflict.inicio, fin: conflict.fin,
             clinica_id: Number(conflict.clinica_id) };
         from = to;
@@ -3753,7 +3836,7 @@ function expandBloqueoForRange(bloqueo, fromDate, toDate, timeZone = DEFAULT_TIM
                 clinica_id: bloqueo.clinica_id ?? null, fecha: date,
                 hora_inicio: toHm(projected.fecha_inicio, timeZone),
                 hora_fin: toDay(projected.fecha_fin, timeZone) === nextDay ? '24:00' : toHm(projected.fecha_fin, timeZone),
-                motivo: bloqueo.motivo || '', tipo: bloqueo.tipo || 'ausencia', recurrente: bloqueo.recurrente || 'none' });
+                motivo: bloqueo.motivo || '', tipo: bloqueo.tipo || 'ausencia', recurrente: bloqueo.recurrente || 'none', ...blockScopeFields(bloqueo) });
         }
     }
     return rows;
@@ -4380,7 +4463,7 @@ function rejectPersonalScheduleTransfer(status, body) {
 }
 
 function sendPersonalScheduleTransferError(error, res) {
-    if (/^personal_schedule_sharing_/.test(error?.code || '')) {
+    if (/^personal_(?:schedule_sharing|block_scope)_/.test(error?.code || '')) {
         res.status(error.status || 409).json({ code: error.code, message: error.message });
         return true;
     }

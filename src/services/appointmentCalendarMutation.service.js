@@ -35,6 +35,7 @@ async function uncoveredPhases({ db, rows, transaction, installationMapping = nu
       fecha_inicio: { [Op.lt]: maxEnd }, fecha_fin: { [Op.gt]: minStart } }, transaction }) : [],
     db.ClinicaHorario.findAll({ where: { clinica_id: { [Op.in]: clinicIds } }, transaction }),
   ]);
+  const blockScopes = await require('../lib/personal-block-scope').loadPersonalBlockScopes({ db, doctorIds, transaction, links });
   const result = new Set(), cache = new Map();
   for (const row of rows) {
     const clinicId = Number(row.appointment.clinica_id), timeZone = resolveClinicTimezone(clinics.find(c => Number(c.id_clinica) === clinicId));
@@ -57,8 +58,7 @@ async function uncoveredPhases({ db, rows, transaction, installationMapping = nu
         const doctorId = Number(row.doctor_id), dc = links.find(l => Number(l.doctor_id) === doctorId && Number(l.clinica_id) === clinicId);
         const context = buildDoctorAvailabilityContext({ doctorId, clinicaId: clinicId, dc, dow, fechaLocal: date, timeZone });
         cache.set(key, { windows: dc?.activo && dc?.recibe_citas ? context.docWins : [],
-          blocks: buildDoctorBloqueoRowsForDate(doctorBlocks.filter(b => Number(b.doctor_id) === doctorId
-            && (b.clinica_id == null || b.aplica_a_todas_clinicas === true || Number(b.clinica_id) === clinicId)), date, timeZone) });
+          blocks: buildDoctorBloqueoRowsForDate(blockScopes.filter(doctorBlocks.filter(b => Number(b.doctor_id) === doctorId), clinicId), date, timeZone) });
       } else {
         const room = rooms.find(r => Number(r.id) === Number(row.installation_id));
         cache.set(key, { windows: room?.activo ? buildWindowsFromHorarios(room.horarios || [], dow, date, timeZone) : [],

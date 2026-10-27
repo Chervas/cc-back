@@ -13,6 +13,25 @@ const { normalizeInstallationProfessionals, installationAllowsStaff } = require(
 const { normalizeInstallationOverlap: overlapSettings } = require('../lib/installation-overlap');
 const { agendaClinicIds, agendaInstallationAliases } = require('../lib/agenda-read-scope');
 const { normalizeSharingRequest, createInstallationPhysicalSharingService, installationSharingListMetadata } = require('../services/installationPhysicalSharing.service');
+const { filterPersonalBlocksForClinic } = require('../lib/personal-block-scope');
+const { buildDoctorBloqueoRowsForDate, resolveClinicTimezone, formatDateLocal } = require('../lib/availability-calendar');
+const { addDays } = require('../lib/personal-schedule-recurring');
+
+async function personalDoctorBlockRows({ doctorId, clinicId, start, end, timeZone, link }) {
+  const definitions = await db.DoctorBloqueo.findAll({ where: { doctor_id: doctorId, [Op.or]: [
+    { recurrente: 'none', fecha_inicio: { [Op.lt]: end }, fecha_fin: { [Op.gt]: start } },
+    { recurrente: null, fecha_inicio: { [Op.lt]: end }, fecha_fin: { [Op.gt]: start } },
+    { recurrente: { [Op.in]: ['daily', 'weekly', 'monthly'] }, fecha_inicio: { [Op.lt]: end } },
+  ] }, include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }] });
+  const scoped = await filterPersonalBlocksForClinic({ db, definitions, clinicId, links: link ? [link] : null });
+  const rows = [], last = formatDateLocal(end, timeZone);
+  for (let date = formatDateLocal(start, timeZone), count = 0; date <= last; date = addDays(date, 1)) {
+    if (++count > 368) throw Object.assign(Error('Rango de disponibilidad inválido'), { statusCode: 400 });
+    rows.push(...buildDoctorBloqueoRowsForDate(scoped, date, timeZone)
+      .filter(row => new Date(row.fecha_inicio) < end && new Date(row.fecha_fin) > start));
+  }
+  return rows;
+}
 
 const physicalSharing = req => createInstallationPhysicalSharingService({ db,
   authorize: (feature, clinicId) => assertClinicFeature(req, feature, clinicId) });
@@ -571,7 +590,7 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
 
   // Instalacion checks
   if (instalacion_id) {
-    instData = await db.Instalacion.findByPk(instalacion_id, { include: [{ model: db.InstalacionHorario, as: 'horarios' }, { model: db.InstalacionBloqueo, as: 'bloqueos' }, { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','grupoClinicaId'] }] });
+    instData = await db.Instalacion.findByPk(instalacion_id, { include: [{ model: db.InstalacionHorario, as: 'horarios' }, { model: db.InstalacionBloqueo, as: 'bloqueos' }, { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','nombre_clinica','grupoClinicaId','configuracion'] }] });
     if (!instData || !instData.activo) return res.status(404).json({ message: 'Instalación no encontrada' });
     const installationClinicId = Number(instData.clinica_id);
     try {
@@ -606,7 +625,7 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     }
     docData = await db.DoctorClinica.findOne({
       where: { doctor_id, clinica_id: accessClinicId },
-      include: [{ model: db.DoctorHorario, as: 'horarios' }],
+      include: [{ model: db.DoctorHorario, as: 'horarios' }, { model: db.Clinica, as: 'clinica', attributes: ['id_clinica','configuracion'] }],
     });
     if (!docData || !docData.activo) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor no asignado a la clínica' });
   }
@@ -641,7 +660,9 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
       citasInst.forEach(c => blockIntervals.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
     }
     if (doctor_id) {
-      const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: timeStrToDate(fecha,'23:59') }, fecha_fin: { [Op.gt]: timeStrToDate(fecha,'00:00') } } });
+      const bloqueos = await personalDoctorBlockRows({ doctorId: doctor_id, clinicId: accessClinicId,
+        start: timeStrToDate(fecha, '00:00'), end: timeStrToDate(fecha, '23:59'),
+        timeZone: resolveClinicTimezone(docData?.clinica || instData?.clinica), link: docData });
       bloqueos.forEach(b => blockIntervals.push({ start: new Date(b.fecha_inicio), end: new Date(b.fecha_fin) }));
       const citasDoc = await require('../services/appointmentResourceCalendar.service').resourceAppointments({ db, doctorId: doctor_id, start: timeStrToDate(fecha, '00:00'), end: timeStrToDate(fecha, '23:59') });
       citasDoc.forEach(c => blockIntervals.push({ start: new Date(c.inicio), end: new Date(c.fin) }));
@@ -679,8 +700,9 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
     const h = docData && (docData.horarios || []).find(h => h.dia_semana === dow);
     const inRange = h && h.activo && `${h.hora_inicio}` <= toTime(start) && `${h.hora_fin}` >= toTime(end);
     if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
-    const bloqueos = await db.DoctorBloqueo.findAll({ where: { doctor_id, fecha_inicio: { [Op.lt]: effectiveEnd }, fecha_fin: { [Op.gt]: start } } });
-    if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
+    const bloqueos = await personalDoctorBlockRows({ doctorId: doctor_id, clinicId: accessClinicId, start, end: effectiveEnd,
+      timeZone: resolveClinicTimezone(docData?.clinica || instData?.clinica), link: docData });
+    if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: 'Ausencia del profesional' });
     const citasDoc = await require('../services/appointmentResourceCalendar.service').resourceAppointments({ db, doctorId: doctor_id, start, end: effectiveEnd });
     if (citasDoc.length) conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
   }

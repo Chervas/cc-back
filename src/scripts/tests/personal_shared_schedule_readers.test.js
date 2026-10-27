@@ -21,6 +21,7 @@ function load(relative,db,deps={}){
       if(name==='crypto'||name==='node:crypto')return require(name);
       if(name==='../lib/personal-schedule-recurring')return recurring;
       if(name==='../lib/availability-calendar')return calendar;
+      if(name==='../lib/personal-block-scope')return require('../../lib/personal-block-scope');
       if(name==='../lib/flexible-agenda')return flexible;
       if(name==='./personalScheduleSharing.service'||name==='../services/personalScheduleSharing.service')return sharing;
       if(name==='../services/personalCalendarUndo.service')return require('../../services/personalCalendarUndo.service');
@@ -233,14 +234,16 @@ test('legacy availability uses the clinic civil day and timezone for slot bounda
   assert.equal(result.res.statusCode,200);assert.equal(result.res.body.available,true);
 });
 
-test('legacy shared-calendar slots and validation respect clinic-local versus global blocks',async()=>{
+test('legacy shared-calendar slots and validation apply linked blocks to both members, keep an independent third local, and retain global scope',async()=>{
   const f=fixture();f.exceptions.splice(0);
+  Object.assign(f.schedules[1],{hora_inicio:'09:00',hora_fin:'12:00'});
   const local={id:9100,doctor_id:9001,clinica_id:101,aplica_a_todas_clinicas:false,recurrente:'none',
     fecha_inicio:'2026-10-26T09:00:00Z',fecha_fin:'2026-10-26T10:00:00Z',motivo:'Owned local A'};
-  for(const [block,blockedInB] of [[local,false],[{...local,clinica_id:null},true],
-    [{...local,aplica_a_todas_clinicas:true},true],[{...local,aplica_a_todas_clinicas:1},true]]){
-    for(const clinicId of [101,102]){
-      const blocked=clinicId===101||blockedInB;
+  for(const [block,blockedIds] of [[local,[101,102]],[{...local,clinica_id:102},[101,102]],
+    [{...local,clinica_id:103},[103]],[{...local,clinica_id:null},[101,102,103]],
+    [{...local,aplica_a_todas_clinicas:true},[101,102,103]],[{...local,aplica_a_todas_clinicas:1},[101,102,103]]]){
+    for(const clinicId of [101,102,103]){
+      const blocked=blockedIds.includes(clinicId);
       const slots=await legacyAvailability(f,{clinica_id:String(clinicId),fecha:'2026-10-26',slots:'true',duracion_min:'60'},{blocks:[block]});
       assert.equal(slots.res.body.slots.length,blocked?2:3);
       assert.equal(slots.res.body.slots.some(slot=>slot.start==='2026-10-26T09:00:00.000Z'),!blocked);

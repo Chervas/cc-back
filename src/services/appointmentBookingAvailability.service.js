@@ -100,7 +100,7 @@ async function resolveInstallationKeys({ db, clinic, installationIds, transactio
 /** Bounded, bulk read model. No patient names, notes, foreign clinic IDs or SQL per candidate. */
 async function loadBookingContext({ db, clinic, profile, start, end, transaction = null, ignoreAppointmentId = null,
   occupancyEnabled = false, installationMapping = null, dates = null, patientId = null, additionalStaffIds = [], equipmentEnabled = undefined,
-  ignoreAppointmentIds = [], inheritEquipmentAttention = true, includeDiagnosticLabels = false }) {
+  ignoreAppointmentIds = [], inheritEquipmentAttention = true, includeDiagnosticLabels = false, readableBlockClinicIds = [] }) {
   const { Op } = db.Sequelize;
   // Server-owned batch only. HTTP callers never forward this option; program
   // continuation derives the IDs from the scoped purchase, not the request.
@@ -141,6 +141,8 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
       ...(profile.version === 4 ? [legacyAttentionSnapshotAttribute(db, 'CitaPaciente')] : []),
       protectedBookingAttribute(db, 'CitaPaciente'), nonShareableBookingAttribute(db, 'CitaPaciente')], transaction }),
   ]);
+  const blockScopes = await require('../lib/personal-block-scope').loadPersonalBlockScopes({ db, doctorIds, transaction, links: doctorLinks });
+  const scopedDoctorBlocks = blockScopes.filter(doctorBlocks, clinicId);
   // One physical room has one simultaneous-occupancy policy across aliases.
   const canonicalIds = [...new Set([...mapping.keys.values()].map(key => Number(key.split(':')[1])))];
   const missingCanonicalIds = canonicalIds.filter(id => !installations.some(room => Number(room.id) === id));
@@ -264,12 +266,9 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
         ...(profile.version === 4 ? { attention_visits: attentionVisits.get(id) } : {}) });
       const target = doctors.get(id);
       target.windows.push(...buildDoctorAvailabilityContext({ doctorId: id, clinicaId: clinicId, dc: doctor, dow, fechaLocal: date, timeZone }).docWins);
-      const projectedBlocks = buildDoctorBloqueoRowsForDate(doctorBlocks.filter(row => Number(row.doctor_id) === id
-        && (row.clinica_id == null || Number(row.clinica_id) === clinicId
-          || row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1)), date, timeZone);
+      const projectedBlocks = buildDoctorBloqueoRowsForDate(scopedDoctorBlocks.filter(row => Number(row.doctor_id) === id), date, timeZone);
       target.busy.push(...projectedBlocks.map(row => ({ start: row.fecha_inicio, end: row.fecha_fin })));
-      if (profile.version === 4) target.absence_windows.push(...projectedBlocks.filter(row => ['ausencia', 'vacaciones'].includes(row.tipo)
-        && (row.clinica_id == null || Number(row.clinica_id) === clinicId || row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1))
+      if (profile.version === 4) target.absence_windows.push(...projectedBlocks.filter(row => ['ausencia', 'vacaciones'].includes(row.tipo))
         .map(row => ({ start: row.fecha_inicio, end: row.fecha_fin })));
     });
     installations.forEach((installation) => {
@@ -302,8 +301,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
       patient_overlap_protected: row.get ? row.get('patient_overlap_protected') : row.patient_overlap_protected,
     }))) : [];
   return { doctors, installations: cabins, clinicWindows, installationKeys: mapping.keys, mapping, timeZone, patientBusy,
-    ...(includeDiagnosticLabels ? { personalBlocks: projectPersonalBlocks(doctorBlocks.filter(row => doctors.has(Number(row.doctor_id))
-      && (row.clinica_id == null || Number(row.clinica_id) === clinicId || row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1)), calendarDates, timeZone) } : {}),
+    ...(includeDiagnosticLabels ? { personalBlocks: projectPersonalBlocks(scopedDoctorBlocks.filter(row => doctors.has(Number(row.doctor_id))), calendarDates, timeZone, blockScopes, { clinicId, readableClinicIds: readableBlockClinicIds }) } : {}),
     ...attachEquipmentContext(equipmentContext, cabins, mapping, busy) };
 }
 

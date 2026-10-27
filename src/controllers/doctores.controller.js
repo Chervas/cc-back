@@ -19,8 +19,7 @@ async function doctorBlocksForDate({ doctorId, clinicId, date, timeZone, start, 
     { recurrente: null, fecha_inicio: { [Op.lt]: end }, fecha_fin: { [Op.gt]: start } },
     { recurrente: { [Op.in]: ['daily', 'weekly', 'monthly'] }, fecha_inicio: { [Op.lt]: end } },
   ] }, include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }] });
-  const scoped = rows.filter(row => row.clinica_id == null || Number(row.clinica_id) === Number(clinicId)
-    || row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1);
+  const scoped = await require('../lib/personal-block-scope').filterPersonalBlocksForClinic({ db, definitions: rows, clinicId });
   return buildDoctorBloqueoRowsForDate(scoped, date, timeZone)
     .filter(row => overlap(start, end, new Date(row.fecha_inicio), new Date(row.fecha_fin)));
 }
@@ -202,52 +201,28 @@ exports.updateHorarios = asyncHandler(async (req, res) => {
 
 exports.listBloqueos = asyncHandler(async (req, res) => {
   const doctorId = req.authorizedDoctorId || req.params.doctorId;
-  const clinicIds = req.authorizedDoctorClinicIds || [];
-  const items = await db.DoctorBloqueo.findAll({
-    where: {
-      doctor_id: doctorId,
-      [Op.or]: [
-        { clinica_id: { [Op.in]: clinicIds } },
-        { clinica_id: null },
-      ],
-    },
-  });
-  res.json(items);
+  return delegatePersonalSchedule(req, res, 'getPersonalBloqueos', doctorId, null);
 });
 
 exports.createBloqueo = asyncHandler(async (req, res) => {
   const doctorId = req.authorizedDoctorId || req.params.doctorId || req.userData?.userId;
-  const bloqueo = await withDoctorCalendarMutation(doctorId, transaction => db.DoctorBloqueo.create({
-    doctor_id: doctorId,
-    clinica_id: req.body.clinica_id ?? null,
-    fecha_inicio: req.body.fecha_inicio,
-    fecha_fin: req.body.fecha_fin,
-    tipo: req.body.tipo || 'ausencia',
-    motivo: req.body.motivo,
-    recurrente: req.body.recurrente || 'none',
-    aplica_a_todas_clinicas: req.body.clinica_id == null ? !!req.body.aplica_a_todas_clinicas : false,
-    creado_por: req.user?.id || null
-  }, { transaction }));
-  res.status(201).json(bloqueo);
+  req.body = { ...(req.body || {}), tipo: req.body?.tipo || 'ausencia' };
+  return delegatePersonalSchedule(req, res, 'createPersonalBloqueo', doctorId, req.body?.clinica_id ?? null);
 });
 
 exports.deleteBloqueo = asyncHandler(async (req, res) => {
   const item = await db.DoctorBloqueo.findByPk(req.params.id);
   if (!item) return res.status(404).json({ message: 'Bloqueo no encontrado' });
-  await withDoctorCalendarMutation(item.doctor_id, transaction => item.destroy({ transaction }));
-  res.status(204).end();
+  req.params.bloqueoId = String(item.id);
+  return delegatePersonalSchedule(req, res, 'deletePersonalBloqueo', item.doctor_id, item.clinica_id);
 });
 
 exports.updateBloqueo = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const bloqueo = await db.DoctorBloqueo.findByPk(id);
   if (!bloqueo) return res.status(404).json({ message: 'Bloqueo no encontrado' });
-  const payload = { ...(req.body || {}) };
-  delete payload.id;
-  delete payload.doctor_id;
-  delete payload.creado_por;
-  await withDoctorCalendarMutation(bloqueo.doctor_id, transaction => bloqueo.update(payload, { transaction }));
-  res.json(bloqueo);
+  req.params.bloqueoId = String(bloqueo.id);
+  return delegatePersonalSchedule(req, res, 'updatePersonalBloqueo', bloqueo.doctor_id, bloqueo.clinica_id);
 });
 
 async function buildSchedule(doctorId, authorizedClinicIds = []) {
@@ -262,14 +237,14 @@ async function buildSchedule(doctorId, authorizedClinicIds = []) {
       { model: db.DoctorHorario, as: 'horarios' }
     ]
   });
-  const bloqueos = await db.DoctorBloqueo.findAll({
-    where: {
-      doctor_id: doctorId,
-      [Op.or]: [
-        { clinica_id: { [Op.in]: clinicIds } },
-        { clinica_id: null },
-      ],
-    },
+  const definitions = await db.DoctorBloqueo.findAll({ where: { doctor_id: doctorId },
+    include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }] });
+  const scopes = await require('../lib/personal-block-scope').loadPersonalBlockScopes({ db, doctorIds: [doctorId], links: clinicas });
+  const bloqueos = definitions.filter(block => clinicIds.some(id => scopes.applies(block, id))).map(value => {
+    const row = value.toJSON ? value.toJSON() : value;
+    return { ...row, ...scopes.metadata(row),
+      ...(row.clinica_id != null && !clinicIds.includes(Number(row.clinica_id))
+        ? { tipo: 'ausencia', motivo: '', motivo_redacted: true, can_edit: false } : {}) };
   });
   return {
     doctor_id: String(doctorId),
@@ -395,7 +370,9 @@ exports.disponibilidad = asyncHandler(async (req, res) => {
   if (!inRange) conflicts.push({ type: 'doctor_unavailable', message: 'Doctor fuera de horario' });
   const bloqueos = await doctorBlocksForDate({ doctorId: doctor_id, clinicId: dc?.clinica_id,
     date: fechaLocal, timeZone, start, end: effectiveEnd });
-  if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message: bloqueos[0].motivo || 'Bloqueo doctor' });
+  if (bloqueos.length) conflicts.push({ type: 'doctor_unavailable', message:
+    (bloqueos[0].clinica_id == null || Number(bloqueos[0].clinica_id) === Number(dc?.clinica_id)) && bloqueos[0].motivo
+      || 'Ausencia del profesional' });
   const citasDoc = await resourceAppointments({ db, doctorId: doctor_id, start, end: effectiveEnd });
   if (citasDoc.length) conflicts.push({ type: 'overlap', message: 'Doctor ocupado' });
 

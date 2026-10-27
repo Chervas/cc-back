@@ -49,6 +49,8 @@ async function inspectSeries({ db, slots, clinicId, doctorId, installationId, do
     (doctorId || installationId) ? resourceAppointments({ db, clinic, doctorId, installationId, start: first, end: last, transaction }) : [],
     installationId ? (enabled ? resourceInstallationBlocks({ db, clinic, installationIds: [installationId], start: first, end: last, transaction }) : installation?.bloqueos || []) : [],
   ]);
+  const scopedDoctorBlocks = await require('../lib/personal-block-scope').filterPersonalBlocksForClinic({
+    db, definitions: doctorBlocks, clinicId, transaction, links: doctor ? [doctor] : null });
   const clinicHasSchedule = hasActiveSchedule(clinicHours);
   return slots.map((slot) => {
     const date = formatDateLocal(slot.start, timeZone);
@@ -73,7 +75,7 @@ async function inspectSeries({ db, slots, clinicId, doctorId, installationId, do
       if (context.dcMissing || !inAnyWindow(context.docWins, slot.start, slot.end)) {
         conflicts.push(conflict(slot, 'STAFF_OUT_OF_HOURS', 'doctor', context.outOfHoursMessage));
       }
-      if (buildDoctorBloqueoRowsForDate(doctorBlocks, date, timeZone)
+      if (buildDoctorBloqueoRowsForDate(scopedDoctorBlocks, date, timeZone)
         .some((row) => overlaps(slot.start, slot.end, row.fecha_inicio, row.fecha_fin))) {
         conflicts.push(conflict(slot, 'STAFF_BLOCKED', 'doctor', 'Profesional no disponible'));
       }

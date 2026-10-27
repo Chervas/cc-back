@@ -4,7 +4,8 @@ const { resourceAppointments, resourceInstallationBlocks } = require('../service
 const { loadBookingContext } = require('../services/appointmentBookingAvailability.service');
 const { installationAllowsStaff } = require('./installation-professionals');
 const { addDays } = require('./personal-schedule-recurring');
-const { projectPersonalBlocks } = require('./agenda-personal-blocks');
+const { projectPersonalBlocks, redactPersonalBlockDetails } = require('./agenda-personal-blocks');
+const { loadPersonalBlockScopes } = require('./personal-block-scope');
 const {
   resolveClinicTimezone, localDateTimeToUtc, formatLocal, buildWindowsFromHorarios,
   buildDoctorBloqueoRowsForDate, buildDoctorAvailabilityContext, hasActiveSchedule,
@@ -77,7 +78,7 @@ function buildLegacySlots({ baseStart, baseEnd, clinicHasSchedule, clinicWins, i
  * attention, or projecting an alias room's doctor onto the selected clinician.
  */
 async function loadLegacyAvailabilitySnapshot({ db, clinic, dates, doctorIds = [], installationIds = [],
-  additionalStaffIds = [], fetchClinicHorarios, readers = {} }) {
+  additionalStaffIds = [], fetchClinicHorarios, readers = {}, readableBlockClinicIds = [] }) {
   const doctors = uniqueIds(doctorIds), installations = uniqueIds(installationIds);
   if (doctors.length > 100 || installations.length > 100
     || [...doctors, ...installations].some(id => !Number.isSafeInteger(id) || id <= 0)) {
@@ -112,20 +113,21 @@ async function loadLegacyAvailabilitySnapshot({ db, clinic, dates, doctorIds = [
     validDoctors.length ? db.DoctorBloqueo.findAll({ where: { doctor_id: { [Op.in]: validDoctors }, [Op.or]: [
       { recurrente: 'none', fecha_inicio: { [Op.lt]: end }, fecha_fin: { [Op.gt]: start } },
       { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [Op.lte]: end } },
-    ] }, attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente', 'aplica_a_todas_clinicas'],
+    ] }, attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente', 'recurrente_hasta', 'aplica_a_todas_clinicas'],
     include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }] }) : [],
     validInstallations.length ? blocksReader({ db, clinic, installationIds: validInstallations, start, end }) : [],
     validInstallations.length ? appointmentsReader({ db, clinic, installationIds: validInstallations, start, end }) : [],
     validDoctors.length ? appointmentsReader({ db, doctorIds: validDoctors, start, end }) : [],
     additionalStaffIds.length ? supportReader({ db, clinic, profile: { phases: [] }, start, end, dates: sortedDates,
-      additionalStaffIds, occupancyEnabled: true, includeDiagnosticLabels: true }) : null,
+      additionalStaffIds, occupancyEnabled: true, includeDiagnosticLabels: true, readableBlockClinicIds }) : null,
   ]);
   const installationMap = new Map(installationsRows.map(row => [Number(row.id), row]));
   const doctorMap = new Map(doctorRows.map(row => [Number(row.doctor_id), row]));
+  const blockScopes = await loadPersonalBlockScopes({ db, doctorIds: validDoctors, links: doctorRows });
+  const scopedBlockDefs = blockScopes.filter(doctorBlockDefs.filter(row => validDoctors.includes(Number(row.doctor_id))), clinicId);
   const days = new Map();
   return { clinic, timeZone, installationMap, doctorMap, additionalStaffIds, supportContext,
-    personalBlocks: projectPersonalBlocks(doctorBlockDefs.filter(row => validDoctors.includes(Number(row.doctor_id))
-      && (row.clinica_id == null || Number(row.clinica_id) === clinicId || row.aplica_a_todas_clinicas === true || row.aplica_a_todas_clinicas === 1)), sortedDates, timeZone),
+    personalBlocks: projectPersonalBlocks(scopedBlockDefs, sortedDates, timeZone, blockScopes, { clinicId, readableClinicIds: readableBlockClinicIds }),
     day(date) {
       if (days.has(date)) return days.get(date);
       if (!sortedDates.includes(date)) throw Error('AVAILABILITY_SNAPSHOT_DATE_OUT_OF_SCOPE');
@@ -139,7 +141,7 @@ async function loadLegacyAvailabilitySnapshot({ db, clinic, dates, doctorIds = [
           dc: doctorMap.get(id) || null, dow, fechaLocal: date, timeZone })])),
         installationBlocks: groupBy(installationBlocks.filter(row => intersects(dayStart, dayEnd, row.fecha_inicio, row.fecha_fin)), 'instalacion_id'),
         installationAppointments: groupBy(installationAppointments.filter(row => intersects(dayStart, dayEnd, row.inicio, row.fin)), 'instalacion_id'),
-        doctorBlocks: groupBy(buildDoctorBloqueoRowsForDate(doctorBlockDefs, date, timeZone), 'doctor_id'),
+        doctorBlocks: groupBy(redactPersonalBlockDetails(buildDoctorBloqueoRowsForDate(scopedBlockDefs, date, timeZone), clinicId, readableBlockClinicIds), 'doctor_id'),
         doctorAppointments: groupBy(doctorAppointments.filter(row => intersects(dayStart, dayEnd, row.inicio, row.fin)), 'doctor_id'),
       };
       days.set(date, result);

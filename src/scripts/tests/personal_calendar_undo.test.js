@@ -236,8 +236,9 @@ test('membership-only changes expand Undo permissions over both historical and r
   const after = clone(before); after.DoctorClinica[2].shared_schedule_source_id = null;
   for (const [left, right] of [[before, after], [after, before]]) {
     const scopes = undoService.changedScopes(left, right, undoService.changesBetween(left, right));
-    assert.deepEqual(scopes.map(scope => scope.clinicId).sort((a, b) => a - b), [10, 20, 30]);
-    assert(scopes.every(scope => scope.doctorId === 2 && scope.kind === 'horario'));
+    for (const kind of ['horario', 'bloqueo'])
+      assert.deepEqual(scopes.filter(scope => scope.kind === kind).map(scope => scope.clinicId).sort((a,b) => a-b), [10,20,30]);
+    assert(scopes.every(scope => scope.doctorId === 2));
   }
 });
 
@@ -269,13 +270,14 @@ test('Undo of a real shared-calendar unlink refuses revoked group permissions, t
   const beforeRejectedUndo = clone(f.state());
   let checked;
   await assert.rejects(undo(f, result.undo.token, { assertPermissions: async scopes => {
-    checked = scopes.map(scope => scope.clinicId).sort((a, b) => a - b);
+    checked = scopes.map(scope => `${scope.kind}:${scope.clinicId}`).sort();
     return scopes.every(scope => scope.clinicId === 30); // Permissions on A/B were revoked.
   } }), { code: 'availability_undo_forbidden' });
-  assert.deepEqual(checked, [10, 20, 30]); assert.deepEqual(f.state(), beforeRejectedUndo);
+  assert.deepEqual(checked, ['bloqueo:10','bloqueo:20','bloqueo:30','horario:10','horario:20','horario:30']); assert.deepEqual(f.state(), beforeRejectedUndo);
   assert.equal(f.state().PersonalCalendarUndoReceipt[0].consumed_at == null, true);
   await undo(f, result.undo.token, { assertPermissions: async scopes => {
-    assert.deepEqual(scopes.map(scope => scope.clinicId).sort((a, b) => a - b), [10, 20, 30]); return true;
+    assert.deepEqual(scopes.map(scope => `${scope.kind}:${scope.clinicId}`).sort(),
+      ['bloqueo:10','bloqueo:20','bloqueo:30','horario:10','horario:20','horario:30']); return true;
   } });
   assert.deepEqual(f.state().DoctorClinica, originalLinks);
   assert.deepEqual(f.state().DoctorHorario, originalSchedules);

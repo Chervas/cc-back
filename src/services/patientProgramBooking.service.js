@@ -71,7 +71,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
       assertOperationalBookingProfile(session.booking_profile, { capabilities: capabilities() });
     }
   }
-  async function load({ publicId, clinicId, transaction = null, lock = false }) {
+  async function load({ publicId, clinicId, transaction = null, lock = false, readableBlockClinicIds = [] }) {
     assertEnabled();
     if (!Number.isSafeInteger(clinicId) || clinicId < 1) fail('program_clinic_required', 'Clínica no válida.', null, 400);
     if (lock) {
@@ -146,7 +146,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     const resourceOptions = { installations: rooms.filter(row => roomIds.includes(Number(row.id))).map(row => ({ id: Number(row.id), name: row.nombre || `Instalación ${row.id}` })),
       professionals: doctors.filter(row => doctorIds.includes(Number(row.doctor_id))).map(row => ({ id: Number(row.doctor_id),
         name: [row.doctor?.nombre, row.doctor?.apellidos].filter(Boolean).join(' ') || `Profesional ${row.doctor_id}` })) };
-    return { voucher, budget, operationallyAuthorized, origin, clinic, snapshot, sessions, resourceOptions, timeZone: resolveClinicTimezone(clinic) };
+    return { voucher, budget, operationallyAuthorized, origin, clinic, snapshot, sessions, resourceOptions, readableBlockClinicIds, timeZone: resolveClinicTimezone(clinic) };
   }
   function assertSchedulable(plan) {
     if (!plan.operationallyAuthorized || plan.voucher.status !== 'active'
@@ -215,7 +215,7 @@ function createPatientProgramBookingService({ db, enabled = programBookingEnable
     // One bounded bulk context per proposal/confirmation, never queries inside
     // the candidate loop. Only calendar intervals leave the availability layer.
     return loadBookingContext({ db, clinic: plan.clinic, profile, start, end, transaction, occupancyEnabled: true,
-      installationMapping: mapping, patientId: plan.voucher.patient_id, ignoreAppointmentIds, includeDiagnosticLabels: true });
+      installationMapping: mapping, patientId: plan.voucher.patient_id, ignoreAppointmentIds, includeDiagnosticLabels: true, readableBlockClinicIds: plan.readableBlockClinicIds });
   }
   async function read(options) { return dto(await load(options)); }
 

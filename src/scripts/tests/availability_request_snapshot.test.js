@@ -15,7 +15,7 @@ const json = value => JSON.parse(JSON.stringify(value));
 const Op = Object.fromEntries(['in', 'or', 'ne', 'lt', 'gt', 'lte'].map(key => [key, Symbol(key)]));
 const horarios = Array.from({ length: 7 }, (_, dia_semana) => ({ dia_semana, activo: true, hora_inicio: '09:00', hora_fin: '18:00' }));
 
-function fixture({ denied = false, profile = null, supportBusy = false, supportPerson = null, clinicHours = [], treatmentError = null } = {}) {
+function fixture({ denied = false, profile = null, supportBusy = false, supportPerson = null, clinicHours = [], treatmentError = null, simpleBooking = true } = {}) {
   const counts = { acl: 0, clinic: 0, clinicHours: 0, rooms: 0, doctorLinks: 0, doctorBlocks: 0,
     roomBlocks: 0, roomAppointments: 0, doctorAppointments: 0, profileContext: 0, catalog: 0, solve: 0 };
   const clinic = { id_clinica: 72, grupoClinicaId: 29, equipment_booking_enabled: true, configuracion: { timezone: 'Europe/Madrid' } };
@@ -62,7 +62,7 @@ function fixture({ denied = false, profile = null, supportBusy = false, supportP
       if (name === '../services/appointmentBookingAvailability.service') return { ...localRequire(name), loadBookingContext: readers.loadBookingContext,
         solutionsForCalendar: args => { counts.solve++; return state.profileBusy ? [] : [{ start_local: `${args.date}T10:00`, end_local: `${args.date}T10:30` }]; } };
       if (name === '../services/treatmentBookingProfile.service') return { ...localRequire(name),
-        bookingCapabilities: () => ({ simple: true, multi: true }), loadScopedTreatment: async () => {
+        bookingCapabilities: () => ({ simple: simpleBooking, multi: true }), loadScopedTreatment: async () => {
           counts.catalog++; if (treatmentError) throw treatmentError; return {};
         }, requireOperationalProfile: () => profile };
       return localRequire(name);
@@ -76,6 +76,25 @@ function fixture({ denied = false, profile = null, supportBusy = false, supportP
   }
   return { counts, state, db, readers, clinic, rooms, doctors, call };
 }
+
+test('legacy check and slots restrict only the recurring linked occurrence interval, with half-open boundaries', async () => {
+  const f=fixture({simpleBooking:false}), member=f.doctors[0];
+  Object.assign(member,{id:24,shared_schedule_source_id:23});
+  const source={...member,id:23,clinica_id:66};
+  const original=f.db.DoctorClinica.findAll;
+  f.db.DoctorClinica.findAll=async query=>query.skipSharedScheduleProjection?[source,member]:original(query);
+  f.state.doctorBlocks.push({id:291,doctor_id:5,clinica_id:66,recurrente:'weekly',tipo:'ausencia',
+    fecha_inicio:new Date('2030-01-07T12:15:00Z'),fecha_fin:new Date('2030-01-07T13:00:00Z'),excepciones:[]});
+  for (const [time,blocked] of [['09:00',false],['13:15',true],['14:00',false]]) {
+    const checked=await f.call('check',{doctor_id:'5',inicio_local:'2030-01-14T'+time,duracion_min:'30'});
+    assert.equal(checked.statusCode,blocked?409:200,time+': '+JSON.stringify(checked.body));
+    assert.equal((checked.body.resource_conflicts || []).some(row=>row.code==='STAFF_BLOCKED'),blocked);
+  }
+  const slots=await f.call('slots',{doctor_id:'5',fecha_local:'2030-01-14',duracion_min:'30',granularity_min:'15',from_local:'09:00',to_local:'15:00'});
+  assert.equal(slots.statusCode,200,JSON.stringify(slots.body));
+  assert(slots.body.slots.some(row=>row.start_local==='2030-01-14T09:00'));
+  assert(!slots.body.slots.some(row=>row.start_local==='2030-01-14T13:15'));
+});
 
 test('generic grid parity with legacy /slots in both matrix orientations, with bounded reads', async () => {
   for (const mode of ['doctor', 'installation']) {

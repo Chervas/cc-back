@@ -141,6 +141,13 @@ function undoMayReduceAvailability(changes) {
 }
 function changedScopes(before, after, changes) {
   const scopes = [];
+  const blockScopes = new Map([[before, require('../lib/personal-block-scope').createPersonalBlockScopes(before.DoctorClinica || [])],
+    [after, require('../lib/personal-block-scope').createPersonalBlockScopes(after.DoctorClinica || [])]]);
+  const addBlockScope = (snapshot, block) => {
+    const value = blockScopes.get(snapshot).metadata(block);
+    for (const clinicId of value.scope === 'global' ? [null] : value.effective_clinic_ids)
+      scopes.push({ kind: 'bloqueo', doctorId: Number(block.doctor_id), clinicId });
+  };
   const scheduleScope = (snapshot, id) => {
     const schedule = snapshot.DoctorHorario.find(row => Number(row.id) === Number(id));
     const link = schedule && snapshot.DoctorClinica.find(row => Number(row.id) === Number(schedule.doctor_clinica_id));
@@ -159,12 +166,14 @@ function changedScopes(before, after, changes) {
         ? snapshot.DoctorClinica.filter(member => Number(member.doctor_id) === Number(row.doctor_id)
           && Number(member.shared_schedule_source_id) === Number(row.shared_schedule_source_id)) : [row];
       members.forEach(member => scopes.push({ kind: 'horario', doctorId: Number(member.doctor_id), clinicId: Number(member.clinica_id) }));
+      if (Number(change.before?.shared_schedule_source_id || 0) !== Number(change.after?.shared_schedule_source_id || 0))
+        members.forEach(member => scopes.push({ kind: 'bloqueo', doctorId: Number(member.doctor_id), clinicId: Number(member.clinica_id) }));
     }
     else if (table === 'DoctorHorario') scheduleScope(snapshot, row.id);
     else if (table === 'DoctorHorarioExcepcion') scheduleScope(snapshot, row.doctor_horario_id);
     else {
       const block = table === 'DoctorBloqueo' ? row : snapshot.DoctorBloqueo.find(block => Number(block.id) === Number(row.doctor_bloqueo_id));
-      if (block) scopes.push({ kind: 'bloqueo', doctorId: Number(block.doctor_id), clinicId: block.clinica_id == null ? null : Number(block.clinica_id) });
+      if (block) addBlockScope(snapshot, block);
     }
   }
   return [...new Map(scopes.map(scope => [JSON.stringify(scope), scope])).values()];

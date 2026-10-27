@@ -84,7 +84,7 @@ function createService({ db = require('../../models'), concepts = require('./eco
       requires_manual_date: true, appointment_id: null, start_at: null, end_at: null }));
     snapshot.appointments = sessions;
     const allowed = input.kind === 'budget_concept' || ['active', 'pending'].includes(origin.status) && (!origin.expires_at || new Date(origin.expires_at) > now());
-    return { ...context, source, treatment, profile, legacy, clinic, timeZone: timezone, snapshot, sessions, reserved, pending,
+    return { ...context, readableBlockClinicIds: input.readableBlockClinicIds || [], source, treatment, profile, legacy, clinic, timeZone: timezone, snapshot, sessions, reserved, pending,
       can_schedule: allowed && pending > 0, revision: replay.hash(JSON.parse(JSON.stringify({ source, snapshot: snapshot.sha256, revisionEvidence }))),
       resourceOptions: { installations: resources.installations.map(row => ({ id: Number(row.id), name: row.name })),
         professionals: resources.doctors.map(row => ({ id: Number(row.id), name: row.name })) } };
@@ -101,7 +101,7 @@ function createService({ db = require('../../models'), concepts = require('./eco
     const profile = { version: Math.max(...sessions.map(row => row.booking_profile.version)),
       phases: sessions.flatMap(row => row.booking_profile.phases) };
     return loadBookingContext({ db, clinic: plan.clinic, profile, start, end, occupancyEnabled: true,
-      patientId: plan.patientId, includeDiagnosticLabels: true });
+      patientId: plan.patientId, includeDiagnosticLabels: true, readableBlockClinicIds: plan.readableBlockClinicIds });
   }
   async function propose(input) {
     const plan = await load(input);

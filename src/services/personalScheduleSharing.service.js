@@ -174,9 +174,24 @@ async function makePlan({ db, doctorId, input, checkAll, transaction, lock = fal
   need(typeof checkAll === 'function' && await checkAll({ doctorId: Number(doctorId), clinicIds: affectedIds, transaction }) === true,
     'forbidden', 'Necesitas permiso para gestionar los horarios de todas las clínicas afectadas.', 403);
   const sourceSchedules = source.horarios || [];
+  const blockDefinitions = db.DoctorBloqueo ? await db.DoctorBloqueo.findAll({ where: { doctor_id: Number(doctorId) },
+    include: db.DoctorBloqueoExcepcion ? [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }] : [],
+    order: [['id', 'ASC']], limit: 4001, transaction }) : [];
+  need(blockDefinitions.length <= 4000, 'review_required', 'Hay demasiados bloqueos para revisar el vínculo de una vez.');
+  const blockScopes = require('../lib/personal-block-scope').createPersonalBlockScopes(ctx.rows);
+  const affectedBlocks = blockDefinitions.filter(block => {
+    const scope = blockScopes.metadata(block);
+    return scope.scope !== 'global' && scope.effective_clinic_ids.some(id => affectedIds.includes(id));
+  });
   let previewBytes = 1024;
   const details = { revision: ctx.revision, operation: normalized.operation, source_clinica_id: normalized.source_clinica_id,
     source_doctor_clinica_id: Number(selectedSource.id), clinic_ids: normalized.clinic_ids, affected_clinic_ids: affectedIds,
+    personal_blocks: { policy: 'current_linked_group', unlink_behavior: 'anchor_only',
+      count: affectedBlocks.length, definitions: affectedBlocks.map(block => ({ id: Number(block.id),
+        canonical_clinica_id: block.clinica_id == null ? null : Number(block.clinica_id),
+        fecha_inicio: block.fecha_inicio, fecha_fin: block.fecha_fin, recurrente: block.recurrente,
+        recurrente_hasta: block.recurrente_hasta || null,
+        exceptions: (block.excepciones || []).map(row => ({ fecha: row.fecha, cancelado: row.cancelado })) })) },
     differences: affected.map(row => {
       const current = ctx.source(row).horarios || [];
       const difference = { clinica_id: clinicId(row), nombre_clinica: name(row), source_count: sourceSchedules.length, current_count: current.length,
@@ -191,7 +206,8 @@ async function makePlan({ db, doctorId, input, checkAll, transaction, lock = fal
       need(previewBytes <= 1024 * 1024, 'review_required', 'La vista previa es demasiado grande. Revisa el vínculo por partes.');
       return difference;
     }) };
-  details.preview_hash = digest({ doctor_id: Number(doctorId), input: normalized, rows: ctx.rows, details });
+  details.preview_hash = digest({ doctor_id: Number(doctorId), input: normalized, rows: ctx.rows,
+    blocks: plain(blockDefinitions), details });
   need(Buffer.byteLength(JSON.stringify(details)) <= 1024 * 1024, 'review_required', 'La vista previa es demasiado grande. Revisa el vínculo por partes.');
   return { details, ctx, input: normalized, selectedSource, source, sourceSchedules, members, selectedRows };
 }

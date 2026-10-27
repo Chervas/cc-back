@@ -1,7 +1,14 @@
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op } = db.Sequelize;
-const { assertUserCanAccessFeature } = require('../lib/access-policy');
+const { assertUserCanAccessFeature, getAccessibleClinicIdsForFeature } = require('../lib/access-policy');
+const { redactPersonalBlockDetails } = require('../lib/agenda-personal-blocks');
+async function readablePersonalBlockClinics(req) {
+  req.personalBlockReadableClinics ||= typeof getAccessibleClinicIdsForFeature === 'function'
+    ? getAccessibleClinicIdsForFeature({ actorId: Number(req.userData?.userId), featureKey: 'team.view' })
+    : Promise.resolve([]);
+  return req.personalBlockReadableClinics;
+}
 const { searchTreatmentSlots, loadBookingContext, solutionsForCalendar } = require('../services/appointmentBookingAvailability.service');
 const { addDays } = require('../lib/personal-schedule-recurring');
 const { resolveLocalInstant } = require('../lib/voucher-schedule-calendar');
@@ -29,6 +36,7 @@ async function requestOperationalProfile(treatment, req, clinic) {
 }
 const { resourceAppointments, resourceInstallationBlocks } = require('../services/appointmentResourceCalendar.service');
 const { buildLegacySlots, loadLegacyAvailabilitySnapshot } = require('../lib/availability-request-snapshot');
+const { filterPersonalBlocksForClinic } = require('../lib/personal-block-scope');
 const { allowFlexibleConflicts } = require('../lib/flexible-agenda');
 const { supportConflictsForSlot, installationStaffConflicts } = require('../lib/availability-support-conflicts');
 const {
@@ -732,7 +740,7 @@ exports.check = asyncHandler(async (req, res) => {
     const selections = { appointment: { doctor_id: Number(doctor_id), ...(installationId ? { installation_id: installationId } : {}) } };
     const additionalStaffIds = requestedAdditionalStaff(req);
     const context = await loadBookingContext({ db, clinic: clinica, profile, start, end, occupancyEnabled: true,
-      patientId: patientContext.patientId, additionalStaffIds, includeDiagnosticLabels: true,
+      patientId: patientContext.patientId, additionalStaffIds, includeDiagnosticLabels: true, readableBlockClinicIds: await readablePersonalBlockClinics(req),
       ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null,
       ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, ignore_cita_id, clinicaId) });
     const { assessment, restrictionErrorDetails, restrictionResourceConflicts } = require('../lib/booking-restriction-confirmation');
@@ -768,7 +776,7 @@ exports.check = asyncHandler(async (req, res) => {
     supportContext = await loadBookingContext({ db, clinic: clinica, profile: { phases: [] }, start, end,
       ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, ignore_cita_id, clinicaId),
       additionalStaffIds, ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, occupancyEnabled: true,
-      includeDiagnosticLabels: true });
+      includeDiagnosticLabels: true, readableBlockClinicIds: await readablePersonalBlockClinics(req) });
     supportConflicts = supportConflictsForSlot({ additionalStaffIds, supportContext, start, end, clinicaId, timeZone: clinicTimezone });
   }
 
@@ -790,7 +798,7 @@ exports.check = asyncHandler(async (req, res) => {
     const context = await loadBookingContext({ db, clinic: clinica, profile: readProfile, start, end,
       ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, ignore_cita_id, clinicaId),
       ignoreAppointmentId: ignore_cita_id ? Number(ignore_cita_id) : null, patientId: bookingContext.patientId,
-      occupancyEnabled: true, additionalStaffIds, includeDiagnosticLabels: true });
+      occupancyEnabled: true, additionalStaffIds, includeDiagnosticLabels: true, readableBlockClinicIds: await readablePersonalBlockClinics(req) });
     const solution = solveBookingProfile({ profile: bookingProfile, start, ...context, selections });
     const patientBusy = (context.patientBusy || []).some(row => new Date(row.start) < end && new Date(row.end) > start);
     if (!solution || patientBusy || supportConflicts.length || new Date(solution.end_at).getTime() !== end.getTime()) {
@@ -959,9 +967,10 @@ exports.check = asyncHandler(async (req, res) => {
       },
       include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
     });
-    const bloqueos = buildDoctorBloqueoRowsForDate(bloqueoDefs, fechaLocalCheck, clinicTimezone);
-    if (bloqueos.length) {
-      const b = bloqueos[0];
+    const scopedDefs = await filterPersonalBlocksForClinic({ db, definitions: bloqueoDefs, clinicId: clinicaId });
+    const bloqueos = redactPersonalBlockDetails(buildDoctorBloqueoRowsForDate(scopedDefs, fechaLocalCheck, clinicTimezone), Number(clinicaId), await readablePersonalBlockClinics(req));
+    const b = bloqueos.find(row => new Date(row.fecha_inicio) < end && new Date(row.fecha_fin) > start);
+    if (b) {
       conflicts.push({
         resource_type: 'staff',
         resource_role: 'doctor',
@@ -1108,7 +1117,7 @@ exports.slots = asyncHandler(async (req, res) => {
         ignoreAppointmentId: req.query.ignore_cita_id ? Number(req.query.ignore_cita_id) : null,
         ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, req.query.ignore_cita_id, clinicaId),
         patientId: bookingContext.patientId,
-        includeDiagnosticLabels: includeUnavailable });
+        includeDiagnosticLabels: includeUnavailable, readableBlockClinicIds: await readablePersonalBlockClinics(req) });
       return res.json(profileSlotsPayload({ query: req.query, profile, context, clinic: clinica, additionalStaffIds }));
     }
   }
@@ -1181,7 +1190,7 @@ exports.slots = asyncHandler(async (req, res) => {
   // One bulk read per date/request, never SQL per suggested slot or participant.
   const supportContext = additionalStaffIds.length ? await loadBookingContext({ db, clinic: clinica,
     profile: { phases: [] }, start: baseStart, end: baseEnd, additionalStaffIds, occupancyEnabled: true,
-    includeDiagnosticLabels: includeUnavailable }) : null;
+    includeDiagnosticLabels: includeUnavailable, readableBlockClinicIds: await readablePersonalBlockClinics(req) }) : null;
 
   const buildSlots = ({
     inst,
@@ -1288,10 +1297,11 @@ exports.slots = asyncHandler(async (req, res) => {
           { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [Op.lte]: baseEnd } },
         ],
       },
-      attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente'],
+      attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente', 'recurrente_hasta', 'aplica_a_todas_clinicas'],
       include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
     });
-    const docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
+    const scopedDefs = await filterPersonalBlocksForClinic({ db, definitions: docBloqDefs, clinicId: clinicaId, links: dc ? [dc] : null });
+    const docBloqRows = redactPersonalBlockDetails(buildDoctorBloqueoRowsForDate(scopedDefs, fecha_local, clinicTimezone), Number(clinicaId), await readablePersonalBlockClinics(req));
     const docCitasRows = await resourceAppointments({ db, doctorId, start: baseStart, end: baseEnd });
 
     const slotsByInst = {};
@@ -1372,10 +1382,11 @@ exports.slots = asyncHandler(async (req, res) => {
           { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [Op.lte]: baseEnd } },
         ],
       },
-      attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente'],
+      attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente', 'recurrente_hasta', 'aplica_a_todas_clinicas'],
       include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
     });
-    const docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
+    const scopedDefs = await filterPersonalBlocksForClinic({ db, definitions: docBloqDefs, clinicId: clinicaId, links: dcRows });
+    const docBloqRows = redactPersonalBlockDetails(buildDoctorBloqueoRowsForDate(scopedDefs, fecha_local, clinicTimezone), Number(clinicaId), await readablePersonalBlockClinics(req));
     const docCitasRows = await resourceAppointments({ db, doctorIds, start: baseStart, end: baseEnd });
 
     const docBloqById = new Map();
@@ -1493,10 +1504,11 @@ exports.slots = asyncHandler(async (req, res) => {
           { recurrente: { [Op.ne]: 'none' }, fecha_inicio: { [Op.lte]: baseEnd } },
         ],
       },
-      attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente'],
+      attributes: ['id', 'doctor_id', 'fecha_inicio', 'fecha_fin', 'motivo', 'tipo', 'clinica_id', 'recurrente', 'recurrente_hasta', 'aplica_a_todas_clinicas'],
       include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }],
     });
-    docBloqRows = buildDoctorBloqueoRowsForDate(docBloqDefs, fecha_local, clinicTimezone);
+    const scopedDefs = await filterPersonalBlocksForClinic({ db, definitions: docBloqDefs, clinicId: clinicaId, links: dc ? [dc] : null });
+    docBloqRows = redactPersonalBlockDetails(buildDoctorBloqueoRowsForDate(scopedDefs, fecha_local, clinicTimezone), Number(clinicaId), await readablePersonalBlockClinics(req));
     docCitasRows = await resourceAppointments({ db, doctorId, start: baseStart, end: baseEnd });
   }
 
@@ -1729,13 +1741,13 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
         ignoreAppointmentId: req.query.ignore_cita_id ? Number(req.query.ignore_cita_id) : null,
         ignoreAppointmentIds: await require('../services/appointmentPatientLinks.service').ignoreLinkedIds(db, req.query.ignore_cita_id, clinic.id_clinica),
         patientId: bookingContext.patientId,
-        includeDiagnosticLabels: grid });
+        includeDiagnosticLabels: grid, readableBlockClinicIds: await readablePersonalBlockClinics(req) });
       if (grid) personalBlocks.push(...(context.personalBlocks || []));
       const getPayload = query => profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds, completePlan, resolveInstant });
       group.forEach(date => byDate.set(date, getPayload));
     } else {
       const snapshot = await loadLegacyAvailabilitySnapshot({ db, clinic, dates: group, doctorIds: doctors,
-        installationIds: installations, additionalStaffIds, fetchClinicHorarios,
+        installationIds: installations, additionalStaffIds, fetchClinicHorarios, readableBlockClinicIds: await readablePersonalBlockClinics(req),
         readers: { resourceAppointments, resourceInstallationBlocks, loadBookingContext } });
       if (grid) personalBlocks.push(...snapshot.personalBlocks);
       group.forEach(date => byDate.set(date, query => legacySnapshotPayload(snapshot, query)));

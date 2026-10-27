@@ -7,10 +7,14 @@ assert(contextStart > 0 && contextEnd > contextStart && handlerStart > 0 && hand
 function fixture(deny = null) {
   const calls = [], headers = {}, exports = {}, req = { userData: { userId: 7 }, params: { voucherId: 'purchased-owned' }, body: { clinic_id: 999, actor_id: 999 } };
   const sandbox = { exports, asyncHandler: fn => fn, actorId: request => request.userData.userId,
+    getAccessibleClinicIdsForFeature: async ({ actorId, featureKey }) => {
+      assert.equal(actorId, 7); assert.equal(featureKey, 'team.view'); return [66,72];
+    },
     requireVoucherFeature: async (request, feature) => { calls.push(feature); if (feature === deny) throw Object.assign(Error('denied'), { statusCode: 403 }); return 66; },
     requireClinicFeature: async (request, feature, clinic) => { assert.equal(clinic, 66); calls.push(feature); if (feature === deny) throw Object.assign(Error('denied'), { statusCode: 403 }); },
     programBooking: { availabilityGrid: async input => { calls.push('grid'); assert.equal(input.clinicId, 66); assert.equal(input.actorId, 7);
-      assert.equal(input.publicId, req.params.voucherId); assert.equal(input.payload, req.body); return { rows: [], active_key: 'owned-session' }; } } };
+      assert.equal(input.publicId, req.params.voucherId); assert.equal(input.payload, req.body);
+      assert.deepEqual(input.readableBlockClinicIds, [66,72]); return { rows: [], active_key: 'owned-session' }; } } };
   vm.runInNewContext(code.slice(contextStart, contextEnd) + code.slice(handlerStart, handlerEnd), sandbox);
   const res = { set: (name, value) => { headers[name] = value; }, json: value => { res.body = value; } };
   return { calls, headers, res, run: () => exports.getProgramAvailabilityGrid(req, res) };

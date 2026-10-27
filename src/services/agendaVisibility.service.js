@@ -29,18 +29,17 @@ async function agendaVisibility({ db, clinicIds, dates }) {
   const ids = [...new Set(links.map(row => Number(row.doctor_id)))];
   const blocks = ids.length ? await db.DoctorBloqueo.findAll({ where: { doctor_id: { [Op.in]: ids },
     [Op.and]: [
-      { [Op.or]: [{ clinica_id: { [Op.in]: clinicIds } }, { clinica_id: null }] },
       { [Op.or]: [{ recurrente: { [Op.ne]: 'none' } }, {
         fecha_inicio: { [Op.lt]: new Date(`${dates.at(-1)}T23:59:59Z`) },
         fecha_fin: { [Op.gt]: new Date(`${dates[0]}T00:00:00Z`) },
       }] },
     ] }, include: [{ model: db.DoctorBloqueoExcepcion, as: 'excepciones' }] }) : [];
+  const scopes = await require('../lib/personal-block-scope').loadPersonalBlockScopes({ db, doctorIds: ids, links });
   return {
     dates,
     professionals: links.map(link => {
       const timeZone = resolveClinicTimezone(clinics.find(row => Number(row.id_clinica) === Number(link.clinica_id)));
-      const ownBlocks = blocks.filter(row => Number(row.doctor_id) === Number(link.doctor_id)
-        && (row.clinica_id == null || Number(row.clinica_id) === Number(link.clinica_id)));
+      const ownBlocks = scopes.filter(blocks.filter(row => Number(row.doctor_id) === Number(link.doctor_id)), link.clinica_id);
       return { id: String(link.doctor_id), clinic_id: String(link.clinica_id),
         // Do not subtract appointments or absences: "has a shift" != "has a free slot".
         visible_dates: dates.filter(date => buildWindowsFromHorarios(link.horarios || [], dayIndexFromLocalDate(date), date, timeZone).length

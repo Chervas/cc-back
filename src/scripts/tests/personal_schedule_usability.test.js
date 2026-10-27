@@ -29,7 +29,7 @@ function matches(value, where = {}) {
     return actual === wanted || String(actual) === String(wanted);
   });
 }
-function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard = false, emitUndoReceipt = false, sensitiveClinics = [10, 20], concurrentMutations = false, sharedCalendars = false } = {}) {
+function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard = false, emitUndoReceipt = false, sensitiveClinics = [10, 20], teamClinics = [10,20], concurrentMutations = false, sharedCalendars = false } = {}) {
   let state = {
     links: [{ id: 201, doctor_id: 2, clinica_id: 10, activo: true, recibe_citas: true },
       { id: 202, doctor_id: 2, clinica_id: 20, activo: true, recibe_citas: true },
@@ -67,6 +67,7 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
     return !source || state.links.some(link => link.id === row.doctor_clinica_id && matches(link, source.where));
   };
   const models = {
+    Sequelize: { Op },
     DoctorHorario: {
       findAll: async query => state.schedules.filter(row => matches(row, query.where) && scoped(row, query)).map(schedule),
       findOne: async query => { const row = state.schedules.find(row => matches(row, query.where) && scoped(row, query)); return row ? schedule(row) : null; },
@@ -154,9 +155,10 @@ function fixture({ bookingEnabled = true, deniedClinic = null, realCoverageGuard
       ROLES_CLINICA: ['doctor', 'propietario'], SUBROLES_CLINICA: ['doctor'], ESTADO_CUENTA: ['activa'], ESTADO_INVITACION: ['aceptada'],
       isGlobalAdmin: id => Number(id) === 1, isStaffRole: () => true, isAdminRole: () => true, canManagePersonal: () => true },
     '../lib/access-policy': { canUserAccessFeature: async ({ clinicId }) => Number(clinicId) !== deniedClinic,
-      getAccessibleClinicIdsForFeature: async ({ featureKey } = {}) => featureKey === 'patients.sensitive.view' ? sensitiveClinics : [10, 20] },
+      getAccessibleClinicIdsForFeature: async ({ featureKey, actorId } = {}) => featureKey === 'patients.sensitive.view' ? sensitiveClinics : Number(actorId) === 99 ? teamClinics : [10, 20] },
     '../services/personalPresence.service': {},
     '../services/personalScheduleSharing.service': require('../../services/personalScheduleSharing.service'),
+    '../lib/personal-block-scope': require('../../lib/personal-block-scope'),
     '../services/personalScheduleProgramRead.service': require('../../services/personalScheduleProgramRead.service'),
     '../services/appointmentCalendarMutation.service': { withCalendarMutation,
       sendCalendarMutationError: (error, res) => { if (!/^booking_calendar_/.test(error?.code || '')) return false;
@@ -196,6 +198,60 @@ function sharedPresenceFixture(options = {}) {
 }
 const widePresence = { dia_semana: 1, hora_inicio: '06:00', hora_fin: '23:00', activo: true,
   rrule: 'FREQ=WEEKLY;COUNT=3', fecha_inicio_vigencia: '2027-01-04', fecha_fin_vigencia: '2027-01-18' };
+
+test('linked block permissions exclude both members when one clinic is denied and do not offer an unusable create action', async () => {
+  const f = sharedPresenceFixture({ deniedClinic: 20 });
+  let result = await f.call('getPersonalBloqueosPermissions', {}, { id: '2' }, 99);
+  assert.equal(result.statusCode, 200); assert.deepEqual(result.body.allowed_clinic_ids_for_bloqueos, []);
+  for (const clinica_id of [10,20]) {
+    result = await f.call('createPersonalBloqueo', { clinica_id, fecha_inicio: '2027-01-04T10:00:00Z',
+      fecha_fin: '2027-01-04T11:00:00Z', tipo: 'vacaciones' }, { id:'2' }, 99);
+    assert.equal(result.statusCode,403,JSON.stringify(result));
+  }
+  assert.equal(f.calls.transactions,0); assert.equal(f.state().blocks.length,0);
+});
+test('linked block DTO preserves one canonical anchor, hides an inaccessible reason, and editing from its peer retains that anchor', async () => {
+  const f = sharedPresenceFixture({ teamClinics: [20], deniedClinic: 10 });
+  f.state().blocks.push({ id:291,doctor_id:2,clinica_id:10,fecha_inicio:new Date('2027-01-04T10:00:00Z'),
+    fecha_fin:new Date('2027-01-04T11:00:00Z'),tipo:'vacaciones',motivo:'Private reason',recurrente:'none',excepciones:[] });
+  let result = await f.call('getPersonalBloqueos', {}, {id:'2'},99);
+  assert.equal(result.statusCode,200,JSON.stringify(result)); assert.equal(result.body.length,1);
+  assert.equal(result.body[0].motivo,''); assert.equal(result.body[0].tipo,'ausencia');
+  assert.equal(result.body[0].can_edit,false); assert.equal(result.body[0].canonical_clinica_id,10);
+  assert.deepEqual(result.body[0].effective_clinic_ids,[10,20]);
+  result = await f.call('getPersonalBloqueos', {}, {id:'2'});
+  assert.equal(result.body[0].motivo,'Private reason'); assert.equal(result.body[0].can_edit,true);
+  result = await f.call('updatePersonalBloqueo',{clinica_id:20,motivo:'Updated'}, {id:'2',bloqueoId:'291'});
+  assert.equal(result.statusCode,200,JSON.stringify(result)); assert.equal(f.state().blocks.length,1);
+  assert.equal(f.state().blocks[0].clinica_id,10); assert.equal(f.state().blocks[0].motivo,'Updated');
+});
+
+test('block CAS rejects changes committed between the definition SELECT and revision pin, including same-clinic lost updates', async () => {
+  for (const moveAnchor of [true,false]) for (const handler of ['updatePersonalBloqueo','deletePersonalBloqueo',
+    'createPersonalBloqueoExcepcion','patchPersonalBloqueoExcepcion','deletePersonalBloqueoExcepcion']) {
+    const f = fixture({ sharedCalendars:true,deniedClinic:20,teamClinics:[10] });
+    const persisted = { id:291,doctor_id:2,clinica_id:10,fecha_inicio:new Date('2027-01-04T10:00:00Z'),
+      fecha_fin:new Date('2027-01-04T11:00:00Z'),tipo:'ausencia',motivo:'Original',recurrente:'none' };
+    f.state().blocks.push(persisted); f.state().revisions.push({doctor_id:2,revision:'0'});
+    let changed=false, writes=0; const findOne=f.models.DoctorBloqueo.findOne;
+    f.models.DoctorBloqueo.findOne=async query => {
+      const snapshot=await findOne(query);
+      if (!changed) { changed=true; persisted.clinica_id=moveAnchor?20:10;
+        persisted.motivo='Concurrent committed edit'; f.state().revisions[0].revision='1'; }
+      return snapshot && {...snapshot,destroy:async()=>{writes++;}};
+    };
+    const exception={id:901,doctor_bloqueo_id:291,fecha:'2027-01-04',cancelado:true,
+      update:async()=>{writes++;}};
+    Object.assign(f.models.DoctorBloqueoExcepcion,{findOne:async()=>exception,
+      upsert:async()=>{writes++;return[exception];},destroy:async()=>{writes++;return 1;}});
+    const result=await f.call(handler,{motivo:'Stale overwrite',fecha:'2027-01-04',cancelado:true},
+      {id:'2',bloqueoId:'291',exceptionId:'901'},99);
+    assert.equal(result.statusCode,409,handler+': '+JSON.stringify(result));
+    assert.equal(result.body.code,'personal_block_scope_stale'); assert.equal(writes,0);
+    assert.equal(f.state().blocks[0].clinica_id,moveAnchor?20:10);
+    assert.equal(f.state().blocks[0].motivo,'Concurrent committed edit');
+  }
+});
 
 test('a new continuous presence bar created from a shared member spans closed periods and projects one canonical row into both clinics', async () => {
   const f = sharedPresenceFixture();
