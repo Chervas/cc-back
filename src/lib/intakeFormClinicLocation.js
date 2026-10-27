@@ -17,7 +17,10 @@ function parseConfig(value) {
 
 function normalizedAlias(value) {
   if (typeof value !== 'string' && typeof value !== 'number') return null;
-  return sanitize(String(value).normalize('NFKC')) || null;
+  return sanitize(String(value).normalize('NFKC'))
+    .replace(/\bl['’](?=\p{L})/gu, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim() || null;
 }
 
 function cleanClinicLabel(value) {
@@ -116,7 +119,26 @@ function locationAliases(location, clinic) {
 
   locationFields.forEach((field) => addAlias(aliases, location?.[field]));
   clinicFields.forEach((field) => addAlias(aliases, clinic?.[field]));
+  // A structured public label such as "City - Neighbourhood" already names
+  // the branch. Derive that complete segment, never arbitrary substrings.
+  for (const field of ['label', 'public_label']) {
+    const parts = String(location?.[field] || '').split(/\s+[-–—|]\s+/);
+    if (parts.length > 1) addAlias(aliases, parts[parts.length - 1]);
+  }
   return aliases;
+}
+
+function addSharedBrandAliases(entries) {
+  const named = entries.map(entry => ({ entry, words: normalizedAlias(entry.clinic?.nombre_clinica || entry.clinic?.name)?.split(' ') || [] }));
+  if (named.length < 2 || named.some(item => item.words.length < 2)) return;
+  const shortest = Math.min(...named.map(item => item.words.length));
+  let prefixLength = 0;
+  while (prefixLength < shortest - 1 && named.every(item => item.words[prefixLength] === named[0].words[prefixLength])) prefixLength++;
+  if (!prefixLength) return;
+  for (const {entry, words} of named) {
+    const branch = words.slice(prefixLength).join(' ');
+    if (branch.length >= 3 && !/^\d+$/.test(branch)) entry.aliases.add(branch);
+  }
 }
 
 function containsWholeAlias(candidate, alias) {
@@ -193,6 +215,7 @@ function resolveConfiguredFormClinicLocation({
     if (!aliases.size) continue;
     entries.push({ clinicId, clinic, aliases });
   }
+  addSharedBrandAliases(entries);
 
   const exactMatches = entries.flatMap((entry) => (
     entry.aliases.has(candidate) ? [{ ...entry, matchedAlias: candidate }] : []

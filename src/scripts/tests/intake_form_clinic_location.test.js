@@ -48,6 +48,11 @@ function testFivePropdentalLocations() {
     ['Propdental Nou Barris', 35],
     ['Propdental Badalona', 58],
     ['Propdental Hospitalet de Llobregat', 59],
+    ['Sants', 19],
+    ['Sant Martí', 56],
+    ['Nou Barris', 35],
+    ['Badalona', 58],
+    ['L’Hospitalet', 59],
   ]);
 
   for (const [label, clinicId] of expected) {
@@ -78,6 +83,13 @@ function testRuntimeZeroClinicIdDoesNotShadowFormLabel() {
 }
 
 function testFailClosed() {
+  for (const hint of ['Barcelona', 'Sant', 'Propdental', 'La que me pille mejor', 'Gràcia']) {
+    assert.equal(resolve(hint).matched, false, `An incomplete or unconfigured branch must not resolve: ${hint}`);
+  }
+  const duplicateBranch = resolve('Sants', {configRecord: {...groupConfig, config: {locations: [
+    {id:19,label:'Barcelona - Sants'}, {id:56,label:'Otra ciudad - Sants'},
+  ]}}});
+  assert.equal(duplicateBranch.reason, 'location_ambiguous');
   const unknown = resolve('Propdental Clínica Inventada');
   assert.equal(unknown.matched, false);
   assert.equal(unknown.hasCandidate, true);

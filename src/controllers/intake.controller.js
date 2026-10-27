@@ -24,6 +24,7 @@ const MetaConnection = db.MetaConnection;
 const ClinicGoogleAdsAccount = db.ClinicGoogleAdsAccount;
 const IntakeConfig = db.IntakeConfig;
 const { scopeWhatsAppFlows } = require('../lib/intakeWhatsAppDestination');
+const { resolvePublicWhatsapp } = require('../lib/intakePublicWhatsapp');
 const ExternalCampaignInventory = db.ExternalCampaignInventory;
 const ChatFlowTemplate = db.ChatFlowTemplate;
 const ClinicaHorario = db.ClinicaHorario;
@@ -4713,69 +4714,32 @@ const getIntakeConfig = async (
     }
 
     if (resolvedGroupId) {
-      // WhatsApp por grupo (fallback si una clínica no tiene número específico).
-      let groupWhatsApp = null;
-      try {
-        const groupPhone = await ClinicMetaAsset.findOne({
-          where: {
-            grupoClinicaId: resolvedGroupId,
-            assignmentScope: 'group',
-            isActive: true,
-            assetType: 'whatsapp_phone_number'
-          },
-          attributes: ['metaAssetName', 'additionalData', 'updatedAt'],
-          order: [['updatedAt', 'DESC']],
-          raw: true
-        });
-        groupWhatsApp = extractWhatsAppNumber(groupPhone);
-      } catch (e) {
-        // No bloquear el snippet/editor por un fallo en soporte extra.
-        groupWhatsApp = null;
-      }
-
       const clinics = await Clinica.findAll({
         where: { grupoClinicaId: resolvedGroupId },
-        attributes: ['id_clinica', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'url_web', 'url_avatar'],
+        attributes: ['id_clinica', 'grupoClinicaId', 'nombre_clinica', 'telefono', 'telefono_fijo', 'telefono_movil', 'telefono_whatsapp', 'direccion', 'url_web', 'url_avatar'],
         order: [['nombre_clinica', 'ASC']],
         raw: true
       });
 
-      // WhatsApp por clínica (si existe), con fallback al número del grupo.
+      // Consultar sólo metadata pública y bindings; nunca cargar tokens.
       const clinicIds = clinics.map((c) => c.id_clinica).filter(Boolean);
       const openingHoursByClinicId = await buildOpeningHoursTextByClinicId(clinicIds);
-      const whatsappByClinicId = new Map();
-      if (clinicIds.length) {
-        const clinicPhones = await ClinicMetaAsset.findAll({
-          where: {
-            assetType: 'whatsapp_phone_number',
-            isActive: true,
-            clinicaId: { [Op.in]: clinicIds }
-          },
-          attributes: ['clinicaId', 'metaAssetName', 'additionalData', 'updatedAt'],
-          order: [['updatedAt', 'DESC']],
-          raw: true
-        });
-        for (const asset of clinicPhones) {
-          const cid = asset?.clinicaId;
-          if (!cid) continue;
-          if (whatsappByClinicId.has(cid)) continue; // ya tenemos el más reciente por el order
-          const wa = extractWhatsAppNumber(asset);
-          if (wa) whatsappByClinicId.set(cid, wa);
-        }
-      }
+      const [phoneAssets, phoneBindings] = await Promise.all([
+        ClinicMetaAsset.findAll({
+          where: {assetType: 'whatsapp_phone_number', isActive: true,
+            [Op.or]: [{clinicaId: {[Op.in]: clinicIds}}, {assignmentScope: 'group', grupoClinicaId: resolvedGroupId}]},
+          attributes: ['id', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'assetType', 'isActive', 'metaAssetName', 'additionalData'], raw: true,
+        }),
+        db.WhatsappChannelBinding.findAll({where: {clinic_id: {[Op.in]: clinicIds}, is_active: true},
+          attributes: ['clinic_id', 'asset_id', 'role', 'is_active'], raw: true}),
+      ]);
 
       payload.available_locations = clinics.map((c) => {
         const fixedPhone = c.telefono_fijo || c.telefono || null;
         const mobilePhone = c.telefono_movil || null;
-        const manualWhatsapp = normalizePhone(c.telefono_whatsapp);
         const phone = fixedPhone || mobilePhone || null;
-        const connectedWhatsapp = whatsappByClinicId.get(c.id_clinica) || null;
-        const whatsapp = connectedWhatsapp || manualWhatsapp || groupWhatsApp || normalizePhone(mobilePhone || fixedPhone) || null;
-        const whatsappSource = connectedWhatsapp
-          ? 'clinic_meta'
-          : (manualWhatsapp
-            ? 'clinic_manual'
-            : (groupWhatsApp ? 'group_meta' : (whatsapp ? 'contact_fallback' : null)));
+        const whatsappContact = resolvePublicWhatsapp({clinic: c, assets: phoneAssets, bindings: phoneBindings,
+          configured: (payload.locations || []).find(location => Number(location.id) === c.id_clinica) || {}});
         return {
           id: c.id_clinica,
           label: c.nombre_clinica,
@@ -4783,9 +4747,7 @@ const getIntakeConfig = async (
           fixed_phone: fixedPhone,
           mobile_phone: mobilePhone,
           phone_source: fixedPhone ? 'clinic_fixed' : (mobilePhone ? 'clinic_mobile' : null),
-          whatsapp,
-          whatsapp_connected: !!connectedWhatsapp,
-          whatsapp_source: whatsappSource,
+          ...whatsappContact,
           address: c.direccion || null,
           url_web: c.url_web || null,
           opening_hours_text: openingHoursByClinicId.get(c.id_clinica) || null,
@@ -4801,27 +4763,16 @@ const getIntakeConfig = async (
         });
       }
       if (clinicRow) {
-        let whatsapp = null;
-        try {
-          const clinicPhone = await ClinicMetaAsset.findOne({
-            where: {
-              clinicaId: clinicRow.id_clinica,
-              isActive: true,
-              assetType: 'whatsapp_phone_number'
-            },
-            attributes: ['metaAssetName', 'additionalData', 'updatedAt'],
-            order: [['updatedAt', 'DESC']],
-            raw: true
-          });
-          whatsapp = extractWhatsAppNumber(clinicPhone);
-        } catch (e) {
-          whatsapp = null;
-        }
+        const [phoneAssets, phoneBindings] = await Promise.all([
+          ClinicMetaAsset.findAll({where: {clinicaId: clinicRow.id_clinica, isActive: true, assetType: 'whatsapp_phone_number'},
+            attributes: ['id', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'assetType', 'isActive', 'metaAssetName', 'additionalData'], raw: true}),
+          db.WhatsappChannelBinding.findAll({where: {clinic_id: clinicRow.id_clinica, is_active: true},
+            attributes: ['clinic_id', 'asset_id', 'role', 'is_active'], raw: true}),
+        ]);
+        const whatsappContact = resolvePublicWhatsapp({clinic: clinicRow, assets: phoneAssets, bindings: phoneBindings,
+          configured: (payload.locations || []).find(location => Number(location.id) === clinicRow.id_clinica) || {}});
         const fixedPhone = clinicRow.telefono_fijo || clinicRow.telefono || null;
         const mobilePhone = clinicRow.telefono_movil || null;
-        const manualWhatsapp = normalizePhone(clinicRow.telefono_whatsapp);
-        const connectedWhatsapp = whatsapp || null;
-        const effectiveWhatsapp = connectedWhatsapp || manualWhatsapp || normalizePhone(mobilePhone || fixedPhone) || null;
         const openingHoursByClinicId = await buildOpeningHoursTextByClinicId([clinicRow.id_clinica]);
         payload.available_locations = [{
           id: clinicRow.id_clinica,
@@ -4830,11 +4781,7 @@ const getIntakeConfig = async (
           fixed_phone: fixedPhone,
           mobile_phone: mobilePhone,
           phone_source: fixedPhone ? 'clinic_fixed' : (mobilePhone ? 'clinic_mobile' : null),
-          whatsapp: effectiveWhatsapp,
-          whatsapp_connected: !!connectedWhatsapp,
-          whatsapp_source: connectedWhatsapp
-            ? 'clinic_meta'
-            : (manualWhatsapp ? 'clinic_manual' : (effectiveWhatsapp ? 'contact_fallback' : null)),
+          ...whatsappContact,
           address: clinicRow.direccion || null,
           url_web: clinicRow.url_web || null,
           opening_hours_text: openingHoursByClinicId.get(clinicRow.id_clinica) || null,
