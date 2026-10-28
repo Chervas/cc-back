@@ -2,10 +2,8 @@
 
 const assert = require('node:assert/strict');
 
-process.env.JOBS_AUTO_START = 'false';
-process.env.RUNTIME_ROLE = 'gateway';
-
-const { __testing } = require('../../services/marketingCompetition.service');
+const { harness } = require('./helpers/marketingOfflineHarness');
+const { __testing } = harness().load('services/marketingCompetition.service.js');
 
 function testAdsLibraryUrlProvidesCanonicalPageIdentity() {
   const url = 'https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ES&is_targeted_country=false&media_type=all&search_type=page&sort_data%5Bdirection%5D=desc&view_all_page_id=1438321663093742';

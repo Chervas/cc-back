@@ -75,7 +75,7 @@ const TREATMENT_AREA_PROFILES = {
     applicationOptions: [{ value: 'general', label: 'General / zona corporal' }],
   },
   estetica: {
-    label: 'Estética',
+    label: 'Medicina estética',
     hint: 'Tratamientos por zona, sesión, consentimiento y revisión visual.',
     defaultCategory: 'Medicina Estética',
     defaultDuration: 45,
@@ -106,6 +106,17 @@ const TREATMENT_AREA_PROFILES = {
     supportsLaboratory: false,
     applicationHint: 'La zona podológica vive en la ficha clínica del área.',
     applicationOptions: [{ value: 'general', label: 'General / zona' }],
+  },
+  cirugia_estetica: {
+    label: 'Cirugía estética',
+    hint: 'Servicios de cirugía estética con valoración, procedimiento y seguimiento postoperatorio.',
+    defaultCategory: 'Consulta de cirugía estética',
+    defaultDuration: 45,
+    defaultSessions: 1,
+    supportsPiece: false,
+    supportsLaboratory: false,
+    applicationHint: 'Los requisitos quirúrgicos se gestionan como protocolo del área.',
+    applicationOptions: [{ value: 'general', label: 'General / procedimiento' }],
   },
   cirugia_digestiva: {
     label: 'Cirugía General y Digestiva',
@@ -140,6 +151,7 @@ const TREATMENT_SERVICE_EXAMPLES = {
   estetica: ['Valoración estética facial', 'Tratamiento facial', 'Revisión postratamiento'],
   veterinaria: ['Consulta veterinaria', 'Revisión postoperatoria', 'Vacunación'],
   podologia: ['Valoración podológica', 'Quiropodia', 'Revisión de plantillas'],
+  cirugia_estetica: ['Consulta de cirugía estética', 'Cirugía estética facial', 'Cirugía estética corporal'],
   cirugia_digestiva: ['Consulta quirúrgica inicial', 'Revisión postoperatoria', 'Seguimiento digestivo'],
   general: ['Consulta inicial', 'Revisión clínica', 'Seguimiento clínico'],
 };

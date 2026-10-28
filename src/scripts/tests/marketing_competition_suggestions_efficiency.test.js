@@ -1,17 +1,10 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const axios = require('axios');
-
-process.env.JOBS_AUTO_START = 'false';
-process.env.RUNTIME_ROLE = 'gateway';
-process.env.GOOGLE_PLACES_API_KEY = 'test-places-key';
-process.env.COMPETITION_PLACES_CACHE_TTL_MS = '0';
-process.env.COMPETITION_GOOGLE_PLACES_COMPETITOR_USE_ALLOWED = 'true';
-process.env.COMPETITION_GOOGLE_PLACES_COMPETITOR_STORAGE_ALLOWED = 'true';
-
-const db = require('../../../models');
-const { __testing } = require('../../services/marketingCompetition.service');
+const { harness, forbidden } = require('./helpers/marketingOfflineHarness');
+const axios = { get: forbidden('HTTP GET'), post: forbidden('HTTP POST') };
+const { __testing } = harness({ mocks: { axios }, env: { COMPETITION_PLACES_CACHE_TTL_MS: '0' } })
+  .load('services/marketingCompetition.service.js');
 
 const EXPECTED_SUGGESTION_FIELDS = [
   'places.id',
@@ -157,7 +150,7 @@ function testAutomaticQueryUsesBusinessProfileLocality() {
   );
 }
 
-function testBusinessProfileCategoryWinsOverSecondaryClinicDiscipline() {
+function testConfiguredAreaWinsOverPublicCategory() {
   const clinic = {
     business_primary_category: 'Clínica de cirugía plástica',
     business_location_name: 'BS Medical - Cirugía y Medicina Estética',
@@ -165,9 +158,7 @@ function testBusinessProfileCategoryWinsOverSecondaryClinicDiscipline() {
     configuracion: { disciplinas: ['estetica', 'nutricion', 'cirugia_digestiva'] },
   };
   assert.deepEqual(__testing.rankingTermsForClinic(clinic), [
-    'clínica estética en Alicante',
     'medicina estética en Alicante',
-    'cirugía plástica en Alicante',
   ]);
   const relevance = __testing.competitorRelevanceForClinic({
     name: 'SEA Clinic | Medicina estética y Cirugía Plástica Alicante',
@@ -186,7 +177,7 @@ function testDefaultHeatmapSearchUsesNaturalNearMeLanguage() {
     configuracion: { disciplinas: ['estetica'] },
   };
 
-  expectNaturalHeatmapSearch(clinic, 'clínica estética cerca de mí', 'clínica estética');
+  expectNaturalHeatmapSearch(clinic, 'medicina estética cerca de mí', 'medicina estética');
 }
 
 function testLocalizedNearMeLabelsNeverReachTheProvider() {
@@ -308,19 +299,17 @@ async function testManualGoogleUrlGeneratesPersistedClinicIdentity() {
 }
 
 async function run() {
-  try {
+  {
     await testSuggestionSearchUsesLightweightSingleRequest();
     await testSuggestionCenterFallsBackToOwnPlaceDetails();
     testAutomaticQueryUsesBusinessProfileLocality();
-    testBusinessProfileCategoryWinsOverSecondaryClinicDiscipline();
+    testConfiguredAreaWinsOverPublicCategory();
     testDefaultHeatmapSearchUsesNaturalNearMeLanguage();
     testLocalizedNearMeLabelsNeverReachTheProvider();
     testHistoricalSavedHeatmapSearchExposesItsCurrentEffectiveTerm();
     testSavedHeatmapSearchIncludesBoundedEvolution();
     await testManualGoogleUrlGeneratesPersistedClinicIdentity();
     console.log('marketing_competition_suggestions_efficiency.test.js OK');
-  } finally {
-    await db.sequelize.close();
   }
 }
 

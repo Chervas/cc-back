@@ -1,6 +1,8 @@
 'use strict';
 
 const axios = require('axios');
+const { parseConfiguration } = require('../lib/clinic-configuration');
+const { withMedicalArea, areaMetadata, medicalAreaBlocker, medicalContextKey, areaError } = require('../lib/marketingMedicalArea');
 const db = require('../../models');
 const { metaGet } = require('../lib/metaClient');
 const { publicHttpUrl, resolveSafeHttpTarget } = require('../lib/safeHttpTarget');
@@ -1576,6 +1578,8 @@ function enrichClinicWithResolvedLocalProfile(clinic, identity) {
       || normalizeUrl(identity.maps_url)
       || buildGoogleMapsUrl(identity.place_id, identity.name),
     business_locality: cleanString(clinic.business_locality) || cleanString(identity.locality),
+    business_country_code: cleanString(clinic.business_country_code) || cleanString(identity.country_code || identity.country),
+    business_website_url: normalizeUrl(clinic.business_website_url) || normalizeUrl(identity.website_url),
     business_administrative_area: cleanString(clinic.business_administrative_area)
       || cleanString(identity.administrative_area),
     business_postal_code: cleanString(clinic.business_postal_code) || cleanString(identity.postal_code),
@@ -1735,11 +1739,14 @@ async function ensureClinicLocalProfileUrlIdentity(clinic, dependencies = {}) {
   );
 }
 
-async function resolvePrimaryClinic(scope) {
+async function resolvePrimaryClinic(scope, dependencies = {}) {
+  const ClinicModel = dependencies.Clinica || Clinica;
+  const LocationModel = dependencies.ClinicBusinessLocation || ClinicBusinessLocation;
+  const inventoryResolver = dependencies.resolveEffectiveMarketingAssetInventory || resolveEffectiveMarketingAssetInventory;
   const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.map(toInt).filter(Boolean) : [];
   const clinicId = clinicIds.length === 1 ? clinicIds[0] : null;
   if (!clinicId) return null;
-  const clinic = await Clinica.findByPk(clinicId, {
+  const clinic = await ClinicModel.findByPk(clinicId, {
     attributes: [
       'id_clinica',
       'nombre_clinica',
@@ -1756,35 +1763,24 @@ async function resolvePrimaryClinic(scope) {
     ],
     raw: true
   });
-  if (!clinic || !ClinicBusinessLocation) return clinic;
+  if (!clinic) return null;
+  clinic.configuracion = parseConfiguration(clinic.configuracion);
 
-  const inventory = await resolveEffectiveMarketingAssetInventory({
+  const inventory = await inventoryResolver({
     clinicIdRaw: clinicId,
     groupIdRaw: null,
     assignmentScopeRaw: 'clinic',
   });
-  const availableProfiles = Array.isArray(inventory?.google?.available_assets?.business_profile)
-    ? inventory.google.available_assets.business_profile
-    : [];
-  const effectiveProfile = inventory?.google?.effective_assets?.business_profile
-    || availableProfiles[0]
-    || null;
+  // Only the inventory's selected effective asset is authoritative. Available
+  // assets and a clinic's most recently synced mapping are not safe fallbacks.
+  const effectiveProfile = inventory?.google?.effective_assets?.business_profile || null;
   const effectiveMappingId = toInt(effectiveProfile?.mapping_id);
-  let businessLocation = effectiveMappingId
-    ? await ClinicBusinessLocation.findOne({
+  const businessLocation = effectiveMappingId && LocationModel
+    ? await LocationModel.findOne({
       where: { id: effectiveMappingId, is_active: true },
       attributes: ['id', 'location_name', 'location_id', 'primary_category', 'sync_status', 'raw_payload'],
       raw: true,
-    })
-    : null;
-  if (!businessLocation) {
-    businessLocation = await ClinicBusinessLocation.findOne({
-      where: { clinica_id: clinicId, is_active: true },
-      attributes: ['id', 'location_name', 'location_id', 'primary_category', 'sync_status', 'raw_payload'],
-      order: [['last_synced_at', 'DESC'], ['updated_at', 'DESC']],
-      raw: true,
-    });
-  }
+    }) : null;
   let businessRaw = businessLocation?.raw_payload;
   if (typeof businessRaw === 'string') {
     try {
@@ -1794,7 +1790,7 @@ async function resolvePrimaryClinic(scope) {
     }
   }
   if (!businessRaw || typeof businessRaw !== 'object' || Array.isArray(businessRaw)) businessRaw = {};
-  const businessAddress = businessRaw.storefrontAddress || {};
+  const businessAddress = businessRaw.storefrontAddress || businessRaw.storefront_address || {};
   const businessLatLng = businessRaw.latlng || businessRaw.latLng || businessRaw.location || {};
   const businessPoint = strictGeoPoint(businessLatLng.latitude, businessLatLng.longitude);
 
@@ -1806,8 +1802,10 @@ async function resolvePrimaryClinic(scope) {
     business_primary_category: businessLocation?.primary_category || null,
     business_sync_status: businessLocation?.sync_status || null,
     business_locality: cleanString(businessAddress.locality),
-    business_administrative_area: cleanString(businessAddress.administrativeArea),
-    business_postal_code: cleanString(businessAddress.postalCode),
+    business_administrative_area: cleanString(businessAddress.administrativeArea || businessAddress.administrative_area),
+    business_country_code: cleanString(businessAddress.regionCode || businessAddress.region_code),
+    business_website_url: normalizeUrl(businessRaw.websiteUri || businessRaw.website_uri),
+    business_postal_code: cleanString(businessAddress.postalCode || businessAddress.postal_code),
     business_address_lines: Array.isArray(businessAddress.addressLines)
       ? businessAddress.addressLines.map(cleanString).filter(Boolean)
       : [],
@@ -1823,16 +1821,17 @@ async function resolvePrimaryClinic(scope) {
     business_photo_url: ownProfilePhotoUrlFromBusinessPayload(businessRaw),
     business_assignment_origin: cleanString(effectiveProfile?.assignment_origin),
   };
-  return ensureClinicLocalProfileUrlIdentity(resolvedClinic);
+  const record = localProfileUrlResolutionRecord(resolvedClinic);
+  // Reading Estado/IA/polling never resolves a URL against an external provider.
+  // Do not graft an old URL identity onto a currently selected GBP mapping.
+  return !businessLocation && !effectiveProfile && record?.status === 'resolved'
+    && localProfileUrlMatches(record, clinic.url_ficha_local)
+    ? enrichClinicWithResolvedLocalProfile(resolvedClinic, record)
+    : resolvedClinic;
 }
 
 function competitionServiceHint(clinic) {
-  return disciplineSearchHint(clinic)
-    || cleanString(clinic?.servicios)
-    || cleanString(clinic?.descripcion)?.split(/[.,;]/)[0]
-    || cleanString(clinic?.business_primary_category)
-    || cleanString(clinic?.business_labels?.[0])
-    || null;
+  return (clinic?.medical_areas ? clinic : withMedicalArea(clinic))?.medical_search_term || null;
 }
 
 function clinicLocationLabel(clinic) {
@@ -1868,47 +1867,21 @@ function placeMatchesClinicAnchor(place, clinic) {
 }
 
 function rankingTermsForClinic(clinic, limit = DEFAULT_RANKING_LIMIT) {
-  const serviceHint = competitionServiceHint(clinic);
-  const city = cleanString(clinic?.ciudad)
-    || cleanString(clinic?.business_locality)
-    || cleanString(clinic?.provincia)
-    || cleanString(clinic?.business_administrative_area);
-  if (!serviceHint || !city) return [];
-
-  const disciplineKeys = Array.isArray(clinic?.configuracion?.disciplinas)
-    ? clinic.configuracion.disciplinas.map((item) => String(item || '').toLowerCase())
-    : [];
-  let baseTerms = [serviceHint];
-  const localProfileHint = specialtyHintFromText([
-    clinic?.business_primary_category,
-    clinic?.business_location_name,
-  ].map(cleanString).filter(Boolean).join(' '));
-
-  if (localProfileHint === 'clínica estética') {
-    baseTerms = ['clínica estética', 'medicina estética', 'cirugía plástica'];
-  } else if (localProfileHint === 'clínica capilar') {
-    baseTerms = ['clínica capilar', 'injerto capilar', 'trasplante capilar', 'tratamiento capilar'];
-  } else if (localProfileHint === 'podólogo') {
-    baseTerms = ['podólogo', 'clínica podológica', 'podología', 'podólogo uñas encarnadas'];
-  } else if (localProfileHint === 'clínica dental') {
-    baseTerms = ['clínica dental', 'dentista', 'implantes dentales', 'ortodoncia'];
-  } else if (disciplineKeys.some((item) => ['capilar', 'medicina_capilar', 'trasplante_capilar'].includes(item))) {
-    baseTerms = ['clínica capilar', 'injerto capilar', 'trasplante capilar', 'tratamiento capilar'];
-  } else if (disciplineKeys.includes('podologia')) {
-    baseTerms = ['podólogo', 'clínica podológica', 'podología', 'podólogo uñas encarnadas'];
-  } else if (disciplineKeys.some((item) => ['dental', 'odontologia'].includes(item))) {
-    baseTerms = ['clínica dental', 'dentista', 'implantes dentales', 'ortodoncia'];
-  } else if (
-    serviceHint === 'clínica estética'
-    || disciplineKeys.some((item) => ['estetica', 'medicina_estetica', 'cirugia_plastica'].includes(item))
-  ) {
-    baseTerms = ['clínica estética', 'medicina estética', 'cirugía plástica'];
-  }
-
-  return [...new Set(baseTerms.map((term) => `${term} en ${city}`))].slice(0, limit);
+  const selected = clinic?.medical_areas ? clinic : withMedicalArea(clinic);
+  const term = selected?.medical_search_term;
+  const city = cleanString(clinic?.ciudad) || cleanString(clinic?.business_locality)
+    || cleanString(clinic?.provincia) || cleanString(clinic?.business_administrative_area);
+  const alternatives = {
+    'clínica dental': ['clínica dental', 'dentista', 'implantes dentales', 'ortodoncia'],
+    'clínica capilar': ['clínica capilar', 'injerto capilar', 'trasplante capilar', 'tratamiento capilar'],
+    podología: ['podología', 'clínica podológica', 'podólogo', 'podólogo uñas encarnadas'],
+  };
+  return term && city ? (alternatives[term] || [term]).slice(0, limit).map(value => `${value} en ${city}`) : [];
 }
 
 function competitionSetupBlocker(clinic, explicitQuery = null) {
+  const areaBlocker = medicalAreaBlocker(clinic?.medical_areas ? clinic : withMedicalArea(clinic));
+  if (areaBlocker) return areaBlocker;
   const localProfileUrl = cleanString(clinic?.url_ficha_local);
   const canonicalPlaceId = normalizePlaceId(clinic?.business_place_id);
   const urlResolutionError = clinic?.business_profile_url_resolution_error;
@@ -1954,6 +1927,7 @@ function competitionSetupBlocker(clinic, explicitQuery = null) {
 function buildSetupRequiredPayload(scope, clinic, blocker, query = null) {
   return {
     success: false,
+    ...areaMetadata(clinic),
     query: cleanString(query),
     clinic: clinic ? { id: clinic.id_clinica, name: clinic.nombre_clinica } : null,
     provider_status: null,
@@ -1970,63 +1944,6 @@ function buildSetupRequiredPayload(scope, clinic, blocker, query = null) {
       clinicIds: scope?.clinicIds || []
     }
   };
-}
-
-function clinicSpecialtyText(clinic) {
-  const config = clinic?.configuracion && typeof clinic.configuracion === 'object' ? clinic.configuracion : {};
-  return normalizeBusinessName([
-    clinic?.nombre_clinica,
-    clinic?.servicios,
-    clinic?.descripcion,
-    clinic?.business_location_name,
-    clinic?.business_primary_category,
-    config.area_medica,
-    config.disciplina,
-    ...(Array.isArray(config.disciplinas) ? config.disciplinas : [])
-  ].map(cleanString).filter(Boolean).join(' '));
-}
-
-function specialtyHintFromText(value) {
-  const text = normalizeBusinessName(value);
-  if (!text) return null;
-  if (/(^| )(capilar|alopecia|injerto capilar|trasplante capilar|pelo|hair)( |$)/.test(text)) return 'clínica capilar';
-  if (/(^| )(hepatobiliar|pancreat|laparoscop|cirugia digestiva|cirujano digestivo|digestiv)( |$)/.test(text)) return 'cirujano hepatobiliar';
-  if (/(^| )(podolog|podologo|podologa|podologia|pies|pie)( |$)/.test(text)) return 'podólogo';
-  if (/(^| )(dental|dentista|odontolog|ortodoncia|implante dental)( |$)/.test(text)) return 'clínica dental';
-  if (/(^| )(cirugia plastica|medicina estetica|clinica estetica|estetica medica|plastic surgery)( |$)/.test(text)) return 'clínica estética';
-  return null;
-}
-
-function disciplineSearchHint(clinic) {
-  const localProfileHint = specialtyHintFromText([
-    clinic?.business_primary_category,
-    clinic?.business_location_name
-  ].map(cleanString).filter(Boolean).join(' '));
-  if (localProfileHint) return localProfileHint;
-
-  const disciplinas = Array.isArray(clinic?.configuracion?.disciplinas)
-    ? clinic.configuracion.disciplinas
-    : [];
-  const map = {
-    dental: 'clínica dental',
-    odontologia: 'clínica dental',
-    podologia: 'podólogo',
-    estetica: 'clínica estética',
-    fisioterapia: 'fisioterapia',
-    medicina_estetica: 'medicina estética',
-    dermatologia: 'dermatólogo',
-    oftalmologia: 'oftalmólogo',
-    capilar: 'clínica capilar',
-    medicina_capilar: 'clínica capilar',
-    trasplante_capilar: 'trasplante capilar',
-    cirugia_digestiva: 'cirujano hepatobiliar',
-    cirugia_hepatobiliar: 'cirujano hepatobiliar',
-    hepatobiliar: 'cirujano hepatobiliar'
-  };
-  const match = disciplinas.map((item) => map[String(item || '').toLowerCase()]).find(Boolean);
-  if (match) return match;
-
-  return specialtyHintFromText(clinicSpecialtyText(clinic));
 }
 
 function inferCompetitionQuery(clinic, explicitQuery = null) {
@@ -2469,7 +2386,8 @@ async function resolveOwnClinicHeatmapProfile(clinic, tracker) {
       }
     );
     const places = Array.isArray(payload) ? payload.map(normalizePlace) : [];
-    const matched = places.find((place) => placeMatchesClinicAnchor(place, clinic)) || null;
+    const matches = places.filter((place) => placeMatchesClinicAnchor(place, clinic));
+    const matched = matches.length === 1 ? matches[0] : null;
     const resolvedPlaceId = normalizePlaceId(matched?.google_place_id);
     if (!matched || !resolvedPlaceId) {
       return {
@@ -2941,8 +2859,10 @@ function mapSavedHeatmapSearchForClinic(row, clinic) {
   });
 }
 
-async function listLocalHeatmapSearches(scope) {
-  const clinic = await resolvePrimaryClinic(scope);
+async function listLocalHeatmapSearches(scope, { medicalArea = null } = {}) {
+  const clinic = withMedicalArea(await resolvePrimaryClinic(scope), medicalArea);
+  const blocker = medicalAreaBlocker(clinic);
+  if (blocker) return { success: true, ...areaMetadata(clinic), items: [], setup_required: true, setup_code: blocker.code };
   if (!clinic) return { success: true, items: [] };
   const defaultTerm = defaultLocalHeatmapTermForClinic(clinic);
   const saved = MarketingCompetitionHeatmapSearch
@@ -2978,11 +2898,14 @@ async function listLocalHeatmapSearches(scope) {
       raw: true,
     })
     : [];
-  return { success: true, items: attachLocalHeatmapEvolution(items, snapshots) };
+  return { success: true, ...areaMetadata(clinic), items: attachLocalHeatmapEvolution(items,
+    snapshots.filter((snapshot) => snapshot.payload?.medical_context_key === medicalContextKey(clinic))) };
 }
 
-async function saveLocalHeatmapSearch(scope, { term, zoomKm = 1, userId = null } = {}) {
-  const clinic = await resolvePrimaryClinic(scope);
+async function saveLocalHeatmapSearch(scope, { term, zoomKm = 1, userId = null, medicalArea = null } = {}) {
+  const clinic = withMedicalArea(await resolvePrimaryClinic(scope), medicalArea);
+  const blocker = medicalAreaBlocker(clinic);
+  if (blocker) throw areaError(blocker.code, blocker.message, 409);
   if (!clinic) {
     const error = new Error('La búsqueda necesita una única clínica seleccionada');
     error.status = 400;
@@ -3020,11 +2943,11 @@ async function saveLocalHeatmapSearch(scope, { term, zoomKm = 1, userId = null }
       last_used_at: now,
     });
   }
-  return { success: true, item: mapSavedHeatmapSearch(row) };
+  return { success: true, ...areaMetadata(clinic), item: mapSavedHeatmapSearch(row) };
 }
 
-async function deleteLocalHeatmapSearch(scope, searchIdRaw) {
-  const clinic = await resolvePrimaryClinic(scope);
+async function deleteLocalHeatmapSearch(scope, searchIdRaw, { medicalArea = null } = {}) {
+  const clinic = withMedicalArea(await resolvePrimaryClinic(scope), medicalArea);
   const searchId = toInt(searchIdRaw);
   if (!clinic || !searchId) {
     const error = new Error('Búsqueda local no válida');
@@ -3101,16 +3024,24 @@ function withBlockedLocalHeatmapMetadata(payload) {
   });
 }
 
-async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3, cachedOnly = false } = {}) {
+async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3, cachedOnly = false, medicalArea = null } = {}, dependencies = {}) {
   const normalizedTerm = normalizeLocalHeatmapTerm(term) || null;
   const normalizedZoomKm = clampHeatmapZoom(zoomKm);
-  const clinic = await resolvePrimaryClinic(scope);
+  const clinic = withMedicalArea(await (dependencies.resolvePrimaryClinic || resolvePrimaryClinic)(scope), medicalArea);
+  const cache = dependencies.persistentHeatmapCache || persistentHeatmapCache;
+  const metadata = { ...areaMetadata(clinic), medical_context_key: medicalContextKey(clinic) };
+  const areaBlocker = medicalAreaBlocker(clinic);
+  if (areaBlocker) return withBlockedLocalHeatmapMetadata({
+    success: false, ...metadata, setup_required: true, setup_code: areaBlocker.code,
+    message: areaBlocker.message, points: [],
+  });
   if (
     !competitionPlacesFeatureEnabled()
     || !COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED
   ) {
     return withBlockedLocalHeatmapMetadata({
       success: false,
+      ...metadata,
       setup_required: true,
       setup_code: 'LOCAL_RANKING_PROVIDER_REQUIRED',
       message: 'El mapa de posicionamiento está pausado hasta conectar un proveedor de ranking local cuya licencia permita este uso y guardar resultados.',
@@ -3123,6 +3054,7 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3, cachedOn
   if (setupBlocker) {
     return withBlockedLocalHeatmapMetadata({
       success: false,
+      ...metadata,
       setup_required: true,
       setup_code: setupBlocker.code,
       message: setupBlocker.message,
@@ -3135,6 +3067,7 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3, cachedOn
   if (!selectedTerm) {
     return withBlockedLocalHeatmapMetadata({
       success: false,
+      ...metadata,
       setup_required: true,
       setup_code: 'LOCAL_TERM_REQUIRED',
       message: 'Falta una búsqueda relevante para calcular el mapa de posición local.',
@@ -3147,7 +3080,7 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3, cachedOn
   const identity = buildHeatmapCacheIdentity({
     scope,
     clinicId: clinic.id_clinica,
-    placeKey: localHeatmapPlaceKey(clinic),
+    placeKey: `${localHeatmapPlaceKey(clinic)}:area:${clinic.selected_medical_area?.code || 'legacy'}:${medicalContextKey(clinic)}`,
     googlePlaceId: storedPlaceId,
     term: heatmapQuery,
     zoomKm: normalizedZoomKm,
@@ -3155,12 +3088,16 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3, cachedOn
     algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION
   });
   if (cachedOnly) {
-    const cached = await persistentHeatmapCache.peek(identity);
-    return withLocalHeatmapComparison(identity, cached);
+    const cached = await cache.peek(identity);
+    // Capability is a service decision after gates/setup, not a side effect of peek.
+    const response = { ...cached, ...metadata, cache: {
+      ...cached.cache, refresh_available: cached.cache?.status !== 'fresh' && cached.cache?.refresh_in_progress !== true,
+    } };
+    return withLocalHeatmapComparison(identity, response);
   }
   await assertLocalHeatmapGenerationBudget(identity);
 
-  const resolved = await persistentHeatmapCache.resolve({
+  const resolved = await cache.resolve({
     identity,
     refreshPayload: {
       scope: {
@@ -3169,6 +3106,7 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3, cachedOn
         groupId: toInt(scope?.groupId),
         clinicIds: Array.isArray(scope?.clinicIds) ? scope.clinicIds.map(toInt).filter(Boolean) : [],
       },
+      medicalArea: clinic.selected_medical_area?.code || null,
       selectedTerm,
       zoomKm: normalizedZoomKm,
     },
@@ -3182,11 +3120,13 @@ async function getLocalRankingHeatmap(scope, { term = null, zoomKm = 3, cachedOn
       },
     });
   }
-  await persistLocalHeatmapSnapshot(identity, resolved);
-  return withLocalHeatmapComparison(identity, resolved);
+  const response = { ...resolved, ...metadata };
+  await persistLocalHeatmapSnapshot(identity, response);
+  return withLocalHeatmapComparison(identity, response);
 }
 
-async function executeLocalRankingHeatmapRefresh(payload = {}) {
+async function executeLocalRankingHeatmapRefresh(payload = {}, dependencies = {}) {
+  const cache = dependencies.persistentHeatmapCache || persistentHeatmapCache;
   const cacheKey = cleanString(payload.cacheKey);
   const refreshToken = cleanString(payload.refreshToken);
   const selectedTerm = normalizeLocalHeatmapTerm(payload.selectedTerm);
@@ -3195,22 +3135,28 @@ async function executeLocalRankingHeatmapRefresh(payload = {}) {
     return { status: 'failed', retryable: false, error_message: 'marketing_competition_heatmap_refresh payload inválido' };
   }
 
-  const clinic = await resolvePrimaryClinic(scope);
+  let clinic;
+  try {
+    clinic = withMedicalArea(await (dependencies.resolvePrimaryClinic || resolvePrimaryClinic)(scope), payload.medicalArea);
+    const blocker = competitionSetupBlocker(clinic, selectedTerm);
+    if (blocker) throw areaError(blocker.code, blocker.message, 409);
+    if (!competitionPlacesFeatureEnabled() || !COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED) {
+      throw areaError('LOCAL_RANKING_PROVIDER_REQUIRED', 'El proveedor de ranking está deshabilitado.', 409);
+    }
+  } catch (error) {
+    await cache.release({ cache_key: cacheKey }, refreshToken, error);
+    return { status: 'failed', retryable: false, error_message: error.code || 'LOCAL_HEATMAP_CONTEXT_CHANGED' };
+  }
   if (!clinic) {
     return { status: 'failed', retryable: false, error_message: 'La clínica del mapa local ya no está disponible' };
   }
   const terms = rankingTermsForClinic(clinic);
-  const knownCompetitors = await MarketingCompetitor.findAll({
-    where: buildCompetitorWhere(scope),
-    attributes: ['id', 'name', 'google_place_id'],
-    raw: true,
-  });
   const heatmapQuery = heatmapSearchTermForClinic(selectedTerm, clinic) || selectedTerm;
   const normalizedZoomKm = clampHeatmapZoom(payload.zoomKm);
   const identity = buildHeatmapCacheIdentity({
     scope,
     clinicId: clinic.id_clinica,
-    placeKey: localHeatmapPlaceKey(clinic),
+    placeKey: `${localHeatmapPlaceKey(clinic)}:area:${clinic.selected_medical_area?.code || 'legacy'}:${medicalContextKey(clinic)}`,
     googlePlaceId: normalizePlaceId(clinic.business_place_id),
     term: heatmapQuery,
     zoomKm: normalizedZoomKm,
@@ -3218,16 +3164,16 @@ async function executeLocalRankingHeatmapRefresh(payload = {}) {
     algorithmVersion: LOCAL_HEATMAP_CACHE_ALGORITHM_VERSION,
   });
   if (identity.cache_key !== cacheKey) {
-    await persistentHeatmapCache.release({ cache_key: cacheKey }, refreshToken, new Error('La identidad del mapa local ha cambiado')).catch(() => {});
+    await cache.release({ cache_key: cacheKey }, refreshToken, new Error('La identidad del mapa local ha cambiado')).catch(() => {});
     return { status: 'failed', retryable: false, error_message: 'La identidad del mapa local ha cambiado' };
   }
 
-  const current = await persistentHeatmapCache.find(identity);
+  const current = await cache.find(identity);
   const currentToken = cleanString(current?.refresh_lock_token || current?.get?.('refresh_lock_token'));
   if (current && currentToken !== refreshToken && heatmapCacheStatus(current) === 'fresh') {
     return { status: 'completed', cacheKey, cacheStatus: 'fresh', providerRequests: 0, alreadyRefreshed: true };
   }
-  const claim = await persistentHeatmapCache.claimForRefresh(identity, refreshToken);
+  const claim = await cache.claimForRefresh(identity, refreshToken);
   if (!claim.acquired || !claim.token) {
     return {
       status: 'waiting',
@@ -3236,7 +3182,12 @@ async function executeLocalRankingHeatmapRefresh(payload = {}) {
     };
   }
 
-  const result = await persistentHeatmapCache.generateAndPersist(identity, claim.token, () => (
+  const knownCompetitors = await MarketingCompetitor.findAll({
+    where: buildCompetitorWhere(scope),
+    attributes: ['id', 'name', 'google_place_id'],
+    raw: true,
+  });
+  const result = await cache.generateAndPersist(identity, claim.token, () => (
     generateLocalRankingHeatmapSnapshot({
       clinic,
       terms,
@@ -3244,7 +3195,9 @@ async function executeLocalRankingHeatmapRefresh(payload = {}) {
       heatmapQuery,
       radiusKm: normalizedZoomKm,
       knownCompetitors,
-    })
+    }).then((generated) => ({ ...generated, payload: {
+      ...generated.payload, ...areaMetadata(clinic), medical_context_key: medicalContextKey(clinic),
+    } }))
   ));
   await persistLocalHeatmapSnapshot(identity, result);
   return {
@@ -4655,34 +4608,8 @@ async function hydrateCompetitors(rows) {
 }
 
 function competitionDisciplineKeys(clinic) {
-  // La ficha local describe la actividad pública que se está comparando y
-  // gana a disciplinas internas secundarias. Así una clínica estética con
-  // una consulta digestiva no evalúa todos sus competidores como digestivos.
-  const localProfileHint = specialtyHintFromText([
-    clinic?.business_primary_category,
-    clinic?.business_location_name,
-  ].map(cleanString).filter(Boolean).join(' '));
-  const localProfileKeys = {
-    'clínica capilar': ['capilar'],
-    'cirujano hepatobiliar': ['cirugia_digestiva'],
-    'podólogo': ['podologia'],
-    'clínica dental': ['dental'],
-    'clínica estética': ['estetica'],
-  };
-  if (localProfileHint && localProfileKeys[localProfileHint]) {
-    return localProfileKeys[localProfileHint];
-  }
-
-  const configured = Array.isArray(clinic?.configuracion?.disciplinas)
-    ? clinic.configuracion.disciplinas.map((item) => String(item || '').toLowerCase()).filter(Boolean)
-    : [];
-  if (configured.length) return configured;
-
-  const hint = disciplineSearchHint(clinic);
-  if (hint === 'clínica capilar' || hint === 'trasplante capilar') return ['capilar'];
-  if (hint === 'podólogo') return ['podologia'];
-  if (hint === 'clínica dental') return ['dental'];
-  return [];
+  const selected = (clinic?.medical_areas ? clinic : withMedicalArea(clinic))?.selected_medical_area;
+  return selected ? [selected.code] : [];
 }
 
 function competitorRelevanceForClinic(competitor, clinic) {
@@ -4719,8 +4646,8 @@ function competitorRelevanceForClinic(competitor, clinic) {
       label: 'dental'
     },
     {
-      keys: ['estetica', 'medicina_estetica', 'cirugia_plastica'],
-      terms: ['estetica', 'estética', 'medicina estetica', 'cirugia plastica', 'cirugía plástica', 'plastic', 'beauty'],
+      keys: ['estetica', 'cirugia_estetica', 'medicina_estetica', 'cirugia_plastica'],
+      terms: ['estetica', 'estética', 'medicina estetica', 'cirugia plastica', 'cirugía plástica', 'cirugia estetica', 'cirugía estética', 'plastic', 'beauty'],
       label: 'medicina estética/cirugía plástica'
     }
   ];
@@ -4813,7 +4740,7 @@ function persistedLocalRanking(clinic) {
 
 async function listCompetitionWithDependencies(
   scope,
-  { includeInactive = false } = {},
+  { includeInactive = false, medicalArea = null } = {},
   dependencies = {}
 ) {
   const resolveClinic = dependencies.resolvePrimaryClinic || resolvePrimaryClinic;
@@ -4825,11 +4752,11 @@ async function listCompetitionWithDependencies(
   const loadProviderStatus = dependencies.providerStatusForScope || providerStatusForScope;
   const loadReviewSummary = dependencies.loadOwnProfileReviewSummary || loadOwnProfileReviewSummary;
 
+  const clinic = withMedicalArea(await resolveClinic(scope), medicalArea);
   return cachedCompetitionValue(
-    cacheKey(['competition-list', scopeCacheKey(scope), includeInactive ? 'with-inactive' : 'active-only']),
+    cacheKey(['competition-list', scopeCacheKey(scope), medicalContextKey(clinic), areaMetadata(clinic), includeInactive ? 'with-inactive' : 'active-only']),
     COMPETITION_REPORT_CACHE_TTL_MS,
     async () => {
-      const clinic = await resolveClinic(scope);
       const rows = await loadCompetitorRows(buildCompetitorWhere(scope, { includeInactive }));
       const competitors = (await hydrateRows(rows))
         .map((competitor) => ({
@@ -4845,6 +4772,7 @@ async function listCompetitionWithDependencies(
       return {
         success: true,
         mode: 'real_v1',
+        ...areaMetadata(clinic),
         setup: {
           has_competitors: competitors.some((item) => item.is_active),
           refresh_frequency: 'weekly',
@@ -4860,7 +4788,8 @@ async function listCompetitionWithDependencies(
           google_maps_url: ownProfile.google_maps_url,
           rating: ownProfile.rating,
           reviews_count: ownProfile.review_count,
-          category: ownProfile.primary_category,
+          category: clinic?.medical_search_category || null,
+          business_category: ownProfile.primary_category,
           address: ownProfile.address,
           photo_url: ownProfile.photo_url || null
         } : null,
@@ -4878,13 +4807,16 @@ async function listCompetition(scope, options = {}) {
   return listCompetitionWithDependencies(scope, options);
 }
 
-async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT } = {}) {
+async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT, medicalArea = null } = {}) {
+  const clinic = withMedicalArea(await resolvePrimaryClinic(scope), medicalArea);
+  const areaBlocker = medicalAreaBlocker(clinic);
+  if (areaBlocker) return buildSetupRequiredPayload(scope, clinic, areaBlocker, query);
   const normalizedLimit = Math.max(1, Math.min(20, Number(limit) || DEFAULT_LIMIT));
   const normalizedQuery = cleanString(query) || null;
   if (!competitionPlacesFeatureEnabled()) {
-    const clinic = await resolvePrimaryClinic(scope);
     return {
       success: false,
+      ...areaMetadata(clinic),
       query: normalizedQuery,
       clinic: clinic ? { id: clinic.id_clinica, name: clinic.nombre_clinica } : null,
       provider_status: await providerStatusForScope(scope),
@@ -4899,10 +4831,9 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
     };
   }
   return cachedCompetitionValue(
-    cacheKey(['competition-suggestions', scopeCacheKey(scope), normalizedQuery || '__auto__', normalizedLimit]),
+    cacheKey(['competition-suggestions', scopeCacheKey(scope), medicalContextKey(clinic), areaMetadata(clinic), normalizedQuery || '__auto__', normalizedLimit]),
     COMPETITION_SUGGESTIONS_CACHE_TTL_MS,
     async () => {
-  const clinic = await resolvePrimaryClinic(scope);
   const setupBlocker = competitionSetupBlocker(clinic, normalizedQuery);
   if (setupBlocker) {
     const payload = buildSetupRequiredPayload(scope, clinic, setupBlocker, normalizedQuery);
@@ -4960,6 +4891,7 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
 
     return {
       success: true,
+      ...areaMetadata(clinic),
       query: textQuery,
       clinic: clinic ? { id: clinic.id_clinica, name: clinic.nombre_clinica } : null,
       provider_status: await providerStatusForScope(scope),
@@ -4968,6 +4900,7 @@ async function suggestCompetitors(scope, { query = null, limit = DEFAULT_LIMIT }
   } catch (error) {
     return {
       success: false,
+      ...areaMetadata(clinic),
       query: textQuery,
       clinic: clinic ? { id: clinic.id_clinica, name: clinic.nombre_clinica } : null,
       provider_status: await providerStatusForScope(scope, { googleError: error }),
@@ -5489,6 +5422,7 @@ async function refreshCompetition(scope, {
 }
 
 module.exports = {
+  resolvePrimaryClinic,
   listCompetition,
   suggestCompetitors,
   createCompetitor,

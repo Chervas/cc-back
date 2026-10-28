@@ -3,15 +3,9 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const axios = require('axios');
+const { harness, forbidden } = require('./helpers/marketingOfflineHarness');
+const axios = { get: forbidden('HTTP GET'), post: forbidden('HTTP POST') };
 const { Op } = require('sequelize');
-
-process.env.JOBS_AUTO_START = 'false';
-process.env.RUNTIME_ROLE = 'gateway';
-process.env.COMPETITION_GOOGLE_PLACES_COMPETITOR_USE_ALLOWED = 'true';
-process.env.COMPETITION_GOOGLE_PLACES_COMPETITOR_STORAGE_ALLOWED = 'true';
-process.env.COMPETITION_LOCAL_RANKING_STORAGE_ALLOWED = 'true';
-process.env.GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || 'test-key';
 
 const {
   DAY_MS,
@@ -21,7 +15,7 @@ const {
   heatmapCacheStatus,
   createHeatmapCacheCoordinator,
 } = require('../../services/marketingCompetitionHeatmapCache.service');
-const { __testing } = require('../../services/marketingCompetition.service');
+const { __testing } = harness({ mocks: { axios } }).load('services/marketingCompetition.service.js');
 
 function clone(value) {
   return value === undefined ? undefined : structuredClone(value);
@@ -215,7 +209,8 @@ async function testPassiveCompetitionListNeverCallsPlacesWhenGatesAreEnabled() {
     assert.equal(result.own_profile.name, 'Ficha local persistida');
     assert.equal(result.own_profile.google_place_id, 'ChIJ-persisted');
     assert.equal(result.own_profile.google_maps_url, 'https://maps.google.com/?cid=123');
-    assert.equal(result.own_profile.category, 'Dentist');
+    assert.equal(result.own_profile.category, 'clínica dental');
+    assert.equal(result.own_profile.business_category, 'Dentist');
     assert.equal(result.own_profile.address, 'Carrer de la Salut, 1');
     assert.equal(result.own_profile.rating, 4.86);
     assert.equal(result.own_profile.reviews_count, 174);

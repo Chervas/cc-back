@@ -2,8 +2,14 @@
 
 const assert = require('assert');
 
-const service = require('../../services/marketingAiVisibility.service');
-const db = require('../../../models');
+const { harness } = require('./helpers/marketingOfflineHarness');
+const offline = harness({ mocks: {
+  './securityMonitoring.service': { assertAiAllowed: async () => {} },
+  './aiUsageTelemetry.service': { recordProviderResponse: async () => {}, recordProviderFailure: async () => {} },
+} });
+const service = offline.load('services/marketingAiVisibility.service.js');
+const db = offline.db;
+const environment = offline.env;
 
 const {
   buildProviderPrompt,
@@ -21,9 +27,6 @@ const {
 } = service.__testing;
 
 async function main() {
-  require('../../services/securityMonitoring.service').assertAiAllowed = async () => {};
-  require('../../services/aiUsageTelemetry.service').recordProviderResponse = async () => {};
-  require('../../services/aiUsageTelemetry.service').recordProviderFailure = async () => {};
 
   const openai = parseOpenAiResponse({
     model: 'gpt-test',
@@ -191,9 +194,9 @@ async function main() {
   assert.equal(
     resolveDisciplineCategory({
       nombre_clinica: 'Centro Salud',
-      configuracion: { disciplinas: ['medicina_estetica', 'cirugia_plastica'] },
+      configuracion: { disciplinas: ['estetica', 'cirugia_estetica'] },
     }, { primary_category: 'Clínica' }),
-    'clínica de medicina estética y cirugía plástica',
+    'clínica de medicina estética',
   );
   assert.deepEqual(
     buildTypicalQueries({ category: 'clínica', city: 'Almería' }),
@@ -207,10 +210,10 @@ async function main() {
     'una búsqueda local sin localidad tampoco debe generarse',
   );
 
-  const previousOpenAiKey = process.env.OPENAI_API_KEY;
-  const previousGeminiKey = process.env.GEMINI_API_KEY;
-  delete process.env.OPENAI_API_KEY;
-  delete process.env.GEMINI_API_KEY;
+  const previousOpenAiKey = environment.OPENAI_API_KEY;
+  const previousGeminiKey = environment.GEMINI_API_KEY;
+  delete environment.OPENAI_API_KEY;
+  delete environment.GEMINI_API_KEY;
   const overviewWithoutSecrets = await service.getOverview(59, { autoStart: true }, {
     resolveClinicContext: async () => ({
       id: 59,
@@ -229,9 +232,24 @@ async function main() {
   assert.equal(overviewWithoutSecrets.typical_queries.length, 4);
   assert.equal(overviewWithoutSecrets.refresh_interval_days, 7);
   assert.equal(overviewWithoutSecrets.cache_hours, 168);
-  assert.equal(overviewWithoutSecrets.max_runs_per_clinic_7d, 4);
+  assert.equal(overviewWithoutSecrets.max_runs_per_area_7d, 4);
+  assert.equal(Object.hasOwn(overviewWithoutSecrets, 'max_runs_per_clinic_7d'), false);
   assert.equal(overviewWithoutSecrets.max_attempts_per_query_7d, 1);
   assert.equal(overviewWithoutSecrets.runs.length, 0);
+
+  for (const [env, expectedLimit] of [
+    [{ AI_VISIBILITY_MAX_RUNS_PER_CLINIC_7D: '6' }, 6],
+    [{ AI_VISIBILITY_MAX_RUNS_PER_CLINIC_7D: '6', AI_VISIBILITY_MAX_RUNS_PER_AREA_7D: '8' }, 8],
+  ]) {
+    const configuredService = harness({ env }).load('services/marketingAiVisibility.service.js');
+    const result = await configuredService.getOverview(59, {}, {
+      resolveClinicContext: async () => ({ id: 59, category: 'Clínica dental', city: 'Hospitalet' }),
+      RunModel: { findAll: async () => [] },
+    });
+    assert.equal(result.max_runs_per_area_7d, expectedLimit);
+    assert.equal(Object.hasOwn(result, 'max_runs_per_clinic_7d'), false);
+    assert.equal(result.automatic.triggered, false);
+  }
 
   const overviewWithoutDiscipline = await service.getOverview(78, { autoStart: true }, {
     resolveClinicContext: async () => ({
@@ -247,8 +265,8 @@ async function main() {
   assert.equal(overviewWithoutDiscipline.automatic.status, 'setup_required');
   assert.equal(overviewWithoutDiscipline.typical_queries.length, 0);
 
-  process.env.OPENAI_API_KEY = 'test-openai-key';
-  process.env.GEMINI_API_KEY = 'test-gemini-key';
+  environment.OPENAI_API_KEY = 'test-openai-key';
+  environment.GEMINI_API_KEY = 'test-gemini-key';
   try {
     let overviewFindAllWhere = null;
     const technicalRead = await service.getOverview(59, {}, {
@@ -270,7 +288,7 @@ async function main() {
     assert.equal(technicalRead.automatic.triggered, false);
     assert.equal(
       overviewFindAllWhere.query_hash[db.Sequelize.Op.in].length,
-      4,
+      1,
       'el overview solo debe mostrar runs de la disciplina y localidad actuales',
     );
 
@@ -418,9 +436,9 @@ async function main() {
     });
     assert.equal(automatic.status, 'queued');
     assert.equal(automatic.triggered, true);
-    assert.equal(automatic.queued, 4);
-    assert.equal(createdRows.length, 4);
-    assert.equal(queuedJobs.length, 4);
+    assert.equal(automatic.queued, 1);
+    assert.equal(createdRows.length, 1);
+    assert.equal(queuedJobs.length, 1);
     assert(queuedJobs.every((job) => job.origin === 'marketing_reports:ai_visibility_automatic'));
     assert(queuedJobs.every((job) => /^ai_visibility:59:/.test(job.dedupeScope)));
 
@@ -453,9 +471,9 @@ async function main() {
       jobScheduler: { triggerImmediate: async () => undefined },
     });
     assert.equal(changedContext.status, 'queued');
-    assert.equal(changedContext.queued, 4);
-    assert.equal(createdRows.length, 8, 'los cuatro hashes del contexto nuevo no deben quedar bloqueados por el catálogo anterior');
-    assert.equal(queuedJobs.length, 8);
+    assert.equal(changedContext.queued, 1);
+    assert.equal(createdRows.length, 2, 'la consulta visible del contexto nuevo no debe quedar bloqueada por el catálogo anterior');
+    assert.equal(queuedJobs.length, 2);
 
     let unexpectedCreate = false;
     let unexpectedJob = false;
@@ -600,7 +618,24 @@ async function main() {
         jobScheduler: { triggerImmediate: async () => undefined },
       }),
       (error) => error?.code === 'AI_VISIBILITY_QUERY_ATTEMPT_LIMIT'
+        && /área seleccionada/.test(error.message)
         && /últimos siete días/.test(error.message),
+    );
+
+    await assert.rejects(
+      service.enqueueRun({
+        clinicId: 59,
+        clinic: { id: 59, category: 'Clínica dental', city: 'Hospitalet' },
+        query: typicalQueries[0].query,
+      }, {
+        RunModel: {
+          findOne: async () => null,
+          count: async ({ distinct }) => distinct ? 4 : 0,
+          create: async () => { throw new Error('el límite por área debe actuar antes de crear un run'); },
+        },
+      }),
+      (error) => error?.code === 'AI_VISIBILITY_RATE_LIMIT' && error.status === 429
+        && error.message === 'El área seleccionada de esta clínica ya ha usado sus 4 comprobaciones de los últimos siete días.',
     );
 
     let queueRunId = 0;
@@ -666,10 +701,10 @@ async function main() {
     assert.equal(queueRows.length, 1);
     assert.equal(queueAttempts, 2);
   } finally {
-    if (previousOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
-    else process.env.OPENAI_API_KEY = previousOpenAiKey;
-    if (previousGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
-    else process.env.GEMINI_API_KEY = previousGeminiKey;
+    if (previousOpenAiKey === undefined) delete environment.OPENAI_API_KEY;
+    else environment.OPENAI_API_KEY = previousOpenAiKey;
+    if (previousGeminiKey === undefined) delete environment.GEMINI_API_KEY;
+    else environment.GEMINI_API_KEY = previousGeminiKey;
   }
 
   console.log('marketing_ai_visibility.test.js: OK');
@@ -679,7 +714,4 @@ main()
   .catch((error) => {
     console.error(error);
     process.exitCode = 1;
-  })
-  .finally(async () => {
-    await db.sequelize.close().catch(() => undefined);
   });

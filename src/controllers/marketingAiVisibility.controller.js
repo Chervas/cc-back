@@ -1,5 +1,6 @@
 'use strict';
 
+const { medicalAreaFromRequest } = require('../lib/marketingMedicalArea');
 const { resolveClinicScope } = require('../lib/clinicScope');
 const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
 const { isGlobalAdmin } = require('../lib/role-helpers');
@@ -67,6 +68,8 @@ exports.getOverview = async (req, res) => {
     // servicio aplica la reutilización semanal antes de crear cualquier job.
     const result = await aiVisibilityService.getOverview(clinicId, {
       limit: req.query?.limit,
+      medicalArea: medicalAreaFromRequest(req),
+      queryKey: req.query?.query_key ?? null,
       autoStart: true,
       requestedBy: req.userData?.userId || null,
       requestedByName: req.userData?.name || null,
@@ -84,6 +87,7 @@ exports.createRun = async (req, res) => {
     await assertAccess(req, clinicId, 'write');
     const result = await aiVisibilityService.enqueueTypicalRun({
       clinicId,
+      medicalArea: medicalAreaFromRequest(req),
       queryKey: req.body?.query_key || req.body?.queryKey || null,
       // Compatibilidad temporal: solo se acepta si coincide exactamente con
       // una de las cuatro consultas generadas por el sistema. Cualquier otro
@@ -109,7 +113,7 @@ exports.getRun = async (req, res) => {
       error.status = 400;
       throw error;
     }
-    const run = await aiVisibilityService.getRun(runId, clinicId);
+    const run = await aiVisibilityService.getRun(runId, clinicId, { medicalArea: medicalAreaFromRequest(req) });
     return res.json({ success: true, run });
   } catch (error) {
     return sendError(res, error, 'Error obteniendo la comprobación de visibilidad');

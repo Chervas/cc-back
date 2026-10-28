@@ -100,6 +100,12 @@ const { detectLegacyJoinChat } = require('../lib/intake-legacy-chat');
 const { detectExternalCookieProviders } = require('../lib/intake-cookie-notice');
 const { inspectSnippetRuntime } = require('../lib/intake-snippet-runtime');
 const {
+  attribute: readDiagnosticAttribute,
+  snippetTagsInHtml,
+  readStoredWebEvidence,
+  buildWebDiagnostics,
+} = require('../lib/intake-web-diagnostics');
+const {
   buildVerificationConfigHash,
   canonicalizeIntakeDomain,
   canonicalizeIntakeDomains,
@@ -5409,7 +5415,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     try {
       const u = new URL(pageUrlRaw);
       const host = normalizeDomain(u.hostname);
-      if (!host || !isDomainAllowed(allowlist, host)) {
+      if (!host || !isDomainAllowed(allowlist, host) || stripWww(host) !== stripWww(domain)) {
         return res.status(400).json({ installed: false, details: 'La URL no coincide con el dominio allowlisteado' });
       }
       candidates.push(u.toString());
@@ -5667,8 +5673,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
 
   const evaluateSnippetHtml = async (htmlToCheck, checkedUrl) => {
     const externalCookieNoticeInfo = detectExternalCookieNotice(htmlToCheck);
-    const scriptTags = htmlToCheck.match(/<script\b[^>]*>/gi) || [];
-    const snippetTags = scriptTags.filter((t) => /(intake|loader)\.js/i.test(t));
+    const snippetTags = snippetTagsInHtml(htmlToCheck, checkedUrl, isClinicaClickAssetHost);
     if (snippetTags.length === 0) {
       return {
         installed: false,
@@ -5679,8 +5684,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       };
     }
 
-    const idRe = new RegExp(`${expectedAttr}\\s*=\\s*['"]?${expectedId}['"]?`, 'i');
-    const tagsForScope = snippetTags.filter((t) => idRe.test(t));
+    const tagsForScope = snippetTags.filter((tag) => readDiagnosticAttribute(tag, expectedAttr) === String(expectedId));
     if (tagsForScope.length === 0) {
       // Pista útil: ¿hay intake.js pero con otro scope/id?
       const clinicIdMatch = snippetTags.map((t) => t.match(/data-clinic-id\s*=\s*['"]?(\d+)['"]?/i)).find(Boolean);
@@ -5743,7 +5747,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       });
 
       if (hmacKeys.includes(expectedHmac)) {
-        return { installed: true, checked_url: checkedUrl, ...detectedRuntime, ...externalCookieNoticeInfo, consent_mode_detected: consentModeDetected };
+        return { installed: true, checked_url: checkedUrl, security_transport: 'legacy_browser_hmac', ...detectedRuntime, ...externalCookieNoticeInfo, consent_mode_detected: consentModeDetected };
       }
 
       const sameOriginBridgeDetected = tagsForScope.some((tag) => {
@@ -5767,6 +5771,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
           reason: 'missing_secure_transport',
           checked_url: checkedUrl,
           details: 'Se encontró el fragmento de medición, pero no su canal seguro de envío. Actualiza el plugin o vuelve a copiar el fragmento.',
+          ...detectedRuntime,
           ...externalCookieNoticeInfo,
         };
       }
@@ -5776,6 +5781,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
         reason: 'hmac_mismatch',
         checked_url: checkedUrl,
         details: 'Se encontró el fragmento de código de medición, pero la clave de seguridad no coincide con la que tiene guardada ClinicaClick.',
+        ...detectedRuntime,
         ...externalCookieNoticeInfo,
       };
     }
@@ -5783,17 +5789,32 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     return { installed: true, checked_url: checkedUrl, ...detectedRuntime, ...externalCookieNoticeInfo, consent_mode_detected: consentModeDetected };
   };
 
+  const storedEvidence = await readStoredWebEvidence({
+    models: db,
+    Op,
+    scopeType: scope,
+    scopeId: expectedId,
+    clinicId,
+    domain,
+    locationIds: configuredClinicIds(record),
+  });
+  const diagnosticsFor = (html, checkedUrl, evaluation) => buildWebDiagnostics({
+    html, checkedUrl, evaluation, stored: storedEvidence,
+    isAllowedAssetUrl: isClinicaClickAssetHost, expectedAttr, expectedId,
+  });
   const primaryFetch = await fetchFirstHtml(uniqueCandidates, false);
 
   if (!primaryFetch.html) {
     const code = primaryFetch.lastError?.response?.status || null;
     return res.status(502).json({
       installed: false,
+      diagnostics: diagnosticsFor(null, null, {}),
       details: `No se pudo acceder a ${domain} para verificar${code ? ` (HTTP ${code})` : ''}`
     });
   }
 
   const primaryEvaluation = await evaluateSnippetHtml(primaryFetch.html, primaryFetch.finalUrl);
+  const diagnostics = diagnosticsFor(primaryFetch.html, primaryFetch.finalUrl, primaryEvaluation);
   const legalPageVerification = await verifyConfiguredLegalPages(
     primaryEvaluation.checked_url || primaryFetch.finalUrl
   );
@@ -5817,6 +5838,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     });
     return res.json({
       installed: true,
+      diagnostics,
       checked_url: primaryEvaluation.checked_url,
       consent_mode_detected: !!primaryEvaluation.consent_mode_detected,
       uses_loader: !!primaryEvaluation.uses_loader,
@@ -5844,6 +5866,10 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       return res.json({
         installed: false,
         cache_stale: true,
+        diagnostics: {
+          ...diagnostics,
+          installation: { ...diagnostics.installation, status: 'cache_stale' },
+        },
         checked_url: primaryEvaluation.checked_url || primaryFetch.finalUrl,
         bypass_checked_url: bypassEvaluation.checked_url,
         consent_mode_detected: !!bypassEvaluation.consent_mode_detected,
@@ -5862,7 +5888,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     }
   }
 
-  return res.json({ ...primaryEvaluation, ...legalPageVerification });
+  return res.json({ ...primaryEvaluation, ...legalPageVerification, diagnostics });
 });
 
 // ===========================

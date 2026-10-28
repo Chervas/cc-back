@@ -1,5 +1,6 @@
 'use strict';
 
+const { medicalAreaFromRequest } = require('../lib/marketingMedicalArea');
 const { resolveClinicScope } = require('../lib/clinicScope');
 const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
 const { isGlobalAdmin } = require('../lib/role-helpers');
@@ -57,7 +58,8 @@ function sendError(res, error, fallbackMessage) {
   }
   return res.status(status).json({
     success: false,
-    error: error.message || fallbackMessage,
+    error: error.code || error.message || fallbackMessage,
+    message: error.message || fallbackMessage,
   });
 }
 
@@ -151,7 +153,7 @@ exports.getCompetition = async (req, res) => {
     const scope = await resolveScope(req);
     await assertScopeAccess(req, scope, 'read');
     const includeInactive = req.query.includeInactive === 'true' || req.query.include_inactive === 'true';
-    const result = await competitionService.listCompetition(scope, { includeInactive });
+    const result = await competitionService.listCompetition(scope, { includeInactive, medicalArea: medicalAreaFromRequest(req) });
     return res.json({
       ...result,
       scope: {
@@ -171,6 +173,7 @@ exports.suggestCompetitors = async (req, res) => {
     const scope = await resolveScope(req, { allowAll: false });
     await assertScopeAccess(req, scope, 'read');
     const result = await competitionService.suggestCompetitors(scope, {
+      medicalArea: medicalAreaFromRequest(req),
       query: req.query.query || req.query.q || null,
       limit: req.query.limit,
     });
@@ -301,6 +304,7 @@ exports.getLocalHeatmap = async (req, res) => {
     const scope = await resolveScope(req, { allowAll: false });
     await assertScopeAccess(req, scope, 'read');
     const result = await competitionService.getLocalRankingHeatmap(scope, {
+      medicalArea: medicalAreaFromRequest(req),
       term: req.query.term || null,
       zoomKm: req.query.zoom_km || req.query.zoomKm || null,
       cachedOnly: ['1', 'true', 'yes'].includes(String(req.query.cached_only || '').trim().toLowerCase()),
@@ -323,7 +327,7 @@ exports.listLocalHeatmapSearches = async (req, res) => {
   try {
     const scope = await resolveScope(req, { allowAll: false });
     await assertScopeAccess(req, scope, 'read');
-    return res.json(await competitionService.listLocalHeatmapSearches(scope));
+    return res.json(await competitionService.listLocalHeatmapSearches(scope, { medicalArea: medicalAreaFromRequest(req) }));
   } catch (error) {
     return sendError(res, error, 'Error cargando búsquedas locales');
   }
@@ -334,6 +338,7 @@ exports.saveLocalHeatmapSearch = async (req, res) => {
     const scope = await resolveScope(req, { allowAll: false });
     await assertScopeAccess(req, scope, 'write');
     const result = await competitionService.saveLocalHeatmapSearch(scope, {
+      medicalArea: medicalAreaFromRequest(req),
       term: req.body?.term,
       zoomKm: req.body?.zoom_km || req.body?.zoomKm,
       userId: req.userData?.userId,
@@ -348,7 +353,7 @@ exports.deleteLocalHeatmapSearch = async (req, res) => {
   try {
     const scope = await resolveScope(req, { allowAll: false });
     await assertScopeAccess(req, scope, 'write');
-    return res.json(await competitionService.deleteLocalHeatmapSearch(scope, req.params.searchId));
+    return res.json(await competitionService.deleteLocalHeatmapSearch(scope, req.params.searchId, { medicalArea: medicalAreaFromRequest(req) }));
   } catch (error) {
     return sendError(res, error, 'Error eliminando búsqueda local');
   }
