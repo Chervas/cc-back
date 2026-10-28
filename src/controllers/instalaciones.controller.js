@@ -11,6 +11,7 @@ const {
 const ACTIVE_APPOINTMENT_WHERE = { estado: { [Op.ne]: 'cancelada' } };
 const { normalizeInstallationProfessionals, installationAllowsStaff } = require('../lib/installation-professionals');
 const { normalizeInstallationOverlap: overlapSettings } = require('../lib/installation-overlap');
+const { normalizeInstallationIcon } = require('../lib/installation-icons');
 const { agendaClinicIds, agendaInstallationAliases } = require('../lib/agenda-read-scope');
 const { normalizeSharingRequest, createInstallationPhysicalSharingService, installationSharingListMetadata } = require('../services/installationPhysicalSharing.service');
 const { filterPersonalBlocksForClinic } = require('../lib/personal-block-scope');
@@ -75,7 +76,7 @@ async function validateProfessionals(value, clinicId, transaction) {
 }
 
 function sendProfessionalError(error, res) {
-  if (!['installation_professionals_invalid', 'installation_overlap_invalid'].includes(error.code)) return false;
+  if (!['installation_professionals_invalid', 'installation_overlap_invalid', 'installation_icon_invalid'].includes(error.code)) return false;
   res.status(400).json({ message: error.message, code: error.code }); return true;
 }
 
@@ -314,6 +315,7 @@ exports.create = asyncHandler(async (req, res) => {
 
   try {
     validateSharingMainFields(body, clinicaId);
+    const icono = normalizeInstallationIcon(body.icono);
     const createInTransaction = async t => {
       const created = await db.Instalacion.create({
       clinica_id: clinicaId,
@@ -322,6 +324,7 @@ exports.create = asyncHandler(async (req, res) => {
       descripcion: body.descripcion || null,
       piso: body.piso || null,
       color: body.color || '#4CAF50',
+      icono,
       capacidad: body.capacidad != null ? Number(body.capacidad) : 1,
       ...overlapSettings(body),
       activo: body.activo !== undefined ? Boolean(body.activo) : true,
@@ -372,6 +375,8 @@ exports.update = asyncHandler(async (req, res) => {
 
   try {
     validateSharingMainFields(body, item.clinica_id);
+    // Validate before entering a transaction or touching linked rooms.
+    const iconFields = body.icono !== undefined ? { icono: normalizeInstallationIcon(body.icono) } : {};
     const mutate = async t => {
       await item.reload({ transaction: t, lock: t.LOCK.UPDATE });
       // Compare normalized stored values without validating the old tuple: an
@@ -402,6 +407,7 @@ exports.update = asyncHandler(async (req, res) => {
       descripcion: body.descripcion ?? item.descripcion,
       piso: body.piso ?? item.piso,
       color: body.color ?? item.color,
+      ...iconFields,
       ...nextOccupancyPolicy,
       activo: body.activo !== undefined ? Boolean(body.activo) : item.activo,
       requiere_preparacion: body.requiere_preparacion !== undefined ? Boolean(body.requiere_preparacion) : item.requiere_preparacion,

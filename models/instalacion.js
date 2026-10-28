@@ -16,6 +16,7 @@ module.exports = (sequelize, DataTypes) => {
     descripcion: DataTypes.TEXT,
     piso: DataTypes.STRING(64),
     color: DataTypes.STRING(16),
+    icono: { type: DataTypes.STRING(96), allowNull: true, defaultValue: null },
     capacidad: { type: DataTypes.INTEGER, defaultValue: 1 },
     allow_overlap_confirmation: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     overlap_capacity_unlimited: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },

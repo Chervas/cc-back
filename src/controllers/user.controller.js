@@ -8,10 +8,11 @@ const {
 const bcrypt = require('bcryptjs');
 const { Op } = require('sequelize');
 const systemNotificationsService = require('../services/systemNotifications.service');
+const { professionalTitlePatch } = require('../lib/professional-title');
 
 const SAFE_USER_ATTRIBUTES = [
   'id_usuario', 'nombre', 'apellidos', 'email_usuario', 'avatar', 'telefono',
-  'cargo_usuario', 'isProfesional', 'fecha_creacion', 'ultimo_login',
+  'cargo_usuario', 'tratamiento_profesional', 'isProfesional', 'fecha_creacion', 'ultimo_login',
 ];
 
 function directoryClinicInclude(req, required = false) {
@@ -197,6 +198,10 @@ exports.updateUser = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
+    let titlePatch;
+    try { titlePatch = professionalTitlePatch(req.body); }
+    catch (error) { return res.status(400).json({ code: error.code, message: error.message }); }
+
     if (await require('../services/authCredentialMutationGuard.service').guardCredentialMutation(user, req.body, res)) return;
 
     const fieldsToUpdate = isAdmin ? [
@@ -213,6 +218,7 @@ exports.updateUser = async (req, res) => {
         user[field] = req.body[field];
       }
     });
+    Object.assign(user, titlePatch);
 
     if (req.body.password_usuario) {
       user.password_usuario = await bcrypt.hash(req.body.password_usuario, 8);

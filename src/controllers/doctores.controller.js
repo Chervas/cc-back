@@ -114,7 +114,7 @@ exports.list = asyncHandler(async (req, res) => {
     where: whereDoctorClinica,
     include: [
       // Nota: el modelo Usuario no tiene campo `especialidad` en BD; usamos `rol_en_clinica` de DoctorClinica como "especialidad" (label).
-      { model: db.Usuario, as: 'doctor', attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario', 'avatar'] },
+      { model: db.Usuario, as: 'doctor', attributes: ['id_usuario', 'nombre', 'apellidos', 'tratamiento_profesional', 'email_usuario', 'avatar'] },
       includeClinica,
       {
         model: db.DoctorHorario,
@@ -144,6 +144,7 @@ exports.list = asyncHandler(async (req, res) => {
       id: String(dc.doctor?.id_usuario ?? dc.doctor_id),
       nombre: dc.doctor?.nombre || '',
       apellidos: dc.doctor?.apellidos || '',
+      tratamiento_profesional: dc.doctor?.tratamiento_profesional ?? null,
       email: dc.doctor?.email_usuario || null,
       avatar: dc.doctor?.avatar || null,
       especialidad: dc.rol_en_clinica || null,

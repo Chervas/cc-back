@@ -52,6 +52,12 @@ module.exports = (sequelize, DataTypes) => {
     notas_usuario: DataTypes.STRING,
     telefono: DataTypes.STRING,
     cargo_usuario: DataTypes.STRING,
+    tratamiento_profesional: {
+      type: DataTypes.STRING(8),
+      allowNull: true,
+      defaultValue: null,
+      validate: { isIn: [['Dr.', 'Dra.']] },
+    },
     cumpleanos: DataTypes.DATE,
     isProfesional: {
       type: DataTypes.BOOLEAN,

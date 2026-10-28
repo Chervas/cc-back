@@ -40,6 +40,7 @@ const withDoctorCalendarMutation = (doctorId, mutate) => withCalendarMutation({ 
 const personalCalendarUndo = require('../services/personalCalendarUndo.service');
 const scheduleSharing = require('../services/personalScheduleSharing.service');
 const personalBlockScope = require('../lib/personal-block-scope');
+const { professionalTitlePatch } = require('../lib/professional-title');
 const scheduleDb = () => require('../../models');
 
 async function personalBlockScopeContext(doctorId, transaction = null) {
@@ -1145,6 +1146,10 @@ exports.updatePersonalMember = async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
+        let titlePatch;
+        try { titlePatch = professionalTitlePatch(req.body); }
+        catch (error) { return res.status(400).json({ code: error.code, message: error.message }); }
+
         if (await require('../services/authCredentialMutationGuard.service').guardCredentialMutation(user, req.body, res)) return;
 
         const fieldsToUpdate = [
@@ -1166,6 +1171,7 @@ exports.updatePersonalMember = async (req, res) => {
                 user[field] = req.body[field];
             }
         }
+        Object.assign(user, titlePatch);
 
         if (req.body.password_usuario) {
             user.password_usuario = await bcrypt.hash(req.body.password_usuario, 8);
