@@ -67,6 +67,7 @@ test('first binding globally closes unmatched legacy connect and callbacks with 
   assert.equal((await f.request('connect?clinic_id=71')).status, 409);
   const result = await f.request('callback?state=foreign&code=FICTITIOUS_CODE&error=FICTITIOUS_SECRET', false);
   assert.equal(result.status, 302); assert(!result.headers.location.includes('FICTITIOUS_SECRET'));
+  assert.equal(new URL(result.headers.location).origin, 'https://crm.clinicaclick.com');
   assert.equal(f.state.provider + f.state.redis, 0);
 });
 test('authentication and full scope permission precede managed state and URL reads', async t => {
