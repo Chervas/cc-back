@@ -11,6 +11,7 @@ const EDITOR_FEATURE_KEYS = Object.freeze([
   'external_cmp_provider',
   'ga4_bridge_enabled',
   'ga4_measurement_id',
+  'ga4_bridge_channels',
 ]);
 
 const EDITOR_GOOGLE_ADS_KEYS = Object.freeze([

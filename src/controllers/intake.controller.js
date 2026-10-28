@@ -5094,8 +5094,8 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     catch (error) { return res.status(error.status || 400).json({ success: false, error: error.code }); }
   }
   const ga4BridgeMutation = body.mutation_kind === 'ga4_bridge';
-  if (ga4BridgeMutation && (Object.keys(body).some(key => !['mutation_kind', 'group_id', 'enabled', 'measurement_id'].includes(key))
-    || typeof body.enabled !== 'boolean' || typeof body.measurement_id !== 'string')) {
+  if (ga4BridgeMutation && (Object.keys(body).some(key => !['mutation_kind', 'group_id', 'enabled', 'measurement_id', 'channels'].includes(key))
+    || typeof body.enabled !== 'boolean' || typeof body.measurement_id !== 'string' || !Array.isArray(body.channels))) {
     return res.status(400).json({ success: false, error: 'ga4_bridge_invalid' });
   }
   const partialMutation = verificationOnlyMutation || domainAddMutation || ga4BridgeMutation;
@@ -5203,7 +5203,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
         );
 
     if (ga4BridgeMutation) config.features = { ...(config.features || {}),
-      ga4_bridge_enabled: body.enabled, ga4_measurement_id: body.measurement_id };
+      ga4_bridge_enabled: body.enabled, ga4_measurement_id: body.measurement_id, ga4_bridge_channels: body.channels };
     const ga4Error = require('../lib/intake-ga4-bridge').ga4BridgeError(config.features);
     if (ga4Error) return { error: { status: 400, body: { success: false, error: ga4Error } } };
 
