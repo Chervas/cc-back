@@ -51,7 +51,8 @@ async function persistGoogleConnection({
   refreshToken = null,
   scopes = null,
   expiresAt,
-}, { GoogleConnectionModel = db.GoogleConnection } = {}) {
+}, { GoogleConnectionModel = db.GoogleConnection, models = db,
+  sequelize = GoogleConnectionModel.sequelize || models.sequelize } = {}) {
   const normalizedUserId = positiveInteger(userId, 'userId');
   const normalizedProviderId = providerIdentity(googleUserId, 'googleUserId');
   const where = {
@@ -68,15 +69,20 @@ async function persistGoogleConnection({
     expiresAt,
   };
 
-  return createOrUpdateByIdentity(
-    GoogleConnectionModel,
-    where,
-    payload,
-    (existing, next) => ({
-      ...next,
-      refreshToken: next.refreshToken || existing.refreshToken || null,
-    })
-  );
+  const guard = require('./googleLegacyOAuthGuard.service').createGoogleLegacyOAuthGuard({ models });
+  if (!sequelize?.transaction) throw Object.assign(Error('google_oauth_unavailable'), { code: 'google_oauth_unavailable', httpStatus: 503 });
+  return sequelize.transaction({ isolationLevel: 'SERIALIZABLE' }, async transaction => {
+    await guard.assertAllowed({ transaction });
+    const existing = await GoogleConnectionModel.findOne({ where, transaction, lock: transaction.LOCK.UPDATE });
+    if (existing) {
+      await existing.update({ ...payload, refreshToken: refreshToken || existing.refreshToken || null }, { transaction });
+      await guard.assertAllowed({ transaction });
+      return existing;
+    }
+    const created = await GoogleConnectionModel.create(payload, { transaction });
+    await guard.assertAllowed({ transaction });
+    return created;
+  });
 }
 
 async function persistMetaConnection({
