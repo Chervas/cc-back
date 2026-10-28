@@ -1418,6 +1418,7 @@ class MetaSyncJobs {
 
   // ===== Web jobs (Search Console + PSI) =====
   async executeWebSync(options = {}) {
+    const cut = require('../lib/searchConsoleLegacyDetailCut').captureCutPolicy(process.env);
     const { clinicId = null, siteUrls = null, siteMappings = null } = options;
     const { ClinicWebAsset, WebScDaily, WebScDailyAgg, WebPsiSnapshot, WebIndexCoverageDaily, WebScQueryDaily } = require('../../models');
     const SyncLog = require('../../models').SyncLog;
@@ -1470,6 +1471,7 @@ class MetaSyncJobs {
           received: 0, inserted: 0, updated: 0, unchanged: 0, written: 0,
           candidateWritesBefore: 0, actualWritesAfter: 0, compactCoverage: [],
           storageWriteEnabled: process.env.SC_ANALYTICS_WRITE_ENABLED === 'true',
+          legacyDetailCutEnabled: cut.enabled, legacyDetailRowsSkipped: 0,
           recentDays: this.config.web.recentDays,
           initialCoverageVerified: process.env.WEB_BACKFILL_INITIAL_COVERAGE_VERIFIED === 'true'
         }
@@ -1515,6 +1517,7 @@ class MetaSyncJobs {
       const analyticsStore = report.ingestion.storageWriteEnabled
         ? require('../services/searchConsoleAnalytics.service') : null;
       const finalRangeByMapping = new Map();
+      const compactTotalsAcks = new Map();
       for (const [clinicaId, arr] of byClinic.entries()) {
         try {
           const authorizedMappings = [];
@@ -1564,10 +1567,12 @@ class MetaSyncJobs {
                 const firstFinalDate = observed[0];
                 const lastFinalDate = observed.at(-1);
                 if (lastFinalDate) {
-                  await analyticsStore.writeTotalsInterval({ mapping: a, siteUrl: a.siteUrl,
+                  const totalsAck = await analyticsStore.writeTotalsInterval({ mapping: a, siteUrl: a.siteUrl,
                     startDate: firstFinalDate, endDate: lastFinalDate,
                     rows: rows.filter(row => row.keys?.[0] >= firstFinalDate && row.keys?.[0] <= lastFinalDate), complete: true, rowLimitReached: false,
                     validate: () => this._assertSearchConsoleMapping(a, credentials) });
+                  if (cut.enabled) compactTotalsAcks.set(a.id, cut.record(totalsAck, { siteUrl: a.siteUrl,
+                    startDate: firstFinalDate, endDate: lastFinalDate, kind: 'totals' }));
                   finalRangeByMapping.set(a.id, { start: firstFinalDate, end: lastFinalDate });
                 }
                 report.ingestion.compactCoverage.push({ siteUrl: a.siteUrl, start: fmt(start),
@@ -1587,12 +1592,14 @@ class MetaSyncJobs {
           // the legacy clinic aggregate. A failed/truncated property must not
           // overwrite a complete aggregate with a partial one.
           for (const rg of scIngest.queryRanges(fmt(start), fmt(end))) {
+            const compactDetailAcks = new Map();
             const queryDailyMap = new Map();
             const topByDate = new Map();
             let intervalComplete = authorizedMappings.length === arr.length;
             for (const { asset: a, credentials } of authorizedMappings) {
               try {
                 const intervals = await readQueryIntervals(a, credentials, rg);
+                if (cut.enabled) for (const interval of intervals) cut.assertRowDates(interval.rows, finalRangeByMapping.get(a.id));
                 for (const interval of intervals) {
                   scIngest.mergeQueryRows({ rows: interval.rows, clinicId: clinicaId, siteUrl: a.siteUrl,
                     queryDailyMap, topByDate, range: interval });
@@ -1604,9 +1611,14 @@ class MetaSyncJobs {
                     if (finalRange && interval.s <= finalRange.end && interval.e >= finalRange.start) {
                       const compactEnd = interval.e < finalRange.end ? interval.e : finalRange.end;
                       const compactStart = interval.s > finalRange.start ? interval.s : finalRange.start;
-                      await analyticsStore.writeInterval({ mapping: a, siteUrl: a.siteUrl, startDate: compactStart, endDate: compactEnd,
+                      const detailAck = await analyticsStore.writeInterval({ mapping: a, siteUrl: a.siteUrl, startDate: compactStart, endDate: compactEnd,
                         rows: rowsQ.filter(row => row.keys?.[0] >= compactStart && row.keys?.[0] <= compactEnd), complete: true, rowLimitReached: false,
                         validate: () => this._assertSearchConsoleMapping(a, credentials) });
+                      if (cut.enabled) {
+                        if (!compactDetailAcks.has(a.id)) compactDetailAcks.set(a.id, []);
+                        compactDetailAcks.get(a.id).push(cut.record(detailAck, { siteUrl: a.siteUrl,
+                          startDate: compactStart, endDate: compactEnd, kind: 'detail' }));
+                      }
                     }
                   }
                 }
@@ -1627,12 +1639,19 @@ class MetaSyncJobs {
             // One transaction covers all write batches and the Top3/Top10
             // summary. A retry therefore sees either the old or complete range.
             const publish = async transaction => {
+              cut.assertCurrent();
               for (const { asset, credentials } of authorizedMappings) await this._assertSearchConsoleMapping(asset, credentials);
-              const stats = bulkPayload.length ? await scIngest.persistChangedRows({
+              if (cut.enabled) await cut.beforePublish({ assets: arr,
+                allAssets: await ClinicWebAsset.findAll({ where: { isActive: true, clinicaId }, raw: true, logging: false }),
+                clinicId: clinicaId, range: rg, rows: bulkPayload, finalRanges: finalRangeByMapping,
+                totalsAcks: compactTotalsAcks, detailAcks: compactDetailAcks,
+                confirm: proof => analyticsStore.confirmPublication(proof, { transaction,
+                  validate: async () => { for (const { asset, credentials } of authorizedMappings) await this._assertSearchConsoleMapping(asset, credentials); return true; } }) });
+              const stats = !cut.enabled && bulkPayload.length ? await scIngest.persistChangedRows({
                 model: WebScQueryDaily, rows: bulkPayload, transaction,
                 keyFields: ['clinica_id', 'date', 'query_hash', 'page_url_hash'],
                 chunkSize: resolveSearchConsoleBulkChunkSize()
-              }) : { received: 0, inserted: 0, updated: 0, unchanged: 0, written: 0 };
+              }) : { received: cut.enabled ? bulkPayload.length : 0, inserted: 0, updated: 0, unchanged: 0, written: 0 };
               for (const [date, sets] of topByDate.entries()) {
                 const defaults = { clinica_id: clinicaId, date, queries_top10: sets.set10.size, queries_top3: sets.set3.size };
                 const [agg, created] = await WebScDailyAgg.findOrCreate({
@@ -1643,6 +1662,7 @@ class MetaSyncJobs {
                 }
               }
               for (const { asset, credentials } of authorizedMappings) await this._assertSearchConsoleMapping(asset, credentials);
+              cut.assertCurrent();
               return stats;
             };
             try {
@@ -1650,6 +1670,7 @@ class MetaSyncJobs {
               for (const key of ['received', 'inserted', 'updated', 'unchanged', 'written']) report.ingestion[key] += stats[key];
               report.ingestion.candidateWritesBefore += stats.received;
               report.ingestion.actualWritesAfter += stats.written;
+              if (cut.enabled) report.ingestion.legacyDetailRowsSkipped += bulkPayload.length;
               report.ingestion.completedIntervals++;
               clinicSucceeded = true;
             } catch (error) {

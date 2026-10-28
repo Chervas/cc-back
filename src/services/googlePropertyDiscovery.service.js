@@ -7,13 +7,15 @@ const COMMON = ['mapping_id', 'clinica_id', 'google_connection_id', 'google_user
 const fields = kind => [...COMMON, ...(kind === 'search_console' ? ['site_hash', 'site_url'] : ['property_name'])];
 const positive = value => Number.isSafeInteger(value) && value > 0 && value <= 2147483647;
 const fail = code => { throw Object.assign(Error(code), { code }); };
-const CONFLICT = new Set(['broker_binding_invalid', 'broker_discovery_scope_unconfigured', 'broker_discovery_limit', 'google_oauth_legacy_closed']);
+const CONFLICT = new Set(['broker_binding_invalid', 'broker_discovery_scope_unconfigured', 'broker_discovery_limit', 'google_oauth_legacy_closed',
+  'google_oauth_scope_conflict', 'google_oauth_consumers_pending', 'google_oauth_service_unconfigured']);
 const CODES = new Set([...CONFLICT, 'google_discovery_no_connection', 'broker_discovery_busy', 'broker_discovery_timeout', 'broker_registry_unavailable', 'broker_cohort_disabled',
   'broker_unavailable', 'broker_timeout', 'broker_configuration_invalid', 'broker_response_invalid', 'provider_failed', 'provider_timeout',
   'provider_unauthorized', 'connection_blocked', 'asset_revoked', 'secret_unavailable', 'credential_revoked', 'scope_denied', 'operation_denied',
-  'audit_unavailable', 'rate_limited', 'google_discovery_session_required', 'google_discovery_scope_forbidden', 'google_credentials_unavailable']);
+  'audit_unavailable', 'rate_limited', 'google_discovery_session_required', 'google_discovery_scope_forbidden', 'google_credentials_unavailable',
+  'google_oauth_scope_forbidden', 'auth_invalid']);
 const safe = error => CODES.has(error?.code) ? error.code : 'google_discovery_unavailable';
-const status = error => error?.code === 'google_discovery_no_connection' ? 404 : error?.code === 'google_discovery_session_required' ? 401 : error?.code === 'google_discovery_scope_forbidden' ? 403
+const status = error => error?.code === 'google_discovery_no_connection' ? 404 : ['google_discovery_session_required','auth_invalid'].includes(error?.code) ? 401 : ['google_discovery_scope_forbidden','google_oauth_scope_forbidden'].includes(error?.code) ? 403
   : CONFLICT.has(error?.code) ? 409 : 503;
 function createGooglePropertyDiscovery({ hasManaged, listBindings, loadMapping, readers: adapters, enabled, now = Date.now }) {
   let active = 0;

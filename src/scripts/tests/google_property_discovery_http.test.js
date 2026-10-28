@@ -23,6 +23,7 @@ async function fixture(t, kind = 'analytics') {
   const resolver = loadDiscoverySource('services/scopeConnectionResolver.service.js', { '../../models': models, sequelize });
   const router = loadDiscoverySource('routes/oauth.routes.js', { ...unusedMetaSurfaceDependencies(), express, sequelize, '../../models': models, './auth.middleware': auth,
     '../services/accessSession.service': sessions, '../services/googlePropertyDiscovery.service': f.service,
+    '../services/googleReviewedSearchConsoleMapping.service': { inventory: async () => [], map: async () => assert.fail('No reviewed descriptor in this historical fixture') },
     '../services/googlePropertyInventoryScope.service': { resolve: async () => state.effectiveMappings || [] },
     '../services/googleLegacyCredentials.service': legacy.credentials, '../services/scopeConnectionResolver.service': resolver,
     '../services/googleOAuthBroker.service': { assertLegacyConnection: async () => {}, bindingFor: async () => null },

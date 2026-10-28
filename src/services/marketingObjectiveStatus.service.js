@@ -7,6 +7,9 @@ const {
 } = require('./effectiveMarketingAssets.service');
 const businessProfileLocalService = require('./businessProfileLocal.service');
 const marketingBulkSendsService = require('./marketingBulkSends.service');
+const searchConsoleAnalytics = require('./searchConsoleAnalytics.service');
+const searchConsoleContract = require('../lib/searchConsoleAnalyticsContract');
+const searchConsoleBroker = require('./searchConsoleBroker.service');
 
 const SCHEMA_VERSION = 1;
 const POLICY_VERSION = '2026-08-v1';
@@ -472,6 +475,9 @@ function defaultDependencies() {
     ClinicBusinessLocation: db.ClinicBusinessLocation,
     WebScDailyAgg: db.WebScDailyAgg,
     WebScQueryDaily: db.WebScQueryDaily,
+    isSearchConsoleReadEnabled: searchConsoleAnalytics.isReadEnabled,
+    searchConsoleAvailability: searchConsoleAnalytics.availability,
+    prepareSearchConsoleMapping: mapping => searchConsoleBroker.prepare(mapping),
     MarketingAiVisibilityRun: db.MarketingAiVisibilityRun,
     MarketingPatientList: db.MarketingPatientList,
     serializeLocation: businessProfileLocalService.serializeLocation,
@@ -512,6 +518,67 @@ async function loadReactivationLists(deps, clinicIds) {
     raw: true,
   });
   return { success: true, items: rows.map(serializeReactivationList) };
+}
+
+// Only date evidence is needed for this score. The existing availability API
+// scans the small coverage ledger, never the retired query/page detail facts.
+async function compactSearchConsoleDate(deps, inventoryPromise, now) {
+  try {
+    const inventory = await inventoryPromise;
+    const assets = inventory?.google?.available_assets?.search_console;
+    if (!Array.isArray(assets) || assets.length > 1000) throw Error('invalid_compact_inventory');
+    const sites = [...new Set(assets.map(asset => searchConsoleContract.property(asset?.site_url).siteUrl))];
+    const mappings = assets.map(asset => ({ id: asset.mapping_id, clinicaId: asset.clinic_id,
+      googleConnectionId: asset.connection_id, siteUrl: asset.site_url, isActive: true }));
+    if (sites.length > 200) throw Error('invalid_compact_inventory');
+    if (!sites.length) {
+      if (deps.isSearchConsoleReadEnabled() !== true) throw Error('compact_read_changed');
+      return { latest: null, unavailable: false };
+    }
+    if (typeof deps.searchConsoleAvailability !== 'function' || typeof deps.prepareSearchConsoleMapping !== 'function') throw Error('compact_reader_unavailable');
+    const endDate = now.toISOString().slice(0, 10);
+    const startDate = new Date(now.getTime() - 35 * 86400000).toISOString().slice(0, 10);
+    let timer; let expired = false;
+    const assertCurrent = () => {
+      if (expired || deps.isSearchConsoleReadEnabled() !== true) throw Error('compact_read_changed');
+    };
+    const validate = async () => {
+      assertCurrent();
+      for (const mapping of mappings) { assertCurrent(); await deps.prepareSearchConsoleMapping(mapping); }
+      assertCurrent();
+    };
+    let result;
+    try {
+      // The API has no cancellation contract. Bound this response only; the
+      // caller never retries or falls back to legacy after an elapsed budget.
+      result = await Promise.race([
+        Promise.resolve().then(async () => {
+          await validate();
+          const value = await deps.searchConsoleAvailability({ siteUrls: sites, startDate, endDate });
+          await validate();
+          return value;
+        }),
+        new Promise((_, reject) => { timer = setTimeout(() => { expired = true; reject(Error('compact_reader_timeout')); }, 5000); }),
+      ]);
+    } finally { clearTimeout(timer); }
+    if (!Array.isArray(result?.properties) || result.properties.length !== sites.length) throw Error('invalid_compact_coverage');
+    const expected = new Set(sites); const seen = new Set(); let latest = null;
+    for (const property of result.properties) {
+      if (!expected.has(property?.siteUrl) || seen.has(property.siteUrl)) throw Error('invalid_compact_coverage');
+      seen.add(property.siteUrl);
+      for (const value of [property.totalsThrough, property.detailThrough]) {
+        if (value == null) continue;
+        if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)
+          || new Date(value + 'T00:00:00.000Z').toISOString().slice(0, 10) !== value || value > endDate) throw Error('invalid_compact_date');
+        if (!latest || value > latest) latest = value;
+      }
+    }
+    // A single explicit covered day establishes imported-data existence only.
+    // MAX(date) does not attest that the intervening interval is complete.
+    return { latest: latest ? { date: latest } : null, unavailable: false };
+  } catch {
+    return { latest: null, unavailable: true };
+  }
 }
 
 async function getMarketingObjectiveStatus(scope, dependencies = {}) {
@@ -571,13 +638,15 @@ async function getMarketingObjectiveStatus(scope, dependencies = {}) {
     limit: 1000,
     raw: true,
   });
-  const scAggregatePromise = deps.WebScDailyAgg.findOne({
+  const compactRead = deps.isSearchConsoleReadEnabled() === true;
+  const compactEvidencePromise = compactRead ? compactSearchConsoleDate(deps, inventoryPromise, now) : Promise.resolve(null);
+  const scAggregatePromise = compactRead ? Promise.resolve(null) : deps.WebScDailyAgg.findOne({
     where: { clinica_id: { [Op.in]: clinicIds } },
     attributes: ['clinica_id', 'date', 'queries_top10', 'queries_top3'],
     order: [['date', 'DESC'], ['id', 'DESC']],
     raw: true,
   });
-  const scQueryPromise = deps.WebScQueryDaily.findOne({
+  const scQueryPromise = compactRead ? compactEvidencePromise.then(value => value.latest) : deps.WebScQueryDaily.findOne({
     where: { clinica_id: { [Op.in]: clinicIds } },
     attributes: ['clinica_id', 'site_url', 'date', 'query', 'clicks', 'impressions', 'ctr', 'position'],
     order: [['date', 'DESC'], ['id', 'DESC']],
@@ -612,6 +681,7 @@ async function getMarketingObjectiveStatus(scope, dependencies = {}) {
     latestSearchConsoleQuery,
     latestAiRun,
     reactivationResult,
+    compactEvidence,
   ] = await Promise.all([
     inventoryPromise,
     requestsPromise,
@@ -620,6 +690,7 @@ async function getMarketingObjectiveStatus(scope, dependencies = {}) {
     scQueryPromise,
     aiRunPromise,
     reactivationPromise,
+    compactEvidencePromise,
   ]);
 
   const profileAssets = businessProfileAssets(inventory);
@@ -643,7 +714,10 @@ async function getMarketingObjectiveStatus(scope, dependencies = {}) {
     serializeLocation: deps.serializeLocation,
     now,
   });
-  const seoAi = scoreSeoAi({
+  const seoAi = compactEvidence?.unavailable ? unavailableSubobjective(
+    'new_patients', 'seo_ai', 'unknown',
+    issue('search_console_data_unavailable', 'No se pudo comprobar la fecha de los datos de Search Console.', 'unknown')
+  ) : scoreSeoAi({
     inventory,
     latestSearchConsoleAggregate,
     latestSearchConsoleQuery,

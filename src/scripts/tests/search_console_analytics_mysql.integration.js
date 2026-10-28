@@ -5,7 +5,6 @@ const path = require('node:path');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 const migration = require('../../../migrations/20261018150000-create-search-console-analytics');
 const { createSearchConsoleAnalytics } = require('../../services/searchConsoleAnalytics.service');
-const { backfillInterval } = require('../search_console_analytics.operator');
 const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.fixture');
 let ownedRoot;
 async function main() {
@@ -96,10 +95,14 @@ async function main() {
       { date: '2024-02-29', query: 'zero', page_url: '', clicks: 0, impressions: 0, position: 4 },
     ];
     async function* cloned() { for (let clinic = 0; clinic < 4; clinic++) for (const row of historical) yield { ...row, site_url: old.siteUrl }; }
-    await backfillInterval({ repository: repo, source: cloned(), ...old, provenanceReviewed: true });
+    const clonedRows = []; for await (const row of cloned()) clonedRows.push(row);
+    // This legacy fixture exercises the repository/archive. Historical backfill
+    // now requires the separate bounded audit, totals and per-date evidence.
+    await repo.writeInterval({ ...old, rows: clonedRows });
     assert.equal(Number((await rows('SELECT COUNT(*) AS n FROM ScAnalyticsDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id WHERE p.site_url=:url', { url: old.siteUrl }))[0].n), 4);
     async function* conflicting() { yield { ...historical[0], site_url: old.siteUrl }; yield { ...historical[0], clicks: 99, site_url: old.siteUrl }; }
-    await assert.rejects(backfillInterval({ repository: repo, source: conflicting(), ...old, provenanceReviewed: true }), { code: 'sc_analytics_conflicting_duplicate' });
+    const conflictingRows = []; for await (const row of conflicting()) conflictingRows.push(row);
+    await assert.rejects(repo.writeInterval({ ...old, rows: conflictingRows }), { code: 'sc_analytics_conflicting_duplicate' });
     let corrupt = false; const archivedBodies = new Map();
     const store = { independent: true, async put({ key, body }) { let content = ''; for await (const chunk of body) content += chunk; archivedBodies.set(key, content); return { key }; }, async read(receipt) { return archivedBodies.get(receipt.key) + (corrupt ? 'corrupt' : ''); } };
     const archiveArgs = { siteUrl: old.siteUrl, month: '2024-02', archiveStore: store, validate };
@@ -163,7 +166,7 @@ async function main() {
     assert.equal(Number((await rows(`SELECT SUM(clicks) AS clicks FROM ${fullMonth.sqlFrom}`, fullParams))[0].clicks), 10);
     assert.equal(await fullMonth.validate(), true);
     report.checks.push('publication between rawSource and SELECT is rejected by post-read validation for both partial-month boundaries; full-month result remains exact');
-    report.checks.push('reviewed legacy clone backfill, conflicting clones abort, leap-month exact weighted/zero-position rollup, independent archive read-back failure safe, partial monthly range explicit, resumable verified purge, retry idempotence, concurrent ingestion prevents stale archive publication');
+    report.checks.push('repository clone fixture, conflicting clones abort, leap-month exact weighted/zero-position rollup, independent archive read-back failure safe, partial monthly range explicit, resumable verified purge, retry idempotence, concurrent ingestion prevents stale archive publication');
     assert.equal(await count('ScAnalyticsStagedRows'), 0); assert.equal(await count('ScAnalyticsStagedTotals'), 0);
   });
   // The fixture owns cleanup and honors explicit data retention for reproduction.

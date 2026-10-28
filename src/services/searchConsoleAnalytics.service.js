@@ -4,6 +4,7 @@
 // runtime call. The factory can only use the SQL connection supplied by its caller.
 const { randomUUID, createHash } = require('node:crypto');
 const C = require('../lib/searchConsoleAnalyticsContract');
+const Legacy = require('../lib/searchConsoleLegacyBackfill');
 const metrics = ['clicks', 'impressions', 'position_weighted', 'position_sum', 'position_count'];
 const chunks = function* (rows, size = 250) { for (let i = 0; i < rows.length; i += size) yield rows.slice(i, i + size); };
 const flag = (env, key) => env?.[key] === 'true';
@@ -54,19 +55,98 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
     if (!rows[0]) C.fail('sc_analytics_unknown_batch');
     return rows[0];
   }
-  async function beginInterval({ siteUrl, mapping, startDate, endDate, kind = 'detail', validate } = {}) {
+  async function beginInterval({ siteUrl, mapping, startDate, endDate, kind = 'detail', validate, batchId, sourceDigest } = {}) {
     writable(); C.range(startDate, endDate); await validated(validate);
     if (Date.parse(endDate) - Date.parse(startDate) > 549 * 86400000) C.fail('sc_analytics_ingest_interval_too_large');
     if (!['detail', 'totals'].includes(kind)) C.fail('sc_analytics_invalid_kind');
+    if ((batchId != null || sourceDigest != null) && (!Legacy.UUID.test(batchId || '') || !Legacy.SHA.test(sourceDigest || ''))) C.fail('sc_analytics_invalid_backfill_binding');
     return tx(async transaction => {
       const p = await property(siteUrl ?? mapping?.siteUrl ?? mapping?.site_url, transaction, true);
       const archived = await query('SELECT month FROM ScAnalyticsArchiveBatches WHERE property_id=:id AND month<=:end AND LAST_DAY(month)>=:start LIMIT 1', { id: p.id, start: startDate, end: endDate }, transaction);
       if (kind === 'detail' && archived.length) C.fail('sc_analytics_month_already_archived');
-      const id = randomUUID();
-      await query('INSERT INTO ScAnalyticsIngestBatches(batch_id,property_id,start_date,end_date,base_revision,kind,state,created_at) VALUES(:id,:property,:start,:end,:revision,:kind,\'staging\',:now)',
-        { id, property: p.id, start: startDate, end: endDate, revision: p.revision, kind, now: now() }, transaction);
+      const id = batchId || randomUUID();
+      await query('INSERT INTO ScAnalyticsIngestBatches(batch_id,property_id,start_date,end_date,base_revision,kind,state,created_at,source_digest) VALUES(:id,:property,:start,:end,:revision,:kind,\'staging\',:now,UNHEX(:sourceDigest))',
+        { id, property: p.id, start: startDate, end: endDate, revision: p.revision, kind, now: now(), sourceDigest: sourceDigest || null }, transaction);
       return { batchId: id, propertyId: String(p.id), siteUrl: p.siteUrl, startDate, endDate, kind };
     });
+  }
+  async function inspectInterval(handle, { sourceDigest, validate } = {}) {
+    writable(); await validated(validate);
+    if (!Legacy.UUID.test(handle?.batchId || '') || !Legacy.SHA.test(sourceDigest || '')) C.fail('sc_analytics_invalid_backfill_binding');
+    return tx(async transaction => {
+      const rows = await query('SELECT b.*,p.site_url FROM ScAnalyticsIngestBatches b JOIN ScAnalyticsProperties p ON p.id=b.property_id WHERE b.batch_id=:id FOR UPDATE', { id: handle.batchId }, transaction);
+      await validated(validate);
+      const b = rows[0];
+      if (!b) return { state: 'absent' };
+      if (digestHex(b.source_digest) !== sourceDigest || b.site_url !== handle.siteUrl || b.start_date !== handle.startDate
+        || b.end_date !== handle.endDate || b.kind !== 'detail') C.fail('sc_analytics_backfill_binding_changed');
+      return { state: b.state, handle: { batchId: b.batch_id, propertyId: String(b.property_id), siteUrl: b.site_url,
+        startDate: b.start_date, endDate: b.end_date, kind: b.kind } };
+    });
+  }
+  async function confirmPublication({ batchId, siteUrl, startDate, endDate, kind } = {}, { transaction, validate } = {}) {
+    writable();
+    if (!isReadEnabled(env) || env.SC_ANALYTICS_LEGACY_DETAIL_CUT_ENABLED !== 'true') C.fail('sc_analytics_legacy_cut_disabled');
+    C.range(startDate, endDate);
+    if (!Legacy.UUID.test(batchId || '') || !['detail', 'totals'].includes(kind)) C.fail('sc_analytics_invalid_batch');
+    const work = async transaction => {
+      await validated(validate);
+      const p = await property(siteUrl, transaction);
+      if (!p) C.fail('sc_analytics_unknown_property');
+      const b = await batch({ batchId }, transaction);
+      if (String(b.property_id) !== String(p.id) || b.start_date !== startDate || b.end_date !== endDate || b.kind !== kind
+        || b.state !== 'committed' || !b.committed_at) C.fail('sc_analytics_publication_unproven');
+      const required = kind === 'detail' ? 'detail_complete' : 'totals_complete';
+      const [{ covered }] = await query(`SELECT COUNT(*) AS covered FROM ScAnalyticsCoverageDaily WHERE property_id=:id AND date BETWEEN :start AND :end AND ${required}=1`,
+        { id: p.id, start: startDate, end: endDate }, transaction);
+      if (Number(covered) !== (Date.parse(endDate) - Date.parse(startDate)) / 86400000 + 1) C.fail('sc_analytics_incomplete_coverage');
+      await validated(validate);
+      if (!isReadEnabled(env) || env.SC_ANALYTICS_WRITE_ENABLED !== 'true' || env.SC_ANALYTICS_LEGACY_DETAIL_CUT_ENABLED !== 'true') C.fail('sc_analytics_legacy_cut_disabled');
+      return { batchId, siteUrl: p.siteUrl, startDate, endDate, kind, committed: true,
+        detailComplete: kind === 'detail', totalsComplete: kind === 'totals' || Number(b.totals_included) === 1 };
+    };
+    return transaction ? work(transaction) : tx(work);
+  }
+  async function reconcileStaged(b, expected, transaction) {
+    if (!expected || expected.sourceDigest !== digestHex(b.source_digest) || !Array.isArray(expected.days)
+      || expected.days.length !== (Date.parse(b.end_date) - Date.parse(b.start_date)) / 86400000 + 1 || Number(b.totals_included) !== 1) C.fail('sc_analytics_backfill_reconciliation_required');
+    const params = { batch: b.batch_id };
+    const detail = await query(`SELECT s.date,HEX(q.value_hash) AS query_hash,HEX(p.value_hash) AS page_hash,${metrics.map(k => 's.' + k).join(',')},HEX(s.row_digest) AS row_digest
+      FROM ScAnalyticsStagedRows s JOIN ScAnalyticsQueries q ON q.id=s.query_id JOIN ScAnalyticsPages p ON p.id=s.page_id WHERE s.batch_id=:batch ORDER BY s.date,q.value_hash,p.value_hash`, params, transaction);
+    const totals = await query(`SELECT date,${metrics.join(',')},HEX(row_digest) AS row_digest FROM ScAnalyticsStagedTotals WHERE batch_id=:batch ORDER BY date`, params, transaction);
+    const normalize = row => ({ ...row, query_hash: row.query_hash?.toLowerCase(), page_hash: row.page_hash?.toLowerCase(), row_digest: row.row_digest.toLowerCase(),
+      clicks: C.integer(row.clicks).toString(), impressions: C.integer(row.impressions).toString(), position_count: C.integer(row.position_count).toString(),
+      position_weighted: C.formatted(C.decimal(row.position_weighted)), position_sum: C.formatted(C.decimal(row.position_sum)) });
+    const d = detail.map(normalize), t = totals.map(normalize);
+    const days = [];
+    for (let time = Date.parse(b.start_date); time <= Date.parse(b.end_date); time += 86400000) {
+      const date = new Date(time).toISOString().slice(0, 10); days.push({ date, detail: Legacy.summary(d, date), totals: Legacy.summary(t, date, true) });
+    }
+    if (Legacy.digest(days) !== Legacy.digest(expected.days)) C.fail('sc_analytics_backfill_reconciliation_failed');
+    // A historical plan may predate a newer compact publication even when this
+    // batch began afterwards. Revision CAS alone does not protect that case.
+    // Each family/date may fill an uncovered empty target; existing facts or
+    // coverage (including complete empty coverage) must match the audited plan.
+    const targetParams = { id: b.property_id, start: b.start_date, end: b.end_date };
+    const targetDetail = await query(`SELECT /*+ MAX_EXECUTION_TIME(5000) */ d.date,HEX(q.value_hash) AS query_hash,HEX(p.value_hash) AS page_hash,${metrics.map(k => 'd.' + k).join(',')},HEX(d.row_digest) AS row_digest
+      FROM ScAnalyticsDaily d LEFT JOIN ScAnalyticsQueries q ON q.id=d.query_id LEFT JOIN ScAnalyticsPages p ON p.id=d.page_id WHERE d.property_id=:id AND d.date BETWEEN :start AND :end ORDER BY d.date,d.query_id,d.page_id LIMIT 50001`, targetParams, transaction);
+    const targetTotals = await query(`SELECT /*+ MAX_EXECUTION_TIME(5000) */ date,${metrics.join(',')},HEX(row_digest) AS row_digest FROM ScAnalyticsPropertyDaily WHERE property_id=:id AND date BETWEEN :start AND :end ORDER BY date LIMIT 50001`, targetParams, transaction);
+    if (targetDetail.length > 50000 || targetTotals.length > 50000 || targetDetail.some(row => !Legacy.SHA.test(String(row.query_hash || '').toLowerCase())
+      || !Legacy.SHA.test(String(row.page_hash || '').toLowerCase()))) C.fail('sc_analytics_backfill_target_conflict');
+    const coverage = await query('SELECT date,detail_complete,totals_complete FROM ScAnalyticsCoverageDaily WHERE property_id=:id AND date BETWEEN :start AND :end', targetParams, transaction);
+    const rankings = await query('SELECT date,queries_top3,queries_top10 FROM ScAnalyticsRankingDaily WHERE property_id=:id AND date BETWEEN :start AND :end', targetParams, transaction);
+    const td = targetDetail.map(normalize).sort((a, b) => a.date.localeCompare(b.date) || a.query_hash.localeCompare(b.query_hash) || a.page_hash.localeCompare(b.page_hash));
+    const tt = targetTotals.map(normalize);
+    for (const day of days) {
+      const c = coverage.find(row => row.date === day.date);
+      for (const [family, actualRows, covered] of [['detail', td, Number(c?.detail_complete) === 1], ['totals', tt, Number(c?.totals_complete) === 1]]) {
+        const actual = Legacy.summary(actualRows, day.date, family === 'totals');
+        if ((covered || actual.rows > 0) && Legacy.digest(actual) !== Legacy.digest(day[family])) C.fail('sc_analytics_backfill_target_conflict');
+      }
+      const ranking = rankings.find(row => row.date === day.date);
+      if (ranking && (String(ranking.queries_top3) !== String(day.detail.rankings.top3)
+        || String(ranking.queries_top10) !== String(day.detail.rankings.top10))) C.fail('sc_analytics_backfill_target_conflict');
+    }
   }
   async function stageRows(handle, input, { totals = false } = {}) {
     writable(); if (!Array.isArray(input) || input.length > 25000) C.fail('sc_analytics_invalid_rows');
@@ -105,7 +185,7 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
       return { staged: rows.length };
     });
   }
-  async function commitInterval(handle, { complete, rowLimitReached, validate } = {}) {
+  async function commitInterval(handle, { complete, rowLimitReached, validate, reconciliation } = {}) {
     writable(); if (complete !== true || rowLimitReached !== false) C.fail('sc_analytics_incomplete_interval');
     return tx(async transaction => {
       const b = await batch(handle, transaction);
@@ -114,6 +194,7 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
       const p = (await query('SELECT id,revision FROM ScAnalyticsProperties WHERE id=:id FOR UPDATE', { id: b.property_id }, transaction))[0];
       await validated(validate);
       if (String(p.revision) !== String(b.base_revision)) C.fail('sc_analytics_superseded_interval');
+      if (b.source_digest != null) await reconcileStaged(b, reconciliation, transaction);
       const params = { id: p.id, batch: b.batch_id, start: b.start_date, end: b.end_date, now: now() };
       if (b.kind === 'detail' && (await query('SELECT month FROM ScAnalyticsArchiveBatches WHERE property_id=:id AND month<=:end AND LAST_DAY(month)>=:start LIMIT 1', params, transaction)).length) C.fail('sc_analytics_month_already_archived');
       let changed = 0;
@@ -327,7 +408,7 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
     });
     return { removed, done };
   }
-  return { beginInterval, stageRows, commitInterval, abortInterval, writeInterval, writeTotalsInterval, availability, rawSource, archiveMonth, purgeArchivedMonth,
+  return { beginInterval, inspectInterval, confirmPublication, stageRows, commitInterval, abortInterval, writeInterval, writeTotalsInterval, availability, rawSource, archiveMonth, purgeArchivedMonth,
     isWriteEnabled: () => isWriteEnabled(env), isReadEnabled: () => isReadEnabled(env), retentionCutoff: () => C.cutoff(now()) };
 }
 
@@ -337,7 +418,7 @@ const runtimeRepo = () => {
   return runtime;
 };
 const exported = { createSearchConsoleAnalytics, storageEnabled: isWriteEnabled, isWriteEnabled, isReadEnabled };
-for (const method of ['beginInterval', 'stageRows', 'commitInterval', 'abortInterval', 'writeInterval', 'writeTotalsInterval', 'availability', 'rawSource', 'archiveMonth', 'purgeArchivedMonth']) {
+for (const method of ['beginInterval', 'inspectInterval', 'confirmPublication', 'stageRows', 'commitInterval', 'abortInterval', 'writeInterval', 'writeTotalsInterval', 'availability', 'rawSource', 'archiveMonth', 'purgeArchivedMonth']) {
   exported[method] = (...args) => {
     const enabled = ['rawSource', 'availability'].includes(method) ? isReadEnabled() : isWriteEnabled();
     if (!enabled) return method.startsWith('write') ? Promise.resolve({ skipped: true, reason: 'sc_analytics_write_disabled' }) : Promise.reject(Object.assign(Error('sc_analytics_disabled'), { code: 'sc_analytics_disabled' }));

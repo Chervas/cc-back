@@ -116,4 +116,16 @@ function createSearchConsoleRepository(getModels) {
   };
 }
 const service = createSearchConsoleBroker({ client, ...createSearchConsoleRepository(() => require('../../models')) });
-module.exports = { ...service, createSearchConsoleBroker, createSearchConsoleRepository };
+// Same exact-resource operation as the registered reader. Only the operator-
+// reviewed mapping service may supply this pre-mapping authority; no Sites.list.
+async function readReviewedSite({ connectionRef, clinicId, siteUrl }, { beforeExecute, timeoutMs } = {}) {
+  const resource = contract.site(siteUrl);
+  if (!positive(clinicId) || typeof connectionRef !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(connectionRef)
+    || typeof beforeExecute !== 'function') fail();
+  await beforeExecute();
+  const result = await client.execute({ operation: discovery.SC_OPERATION, connectionRef,
+    assetRef: resource.assetRef, tenantRef: `clinic:${Number(clinicId)}`, payload: {} }, { timeoutMs });
+  await beforeExecute();
+  return discovery.projectSC(result?.data, resource.siteUrl);
+}
+module.exports = { ...service, createSearchConsoleBroker, createSearchConsoleRepository, readReviewedSite };

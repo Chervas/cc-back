@@ -116,12 +116,12 @@ test('broker tenants keep separate downloads even for one web and connection', a
   assert.equal(downloads, 4);
 });
 
-function jobsFixture({ count = 1, sites = 1, env = {}, storage, helper } = {}) {
+function jobsFixture({ count = 1, sites = 1, env = {}, storage, helper, cutHelper } = {}) {
   const f = database(); Object.assign(f.state, { calls: [], active: true, failQueries: null, truncate: false, revisions: 0, reports: [], storageCalls: [] });
   const mappings = Array.from({ length: count }, (_, index) => ({ id: 91 + index, clinicaId: 71 + index,
     googleConnectionId: 81, siteUrl: 'https://example.invalid/' }));
   for (let index = 1; index < sites; index++) mappings.push({ ...mappings[0], id: 100 + index, siteUrl: 'https://other' + index + '.invalid/' });
-  f.models.ClinicWebAsset = { findAll: async () => mappings };
+  f.models.ClinicWebAsset = { findAll: async ({ where } = {}) => where?.clinicaId ? mappings.filter(a => a.clinicaId === Number(where.clinicaId)) : mappings };
   f.models.SyncLog = { create: async () => ({ update: async value => f.state.reports.push(value) }) };
   const credentials = { assert: async () => { if (!f.state.active) throw Error('REVOKED'); },
     request: async (_connection, send) => send(), safe: () => 'google_credentials_unavailable' };
@@ -139,11 +139,13 @@ function jobsFixture({ count = 1, sites = 1, env = {}, storage, helper } = {}) {
     } },
     env: { WEB_PSI_ENABLED: 'false', WEB_SYNC_RECENT_DAYS: '1', WEB_BACKFILL_DAYS: '1', ...env },
     overrides: { ...(storage ? { '../services/searchConsoleAnalytics.service': storage } : {}),
-      ...(helper ? { '../lib/searchConsoleIngest': helper } : {}) },
+      ...(helper ? { '../lib/searchConsoleIngest': helper } : {}),
+      ...(cutHelper ? { '../lib/searchConsoleLegacyDetailCut': cutHelper } : {}) },
   }).metaSyncJobs;
   jobs._ensureGoogleAccessToken = async () => ({ accessToken: 'FICTITIOUS_OFFLINE_TOKEN', connection: { id: 81 } });
   return { ...f, jobs };
 }
+module.exports = { jobsFixture, database };
 
 test('actual sync for one web/four mappings retains legacy DTOs and skips all query UPDATEs on retry', async () => {
   const f = jobsFixture({ count: 4 });

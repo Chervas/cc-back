@@ -577,9 +577,28 @@ async function googlePropertyInventory(req, kind) {
             throw Object.assign(Error('broker_binding_invalid'), { code: 'broker_binding_invalid' });
         }
     };
-    const managed = await googlePropertyDiscovery.list({ kind, clinicIds, connectionId: Number(resolved.connection.id), revalidate,
-        resolveEffectiveMappings: () => googlePropertyInventoryScope.resolve({ kind, clinicIds,
-            connectionId: Number(resolved.connection.id), scopeInput: getScopeInputFromRequest(req) }) });
+    let managed; let unconfigured;
+    try {
+        managed = await googlePropertyDiscovery.list({ kind, clinicIds, connectionId: Number(resolved.connection.id), revalidate,
+            resolveEffectiveMappings: () => googlePropertyInventoryScope.resolve({ kind, clinicIds,
+                connectionId: Number(resolved.connection.id), scopeInput: getScopeInputFromRequest(req) }) });
+    } catch (error) {
+        if (kind !== 'search_console' || error?.code !== 'broker_discovery_scope_unconfigured') throw error;
+        unconfigured = error; managed = [];
+    }
+    if (kind === 'search_console' && managed !== null) {
+        const reviewed = await require('../services/googleReviewedSearchConsoleMapping.service')
+            .inventory(() => googleAdsMappingScope(req, 'write'));
+        if (unconfigured && !reviewed.length) throw unconfigured;
+        const entries = new Map(managed.map(row => [row.siteUrl, row]));
+        for (const row of reviewed) {
+            if (entries.has(row.siteUrl) && JSON.stringify(entries.get(row.siteUrl)) !== JSON.stringify(row)) {
+                throw Object.assign(Error('broker_response_invalid'), { code: 'broker_response_invalid' });
+            }
+            entries.set(row.siteUrl, row);
+        }
+        managed = [...entries.values()];
+    }
     if (managed !== null) return { managed, resolved };
     await revalidate(false); await googlePropertyDiscovery.assertLegacyAllowed();
     const connection = await googleLegacyCredentials.load(resolved.connection.id);
@@ -616,7 +635,7 @@ async function googleAdsMappingScope(req, access) {
             || connection.scope?.scopeKey !== resolved.scope.scopeKey || Number(connection.connection?.id) !== Number(resolved.connection.id)) fail('broker_binding_invalid');
     };
     return { clinicIds, scopeKey: resolved.scope.scopeKey, connectionId: Number(resolved.connection.id), actorId: claims.userId,
-        sessionRef: claims.jti, revalidate, authorize: async ({ transaction }) => {
+        sessionRef: claims.jti, sessionExpiresAt: claims.exp * 1000, revalidate, authorize: async ({ transaction }) => {
             try { await accessSessions.verifyReference({ userId: claims.userId, sessionRef: claims.jti, expiresAt: new Date(claims.exp * 1000) }, { transaction }); }
             catch { fail('google_discovery_session_required'); }
             return hasMarketingClinicScopeAccess({ userId: claims.userId, clinicIds, access: 'write',
@@ -3443,6 +3462,13 @@ router.post('/google/map-assets', async (req, res) => {
             `${Number.parseInt(String(mapping.clinicaId), 10)}|${String(mapping.siteUrl).trim()}`,
             mapping
         ])).values());
+        // A managed connection never falls through to Sites.list or the legacy
+        // writer. Authority comes from a fixed operator-reviewed file, not HTTP.
+        let managed = false;
+        try { await googlePropertyDiscovery.assertLegacyAllowed(); }
+        catch (error) { if (error?.code !== 'google_oauth_legacy_closed') throw error; managed = true; }
+        if (managed) return res.json(await require('../services/googleReviewedSearchConsoleMapping.service')
+            .map(await googleAdsMappingScope(req, 'write'), req.body));
         const { connection: conn } = await resolveAuthorizedDestinationGoogleConnection({
             userId,
             mappings,
@@ -3561,6 +3587,10 @@ router.post('/google/map-assets', async (req, res) => {
 
         return res.json({ success: true, mapped: createdOrUpdated.length, assets: createdOrUpdated });
     } catch (e) {
+        if (e?.code && (e.code.startsWith('broker_') || e.code.startsWith('google_oauth_')
+            || e.code.startsWith('google_discovery_') || ['asset_revoked', 'scope_denied', 'operation_denied'].includes(e.code))) {
+            return sendGooglePropertyDiscoveryError(res, e);
+        }
         if (sendKnownOAuthMappingError(res, e)) return;
         console.error('❌ Error en /oauth/google/map-assets:', e.response?.data || e.message);
         return res.status(500).json({ success: false, error: 'Error mapeando propiedades' });

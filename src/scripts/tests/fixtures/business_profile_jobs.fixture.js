@@ -8,6 +8,7 @@ function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credent
   const dependencies = {
     '../../models': models, sequelize: require('sequelize'), crypto: require('node:crypto'),
     '../lib/searchConsoleIngest': require('../../../lib/searchConsoleIngest'),
+    '../lib/searchConsoleLegacyDetailCut': require('../../../lib/searchConsoleLegacyDetailCut'),
     'node-cron': { schedule: fail }, axios: { create: () => legacyHttp, post: fail },
     '../services/businessProfileBroker.service': broker,
     '../services/businessProfileCache.service': require('../../../services/businessProfileCache.service')
