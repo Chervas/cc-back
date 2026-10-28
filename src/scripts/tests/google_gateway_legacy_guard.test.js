@@ -4,7 +4,7 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const {REGISTRIES,createGoogleLegacyOAuthGuard}=require('../../services/googleLegacyOAuthGuard.service');
 function fixture(){
-  const state={markers:new Set(),calls:{consume:0,issue:0,token:0,userinfo:0,writes:0,assignment:0},afterToken:null,afterUser:null,afterWrite:null,reads:[],rows:[]};
+  const state={markers:new Set(),returnTo:'https://app.clinicaclick.com',calls:{consume:0,issue:0,token:0,userinfo:0,writes:0,assignment:0},afterToken:null,afterUser:null,afterWrite:null,reads:[],rows:[]};
   const models=Object.fromEntries(REGISTRIES.map(([name])=>[name,{findOne:async options=>{state.reads.push(options);return state.markers.has(name)?{}:null;}}]));
   models.Clinica={findByPk:async()=>({grupoClinicaId:null})};
   const model={sequelize:{async transaction(options,work){assert.equal(options.isolationLevel,'SERIALIZABLE');const before=state.rows.map(x=>({...x}));
@@ -12,7 +12,7 @@ function fixture(){
     findOne:async({where})=>{const row=state.rows.find(x=>Object.entries(where).every(([k,v])=>x[k]===v));return row&&{...row,async update(values){state.calls.writes++;Object.assign(row,values);await state.afterWrite?.();return row;}};},
     create:async values=>{state.calls.writes++;const row={id:81,...values};state.rows.push(row);await state.afterWrite?.();return row;}};
   const env={GOOGLE_CLIENT_ID:'FICTITIOUS_CLIENT',GOOGLE_CLIENT_SECRET:'FICTITIOUS_SECRET',GOOGLE_OAUTH_BROKER_ENABLED:'false',RUNTIME_ROLE:'gateway',JOBS_AUTO_START:'false'};
-  const logs=[];const context=vm.createContext({Buffer,URL,URLSearchParams,Date,process:{env},console:Object.fromEntries(['log','warn','error'].map(k=>[k,(...a)=>logs.push(a)])),setTimeout,clearTimeout});
+  const logs=[];const context=vm.createContext({Buffer,URL,URLSearchParams,Date,Set,process:{env},console:Object.fromEntries(['log','warn','error'].map(k=>[k,(...a)=>logs.push(a)])),setTimeout,clearTimeout});
   const deny=()=>assert.fail('UNDECLARED_GATEWAY_TEST_DEPENDENCY');const blocked=new Proxy({},{get:()=>deny});
   function load(relative,deps){const filename=path.resolve(__dirname,'../..',relative),module={exports:{}};
     const fn=new vm.Script('(function(module,exports,require){\n'+fs.readFileSync(filename,'utf8')+'\n})',{filename}).runInContext(context,{timeout:1000});
@@ -30,7 +30,7 @@ function fixture(){
     '../lib/oauthRedirect':require('../../lib/oauthRedirect'),
     '../lib/oauthMarketingScopeAccess':{marketingScopeInputFromRequest:()=>({clinicIdRaw:71,groupIdRaw:null,assignmentScopeRaw:'clinic'}),authorizeRequestedMarketingConnectionScope:async()=>({requested:true,clinicIds:[71]})},
     '../services/scopeConnectionResolver.service':{normalizeScope:async()=>({clinicId:71,assignmentScope:'clinic'}),buildSharedConnectionScope:()=>({scopeKey:'clinic:71'}),upsertGoogleAssignment:async()=>{state.calls.assignment++;}},
-    '../services/oauthState.service':{consumeOAuthState:async()=>{state.calls.consume++;return{userId:7,clinicId:71,assignmentScope:'clinic',returnTo:'https://app.clinicaclick.com'};},issueOAuthState:async()=>{state.calls.issue++;return'FICTITIOUS_STATE';}},
+    '../services/oauthState.service':{consumeOAuthState:async()=>{state.calls.consume++;return{userId:7,clinicId:71,assignmentScope:'clinic',returnTo:state.returnTo};},issueOAuthState:async()=>{state.calls.issue++;return'FICTITIOUS_STATE';}},
     '../services/oauthConnectionPersistence.service':{persistGoogleConnection:persist},
     axios:{post:async()=>{state.calls.token++;await state.afterToken?.();return{data:{access_token:'FICTITIOUS_ACCESS',refresh_token:'FICTITIOUS_REFRESH',expires_in:3600}};},get:async()=>{state.calls.userinfo++;await state.afterUser?.();return{data:{id:'fictitious-subject'}};}},
   });
@@ -41,7 +41,7 @@ function fixture(){
 }
 test('every managed registry closes public callback before state/provider/persistence',async()=>{
   for(const[name]of REGISTRIES){const f=fixture();f.state.markers.add(name);const r=await f.invoke('/google/callback',{state:'FICTITIOUS',code:'FICTITIOUS_CODE'});
-    assert(r.redirect.includes('error='));assert.equal(r.headers['Cache-Control'],'no-store');assert.equal(r.headers['Referrer-Policy'],'no-referrer');
+    assert(r.redirect.includes('error='));assert.equal(new URL(r.redirect).origin,'https://crm.clinicaclick.com');assert.equal(r.headers['Cache-Control'],'no-store');assert.equal(r.headers['Referrer-Policy'],'no-referrer');
     assert.deepEqual(f.state.calls,{consume:0,issue:0,token:0,userinfo:0,writes:0,assignment:0});}
 });
 test('managed configuration with empty registries never falls through to legacy OAuth',async()=>{
@@ -62,6 +62,12 @@ test('transactional post-write guard rolls back Google row and cannot create ass
 test('unmanaged flagsOFF and empty registries preserve one-use legacy callback without new dispatcher',async()=>{
   const f=fixture();const r=await f.invoke('/google/callback',{state:'x',code:'x'});assert(r.redirect.includes('connected=google'));
   assert.equal(f.state.calls.consume,1);assert.equal(f.state.calls.token,1);assert.equal(f.state.calls.userinfo,1);assert.equal(f.state.calls.writes,1);assert.equal(f.state.calls.assignment,1);
+});
+test('a trusted legacy state preserves its CRM or localhost return instead of using the error fallback',async()=>{
+  for(const origin of ['https://crm.clinicaclick.com','http://localhost:4203']){
+    const f=fixture();f.state.returnTo=origin+'/marketing/mi-clinica';const r=await f.invoke('/google/callback',{state:'x',code:'x'});
+    const location=new URL(r.redirect);assert.equal(location.origin,origin);assert.equal(location.pathname,'/marketing/mi-clinica');assert.equal(location.searchParams.get('connected'),'google');
+  }
 });
 test('missing registry fails closed and provider cancellation never reflects raw error or exchanges code',async()=>{
   const f=fixture();delete f.models.BusinessProfileBrokerBinding;await f.invoke('/google/callback',{state:'x',code:'x'});assert.equal(f.state.calls.consume+f.state.calls.token,0);

@@ -1475,7 +1475,8 @@ router.get('/google/connect', async (req, res) => {
  * GET /oauth/google/callback
  */
 router.get('/google/callback', async (req, res) => {
-    let frontendOrigin = FRONTEND_URL;
+    // Invalid/blocked states have no trusted return URL; use the current public UI.
+    let frontendOrigin = 'https://crm.clinicaclick.com';
     res.set('Cache-Control', 'no-store');
     res.set('Referrer-Policy', 'no-referrer');
     try {
