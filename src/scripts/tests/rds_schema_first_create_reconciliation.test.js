@@ -6,24 +6,30 @@ require('node:tls').connect = () => { throw Error('TEST_ONLY_network_forbidden')
 const P = require('../../lib/rdsSchemaMigrationPolicy'), C = require('../../lib/rdsSchemaMigration'), R = require('../../lib/rdsSchemaFirstCreateReconciliation');
 const W = require('../../lib/rdsSchemaWarningPolicy'), { digest } = require('../../lib/securitySchemaContract');
 const SOURCE = path.resolve(__dirname, '../../..'), clone = value => structuredClone(value);
-async function fixture(t) {
+async function fixture(t, selected = R.SUPPORTED) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-rds-create-reconcile-')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = root + '/source'; fs.mkdirSync(source); fs.mkdirSync(source + '/migrations');
-  fs.copyFileSync(SOURCE + '/migrations/' + R.SUPPORTED.migration, source + '/migrations/' + R.SUPPORTED.migration);
+  fs.copyFileSync(SOURCE + '/migrations/' + selected.migration, source + '/migrations/' + selected.migration);
   const before = { defaults: { DEFAULT_CHARACTER_SET_NAME: 'utf8mb4', DEFAULT_COLLATION_NAME: 'utf8mb4_0900_ai_ci' },
     tables: [{ TABLE_NAME: 'Clinicas', ENGINE: 'InnoDB', TABLE_COLLATION: 'utf8mb4_0900_ai_ci' }],
     columns: ['id_clinica','label'].map(name => ({ TABLE_NAME: 'Clinicas', COLUMN_NAME: name, COLUMN_TYPE: 'int', IS_NULLABLE: 'NO', COLUMN_DEFAULT: null,
       EXTRA: '', CHARACTER_SET_NAME: null, COLLATION_NAME: null, GENERATION_EXPRESSION: '' })), indexes: [], checks: [], foreignKeys: [], migrations: [], triggers: [] };
   const identity = { physicalDbId: 'db-TEST_ONLY', engineVersion: '8.4.11', serverUuid: 'TEST_ONLY_UUID' };
-  const info = { revision: 'a'.repeat(40), contractDigest: 'b'.repeat(64), contract: { tables: {}, migrations: [] }, migrations: { [R.SUPPORTED.migration]: R.SUPPORTED.migrationSha256 } };
-  const plan = P.buildPlan({ info, before, identity, selected: [R.SUPPORTED.migration], moduleFiles: P.migrationFiles(source, [R.SUPPORTED.migration]), profile: 'TEST_ONLY', at: Date.now() });
+  const info = { revision: selected.sourceRevision || 'a'.repeat(40), contractDigest: 'b'.repeat(64), contract: { tables: {}, migrations: [] }, migrations: { [selected.migration]: selected.migrationSha256 } };
+  const plan = P.buildPlan({ info, before, identity, selected: [selected.migration], moduleFiles: P.migrationFiles(source, [selected.migration]), profile: 'TEST_ONLY', at: Date.now() });
   const shape = await R.definition(source, plan), observed = clone(before);
   observed.tables.push(shape.table); observed.columns.push(...shape.columns); observed.indexes.push(...shape.indexes); observed.foreignKeys.push(...shape.foreignKeys);
   const result = { status: 'rds_schema_failed_preserve_partial', reason: 'rds_schema_statement_warnings_require_reconciliation', writesDispatched: 1,
     automaticReplayAllowed: false, transportOpened: true, backup: { status: 'available', physicalDbId: identity.physicalDbId, createdAt: new Date(plan.createdAtEpochMs).toISOString() },
     closure: { physicalCloseObserved: true, physicalStreamDestroyed: true } };
-  const journal = [{ event: 'statement_request', migration: R.SUPPORTED.migration, kind: 'ddl', sqlSha256: R.SUPPORTED.sqlSha256 },
+  const journal = [{ event: 'statement_request', migration: selected.migration, kind: 'ddl', sqlSha256: selected.sqlSha256 },
     { event: 'terminal', accepted: false }];
+  if (selected === R.DELEGATED) {
+    result.operationNonce = selected.originalOperationNonce; result.planRef = { sha256: selected.originalPlanSha256 };
+    journal.splice(1, 0, { event: 'statement_diagnostics', migration: selected.migration, kind: 'ddl', sqlSha256: selected.sqlSha256,
+      warningReadFailed: false, warningStatus: 2, policy: W.NAME,
+      diagnostics: Array.from({ length: 2 }, () => ({ level: 'Warning', code: 1287, messageSha256: selected.diagnosticMessageSha256 })) });
+  }
   return { root, source, before, identity, info, plan, shape, observed, result, journal };
 }
 const validate = f => R.validate({ source: f.source, originalPlan: f.plan, observed: f.observed, identity: f.identity, result: f.result, journal: f.journal });
@@ -119,4 +125,58 @@ test('CLI exposes reconciliation as a read-only plan step and only publishes a s
   for (const change of [{ path: '/etc/secret' }, { path: value.path + '?secret=x' }, { sha256: 'invalid' }, { path: value.path.replace('/runs/', '/runs/../') }]) {
     assert.equal(C.safeResultRef({ ...value, ...change }), null);
   }
+});
+
+test('the exact DelegatedSessions CREATE preserves hashed diagnostics and proves UUID binary, date precision, unique handoff and all restrictive FKs', async t => {
+  const f = await fixture(t, R.DELEGATED), proof = await validate(f);
+  assert.equal(proof.migration, R.DELEGATED.migration); assert.equal(proof.originalWarning, 'retained_by_original_operator_hashed_diagnostics');
+  assert.equal(proof.originalDiagnostics.warningStatus, 2); assert.deepEqual(proof.originalDiagnostics.diagnostics, f.journal[1].diagnostics);
+  assert.equal(proof.originalDiagnostics.journalRowDigest, digest(f.journal[1])); assert.equal(proof.originalDiagnostics.journalIndex, 1);
+  assert.equal(f.shape.columns.length, 20); assert.equal(f.shape.indexes.length, 5); assert.equal(f.shape.foreignKeys.length, 3);
+  assert.deepEqual(f.shape.columns.filter(r => r.COLUMN_TYPE === 'char(36)').map(r => [r.COLUMN_NAME, r.COLLATION_NAME]), [['delegation_id','utf8mb4_bin'],['parent_session_id','utf8mb4_bin']]);
+  assert.equal(f.shape.columns.find(r => r.COLUMN_NAME === 'expires_at').COLUMN_TYPE, 'datetime(3)');
+  assert.equal(f.shape.indexes.find(r => r.INDEX_NAME === 'handoff_digest').NON_UNIQUE, 0);
+  assert(f.shape.foreignKeys.every(r => r.UPDATE_RULE === 'RESTRICT' && r.DELETE_RULE === 'RESTRICT'));
+});
+test('DelegatedSessions requires the original run, source, SQL, identity and exactly retained two diagnostics; it never accepts warning classes generally', async t => {
+  const f = await fixture(t, R.DELEGATED);
+  const mutations = [x => { x.result.operationNonce = 'other'; }, x => { x.result.planRef.sha256 = '0'.repeat(64); },
+    x => { x.plan.sourceRevision = '0'.repeat(40); }, x => { x.identity.engineVersion = '8.4.12'; },
+    x => { x.journal[0].sqlSha256 = '0'.repeat(64); }, x => { x.journal[1].sqlSha256 = '0'.repeat(64); },
+    x => { x.journal.splice(1,1); }, x => { x.journal.splice(1,0,clone(x.journal[1])); },
+    x => { x.journal[1].warningReadFailed = true; }, x => { x.journal[1].warningStatus = 1; },
+    x => { x.journal[1].diagnostics.pop(); }, x => { x.journal[1].diagnostics[0].level = 'Note'; },
+    x => { x.journal[1].diagnostics[0].code = 1681; }, x => { x.journal[1].diagnostics[0].messageSha256 = '0'.repeat(64); },
+    x => { x.journal[1].policy = 'any-warning'; }, x => { x.journal.unshift({ event: 'statement_ack' }); },
+    x => { x.result.writesDispatched = 2; }, x => { x.result.closure.physicalStreamDestroyed = false; }];
+  for (const change of mutations) { const x = { ...f, result: clone(f.result), identity: clone(f.identity), plan: clone(f.plan), journal: clone(f.journal) }; change(x); await assert.rejects(validate(x), /rds_schema_reconciliation_/); }
+  fs.appendFileSync(f.source + '/migrations/' + R.DELEGATED.migration, '\n// TEST_ONLY changed source\n');
+  await assert.rejects(validate(f), /source_changed/);
+});
+test('DelegatedSessions refuses missing/extra indexes, weakened UUID/date/unique/FK metadata, and any unrelated drift', async t => {
+  const f = await fixture(t, R.DELEGATED);
+  for (const change of [x => { x.observed.indexes.push({ ...x.shape.indexes[0], INDEX_NAME: 'idx_delegated_parent_state' }); },
+    x => { x.observed.indexes.pop(); }, x => { x.observed.indexes.find(r => r.INDEX_NAME === 'handoff_digest').NON_UNIQUE = 1; },
+    x => { x.observed.columns.find(r => r.COLUMN_NAME === 'delegation_id').COLLATION_NAME = 'utf8mb4_0900_ai_ci'; },
+    x => { x.observed.columns.find(r => r.COLUMN_NAME === 'expires_at').COLUMN_TYPE = 'datetime'; },
+    x => { x.observed.foreignKeys.at(-1).UPDATE_RULE = 'NO ACTION'; }, x => { x.observed.foreignKeys.at(-1).DELETE_RULE = 'CASCADE'; },
+    x => { x.observed.foreignKeys.pop(); }, x => { x.observed.columns[0].COLUMN_DEFAULT = 'unexpected'; },
+    x => { x.observed.triggers.push({ TABLE_NAME: 'DelegatedSessions', TRIGGER_NAME: 'unexpected' }); },
+    x => { x.observed.migrations.push(R.DELEGATED.migration); }]) {
+    const x = { ...f, observed: clone(f.observed) }; change(x); await assert.rejects(validate(x), /metadata_drift/);
+  }
+});
+test('DelegatedSessions continuation dispatches only three zero-warning indexes and never replays or invents ACK for CREATE', async t => {
+  const f = await fixture(t, R.DELEGATED), sent = [], events = [];
+  const raw = { query(options, values, cb) { if (typeof values === 'function') cb = values; const sql = typeof options === 'string' ? options : options.sql;
+    sent.push(sql); queueMicrotask(() => cb(null, sql === 'SHOW WARNINGS' ? [] : { affectedRows: 0, warningStatus: 0 })); return new EventEmitter(); } }; raw.execute = raw.query;
+  const continuation = { pending: true, proof: await validate(f), resultRef: { path: '/TEST_ONLY/original-result.json', sha256: 'a'.repeat(64) } };
+  const bridge = C.migrationInterface({ admin: { raw, identity: { engineVersion: '8.4.11' } }, aws: { assertFresh() {} }, journal: e => events.push(e), migrationName: R.DELEGATED.migration, continuation });
+  try { await require(f.source + '/migrations/' + R.DELEGATED.migration).up(bridge.queryInterface, require('sequelize')); }
+  finally { await bridge.restore(); }
+  assert.equal(continuation.pending, false); assert(!sent.some(sql => /^CREATE TABLE/i.test(sql)));
+  assert.equal(sent.filter(sql => sql !== 'SHOW WARNINGS').length, 3); assert(sent.filter(sql => sql !== 'SHOW WARNINGS').every(sql => /^ALTER TABLE `DelegatedSessions` ADD INDEX /i.test(sql)));
+  assert.equal(events.filter(e => e.event === 'statement_reconciled').length, 1); assert.equal(events.filter(e => e.event === 'statement_ack').length, 3);
+  assert(!events.some(e => e.event === 'statement_ack' && e.sqlSha256 === R.DELEGATED.sqlSha256));
+  assert(events.filter(e => e.event === 'statement_ack').every(e => e.warnings === 0));
 });
