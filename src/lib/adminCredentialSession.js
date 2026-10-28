@@ -44,6 +44,11 @@ async function verifyToken(token, secret, options) {
   const decoded = jwt.verify(token, secret, { algorithms: ['HS256'] });
   if (!decoded || !Number.isSafeInteger(decoded.userId) || decoded.userId <= 0 || !Number.isInteger(decoded.exp)
     || isBlockedAuthEmail(decoded.email)) reject();
+  // This transitional export accepts untyped legacy access tokens only.
+  // Managed access and delegated purposes require the central live registry
+  // verifier; signature/credential binding alone cannot authorize them.
+  if (['type', 'iss', 'aud', 'sessionVersion', 'delegationVersion', 'adminUserId', 'parentSessionRef']
+    .some(key => Object.hasOwn(decoded, key))) reject();
   return verify(decoded, secret, options);
 }
 module.exports = { claims, assertMatches, verify, verifyToken, bearer };
