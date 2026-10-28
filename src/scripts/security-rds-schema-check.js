@@ -12,7 +12,7 @@ const ROOTS = Object.freeze({ staging: '/home/ubuntu/wt/back-staging', gateway: 
 const CODE = ['src/scripts/security-schema-release.js', 'src/scripts/security-email-login-metadata.js',
   'src/scripts/security-database-metadata.js', 'src/lib/securitySchemaContract.js',
   'src/lib/schemaReleaseDatabase.js', 'src/lib/databaseTlsConfig.js'];
-CODE.push('src/lib/delegatedSchemaPreflight.js');
+const OPTIONAL_CODE = ['src/lib/delegatedSchemaPreflight.js'];
 
 function parse(argv) {
   if (['check-rds', 'preflight-rds'].includes(argv[0])) argv.shift();
@@ -32,7 +32,11 @@ function parse(argv) {
   return options;
 }
 function codePins(root) {
-  return CODE.map(relative => {
+  const files = CODE.concat(OPTIONAL_CODE.filter(relative => {
+    try { fs.lstatSync(path.join(root, relative)); return true; }
+    catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  }));
+  return files.map(relative => {
     const file = path.join(root, relative);
     P.need(fs.realpathSync(file) === file && fs.lstatSync(file).isFile(), 'rds_schema_runtime_check_code');
     return { path: file, sha256: P.sha(fs.readFileSync(file)) };
@@ -82,7 +86,8 @@ async function run(argv, dependencies = {}) {
   // Use that runtime's actual helper/contract semantics, including gateway's
   // independent contract; do not copy the DEV feature-contract implementation.
   const checked = await check.run(['check', '--source', options.source, '--runtime', options.runtime,
-    '--out', reportPath, '--binding', bindingRef.path, '--binding-sha', bindingRef.sha256]);
+    '--out', reportPath, '--binding', bindingRef.path, '--binding-sha', bindingRef.sha256,
+    ...options.required.flatMap(name => ['--require-migration', name])]);
   publicDatabase.validateBinding(binding, options.runtime, now());
   P.need(JSON.stringify(beforePins) === JSON.stringify(readPins(root)), 'rds_schema_runtime_check_changed');
   const afterInfo = check.sourceInfo(options.source, false);
