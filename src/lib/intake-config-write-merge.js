@@ -9,6 +9,8 @@ const EDITOR_FEATURE_KEYS = Object.freeze([
   'consent_mode_enabled',
   'consent_provider',
   'external_cmp_provider',
+  'ga4_bridge_enabled',
+  'ga4_measurement_id',
 ]);
 
 const EDITOR_GOOGLE_ADS_KEYS = Object.freeze([

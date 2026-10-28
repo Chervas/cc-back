@@ -163,7 +163,7 @@ async function readStoredWebEvidence({ models, Op, scopeType, scopeId, clinicId,
   return { plugin, activity };
 }
 
-function buildWebDiagnostics({ html, checkedUrl, evaluation = {}, stored, nowMs = Date.now(), isAllowedAssetUrl, expectedAttr, expectedId }) {
+function buildWebDiagnostics({ html, checkedUrl, evaluation = {}, stored, features, nowMs = Date.now(), isAllowedAssetUrl, expectedAttr, expectedId }) {
   const scripts = snippetTagsInHtml(html, checkedUrl, isAllowedAssetUrl);
   const scoped = scripts.filter((tag) => attribute(tag, expectedAttr) === String(expectedId));
   return {
@@ -187,7 +187,7 @@ function buildWebDiagnostics({ html, checkedUrl, evaluation = {}, stored, nowMs 
       execution: 'not_verified',
     },
     activity: stored.activity,
-    tags: detectGoogleTags(html, checkedUrl),
+    tags: { ...detectGoogleTags(html, checkedUrl), ga4_bridge: require('./intake-ga4-bridge').bridgeStatus(features) },
   };
 }
 

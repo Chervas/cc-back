@@ -5093,13 +5093,18 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
     try { validatePreparation(body); }
     catch (error) { return res.status(error.status || 400).json({ success: false, error: error.code }); }
   }
-  const partialMutation = verificationOnlyMutation || domainAddMutation;
+  const ga4BridgeMutation = body.mutation_kind === 'ga4_bridge';
+  if (ga4BridgeMutation && (Object.keys(body).some(key => !['mutation_kind', 'group_id', 'enabled', 'measurement_id'].includes(key))
+    || typeof body.enabled !== 'boolean' || typeof body.measurement_id !== 'string')) {
+    return res.status(400).json({ success: false, error: 'ga4_bridge_invalid' });
+  }
+  const partialMutation = verificationOnlyMutation || domainAddMutation || ga4BridgeMutation;
   let groupId = requestedGroupId;
   let scope = groupId ? 'group' : 'clinic';
   if (scope === 'clinic') {
     const sharedWebContext = await resolveSharedWebGroupConfigForClinic(clinicId);
     if (sharedWebContext?.record) {
-      if (partialMutation) {
+      if (partialMutation && !ga4BridgeMutation) {
         // The caller remains authorized against the selected clinic. Only the
         // two narrow, lock-protected mutations may resolve their effective web
         // row automatically; a full group editor write still requires group
@@ -5183,7 +5188,7 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
       try { preparation = applyCampaignPreparation(existing, body); }
       catch (error) { return { error: { status: error.status || 400, body: { success: false, error: error.code } } }; }
     }
-    const domains = preparation ? preparation.domains : verificationOnlyMutation
+    const domains = preparation ? preparation.domains : verificationOnlyMutation || ga4BridgeMutation
       ? existingDomains
       : domainAddMutation
         ? canonicalizeIntakeDomains([...existingDomains, domainToAdd])
@@ -5196,6 +5201,11 @@ exports.upsertIntakeConfig = asyncHandler(async (req, res) => {
           normalizeEffectiveGoogleAdsConfig,
           normalizeMetaAdsConfig,
         );
+
+    if (ga4BridgeMutation) config.features = { ...(config.features || {}),
+      ga4_bridge_enabled: body.enabled, ga4_measurement_id: body.measurement_id };
+    const ga4Error = require('../lib/intake-ga4-bridge').ga4BridgeError(config.features);
+    if (ga4Error) return { error: { status: 400, body: { success: false, error: ga4Error } } };
 
     if (!partialMutation && !preparationMutation
       && Object.prototype.hasOwnProperty.call(config, 'locations')
@@ -5799,7 +5809,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
     locationIds: configuredClinicIds(record),
   });
   const diagnosticsFor = (html, checkedUrl, evaluation) => buildWebDiagnostics({
-    html, checkedUrl, evaluation, stored: storedEvidence,
+    html, checkedUrl, evaluation, stored: storedEvidence, features: record?.config?.features,
     isAllowedAssetUrl: isClinicaClickAssetHost, expectedAttr, expectedId,
   });
   const primaryFetch = await fetchFirstHtml(uniqueCandidates, false);
