@@ -564,7 +564,7 @@ async function googlePropertyInventory(req, kind) {
     const revalidate = async managed => {
         let claims;
         try { claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { claims = null; }
-        if (!claims || Number(claims.userId) !== Number(actor) || managed && (claims.sessionVersion !== 1 || !claims.jti)) {
+        if (!claims || Number(claims.userId) !== Number(actor) || managed && (!require('../lib/delegatedOperationPolicy').isManagedBusinessSession(claims) || !claims.jti)) {
             throw Object.assign(Error('google_discovery_session_required'), { code: 'google_discovery_session_required' });
         }
         let scope;
@@ -633,7 +633,7 @@ async function googleAdsInventory(req, { capture = false } = {}) {
     const revalidate = async managed => {
         let claims;
         try { claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { claims = null; }
-        if (!claims || Number(claims.userId) !== Number(actor) || managed && (claims.sessionVersion !== 1 || !claims.jti)) {
+        if (!claims || Number(claims.userId) !== Number(actor) || managed && (!require('../lib/delegatedOperationPolicy').isManagedBusinessSession(claims) || !claims.jti)) {
             throw Object.assign(Error('google_discovery_session_required'), { code: 'google_discovery_session_required' });
         }
         let authorized;

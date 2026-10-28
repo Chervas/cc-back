@@ -1,10 +1,11 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
 const { UUID } = require('../../services/platform-audit/src/event');
-function createCapture({ repository, enabled = () => process.env.PLATFORM_AUDIT_REALTIME_ENABLED, now = () => new Date() }) {
-  return { async run(actor, operation, work) {
+function createCapture({ repository, enabled = () => process.env.PLATFORM_AUDIT_REALTIME_ENABLED, now = () => new Date(),
+  delegationAudit = () => require('./platformAudit.delegation') }) {
+  async function capture(actor, operation, work) {
     const flag = enabled(); if (![undefined, '', 'false', 'true'].includes(flag)) throw Error('realtime_unavailable');
-    if (flag !== 'true') return work();
+    if (flag !== 'true' && !actor.authDelegation) return work();
     const repo = typeof repository === 'function' ? repository() : repository;
     const health = await repo.health(now(), { includeUnresolved: false });
     if (health.pending >= 10000 || health.oldestAgeSeconds >= 3600) throw Error('realtime_unavailable');
@@ -23,6 +24,16 @@ function createCapture({ repository, enabled = () => process.env.PLATFORM_AUDIT_
         ? operation.action === 'realtime.subscribe' ? 'subscription_prepared' : 'packet_prepared' : result.invalid ? 'request_invalid' : 'access_denied',
       scope: result.scope || base.scope, clinicIds: result.allowed ? result.clinicIds.map(String) : [] });
     return result;
+  }
+  return { async run(actor, operation, work) {
+    const context = require('../lib/delegationAuditContext');
+    // A scheduled delivery can execute in another producer's async chain.
+    // The freshly verified recipient always selects its own audit identity.
+    if (actor.authDelegation) {
+      await delegationAudit().assertReady();
+      return context.run(actor.authDelegation, () => capture(actor, operation, work));
+    }
+    return context.suppress(() => capture(actor, operation, work));
   } };
 }
 let instance;

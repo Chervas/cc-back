@@ -14,7 +14,7 @@ function createBusinessProfileMutations({ models, broker, sessions, journal, sco
     let claims;
     try { claims = await sessions.verify(sessions.bearer(request?.headers?.authorization)); }
     catch { fail('business_profile_session_required'); }
-    if (claims.sessionVersion !== 1 || Number(request?.userData?.userId) !== claims.userId) fail('business_profile_session_required');
+    if (!require('../lib/delegatedOperationPolicy').isManagedBusinessSession(claims) || Number(request?.userData?.userId) !== claims.userId) fail('business_profile_session_required');
     return actorFor({ type: 'user', userId: claims.userId, sessionRef: claims.jti, expiresAt: claims.exp * 1000 });
   }
   async function publicAsset(row, input, transaction) {
@@ -102,7 +102,7 @@ function createBusinessProfileMutations({ models, broker, sessions, journal, sco
     }
     await ctx.beforeExecute();
     if (ctx.actor.type === 'user') await sessions.verifyReference({ userId: ctx.actor.userId,
-      sessionRef: ctx.actor.sessionRef, expiresAt: new Date(ctx.actor.expiresAt) });
+      sessionRef: ctx.actor.sessionRef, expiresAt: new Date(ctx.actor.expiresAt) }, { purpose: 'business_profile.write' });
     else if (await ctx.verifyAutomation?.({}) !== true) fail('business_profile_automation_required');
     await broker.assert(ctx.location, ctx.brokerContext);
     return result;
@@ -153,7 +153,7 @@ function createBusinessProfileMutations({ models, broker, sessions, journal, sco
           state: 'unknown', createdAt: row.created_at, lastError: row.last_error });
       }
       for (const [mappingId, allowed] of checked) if (allowed) await scope({ models: db(), clinicId, mappingId, userId: actor.userId });
-      await sessions.verifyReference({ userId: actor.userId, sessionRef: actor.sessionRef, expiresAt: new Date(actor.expiresAt) });
+      await sessions.verifyReference({ userId: actor.userId, sessionRef: actor.sessionRef, expiresAt: new Date(actor.expiresAt) }, { purpose: 'business_profile.write' });
       return { success: true, items, hasMore: rows.length > 100, enabled: true };
     }),
   };

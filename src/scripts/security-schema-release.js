@@ -120,7 +120,11 @@ async function run(argv) {
   const options = parse([...argv]);
   const info = sourceInfo(options.source, options.action !== 'check');
   const env = environment(options.runtime);
-  info.contract = effectiveContract(info.contract, env);
+  const delegationPreflight = require('../lib/delegatedSchemaPreflight');
+  const requireDelegation = (options.requiredMigrations || []).includes(delegationPreflight.MIGRATION);
+  // A selected required migration must prove its schema before feature enable;
+  // this affects only the metadata contract, never the runtime environment.
+  info.contract = effectiveContract(info.contract, requireDelegation ? { ...env, AUTH_DELEGATION_ENABLED: 'true' } : env);
   const binding = options.runtime === 'dev' ? null : publicDatabase.readBinding(options.binding, options['binding-sha'], options.runtime);
   const opened = binding ? await publicDatabase.connectCheck(env, binding, options.runtime) : null;
   const connection = opened ? opened.connection : await require('mysql2/promise').createConnection(configuration(env));
@@ -140,10 +144,14 @@ async function run(argv) {
         }
       }
       if (options.action === 'check') {
+        const delegationGrants = env.AUTH_DELEGATION_ENABLED === 'true' || requireDelegation
+          ? await delegationPreflight.check(query) : null;
+        if (delegationGrants && !delegationGrants.compatible) compatibility.compatible = false;
         const report = { status: compatibility.compatible ? 'compatible' : 'incompatible', runtime: options.runtime,
           revision: info.revision, contractDigest: info.contractDigest, snapshotDigest: digest(before),
           settings: settings(env), checkedTables: Object.keys(info.contract.tables).length,
-          disabledFeatureGroups: info.contract.disabledFeatureGroups || [], ...(opened ? { transportProof: opened.proof } : {}), ...compatibility };
+          disabledFeatureGroups: info.contract.disabledFeatureGroups || [], ...(delegationGrants ? { delegationGrants } : {}),
+          ...(opened ? { transportProof: opened.proof } : {}), ...compatibility };
         writeJson(options.out, report); if (binding) publicDatabase.validateBinding(binding, options.runtime); return report;
       }
       const plan = { version: 1, runtime: 'dev', database: DEV_DATABASE, revision: info.revision,

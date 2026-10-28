@@ -4505,7 +4505,9 @@ try {
 
   async executeAuthSessionExpiry() {
     if (process.env.AUTH_SESSION_EXPIRY_ENABLED !== 'true') return { disabled: true };
-    return require('../services/accessSession.service').expire();
+    const result = await require('../services/accessSession.service').expire();
+    if (process.env.AUTH_DELEGATION_ENABLED !== 'true') return result;
+    return { ...result, delegated: await require('../services/delegatedSession.service').expire() };
   }
 
   async executePlatformAuditReconciliation() {

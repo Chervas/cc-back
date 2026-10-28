@@ -2,13 +2,16 @@
 const { randomUUID } = require('node:crypto');
 const { Op } = require('sequelize');
 const { pack, unpack, receiptFor, fail } = require('../../services/platform-audit/src/event');
-function createRepository(model) {
+function createRepository(model, { delegationAudit } = {}) {
   const sql = model.sequelize;
   const owned = (row, now) => ({ event_id: row.event_id, digest: row.digest, lease_token: row.lease_token,
     lease_until: { [Op.gt]: now }, state: { [Op.ne]: 'delivered' } });
-  return {
+  const repository = {
     async append(value, { transaction } = {}) {
       const row = pack(value);
+      const delegated = row.event.version !== 27 && require('../lib/delegationAuditContext').current();
+      // Pair attribution and the existing canonical event in the same commit.
+      if (delegated && !transaction) return sql.transaction(transaction => repository.append(value, { transaction }));
       try {
         await model.create({ event_id: row.event.eventId, correlation_id: row.event.correlationId, stage: row.event.stage,
           result_part: row.event.version === 6 ? row.event.batchIndex : row.event.version === 12 ? Number(row.event.mappingId)
@@ -22,6 +25,7 @@ function createRepository(model) {
         const existing = await model.findByPk(row.event.eventId, { transaction, raw: true });
         if (!existing || existing.body !== row.body || existing.digest !== row.digest) fail('audit_event_conflict');
       }
+      if (delegated) await (delegationAudit || require('./platformAudit.delegation')).canonicalEvent(row.event, { transaction });
       return row;
     },
     async claim(now = new Date(), mode = 'pending') {
@@ -64,6 +68,7 @@ function createRepository(model) {
         oldestUnresolvedAgeSeconds: unresolved ? age(unresolved[0].oldest) : null };
     },
   };
+  return repository;
 }
 async function drain(repository, sink, { now = () => new Date(), limit = 50, mode = 'pending' } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) fail();

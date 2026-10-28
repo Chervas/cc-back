@@ -52,7 +52,7 @@ function createGoogleConversionReceiptReview({ models, sessions, audit, now = Da
       const captured = await runtime.broker.assert(runtime.account, runtime.brokerContext);
       const guard = async transaction => {
         gate();
-        try { await sessionService.verifyReference({ userId: actor.userId, sessionRef: actor.sessionRef, expiresAt: new Date(actor.expiresAt) }, { transaction }); }
+        try { await sessionService.verifyReference({ userId: actor.userId, sessionRef: actor.sessionRef, expiresAt: new Date(actor.expiresAt) }, { transaction, purpose: 'google_conversion.receipt' }); }
         catch (error) { if (error?.status === 401 || error?.code === 'auth_invalid') fail('google_receipt_session_required'); throw error; }
         if (await beforeExecute({ transaction }) !== true) fail('scope_denied');
         await assertMutationAccess({ userId: actor.userId, customerId: captured.customerId, runtimeAccountId: runtime.account.id, models: m, transaction });

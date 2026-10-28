@@ -64,7 +64,7 @@ function createGoogleAdsActionJournal({ models, sessions, audit, now = Date.now,
       const guard = async transaction => {
         gate();
         try { await getSessions().verifyReference({ userId: actor.userId, sessionRef: actor.sessionRef,
-          expiresAt: new Date(actor.expiresAt) }, { transaction }); }
+          expiresAt: new Date(actor.expiresAt) }, { transaction, purpose: 'google_ads.action' }); }
         catch (error) { if (error?.status === 401 || error?.code === 'auth_invalid') fail('google_action_session_required'); throw error; }
         if (await authorize({ transaction }) !== true) fail('scope_denied');
         if (!recovering) {

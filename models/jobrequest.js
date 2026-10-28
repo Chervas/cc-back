@@ -81,6 +81,12 @@ module.exports = (sequelize, DataTypes) => {
     underscored: true,
     createdAt: 'created_at',
     updatedAt: 'updated_at',
+    hooks: {
+      beforeValidate: instance => { if (instance.isNewRecord) require('../src/lib/delegationJobModelHooks').prepare(instance); },
+      beforeCreate: instance => require('../src/lib/delegationJobModelHooks').prepare(instance),
+      beforeBulkCreate: instances => require('../src/lib/delegationJobModelHooks').prepareBulk(instances),
+      beforeUpdate: instance => require('../src/lib/delegationJobModelHooks').update(instance),
+    },
     indexes: [
       {
         name: 'idx_job_requests_type_status_created_at',

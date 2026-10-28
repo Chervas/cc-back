@@ -1,6 +1,9 @@
 'use strict';
 const fs = require('node:fs'); const vm = require('node:vm'); const path = require('node:path');
 const root = path.resolve(__dirname, '../../..');
+// Pure policy helpers are executed as production code; transports and models
+// still require explicit injection and retain the closed dependency fallback.
+const pureDependencies = { '../lib/delegatedOperationPolicy': require('../../../lib/delegatedOperationPolicy') };
 function loadDiscoverySource(relative, dependencies, { env = {}, logs = [] } = {}) {
   const filename = path.join(root, relative); const module = { exports: {} };
   const forbidden = () => { throw Error('UNEXPECTED_DEPENDENCY_IN_DISCOVERY_QA'); };
@@ -9,7 +12,8 @@ function loadDiscoverySource(relative, dependencies, { env = {}, logs = [] } = {
     module, exports: module.exports, Buffer, URL, URLSearchParams, Date, setTimeout, clearTimeout,
     process: { env: { RUNTIME_ROLE: 'gateway', JOBS_AUTO_START: 'false', ...env } },
     console: Object.fromEntries(['log', 'warn', 'error'].map(k => [k, (...args) => logs.push(args)])),
-    require: name => Object.hasOwn(dependencies, name) ? dependencies[name] : blocked,
+    require: name => Object.hasOwn(dependencies, name) ? dependencies[name]
+      : Object.hasOwn(pureDependencies, name) ? pureDependencies[name] : blocked,
   }, { filename, timeout: 2000 });
   return module.exports;
 }

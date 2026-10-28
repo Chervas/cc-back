@@ -54,7 +54,7 @@ function projectUser(user) {
   return { id_usuario: Number(user.id_usuario), nombre: user.nombre, apellidos: user.apellidos, email_usuario: user.email_usuario,
     isProfesional: user.isProfesional === true, url_avatar: user.avatar || null, isAdmin: isGlobalAdmin(user.id_usuario) };
 }
-function createService({ models, audit, trustedDevices, config = settings, now = () => new Date() }) {
+function createService({ models, audit, trustedDevices, delegatedSessions, config = settings, now = () => new Date() }) {
   const db = () => typeof models === 'function' ? models() : models;
   const devices = () => trustedDevices || require('./authTrustedDevice.service').createService({ models, now, credentialBinding: user => binding(user, config().secret) });
   const repo = () => audit || require('./platformAudit.repository').createRepository(db().PlatformAuditEvent);
@@ -79,7 +79,8 @@ function createService({ models, audit, trustedDevices, config = settings, now =
         || v.emailVerifiedAt * 1000 > row.issued_at.getTime() || !(trusted ? UUID.test(row.trusted_device_id) && !row.email_challenge_id : UUID.test(row.email_challenge_id))) fail();
     }
   }
-  async function verify(token) {
+  const delegated = () => delegatedSessions || require('./delegatedSession.service');
+  async function verifyNormal(token) {
     const cfg = config(); const v = decode(token, cfg, now());
     if (!v.sessionVersion) return adminCredentials.verify(v, cfg.secret, { findUser: id => db().Usuario.findByPk(id, {
       attributes: ['id_usuario','password_usuario','email_usuario','estado_cuenta','es_provisional'], logging: false,
@@ -94,9 +95,13 @@ function createService({ models, audit, trustedDevices, config = settings, now =
     if (row.authentication_method === 'password_trusted_device') await devices().verifySession(row, user);
     return v;
   }
+  async function verify(token) {
+    if (require('./delegatedSession.service').isDelegatedToken(token)) return delegated().verify(token);
+    return verifyNormal(token);
+  }
   // OAuth callbacks carry a one-use state, not a JWT. Its durable request must
   // retain the managed session reference and the original authorization expiry.
-  async function verifyReference({ userId, sessionRef, expiresAt }, { transaction, requireEmail = false } = {}) {
+  async function verifyNormalReference({ userId, sessionRef, expiresAt }, { transaction, requireEmail = false } = {}) {
     const cfg = config();
     if (cfg.mode !== 'enforce' || !Number.isSafeInteger(userId) || userId <= 0
       || typeof sessionRef !== 'string' || !UUID.test(sessionRef)
@@ -118,6 +123,23 @@ function createService({ models, audit, trustedDevices, config = settings, now =
     // distinct from the 401 that invalidates the application's current login.
     if (requireEmail && row.authentication_method !== 'password_email') fail('auth_email_verification_required', 403);
     return { userId, sessionRef };
+  }
+  async function verifyReference(reference, options = {}) {
+    const context = options.purpose && require('../lib/delegationAuditContext').current()?.delegation;
+    if (context && context.childSessionRef === reference.sessionRef) {
+      if (options.requireEmail) require('./delegatedSession.service').ownSession();
+      // Verified request/job context avoids first locking the effective target
+      // as a normal session. The child checker locks actor/target in ID order.
+      return delegated().verifyReference(reference, options);
+    }
+    try { return await verifyNormalReference(reference, options); }
+    catch (error) {
+      // Only a valid child registry reference can take this second path. An
+      // unclassified business purpose stays denied; normal failures are kept.
+      if (error.code !== 'auth_invalid' || !await delegated().hasReference(reference, options)) throw error;
+      if (options.requireEmail) require('./delegatedSession.service').ownSession();
+      return delegated().verifyReference(reference, options);
+    }
   }
   // Call within a transaction that already locks the freshly authenticated user. All issuers share this method.
   async function issue(user, { transaction, parentToken, reason = 'credentials_verified', ttl, sessionRef = randomUUID(), emailChallengeId, trustedDeviceToken } = {}) {
@@ -186,6 +208,11 @@ function createService({ models, audit, trustedDevices, config = settings, now =
       { transaction, lock: transaction.LOCK.UPDATE }), transaction));
   }
   async function revoke(token, all = false) {
+    if (require('./delegatedSession.service').isDelegatedToken(token)) {
+      if (all) require('./delegatedSession.service').ownSession();
+      const claims = await delegated().verify(token);
+      return delegated().revoke({ token, delegationId: claims.jti });
+    }
     const cfg = config(); const v = decode(token, cfg, now());
     if (!v.sessionVersion) return { status: 'local_only', revoked: false };
     return db().sequelize.transaction(async transaction => {
@@ -220,7 +247,8 @@ function createService({ models, audit, trustedDevices, config = settings, now =
     }
     return { expired: count };
   }
-  return { verify, verifyReference, issue, authenticated, revoke, expire, credentialBinding: user => binding(user, config().secret) };
+  return { verify, verifyNormal, verifyReference, verifyNormalReference, issue, authenticated, revoke, expire,
+    credentialBinding: user => binding(user, config().secret), activeUser, projectUser };
 }
 const singleton = createService({ models: () => require('../../models') });
 module.exports = { ...singleton, createService, settings, bearer, decode, projectUser, activeUser, binding };

@@ -1,6 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/auth.controllers');
+router.use('/delegations', require('./authDelegations.routes').createRouter());
+// Public recovery/login commands keep their existing public contracts, but an
+// authenticated child cannot use its context to operate on login credentials.
+router.use(['/forgot-password', '/reset-password', '/sign-in', '/sign-up', '/unlock-session', '/email-code/verify', '/email-code/resend', '/claim-invite'], (req, res, next) => {
+    let token;
+    try { token = require('../services/accessSession.service').bearer(req.headers.authorization); } catch { return next(); }
+    if (!require('../services/delegatedSession.service').isDelegatedToken(token)) return next();
+    return require('./auth.middleware')(req, res, next);
+});
 
 router.post('/forgot-password', authController.forgotPassword);
 router.post('/reset-password', authController.resetPassword);

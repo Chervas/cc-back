@@ -14,7 +14,7 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
     const rows = await model.sequelize.query('SELECT /*+ MAX_EXECUTION_TIME(1500) */ event_id, occurred_at, body, digest, receipt '
       + 'FROM PlatformAuditEvents WHERE state=\'delivered\' AND delivered_at <= :snapshot AND occurred_at >= :from AND occurred_at < :to '
       + (criteria.action ? "AND JSON_UNQUOTE(JSON_EXTRACT(body,'$.action'))=:action " : '')
-      + (criteria.userId ? "AND (JSON_UNQUOTE(JSON_EXTRACT(body,'$.actor.id'))=:userId OR JSON_UNQUOTE(JSON_EXTRACT(body,'$.subjectUserId'))=:userId) " : '')
+      + (criteria.userId ? "AND (JSON_UNQUOTE(JSON_EXTRACT(body,'$.actor.id'))=:userId OR JSON_UNQUOTE(JSON_EXTRACT(body,'$.subjectUserId'))=:userId OR JSON_UNQUOTE(JSON_EXTRACT(body,'$.effectiveActor.id'))=:userId OR JSON_UNQUOTE(JSON_EXTRACT(body,'$.adminUserId'))=:userId) " : '')
       + (state.lastAt ? 'AND (occurred_at < :lastAt OR (occurred_at = :lastAt AND event_id < :lastId)) ' : '')
       + 'ORDER BY occurred_at DESC,event_id DESC LIMIT 26', { replacements, type: model.sequelize.constructor.QueryTypes.SELECT, logging: false });
     return rows;
@@ -70,6 +70,9 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
         coverage: 'confirmed_platform_index_only', events: verified.map(v => ({ eventId: v.eventId, occurredAt: v.occurredAt,
           action: v.action, stage: v.stage, outcome: v.outcome, reason: v.reason, actorType: v.actor.type, actorId: v.actor.id,
           correlationId: v.correlationId,
+          delegation: v.version === 27 ? { adminUserId: v.adminUserId, effectiveUserId: v.effectiveActor.id,
+            delegationId: v.delegationId, parentSessionRef: v.parentSessionRef, requestCorrelationId: v.requestCorrelationId,
+            runtimeNamespace: v.runtimeNamespace, expiresAt: v.expiresAt, http: v.http, socket: v.socket, job: v.job, sourceEvent: v.sourceEvent } : null,
           businessProfileMutation: v.version === 25 ? { operationRef: v.operationRef, mappingId: v.mappingId,
             assetRef: v.assetRef, family: v.family, executionRef: v.executionRef, nodeRef: v.nodeRef,
             initiatorUserId: v.initiatorUserId, clinicCount: v.clinicCount } : null,

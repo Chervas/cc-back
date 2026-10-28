@@ -247,7 +247,7 @@ function selectPrimarySiteMapping(mappings) {
 async function assertWebBrokerScope(req, mappings, exact = false) {
   let claims;
   try { claims = await accessSessions.verify(accessSessions.bearer(req.headers.authorization)); } catch { claims = null; }
-  if (!claims || claims.sessionVersion !== 1 || !claims.jti || Number(claims.userId) !== Number(req.webClinicUserId)) {
+  if (!claims || !require('../lib/delegatedOperationPolicy').isManagedBusinessSession(claims) || !claims.jti || Number(claims.userId) !== Number(req.webClinicUserId)) {
     throw Object.assign(Error('search_console_session_required'), { code: 'search_console_session_required', httpStatus: 401 });
   }
   const access = req.method === 'GET' ? 'read' : 'write';

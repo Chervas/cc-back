@@ -41,7 +41,7 @@ test('v25 reader verifies the exact S3 version, digest and KMS protection; futur
   const { readBatch } = require('../src/reader'), { KEY_ARN } = require('../src/s3');
   const row = pack(fixture()), { privateKey } = generateKeyPairSync('ed25519');
   const ref = { key: keyFor(row), digest: row.digest, versionId: 'fictitious-v25' };
-  assert.throws(() => refFor({ ...ref, key: ref.key.replace('/v25/', '/v26/') }, 'confirmed'));
+  assert.throws(() => refFor({ ...ref, key: ref.key.replace('/v25/', '/v28/') }, 'confirmed'));
   const input = signRequest({ mode: 'confirmed', actorId: '1', sessionRef: randomUUID(), refs: [ref] },
     { keyId: 'fixture', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }) }).input;
   for (const wrong of [null, 'version', 'digest', 'kms']) {

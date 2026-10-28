@@ -6,7 +6,12 @@ const personalController = require('../controllers/personal.controller');
 const { requirePersonalMergeAccess } = require('../lib/personalMergeAccess');
 
 // Reclamación de cuenta provisional (flujo onboarding por email)
-router.post('/reclamar', personalController.claimProvisionalAccount);
+router.post('/reclamar', (req, res, next) => {
+    let token;
+    try { token = require('../services/accessSession.service').bearer(req.headers.authorization); } catch { return next(); }
+    if (!require('../services/delegatedSession.service').isDelegatedToken(token)) return next();
+    return authMiddleware(req, res, next);
+}, personalController.claimProvisionalAccount);
 
 // El resto de rutas requieren JWT
 router.use(authMiddleware);

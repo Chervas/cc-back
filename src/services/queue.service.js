@@ -26,8 +26,34 @@ const queues = {
     automationDefaults: new Queue('automation_defaults', queueOptions),
 };
 
+// Keep reserved attribution out of user-supplied queue payloads. Only verified
+// server context can produce it; the worker restores it without a user token.
+for (const queue of Object.values(queues)) {
+    const add = queue.add.bind(queue), addBulk = queue.addBulk.bind(queue);
+    queue.add = (name, data, options) => add(name,
+        require('../lib/delegationAuditContext').attachJob(data, { kind: 'bull', type: `${queue.name}:${name}` }), options);
+    queue.addBulk = jobs => addBulk(jobs.map(job => ({ ...job,
+        data: require('../lib/delegationAuditContext').attachJob(job.data, { kind: 'bull', type: `${queue.name}:${job.name}` }),
+    })));
+}
+
 function createWorker(name, processor) {
-    const worker = new Worker(name, processor, queueOptions);
+    const worker = new Worker(name, job => require('./platformAudit.delegation').runJob(job.data || {}, {
+        kind: 'bull', type: `${name}:${job.name}`, jobRef: String(job.id), attempt: Number(job.attemptsMade || 0),
+    }, payload => {
+        if (payload === job.data) return processor(job);
+        const marker = job.data[require('../lib/delegationAuditContext').PAYLOAD_KEY];
+        const wrapped = new Proxy(job, { get(target, key) {
+            if (key === 'data') return payload;
+            if (key === 'updateData') return data => target.updateData({
+                ...require('../lib/delegationAuditContext').cleanPayload(data),
+                [require('../lib/delegationAuditContext').PAYLOAD_KEY]: marker,
+            });
+            const value = Reflect.get(target, key);
+            return typeof value === 'function' ? value.bind(target) : value;
+        } });
+        return processor(wrapped);
+    }), queueOptions);
     const events = new QueueEvents(name, queueOptions);
     events.on('failed', ({ jobId, failedReason }) => {
         console.error(`[Queue ${name}] Job ${jobId} failed: ${failedReason}`);

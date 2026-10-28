@@ -11,7 +11,7 @@ function createMetaMarketingAccessCheck({models,broker,sessions,authorizeScope,s
   async function execute(req,mappingId){
     if(!enabled())fail('broker_cohort_disabled');
     const initial=await sessions(req);
-    if(initial?.sessionVersion!==1||!initial.jti||Number(initial.userId)!==Number(req.userData?.userId))fail('meta_broker_session_required');
+    if(!require('../lib/delegatedOperationPolicy').isManagedBusinessSession(initial)||!initial.jti||Number(initial.userId)!==Number(req.userData?.userId))fail('meta_broker_session_required');
     const actor={userId:initial.userId,sessionRef:initial.jti};
     const authorization=async()=>{
       try{return await authorizeScope(req);}catch(error){
@@ -29,7 +29,7 @@ function createMetaMarketingAccessCheck({models,broker,sessions,authorizeScope,s
     const guard=async fresh=>{
       if(!enabled())fail('broker_cohort_disabled');
       const claims=await sessions(req);
-      if(claims?.userId!==actor.userId||claims.jti!==actor.sessionRef||claims.sessionVersion!==1)fail('meta_broker_session_required');
+      if(claims?.userId!==actor.userId||claims.jti!==actor.sessionRef||!require('../lib/delegatedOperationPolicy').isManagedBusinessSession(claims))fail('meta_broker_session_required');
       const latest=await authorization();
       if(!latest?.requested||scopeInput(req,latest)!==requestedScope
         ||JSON.stringify(latest.clinicIds.slice().sort((a,b)=>a-b))!==JSON.stringify(fresh.clinicIds))fail('meta_broker_scope_forbidden');

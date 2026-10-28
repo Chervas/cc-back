@@ -17,7 +17,7 @@ function createMetaConnectionMetadata({ authorize, resolve, session, loadMapping
       if (value !== null && value !== '' && (!['string', 'number'].includes(typeof value) || !/^[1-9]\d{0,9}$/.test(String(value)) || Number(value) > 2147483647)) fail('marketing_connection_scope_invalid', 400);
     }
     const claims = await session(req);
-    if (!claims?.userId || Number(claims.userId) !== Number(req.userData?.userId) || claims.sessionVersion !== 1 || !claims.jti) fail('meta_metadata_session_required', 401);
+    if (!claims?.userId || Number(claims.userId) !== Number(req.userData?.userId) || !require('../lib/delegatedOperationPolicy').isManagedBusinessSession(claims) || !claims.jti) fail('meta_metadata_session_required', 401);
     const authorization = await authorize(req);
     if (!authorization?.requested || !authorization.clinicIds?.length) fail('marketing_connection_scope_required', 400);
     const resolved = await resolve(req);
@@ -39,7 +39,7 @@ function createMetaConnectionMetadata({ authorize, resolve, session, loadMapping
     const finalAccess = await authorize(req);
     if (!finalAccess?.requested || signature([...new Set(finalAccess.clinicIds.map(Number))].sort((a,b) => a-b)) !== signature(before.clinicIds)) fail('meta_metadata_scope_changed', 409);
     const finalSession = await session(req);
-    if (!finalSession || finalSession.sessionVersion !== 1 || signature({ userId: finalSession.userId, jti: finalSession.jti }) !== signature(before.session)) fail('meta_metadata_session_required', 401);
+    if (!finalSession || !require('../lib/delegatedOperationPolicy').isManagedBusinessSession(finalSession) || signature({ userId: finalSession.userId, jti: finalSession.jti }) !== signature(before.session)) fail('meta_metadata_session_required', 401);
     const availability = { available: false, reason: 'meta_security_quarantine' };
     const status = { connected: false, connectionStored: !!connection, availability,
       reason: 'meta_security_quarantine', validationDeferred: true, reauthorizationRequired: false,

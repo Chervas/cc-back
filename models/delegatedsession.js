@@ -1,0 +1,27 @@
+'use strict';
+module.exports = (sequelize, D) => sequelize.define('DelegatedSession', {
+  delegation_id: { type: D.UUID, primaryKey: true, allowNull: false },
+  admin_user_id: { type: D.INTEGER, allowNull: false },
+  effective_user_id: { type: D.INTEGER, allowNull: false },
+  parent_session_id: { type: D.UUID, allowNull: false },
+  parent_expires_at: { type: D.DATE(3), allowNull: false },
+  actor_credential_binding: { type: D.STRING(64), allowNull: false },
+  target_credential_binding: { type: D.STRING(64), allowNull: false },
+  handoff_digest: { type: D.STRING(64), allowNull: false, unique: true },
+  pkce_challenge: { type: D.STRING(43), allowNull: false },
+  tab_nonce_digest: { type: D.STRING(64), allowNull: false },
+  handoff_expires_at: { type: D.DATE(3), allowNull: false },
+  handoff_consumed_at: { type: D.DATE(3), allowNull: true },
+  state: { type: D.STRING(16), allowNull: false },
+  created_at: { type: D.DATE(3), allowNull: false },
+  activated_at: { type: D.DATE(3), allowNull: true },
+  expires_at: { type: D.DATE(3), allowNull: false },
+  ended_at: { type: D.DATE(3), allowNull: true },
+  end_reason: { type: D.STRING(32), allowNull: true },
+  runtime_namespace: { type: D.STRING(80), allowNull: false },
+  frontend_origin: { type: D.STRING(255), allowNull: false },
+}, { tableName: 'DelegatedSessions', timestamps: false, indexes: [
+  { name: 'idx_delegated_parent_state', fields: ['parent_session_id', 'state'] },
+  { name: 'idx_delegated_target_state', fields: ['effective_user_id', 'state'] },
+  { name: 'idx_delegated_state_expiry', fields: ['state', 'expires_at'] },
+] });

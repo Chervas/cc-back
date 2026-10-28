@@ -84,7 +84,7 @@ const legacySignIn = (req, res) => auditedAuth(req, res, 'auth.sign_in', async (
     if (!user?.password_usuario || !await bcrypt.compare(req.body.password, user.password_usuario)) return rejectedCredentials();
     return sessions.authenticated(user, { attempt });
 });
-exports.signInWithToken = (req, res) => auditedAuth(req, res, 'auth.token_sign_in', async (attempt) => {
+const normalSignInWithToken = (req, res) => auditedAuth(req, res, 'auth.token_sign_in', async (attempt) => {
     const accessToken = req.body?.accessToken;
     if (!accessToken) return { status: 400, body: { error: 'Access token is required' }, audit: { outcome: 'denied', reason: 'request_invalid' } };
     const decodedToken = await sessions.verify(accessToken);
@@ -93,6 +93,21 @@ exports.signInWithToken = (req, res) => auditedAuth(req, res, 'auth.token_sign_i
     if (!user) return { status: 401, body: { error: 'User not found.' }, audit: { outcome: 'denied', reason: 'token_rejected' } };
     return sessions.authenticated(user, { parentToken: accessToken, attempt });
 });
+exports.signInWithToken = async (req, res) => {
+    const delegated = require('../services/delegatedSession.service');
+    if (!delegated.isDelegatedToken(req.body?.accessToken)) return normalSignInWithToken(req, res);
+    res.set('Cache-Control', 'private, no-store');
+    try {
+        const result = await delegated.refresh(req.body.accessToken);
+        req.userData = { userId: result.delegation.effectiveUserId, email: result.user.email_usuario };
+        req.authSession = { id: result.delegation.childSessionRef, expiresAt: Math.floor(new Date(result.delegation.expiresAt).getTime() / 1000), kind: 'delegated' };
+        Object.defineProperty(req, 'authDelegation', { value: result.delegation, enumerable: true });
+        return await require('../services/platformAudit.delegation').admitHttp(req, res, () => res.json(result));
+    } catch (error) {
+        const invalid = ['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error.name);
+        return res.status(invalid ? 401 : 503).json({ error: invalid ? 'auth_invalid' : 'auth_delegation_unavailable' });
+    }
+};
 
 exports.signUp = async (req, res) => {
     try {
@@ -235,13 +250,26 @@ exports.me = async (req, res) => {
     try {
         const user = await Usuario.findByPk(req.userData.userId, { attributes: ['id_usuario', 'nombre', 'apellidos', 'email_usuario', 'isProfesional', 'avatar'] });
         if (!user) return res.status(401).json({ message: 'Auth failed!' });
-        return res.json({ user: sessions.projectUser(user), session: { managed: Boolean(req.authSession?.id), expiresAt: req.authSession?.expiresAt } });
+        return res.json({ user: sessions.projectUser(user), session: { managed: Boolean(req.authSession?.id), expiresAt: req.authSession?.expiresAt },
+            ...(req.authDelegation ? { delegation: req.authDelegation } : {}) });
     } catch { return res.status(503).json({ message: 'Authentication temporarily unavailable.' }); }
 };
 async function revoke(req, res, all) {
     res.set('Cache-Control', 'private, no-store');
     try {
-        const result = await sessions.revoke(sessions.bearer(req.headers.authorization), all);
+        const token = sessions.bearer(req.headers.authorization);
+        const delegated = require('../services/delegatedSession.service');
+        if (delegated.isDelegatedToken(token)) {
+            const verified = await delegated.verify(token);
+            req.userData = { userId: verified.userId, email: verified.email };
+            req.authSession = { id: verified.jti, expiresAt: verified.exp, kind: 'delegated' };
+            Object.defineProperty(req, 'authDelegation', { value: verified.authDelegation, enumerable: true });
+            return await require('../services/platformAudit.delegation').admitHttp(req, res, async () => {
+                if (all) return res.status(403).json({ error: 'delegated_operation_requires_own_session' });
+                return res.json(await delegated.revoke({ token, delegationId: verified.jti }));
+            });
+        }
+        const result = await sessions.revoke(token, all);
         if (all && result.revoked) trustedDevices.clearCookie(res);
         return res.json(result);
     }

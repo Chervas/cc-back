@@ -12,6 +12,7 @@ const ROOTS = Object.freeze({ staging: '/home/ubuntu/wt/back-staging', gateway: 
 const CODE = ['src/scripts/security-schema-release.js', 'src/scripts/security-email-login-metadata.js',
   'src/scripts/security-database-metadata.js', 'src/lib/securitySchemaContract.js',
   'src/lib/schemaReleaseDatabase.js', 'src/lib/databaseTlsConfig.js'];
+CODE.push('src/lib/delegatedSchemaPreflight.js');
 
 function parse(argv) {
   if (['check-rds', 'preflight-rds'].includes(argv[0])) argv.shift();

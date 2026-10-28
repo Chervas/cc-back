@@ -4182,7 +4182,7 @@ exports.getOverview = async (req, res) => {
             const sessions = require('../services/accessSession.service');
             claims = await sessions.verify(sessions.bearer(req.headers?.authorization));
           } catch { claims = null; }
-          if (!claims || claims.sessionVersion !== 1 || !claims.jti || Number(claims.userId) !== userId) {
+          if (!claims || !require('../lib/delegatedOperationPolicy').isManagedBusinessSession(claims) || !claims.jti || Number(claims.userId) !== userId) {
             throw Object.assign(Error('search_console_session_required'), { code: 'search_console_session_required', status: 401 });
           }
           return scope.isAll ? isGlobalAdmin(userId)

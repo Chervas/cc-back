@@ -19,7 +19,9 @@ function installSocketSessionGuard(io, sessions = require('../services/accessSes
       const token = socket.handshake.auth?.token || sessions.bearer(socket.handshake.headers?.authorization);
       const v = await verify(token);
       socket.userData = { userId: v.userId, email: v.email };
-      pending.set(socket, { token, exp: v.exp }); next();
+      if (v.authDelegation) Object.defineProperty(socket, 'authDelegation', { value: v.authDelegation, enumerable: true });
+      pending.set(socket, { token, exp: v.exp, userId: v.userId, sessionRef: v.jti,
+        delegationId: v.authDelegation?.delegationId }); next();
     } catch { next(Error('auth_invalid')); }
   });
   io.on('connection', socket => {
@@ -28,13 +30,17 @@ function installSocketSessionGuard(io, sessions = require('../services/accessSes
     let checking;
     const check = () => checking ||= verify(initial.token).then(value => {
       if (!socket.connected) throw Error('auth_disconnected');
+      if (value.userId !== initial.userId || value.jti !== initial.sessionRef
+        || value.authDelegation?.delegationId !== initial.delegationId) throw Error('auth_invalid');
       return value;
     }).catch(() => { socket.disconnect(true); throw Error('auth_invalid'); }).finally(() => { checking = null; });
     verifiers.set(socket, check);
     // Incoming packet checks alone would leave outbound room traffic alive after logout.
     const poll = setInterval(() => { check().catch(() => {}); }, intervalMs); poll.unref?.();
     const expiry = setTimeout(() => socket.disconnect(true), Math.max(0, Math.min(2147483647, initial.exp * 1000 - Date.now()))); expiry.unref?.();
-    socket.use((_packet, next) => { check().then(() => next(), () => next(Error('auth_invalid'))); });
+    socket.use((packet, next) => { check().then(value => value.authDelegation
+      ? require('../services/platformAudit.delegation').admitSocket(socket, packet, next) : next())
+      .catch(() => { socket.disconnect(true); next(Error('auth_invalid')); }); });
     socket.once('disconnect', () => { verifiers.delete(socket); clearInterval(poll); clearTimeout(expiry); });
   });
 }

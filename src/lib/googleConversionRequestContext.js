@@ -7,7 +7,7 @@ async function googleConversionRequestContext(req, value, { models, sessions, re
   let claims;
   try { claims = await sessions.verify(sessions.bearer(req.headers.authorization)); }
   catch { fail(sessionError); }
-  if (claims.sessionVersion !== 1 || !positive(claims.userId) || !UUID.test(claims.jti)
+  if (!require('./delegatedOperationPolicy').isManagedBusinessSession(claims) || !positive(claims.userId) || !UUID.test(claims.jti)
     || !Number.isSafeInteger(claims.exp * 1000)) fail(sessionError);
   const actor = { userId: Number(claims.userId), sessionRef: claims.jti, expiresAt: claims.exp * 1000 };
   const m = typeof models === 'function' ? models() : models; let expectedIds;

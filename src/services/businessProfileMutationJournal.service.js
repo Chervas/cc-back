@@ -66,7 +66,7 @@ function createBusinessProfileMutationJournal({ models, sessions, audit, now = D
         if (actor.type === 'user') {
           if (actor.expiresAt <= now()) fail('business_profile_session_required');
           try { await (sessions || require('./accessSession.service')).verifyReference({ userId: actor.userId,
-            sessionRef: actor.sessionRef, expiresAt: new Date(actor.expiresAt) }, { transaction }); }
+            sessionRef: actor.sessionRef, expiresAt: new Date(actor.expiresAt) }, { transaction, purpose: 'business_profile.write' }); }
           catch (error) { if (error?.status === 401 || error?.code === 'auth_invalid') fail('business_profile_session_required'); throw error; }
         } else if (typeof context.verifyAutomation !== 'function' || await context.verifyAutomation({ transaction, recovering }) !== true) fail('business_profile_automation_required');
         if (await context.beforeExecute({ transaction, recovering, clinicIds: clinicIds.slice() }) !== true) fail('scope_denied');

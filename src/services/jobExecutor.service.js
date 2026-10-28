@@ -747,6 +747,12 @@ function resolveNextRun({ pauseUntil, backoffMs }) {
 }
 
 async function runJob(jobRequest) {
+  return require('./platformAudit.delegation').runJob(jobRequest.payload || {}, {
+    kind: 'native', type: String(jobRequest?.type), jobRef: String(jobRequest.id), attempt: Number(jobRequest.attempts || 0),
+  }, payload => runJobHandler(jobRequest, payload));
+}
+
+async function runJobHandler(jobRequest, delegatedPayload) {
   const jobType = normalizeJobType(jobRequest?.type);
   let handler = JOB_HANDLERS[jobType];
   if (!handler && jobType === 'automations_v2_execute') {
@@ -760,7 +766,7 @@ async function runJob(jobRequest) {
   let active = true;
   const claim = createJobClaim(jobRequest, { isActive: () => active });
   try {
-    const payload = jobRequest.payload || {};
+    const payload = delegatedPayload || jobRequest.payload || {};
     const execution = Promise.resolve().then(() => handler(payload, jobRequest, claim));
     // Promise.race no cancela el handler original. Los cron del catálogo deben
     // finalizar por sí mismos para que nunca se reprograme un segundo barrido

@@ -43,7 +43,7 @@ function createService({ models, sessions, broker = configuredClient(), config =
     // Regular MFA or a valid trusted-device session is sufficient for reading.
     // requireEmail:true is reserved for authorizing a new credential.
     await sessionApi().verifyReference({ userId:actor.userId,sessionRef:actor.sessionRef,
-      expiresAt:new Date(actor.sessionExpiresAt*1000) }, { requireEmail:false });
+      expiresAt:new Date(actor.sessionExpiresAt*1000) }, { requireEmail:false, purpose:'whatsapp.authorization.read' });
   }
   async function snapshot(scope, actor) {
     const clinics = await db().Clinica.findAll({ where:scope.type === 'clinic' ? {id_clinica:scope.id} : {grupoClinicaId:scope.id},
