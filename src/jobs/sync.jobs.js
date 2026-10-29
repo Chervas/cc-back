@@ -14,6 +14,7 @@
  */
 
 const cron = require('node-cron');
+const scAdmission = require('../lib/searchConsoleIngestionAdmission').application;
 const axios = require('axios');
 const crypto = require('crypto');
 const SYNC_PROVIDER_HTTP_TIMEOUT_MS = Math.max(
@@ -657,6 +658,10 @@ class MetaSyncJobs {
       return { status: 'disabled', queued: false, job_type: definition.type };
     }
 
+    if (scAdmission.claimExclusions(require('../../models').sequelize).includes(definition.type)) {
+      return { status: 'paused', queued: false, job_type: definition.type, reason: 'search_console_ingestion_paused' };
+    }
+
     const suppliedPayload = options.payload
       && typeof options.payload === 'object'
       && !Array.isArray(options.payload)
@@ -806,6 +811,10 @@ class MetaSyncJobs {
         // se observa en JobRequests/SyncLogs, no en el monitor de node-cron.
         const jobData = this.jobs.get(jobName);
         if (jobData) {
+          if (['webSync','webBackfill'].includes(jobName) && result?.status === 'paused') {
+            jobData.lastEnqueueAttempt = new Date(); jobData.status = 'paused'; jobData.lastError = null;
+            return result;
+          }
           if (result?.job_request_id) {
             jobData.lastEnqueuedAt = new Date();
             jobData.lastJobRequestId = result.job_request_id;
@@ -1001,6 +1010,10 @@ class MetaSyncJobs {
     try {
       const result = await jobData.handler();
 
+      if (['webSync','webBackfill'].includes(jobName) && result?.status === 'paused') {
+        jobData.lastEnqueueAttempt = new Date(); jobData.status = 'paused'; jobData.lastError = null;
+        return result;
+      }
       if (result?.job_request_id) {
         jobData.lastEnqueuedAt = new Date();
         jobData.lastJobRequestId = result.job_request_id;
@@ -1418,6 +1431,10 @@ class MetaSyncJobs {
 
   // ===== Web jobs (Search Console + PSI) =====
   async executeWebSync(options = {}) {
+    return scAdmission.run(require('../../models').sequelize, () => this._admittedexecuteWebSync(options));
+  }
+
+  async _admittedexecuteWebSync(options = {}) {
     const cut = require('../lib/searchConsoleLegacyDetailCut').captureCutPolicy(process.env);
     const { clinicId = null, siteUrls = null, siteMappings = null } = options;
     const { ClinicWebAsset, WebScDaily, WebScDailyAgg, WebPsiSnapshot, WebIndexCoverageDaily, WebScQueryDaily } = require('../../models');
@@ -1555,8 +1572,9 @@ class MetaSyncJobs {
                   ctr: r.ctr||0,
                   position: r.position||null
                 };
+                await scAdmission.assertHeld();
                 const [rec, created] = await WebScDaily.findOrCreate({ where: { clinica_id: clinicaId, site_url: a.siteUrl, date }, defaults: payload });
-                if (!created && !scIngest.metricsEqual(rec, payload)) await rec.update(payload);
+                if (!created && !scIngest.metricsEqual(rec, payload)) { await scAdmission.assertHeld(); await rec.update(payload); }
               }
               if (analyticsStore) {
                 // A successful final-data request through today is not evidence
@@ -1567,6 +1585,7 @@ class MetaSyncJobs {
                 const firstFinalDate = observed[0];
                 const lastFinalDate = observed.at(-1);
                 if (lastFinalDate) {
+                  await scAdmission.assertHeld();
                   const totalsAck = await analyticsStore.writeTotalsInterval({ mapping: a, siteUrl: a.siteUrl,
                     startDate: firstFinalDate, endDate: lastFinalDate,
                     rows: rows.filter(row => row.keys?.[0] >= firstFinalDate && row.keys?.[0] <= lastFinalDate), complete: true, rowLimitReached: false,
@@ -1611,6 +1630,7 @@ class MetaSyncJobs {
                     if (finalRange && interval.s <= finalRange.end && interval.e >= finalRange.start) {
                       const compactEnd = interval.e < finalRange.end ? interval.e : finalRange.end;
                       const compactStart = interval.s > finalRange.start ? interval.s : finalRange.start;
+                      await scAdmission.assertHeld();
                       const detailAck = await analyticsStore.writeInterval({ mapping: a, siteUrl: a.siteUrl, startDate: compactStart, endDate: compactEnd,
                         rows: rowsQ.filter(row => row.keys?.[0] >= compactStart && row.keys?.[0] <= compactEnd), complete: true, rowLimitReached: false,
                         validate: () => this._assertSearchConsoleMapping(a, credentials) });
@@ -1647,17 +1667,21 @@ class MetaSyncJobs {
                 totalsAcks: compactTotalsAcks, detailAcks: compactDetailAcks,
                 confirm: proof => analyticsStore.confirmPublication(proof, { transaction,
                   validate: async () => { for (const { asset, credentials } of authorizedMappings) await this._assertSearchConsoleMapping(asset, credentials); return true; } }) });
+              await scAdmission.assertHeld();
               const stats = !cut.enabled && bulkPayload.length ? await scIngest.persistChangedRows({
                 model: WebScQueryDaily, rows: bulkPayload, transaction,
                 keyFields: ['clinica_id', 'date', 'query_hash', 'page_url_hash'],
                 chunkSize: resolveSearchConsoleBulkChunkSize()
               }) : { received: cut.enabled ? bulkPayload.length : 0, inserted: 0, updated: 0, unchanged: 0, written: 0 };
+              await scAdmission.assertHeld();
               for (const [date, sets] of topByDate.entries()) {
                 const defaults = { clinica_id: clinicaId, date, queries_top10: sets.set10.size, queries_top3: sets.set3.size };
+                await scAdmission.assertHeld();
                 const [agg, created] = await WebScDailyAgg.findOrCreate({
                   where: { clinica_id: clinicaId, date }, defaults, transaction
                 });
                 if (!created && !scIngest.metricsEqual(agg, defaults, { queries_top10: 0, queries_top3: 0 })) {
+                  await scAdmission.assertHeld();
                   await agg.update(defaults, { transaction });
                 }
               }
@@ -1771,6 +1795,10 @@ class MetaSyncJobs {
   }
 
   async executeWebBackfill() {
+    return scAdmission.run(require('../../models').sequelize, () => this._admittedexecuteWebBackfill());
+  }
+
+  async _admittedexecuteWebBackfill() {
     const prev = this.config.web.recentDays;
     const prevMode = this._webBackfillMode;
     this.config.web.recentDays = scIngest.backfillDays(this.config.web, process.env);
@@ -3426,6 +3454,10 @@ class MetaSyncJobs {
   }
 
   async executeWebBackfillForSites(siteMappings = []) {
+    return scAdmission.run(require('../../models').sequelize, () => this._admittedexecuteWebBackfillForSites(siteMappings));
+  }
+
+  async _admittedexecuteWebBackfillForSites(siteMappings = []) {
     if (!Array.isArray(siteMappings) || siteMappings.length === 0) {
       throw new Error('siteMappings must contain at least one { clinicId, siteUrl } pair');
     }

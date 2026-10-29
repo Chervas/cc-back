@@ -31,6 +31,32 @@
       "migrations": [
         "20261024160000-create-infrastructure-notification-receipts.js"
       ]
+    },
+    "search_console_analytics": {
+      "enabledWhenAny": {
+        "SC_ANALYTICS_WRITE_ENABLED": "true",
+        "SC_ANALYTICS_READ_ENABLED": "true",
+        "SC_ANALYTICS_ARCHIVE_ENABLED": "true",
+        "SC_ANALYTICS_PURGE_ENABLED": "true",
+        "SC_ANALYTICS_LEGACY_DETAIL_CUT_ENABLED": "true"
+      },
+      "tables": [
+        "ScAnalyticsArchiveBatches",
+        "ScAnalyticsCoverageDaily",
+        "ScAnalyticsDaily",
+        "ScAnalyticsIngestBatches",
+        "ScAnalyticsMonthly",
+        "ScAnalyticsPages",
+        "ScAnalyticsProperties",
+        "ScAnalyticsPropertyDaily",
+        "ScAnalyticsQueries",
+        "ScAnalyticsRankingDaily",
+        "ScAnalyticsStagedRows",
+        "ScAnalyticsStagedTotals"
+      ],
+      "migrations": [
+        "20261018150000-create-search-console-analytics.js"
+      ]
     }
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
@@ -4613,6 +4639,1177 @@
         }
       ],
       "foreignKeys": []
+    },
+    "ScAnalyticsArchiveBatches": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "property_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "month",
+          "COLUMN_TYPE": "date",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "batch_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin"
+        },
+        {
+          "COLUMN_NAME": "source_revision",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "source_digest",
+          "COLUMN_TYPE": "binary(32)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "source_rows",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "varchar(16)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "archive_receipt",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "verified_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "purged_rows",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "0",
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "property_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "month",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "sca_archive_id",
+          "columns": [
+            {
+              "INDEX_NAME": "sca_archive_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "batch_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ScAnalyticsCoverageDaily": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "property_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "date",
+          "COLUMN_TYPE": "date",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "detail_complete",
+          "COLUMN_TYPE": "tinyint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "0",
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "totals_complete",
+          "COLUMN_TYPE": "tinyint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "0",
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "property_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "date",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ScAnalyticsDaily": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "property_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "date",
+          "COLUMN_TYPE": "date",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "query_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "page_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clicks",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "impressions",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_weighted",
+          "COLUMN_TYPE": "decimal(38,9)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_sum",
+          "COLUMN_TYPE": "decimal(38,9)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_count",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "row_digest",
+          "COLUMN_TYPE": "binary(32)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updated_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "property_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "date",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 3,
+              "COLUMN_NAME": "query_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 4,
+              "COLUMN_NAME": "page_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ScAnalyticsIngestBatches": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "batch_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin"
+        },
+        {
+          "COLUMN_NAME": "property_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "start_date",
+          "COLUMN_TYPE": "date",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "end_date",
+          "COLUMN_TYPE": "date",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "base_revision",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "kind",
+          "COLUMN_TYPE": "varchar(16)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "totals_included",
+          "COLUMN_TYPE": "tinyint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "0",
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "varchar(16)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "staging",
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "created_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "committed_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "source_digest",
+          "COLUMN_TYPE": "binary(32)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "row_count",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "batch_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "sca_ingest_property",
+          "columns": [
+            {
+              "INDEX_NAME": "sca_ingest_property",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "property_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "sca_ingest_property",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ScAnalyticsMonthly": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "property_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "month",
+          "COLUMN_TYPE": "date",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "query_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "page_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clicks",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "impressions",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_weighted",
+          "COLUMN_TYPE": "decimal(38,9)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_sum",
+          "COLUMN_TYPE": "decimal(38,9)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_count",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "source_rows",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "source_days",
+          "COLUMN_TYPE": "int unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "property_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "month",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 3,
+              "COLUMN_NAME": "query_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 4,
+              "COLUMN_NAME": "page_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ScAnalyticsPages": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "auto_increment",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "value_hash",
+          "COLUMN_TYPE": "binary(32)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "value_text",
+          "COLUMN_TYPE": "mediumtext",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_bin"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "sca_page_hash",
+          "columns": [
+            {
+              "INDEX_NAME": "sca_page_hash",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "value_hash",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ScAnalyticsProperties": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "auto_increment",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "site_hash",
+          "COLUMN_TYPE": "binary(32)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "site_url",
+          "COLUMN_TYPE": "varchar(512)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_bin"
+        },
+        {
+          "COLUMN_NAME": "revision",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "0",
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "sca_property_hash",
+          "columns": [
+            {
+              "INDEX_NAME": "sca_property_hash",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "site_hash",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ScAnalyticsPropertyDaily": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "property_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "date",
+          "COLUMN_TYPE": "date",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clicks",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "impressions",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_weighted",
+          "COLUMN_TYPE": "decimal(38,9)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_sum",
+          "COLUMN_TYPE": "decimal(38,9)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_count",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "row_digest",
+          "COLUMN_TYPE": "binary(32)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updated_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "property_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "date",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ScAnalyticsQueries": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "auto_increment",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "value_hash",
+          "COLUMN_TYPE": "binary(32)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "value_text",
+          "COLUMN_TYPE": "mediumtext",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_bin"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "sca_query_hash",
+          "columns": [
+            {
+              "INDEX_NAME": "sca_query_hash",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "value_hash",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ScAnalyticsRankingDaily": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "property_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "date",
+          "COLUMN_TYPE": "date",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "queries_top3",
+          "COLUMN_TYPE": "int unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "queries_top10",
+          "COLUMN_TYPE": "int unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updated_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "property_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "date",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ScAnalyticsStagedRows": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "batch_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin"
+        },
+        {
+          "COLUMN_NAME": "date",
+          "COLUMN_TYPE": "date",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "query_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "page_id",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clicks",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "impressions",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_weighted",
+          "COLUMN_TYPE": "decimal(38,9)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_sum",
+          "COLUMN_TYPE": "decimal(38,9)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_count",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "row_digest",
+          "COLUMN_TYPE": "binary(32)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "batch_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "date",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 3,
+              "COLUMN_NAME": "query_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 4,
+              "COLUMN_NAME": "page_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
+    },
+    "ScAnalyticsStagedTotals": {
+      "ENGINE": "InnoDB",
+      "columns": [
+        {
+          "COLUMN_NAME": "batch_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin"
+        },
+        {
+          "COLUMN_NAME": "date",
+          "COLUMN_TYPE": "date",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clicks",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "impressions",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_weighted",
+          "COLUMN_TYPE": "decimal(38,9)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_sum",
+          "COLUMN_TYPE": "decimal(38,9)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "position_count",
+          "COLUMN_TYPE": "bigint unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "row_digest",
+          "COLUMN_TYPE": "binary(32)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "batch_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "date",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "foreignKeys": []
     }
   },
   "migrations": [
@@ -4668,6 +5865,10 @@
     {"name": "20260925113000-whatsapp-activation-history.js", "sha256": "44befbf80817e894c95cbc0429c221f671b9e77cab13b7ec52bf768ceddcb0bc"},
     {"name": "20261004180000-program-commercial-price-profile.js", "sha256": "c25968779c302bcf22504d39668718f4f55e836f42e0485af7d987a0a65e37e5"},
     {"name": "20261024160000-create-infrastructure-notification-receipts.js", "sha256": "d2994a3db213b0e9378cab35458033dfde8c77ba2986c3984e984d3c76627984"},
-    {"name": "20261028150000-add-room-icons.js", "sha256": "945f2ce578c60673f7365a878e0c0b3cd916e808940f2b5a55e86e7b3c68d91b"}
+    {"name": "20261028150000-add-room-icons.js", "sha256": "945f2ce578c60673f7365a878e0c0b3cd916e808940f2b5a55e86e7b3c68d91b"},
+    {
+      "name": "20261018150000-create-search-console-analytics.js",
+      "sha256": "1b9f609ee4388a552d4e0a727ee47c16e56e1aa53ef317ebd0b1ee581ddaf858"
+    }
   ]
 }

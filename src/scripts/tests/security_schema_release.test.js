@@ -16,7 +16,9 @@ test('contract permits additive fields but rejects security type, default, index
   const actual=baseline(); assert.equal(compare(actual,schema).compatible,true);
   actual.columns.push({ TABLE_NAME:'AuthSessions',COLUMN_NAME:'future_optional' });
   assert.equal(compare(actual,schema).compatible,true);
-  for (const change of [s=>s.tables.pop(),s=>s.columns.shift(),s=>s.columns[0].IS_NULLABLE='YES',
+  const requiredColumn=actual.columns.find(c=>c.IS_NULLABLE==='NO');
+  assert.ok(requiredColumn);
+  for (const change of [s=>s.tables.pop(),s=>s.columns.shift(),s=>s.columns.find(c=>c.TABLE_NAME===requiredColumn.TABLE_NAME&&c.COLUMN_NAME===requiredColumn.COLUMN_NAME).IS_NULLABLE='YES',
     s=>s.columns[0].COLUMN_DEFAULT='unexpected',s=>s.indexes.shift(),s=>s.migrations.pop(),
     s=>s.defaults.DEFAULT_COLLATION_NAME='utf8mb4_unicode_ci']) {
     const altered=baseline();change(altered);assert.equal(compare(altered,schema).compatible,false);
@@ -69,7 +71,7 @@ test('gated schema requirements are omitted only while every declared gate is cl
     assert.equal(Object.hasOwn(disabled.tables, table), false);
   }
   assert.equal(disabled.migrations.some(m => m.name.startsWith('202609192')), false);
-  assert.deepEqual(disabled.disabledFeatureGroups, ['delegated_sessions','whatsapp_inbox_routing_reviews','google_business_profile_writes','infrastructure_notifications']);
+  assert.deepEqual(disabled.disabledFeatureGroups, ['delegated_sessions','whatsapp_inbox_routing_reviews','google_business_profile_writes','infrastructure_notifications','search_console_analytics']);
   assert.equal(Object.hasOwn(disabled.tables, 'WhatsappInboxRoutingReviews'), false);
 
   const partiallyEnabled = effectiveContract(schema, { GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED: 'true' });
@@ -82,10 +84,12 @@ test('gated schema requirements are omitted only while every declared gate is cl
     AUTH_DELEGATION_ENABLED: 'true',
     INFRASTRUCTURE_NOTIFICATIONS_ENABLED: 'true',
     JOB_RUNTIME_NAMESPACE: 'staging',
+    SC_ANALYTICS_READ_ENABLED: 'true',
   });
   assert.equal(Object.hasOwn(enabled.tables, 'BusinessProfileMutations'), true);
   assert.equal(Object.hasOwn(enabled.tables, 'BusinessProfileCacheStates'), true);
   assert.equal(enabled.migrations.filter(m => m.name.startsWith('202609192')).length, 2);
   assert.deepEqual(enabled.disabledFeatureGroups || [], []);
   assert.equal(Object.hasOwn(enabled.tables, 'WhatsappInboxRoutingReviews'), true);
+  assert.equal(Object.hasOwn(enabled.tables, 'ScAnalyticsDaily'), true);
 });

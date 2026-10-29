@@ -116,7 +116,7 @@ test('broker tenants keep separate downloads even for one web and connection', a
   assert.equal(downloads, 4);
 });
 
-function jobsFixture({ count = 1, sites = 1, env = {}, storage, helper, cutHelper } = {}) {
+function jobsFixture({ count = 1, sites = 1, env = {}, storage, helper, cutHelper, admission } = {}) {
   const f = database(); Object.assign(f.state, { calls: [], active: true, failQueries: null, truncate: false, revisions: 0, reports: [], storageCalls: [] });
   const mappings = Array.from({ length: count }, (_, index) => ({ id: 91 + index, clinicaId: 71 + index,
     googleConnectionId: 81, siteUrl: 'https://example.invalid/' }));
@@ -138,7 +138,7 @@ function jobsFixture({ count = 1, sites = 1, env = {}, storage, helper, cutHelpe
       return { data: { rows: f.state.truncate ? Array(25000).fill(point) : [point] } };
     } },
     env: { WEB_PSI_ENABLED: 'false', WEB_SYNC_RECENT_DAYS: '1', WEB_BACKFILL_DAYS: '1', ...env },
-    overrides: { ...(storage ? { '../services/searchConsoleAnalytics.service': storage } : {}),
+    overrides: { ...(admission ? { '../lib/searchConsoleIngestionAdmission': { application: admission } } : {}), ...(storage ? { '../services/searchConsoleAnalytics.service': storage } : {}),
       ...(helper ? { '../lib/searchConsoleIngest': helper } : {}),
       ...(cutHelper ? { '../lib/searchConsoleLegacyDetailCut': cutHelper } : {}) },
   }).metaSyncJobs;

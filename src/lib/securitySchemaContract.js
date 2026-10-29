@@ -5,8 +5,12 @@ const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)
 function effectiveContract(contract, env = {}) {
   const selected = structuredClone(contract);
   for (const [name, group] of Object.entries(contract.featureGroups || {})) {
-    const required = group.enabledWhenAll && Object.entries(group.enabledWhenAll)
+    const hasConditions = Boolean(group.enabledWhenAll || group.enabledWhenAny);
+    const allMatch = !group.enabledWhenAll || Object.entries(group.enabledWhenAll)
       .every(([key, value]) => String(env[key] ?? '') === String(value));
+    const anyMatch = !group.enabledWhenAny || Object.entries(group.enabledWhenAny)
+      .some(([key, value]) => String(env[key] ?? '') === String(value));
+    const required = hasConditions && allMatch && anyMatch;
     if (required) continue;
     for (const table of group.tables || []) delete selected.tables[table];
     const migrations = new Set(group.migrations || []);

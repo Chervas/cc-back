@@ -1,3 +1,4 @@
+const scAdmission = require('../lib/searchConsoleIngestionAdmission').application;
 const { Op } = require('sequelize');
 const crypto = require('crypto');
 const db = require('../../models');
@@ -346,6 +347,7 @@ async function enqueueJobRequest({
   const normalizedStatus = normalizeStatus(status);
   const scopedPayload = buildScopedPayload(payload);
 
+  scAdmission.assertEnqueue(type, options.sequelizeInstance || sequelize);
   const JobRequestModel = options.JobRequestModel || JobRequest;
   const job = await JobRequestModel.create({
     type,
@@ -389,6 +391,7 @@ async function enqueueUniqueJobRequest({
     throw new Error('type is required to enqueue a unique job request');
   }
 
+  scAdmission.assertEnqueue(type, options.sequelizeInstance || sequelize);
   const JobRequestModel = options.JobRequestModel || JobRequest;
   const sequelizeInstance = options.sequelizeInstance || sequelize;
   const activeStatuses = Array.isArray(options.activeStatuses) && options.activeStatuses.length
@@ -552,6 +555,8 @@ async function claimNextJob(priorityList, typeList) {
       }
       where[Op.and] = where[Op.and] || [];
       where[Op.and].push(buildRuntimeScopeWhere());
+      const scExcluded = scAdmission.claimExclusions(sequelize);
+      if (scExcluded.length) where[Op.and].push({ type: { [Op.notIn]: scExcluded } });
 
       const job = await JobRequest.findOne({
         where,
@@ -612,6 +617,8 @@ async function claimJobById(jobId) {
       if (!job) {
         return null;
       }
+
+      if (scAdmission.claimExclusions(sequelize).includes(job.type)) return null;
 
       if (!CLAIMABLE_JOB_STATUSES.includes(job.status)) {
         return null;
