@@ -1,5 +1,6 @@
 'use strict';
 const C = require('./clinical-episode-contract');
+const { sectionIcon } = require('./clinical-section-icons');
 const TYPES = ['text','textarea','yesno','select','multiselect','date','number','readonly'];
 const CONTEXT_KEYS = ['patient.full_name','patient.document','patient.code','patient.history_number','patient.birth_date','patient.sex','patient.age','patient.phone','patient.email','patient.profession','patient.how_known','professional.name','episode.date'];
 const REFERENCE_FIELDS = ['alergias','medicacion','antecedentes','notas_medicas'];
@@ -23,6 +24,7 @@ function schema(value) {
   const sections=value.sections.map(section=>{
     if(!object(section)||!Array.isArray(section.fields)||section.fields.length>100)throw invalid();
     const id=identity(section.id);if(sectionKeys.has(id))throw invalid();sectionKeys.add(id);
+    const icon=sectionIcon(section.icon,()=>invalid('Elige un icono disponible para la sección.'));
     let repeatable;
     if(section.repeatable!==undefined){
       if(value.version!==2||!object(section.repeatable)||Object.keys(section.repeatable).some(key=>!['item_label','add_label'].includes(key))||!section.fields.length)throw invalid('Revisa el grupo repetible.');
@@ -51,7 +53,7 @@ function schema(value) {
       if(field.reference_target!==undefined){if(!REFERENCE_FIELDS.includes(field.reference_target)||field.type==='readonly')throw invalid();out.reference_target=field.reference_target;}
       return out;
     });
-    return{id,title:label(section.title),...(section.description?{description:label(section.description,2000)}:{}),...(repeatable?{repeatable}:{}),fields};
+    return{id,title:label(section.title),...(icon?{icon}:{}),...(section.description?{description:label(section.description,2000)}:{}),...(repeatable?{repeatable}:{}),fields};
   });
   const out={version:value.version,key:identity(value.key),title:label(value.title),kind:value.kind||'standard',sections};
   if(Buffer.byteLength(JSON.stringify(out))>256000)throw invalid('El formulario es demasiado extenso.');return out;

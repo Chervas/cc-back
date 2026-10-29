@@ -1,6 +1,7 @@
 'use strict';
 const C = require('./clinical-episode-contract');
 const F = require('./clinical-form-contract');
+const { sectionIcon } = require('./clinical-section-icons');
 const { FORM_PRESET_KEYS, formPreset } = require('./clinical-form-presets');
 const AREAS = ['general', 'estetica', 'capilar', 'nutricion', 'dental'];
 const LABELS = { reason: 'Motivo de consulta', summary: 'Resumen de la consulta', findings: 'Hallazgos y valoración', interventions: 'Actuación', outcome: 'Evolución', plan: 'Plan y seguimiento', next_steps: 'Próximos pasos', private_notes: 'Notas privadas' };
@@ -17,7 +18,10 @@ function definition(payload) {
   }
   if (Object.keys(payload.rich_document?.sections || {}).some(key => !fields.some(field => field.key === key))) throw C.error(400, 'clinical_template_invalid_fields', 'El texto debe corresponder a los apartados de la plantilla.');
   const rich = C.normalizePatch({ rich_document: payload.rich_document || { version: 1, sections: {} } });
-  const normalizedFields = fields.map(field => ({ key: field.key, label: C.text(field.label, 'label', 120), visible: field.key === 'private_notes' ? false : field.visible }));
+  const normalizedFields = fields.map(field => {
+    const icon = sectionIcon(field.icon, () => C.error(400, 'clinical_template_invalid_fields', 'Elige un icono disponible para el apartado.'));
+    return { key: field.key, label: C.text(field.label, 'label', 120), visible: field.key === 'private_notes' ? false : field.visible, ...(icon ? { icon } : {}) };
+  });
   for (const field of normalizedFields) if (C.CUSTOM_SECTION_KEY.test(field.key)) {
     rich.rich_document ||= { version: 1, sections: {} };
     rich.rich_document.sections[field.key] ||= C.plainDocument('');
