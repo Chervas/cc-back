@@ -9,9 +9,9 @@ const servicePath = path.resolve(__dirname, '../../services/consentimientos.serv
 function harness({ document = {}, packageRow = {} } = {}) {
     let writes = 0;
     const updates = [];
-    const doc = { id: 1, public_id: 'qa_document', status: 'pending', ...document, update: async patch => { writes++; updates.push(patch); } };
+    const doc = { id: 1, public_id: 'qa_document', clinica_id: 121, signed_at: '2020-01-01', snapshot_hash: 'a'.repeat(64), status: 'pending', ...document, update: async patch => { writes++; updates.push(patch); } };
     const pack = { id: 1, public_id: 'qa_package', status: 'pending', documents: [doc], ...packageRow };
-    const db = { Sequelize: { Op: {} }, sequelize: { transaction: async (options, work) => work({}) },
+    const db = { Usuario: {findByPk:async id=>({id_usuario:id,nombre:'Profesional',apellidos:'Ficticio',estado_cuenta:'activo',isProfesional:true})},UsuarioClinica:{findOne:async()=>({rol_clinica:'personaldeclinica',subrol_clinica:'Doctores',estado_invitacion:'aceptada'})},DoctorClinica:{findOne:async()=>({activo:true})}, Sequelize: { Op: {} }, sequelize: { transaction: async (options, work) => work({}) },
         PatientConsentDocument: { findByPk: async () => doc, update: async patch => { await doc.update(patch); return [1]; } }, PatientIntakeRequest: { findOne: async () => null },
         ConsentSignaturePackage: { findOne: async () => pack, findByPk: async () => pack },
         ConsentDeliveryEvent: { create: async () => { writes++; } } };
@@ -73,15 +73,15 @@ test('professional signature cannot impersonate a supplied identity or omit its 
 });
 test('professional signature uses the authenticated actor and server evidence, not client names or methods', async () => {
     const h = harness({ document: professionalDocument });
-    await h.service.signProfessionalConsentDocument('1', { accepted_statement: true, professional_name: 'Someone else', method: 'forged' }, 17);
+    await h.service.signProfessionalConsentDocument('1', { accepted_statement: true, expected_snapshot_hash: 'a'.repeat(64), professional_name: 'Someone else', method: 'forged' }, 17);
     assert.equal(h.updates[0].professional_signed_by, 17);
     const evidence = h.updates[0].snapshot_json.professional_signature_evidence;
     assert.equal(evidence.professional_id, 17);
-    assert.equal(evidence.professional_name, null);
+    assert.equal(evidence.professional_name, 'Profesional Ficticio');
     assert.equal(evidence.method, 'professional_confirmation');
 });
 test('professional countersignature cannot revive an expired document', async () => {
     const h = harness({ document: { ...professionalDocument, expires_at: new Date(0) } });
-    await assert.rejects(h.service.signProfessionalConsentDocument('1', { accepted_statement: true }, 17), e => e.statusCode === 409);
+    await assert.rejects(h.service.signProfessionalConsentDocument('1', { accepted_statement: true, expected_snapshot_hash: 'a'.repeat(64) }, 17), e => e.statusCode === 409);
     assert.equal(h.writes(), 0);
 });

@@ -46,7 +46,7 @@ test('real PRP component relation freezes parent protocols only after both actua
       assert.equal((await db.CitaPaciente.findByPk(rows.child.id_cita)).care_started_at, null);
       await f.consents.signConsentDocument(pkg.documents[0].id, f.signature('OWNED-PRP-PATIENT-ONLY'));
       await assert.rejects(f.start(rows.child), { code: 'appointment_consent_required' });
-      await f.consents.signProfessionalConsentDocument(pkg.documents[0].id, { accepted_statement: true }, 50);
+      await f.consents.signProfessionalConsentDocument(pkg.documents[0].id, { accepted_statement: true, expected_snapshot_hash: (await db.PatientConsentDocument.findByPk(pkg.documents[0].id, {raw:true,hooks:false})).snapshot_hash }, 50);
       const signed = (await db.PatientConsentDocument.findByPk(pkg.documents[0].id)).toJSON();
       assert(signed.signed_at); assert(signed.professional_signed_at); assert.equal(signed.professional_signed_by, 50);
       assert.equal(await db.PatientConsentDocument.count({ where: { cita_id: rows.child.id_cita } }), 0);

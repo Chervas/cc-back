@@ -3735,10 +3735,12 @@ function serializeWalletEntry(entry, budgetPublicId = null) {
   };
 }
 
-function serializeVoucher(voucher, movements) {
+function serializeVoucher(voucher, movements, medicalAreas = []) {
   const enrollment = require('../lib/patient-program-enrollment').readProgramEnrollment(voucher);
   return {
     id: voucher.public_id,
+    created_at: voucher.created_at || null,
+    medical_areas: medicalAreas,
     budget_id: voucher.budget_public_id || null,
     budget_line_key: voucher.budget_line_key,
     treatment_id: voucher.treatment_id ? Number(voucher.treatment_id) : null,
@@ -3834,7 +3836,7 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
     }),
     PatientVoucher.findAll({
       where: { clinic_id: resolvedClinicId, patient_id: patient.id_paciente },
-      order: [['created_at', 'DESC']],
+      order: [['created_at', 'DESC'], ['id', 'DESC']],
     }),
     PatientFiscalDocument.findAll({
       where: { clinic_id: resolvedClinicId, patient_id: patient.id_paciente },
@@ -3842,6 +3844,22 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
     }),
     listTemplates({ clinicId: resolvedClinicId }),
   ]);
+  const { voucherTreatmentIds, voucherMedicalAreas } = require('../lib/clinical-service-metadata');
+  const storedVoucherLines = voucher => {
+    const budget = budgets.find(row => String(row.id) === String(voucher.budget_id));
+    const version = budget && versions.find(row => String(row.budget_id) === String(budget.id)
+      && Number(row.version_number) === Number(budget.current_version));
+    return parseJson(version?.lines, []);
+  };
+  const treatmentIds = [...new Set(vouchers.flatMap(voucher => voucherTreatmentIds(voucher, storedVoucherLines(voucher))))];
+  const treatmentScope = [{ origen: 'clinica', clinica_id: resolvedClinicId }, { origen: 'sistema' }];
+  if (clinic.grupoClinicaId) treatmentScope.push({ origen: 'grupo', grupo_clinica_id: clinic.grupoClinicaId });
+  const serviceTreatments = treatmentIds.length ? await Tratamiento.findAll({
+    where: { id_tratamiento: { [Op.in]: treatmentIds }, [Op.or]: treatmentScope },
+    attributes: ['id_tratamiento', 'disciplina', 'clinical_config'], raw: true,
+  }) : [];
+  const areasByTreatment = new Map(serviceTreatments.map(treatment => [Number(treatment.id_tratamiento),
+    parseJson(treatment.clinical_config, {}).medical_area_code || treatment.disciplina ? [normalizeTreatmentArea(treatment)] : []]));
   const voucherIds = vouchers.map((voucher) => voucher.id);
   const programVoucherIds = vouchers.filter(v => v.source_system === 'treatment_program').map(v => v.id);
   // Two scoped bulk reads for the whole workspace, never a query per program
@@ -3935,7 +3953,8 @@ async function getWorkspace({ patientIdentifier, clinicId }) {
     wallet: { available: walletAvailable, entries: wallet },
     vouchers: vouchers.map((voucher) => {
       voucher.budget_public_id = voucher.budget_id ? budgetPublicIds.get(String(voucher.budget_id)) : null;
-      return serializeVoucher(voucher, movementsByVoucher.get(String(voucher.id)) || []);
+      return serializeVoucher(voucher, movementsByVoucher.get(String(voucher.id)) || [],
+        voucherMedicalAreas(voucher, storedVoucherLines(voucher), areasByTreatment));
     }),
     fiscal_documents: fiscalDocuments.map((document) => serializeFiscalDocument(
       document,

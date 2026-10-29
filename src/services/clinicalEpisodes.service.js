@@ -335,10 +335,13 @@ function createClinicalEpisodeService({ db, now = () => new Date(), validateMate
           // narrativeValues against this immutable template as usual.
           for (const field of Object.keys(payload.rich_document?.sections||{})) sections[field]=normalized.rich_document.sections[field];
           Object.assign(normalized,C.normalizePatch({rich_document:{...base,sections}}));
-          if (formInput===undefined && chosen.template.form_schema) formInput={version:1,instances:[{id:crypto.randomUUID(),template_ref:chosen.template_ref,answers:{}}]};
         }
       }
       template ||= await templateValues(payload, clinicId, transaction);
+      if(formInput===undefined&&template.template_snapshot?.form_schema){
+        const selected=template.template_snapshot,repetitions=F.initialRepetitions(selected.form_schema);
+        formInput={version:1,instances:[{id:crypto.randomUUID(),template_ref:{id:selected.id,version:selected.version},answers:{},...(repetitions?{repetitions}:{})}]};
+      }
       const narrative = narrativeValues(normalized, {}, template.template_snapshot);
       const row = await Report.create({
         public_id: crypto.randomUUID(), clinic_id: clinicId, patient_id: patient.id_paciente,

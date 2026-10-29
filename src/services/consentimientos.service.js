@@ -16,6 +16,8 @@ const documentCompletion = require('../lib/consent-document-completion');
 const documentBlocks = require('../lib/consent-document-blocks');
 const documentBranding = require('../lib/consent-document-branding');
 const consentClinicTime = require('../lib/consent-clinic-time');
+const signatureProgress = require('../lib/consent-signature-progress').signatureProgress;
+const PROFESSIONAL_STATEMENT = 'He informado personalmente al paciente sobre este documento y confirmo en mi propio nombre, dentro de mi competencia profesional.';
 const { renderConsentVersionHtml } = require('../lib/consent-version-html');
 const { medicalQuestionnaireEnabled, clinicMedicalQuestionnaireEnabled } = require('../lib/patient-intake-configuration');
 const { Op } = db.Sequelize;
@@ -579,6 +581,8 @@ function normalizeProfessionalSignatureEvidence(payload = {}, requestMeta = {}, 
     }
     return {
         method: 'professional_confirmation',
+        statement_code: 'personally_informed_patient_v1',
+        statement: PROFESSIONAL_STATEMENT,
         professional_id: actorId,
         professional_name: null,
         accepted_statement: true,
@@ -620,7 +624,7 @@ function buildPrintableHtml(documentRow) {
         pending: 'Pendiente',
         sent: 'Enviado',
         viewed: 'Visto',
-        signed: 'Firmado',
+        signed: signatureProgress(doc).pending_party === 'professional' ? 'Paciente ha firmado, falta profesional' : 'Firmado',
         completed: 'Completado',
         revoked: 'Revocado',
         rejected: 'Rechazado',
@@ -669,7 +673,7 @@ function buildPrintableHtml(documentRow) {
                 <span class="status-chip slate">Validado</span>
             </div>
             <dl class="detail-grid">
-                <div><dt>Profesional</dt><dd>${escapeHtml(professionalEvidence.professional_name || professional.nombre || 'Profesional')}</dd></div>
+                <div><dt>Profesional</dt><dd>${escapeHtml(professionalEvidence.professional_name || (Number(professionalEvidence.professional_id) === Number(professional.id) ? professional.nombre : '') || 'Profesional firmante')}</dd></div>
                 <div><dt>Fecha</dt><dd>${escapeHtml(formatDateTime(professionalEvidence.signed_at || doc.professional_signed_at, timeZone))}</dd></div>
                 <div><dt>Método</dt><dd>${escapeHtml(methodLabel(professionalEvidence.method || 'professional_confirmation'))}</dd></div>
             </dl>
@@ -2332,7 +2336,7 @@ async function createPatientIntakePackage(identifier, options = {}) {
             const html = renderConsentVersionHtml(version, context, renderTemplateHtml);
             const policy = getSigningPolicyFromVersion(version, template);
             const snapshot = {
-                template_source: 'clinic', template,
+                template_source: 'clinic', template: { ...template, requires_professional_signature: !!template.requires_professional_signature },
                 version: { id: version.id, version: version.version, locale: version.locale,
                     title: version.title, body_json: version.body_json || null, variable_schema: version.variable_schema || null,
                     ...(require('../lib/registration-privacy-template').schema(version.body_json) || documentBlocks.versionBlocks(version, template)
@@ -2606,10 +2610,10 @@ async function refreshPackageCounts(packageIdRaw, transaction = null) {
     }
     const currentDocuments = [...latest.values()];
     const requiredCount = currentDocuments.filter((doc) => !!doc.required).length;
-    const signedCount = currentDocuments.filter((doc) => !!doc.required && doc.status === 'signed' && !doc.revoked_at).length;
+    const signedCount = currentDocuments.filter((doc) => !!doc.required && signatureProgress(doc).complete).length;
     const completedCount = currentDocuments.filter((doc) => !!doc.required && documentCompletion.isCompleted(doc)).length;
     const hasCompleted = currentDocuments.some(doc => documentCompletion.isCompleted(doc));
-    const pending = currentDocuments.some((doc) => DOCUMENT_PENDING_STATUSES.has(doc.status));
+    const pending = currentDocuments.some((doc) => DOCUMENT_PENDING_STATUSES.has(doc.status) || signatureProgress(doc).pending_party === 'professional');
     const intakeRequest = await db.PatientIntakeRequest.findOne({ where: { package_id: packageId }, transaction });
     const intake = intakeRequest && await clinicMedicalQuestionnaireEnabled({ db, clinicId: packageRow.clinica_id, transaction })
         ? intakeRequest : null;
@@ -3032,13 +3036,20 @@ function serializeTabletClinic(clinicRow, clinicId) {
         url_avatar: clinic.url_avatar || null, time_zone: consentClinicTime.resolveClinicTimezone(clinic) };
 }
 
+function packageSignatureFields(packageRow, documents) {
+    const professionalPending = documents.filter(doc => !!doc.required && signatureProgress(doc).pending_party === 'professional').length;
+    return { status: !['cancelled', 'expired'].includes(packageRow.status) && professionalPending ? 'pending' : packageRow.status,
+        signed_count: documents.filter(doc => !!doc.required && signatureProgress(doc).complete).length,
+        pending_professional_count: professionalPending };
+}
+
 function withConsentClinicTime(row) {
     const value = getPlain(row), clinic = value.clinica;
     const timeZone = consentClinicTime.documentTimezone(value);
     // Configuration is read only to resolve clinic-local display. Do not add
     // it to the pre-existing staff document DTO or alter stored evidence.
     const { configuracion: _configuration, ...publicClinic } = clinic || {};
-    return { ...value, time_zone: timeZone,
+    return { ...value, time_zone: timeZone, signature_progress: signatureProgress(value),
         ...(clinic ? { clinica: { ...publicClinic, time_zone: timeZone } } : {}) };
 }
 
@@ -3115,13 +3126,12 @@ function serializeKioskPackage(packageRow) {
     return {
         id: plain.id,
         public_id: plain.public_id,
-        status: plain.status,
+        ...packageSignatureFields(plain, documents),
         due_at: plain.due_at || null,
         expires_at: plain.expires_at || null,
         required_count: plain.required_count,
-        signed_count: plain.signed_count,
         completed_count: documents.filter(doc => documentCompletion.isCompleted(doc)).length,
-        satisfied_count: documents.filter(doc => doc.status === 'signed' || documentCompletion.isCompleted(doc)).length,
+        satisfied_count: documents.filter(doc => signatureProgress(doc).complete || documentCompletion.isCompleted(doc)).length,
         pending_count: pendingDocuments.length,
         intake_pending: medicalQuestionnaireEnabled(plain.clinica?.configuracion) && plain.intakeRequest?.status === 'pending',
         time_zone: consentClinicTime.resolveClinicTimezone(plain.clinica),
@@ -3293,11 +3303,10 @@ async function serializePublicPackage(packageRow) {
         package: {
             id: plain.id,
             public_id: plain.public_id,
-            status: plain.status,
+            ...packageSignatureFields(plain, documents),
             required_count: plain.required_count,
-            signed_count: plain.signed_count,
             completed_count: documents.filter(doc => documentCompletion.isCompleted(doc)).length,
-            satisfied_count: documents.filter(doc => doc.status === 'signed' || documentCompletion.isCompleted(doc)).length,
+            satisfied_count: documents.filter(doc => signatureProgress(doc).complete || documentCompletion.isCompleted(doc)).length,
             due_at: plain.due_at || null,
             expires_at: plain.expires_at || null,
         },
@@ -3327,6 +3336,7 @@ async function serializePublicPackage(packageRow) {
             revoked_at: doc.revoked_at || null,
             requires_representative: requiresRepresentative(doc),
             signature_evidence: publicSignatureEvidenceForDocument(doc),
+            signature_progress: signatureProgress(doc),
             ...documentCompletion.publicFields(doc),
             ...consentDocumentChoices.publicDocumentChoices(doc),
             ...consentDocumentPersonalData.publicDocumentPersonalData(doc),
@@ -3577,61 +3587,89 @@ function documentRequiresProfessionalSignature(documentLike) {
     return !!snapshot?.template?.requires_professional_signature;
 }
 
-async function signProfessionalConsentDocument(identifier, payload = {}, userId = null, requestMeta = {}) {
-    const doc = await findDocumentByIdentifier(identifier);
-    if (!doc) {
-        const err = new Error('consent_document_not_found');
-        err.statusCode = 404;
-        throw err;
+async function verifiedConsentProfessional(actorId, clinicId, transaction = null) {
+    if (!db.Usuario || !db.UsuarioClinica || !db.DoctorClinica) throw Object.assign(new Error('professional_identity_unavailable'), { statusCode: 503 });
+    const locks = transaction ? { transaction, lock: transaction.LOCK?.SHARE } : {};
+    const [userRow, memberRow, clinicalRow] = await Promise.all([
+        db.Usuario.findByPk(actorId, { attributes: ['id_usuario', 'nombre', 'apellidos', 'estado_cuenta', 'isProfesional'], ...locks }),
+        db.UsuarioClinica.findOne({ where: { id_usuario: actorId, id_clinica: clinicId }, attributes: ['id_usuario', 'id_clinica', 'rol_clinica', 'subrol_clinica', 'estado_invitacion'], ...locks }),
+        db.DoctorClinica.findOne({ where: { doctor_id: actorId, clinica_id: clinicId, activo: true }, attributes: ['id', 'doctor_id', 'clinica_id', 'activo'], skipSharedScheduleProjection: true, ...locks }),
+    ]);
+    const user = getPlain(userRow), member = getPlain(memberRow);
+    const clinicalProfile = member?.subrol_clinica === 'Doctores' || user?.isProfesional === true || user?.isProfesional === 1;
+    if (!user || user.estado_cuenta !== 'activo' || !member || !clinicalRow || !clinicalProfile
+        || !['personaldeclinica', 'propietario', 'agencia'].includes(member.rol_clinica)
+        || member.estado_invitacion && member.estado_invitacion !== 'aceptada') {
+        throw Object.assign(new Error('professional_clinical_identity_required'), { statusCode: 403 });
     }
-    const plainDoc = getPlain(doc);
-    if (!documentRequiresProfessionalSignature(plainDoc)) {
-        const err = new Error('professional_signature_not_required');
-        err.statusCode = 400;
-        throw err;
-    }
-    if ((DOCUMENT_CLOSED_STATUSES.has(plainDoc.status) && plainDoc.status !== 'signed')
-        || (plainDoc.expires_at && new Date(plainDoc.expires_at).getTime() <= Date.now())) {
-        const err = new Error('consent_document_already_closed');
-        err.statusCode = 409;
-        throw err;
-    }
-    const evidence = normalizeProfessionalSignatureEvidence(payload, requestMeta, userId);
-    if (plainDoc.professional_signed_at) {
-        return findDocumentByIdentifier(plainDoc.id);
-    }
+    const name = [user.nombre, user.apellidos].filter(Boolean).join(' ').trim();
+    if (!name) throw Object.assign(new Error('professional_clinical_identity_required'), { statusCode: 403 });
+    return { id: Number(user.id_usuario), name, clinic_id: Number(clinicId) };
+}
 
-    const snapshot = plainDoc.snapshot_json && typeof plainDoc.snapshot_json === 'object' ? plainDoc.snapshot_json : {};
-    const nextSnapshot = {
-        ...snapshot,
-        professional_signature_evidence: evidence,
-    };
-    const nextHash = hashRenderedSnapshot(nextSnapshot, plainDoc.snapshot_html || '');
+function assertProfessionalDocumentOpen(document) {
+    if (!documentRequiresProfessionalSignature(document)) throw Object.assign(new Error('professional_signature_not_required'), { statusCode: 400 });
+    if ((DOCUMENT_CLOSED_STATUSES.has(document.status) && document.status !== 'signed') || document.revoked_at
+        || document.expires_at && (!Number.isFinite(new Date(document.expires_at).getTime()) || new Date(document.expires_at).getTime() <= Date.now())) {
+        throw Object.assign(new Error('consent_document_already_closed'), { statusCode: 409 });
+    }
+    if (!signatureProgress(document).patient_signed) throw Object.assign(new Error('professional_signature_patient_required'), { statusCode: 409 });
+}
+
+async function getProfessionalSigningContext(identifier, userId) {
+    const doc = await findDocumentByIdentifier(identifier);
+    if (!doc) throw Object.assign(new Error('consent_document_not_found'), { statusCode: 404 });
+    const plainDoc = getPlain(doc); assertProfessionalDocumentOpen(plainDoc);
+    if (plainDoc.professional_signed_at) throw Object.assign(new Error('professional_signature_already_recorded'), { statusCode: 409 });
+    if (plainDoc.package) requireActiveConsentPackage(plainDoc.package);
+    const actor = await verifiedConsentProfessional(toIntOrNull(userId), plainDoc.clinica_id);
+    return { document: withConsentClinicTime(plainDoc), html: buildPrintableHtml(plainDoc), actor,
+        professional_at_issue: plainDoc.snapshot_json?.context?.profesional || null, statement: PROFESSIONAL_STATEMENT };
+}
+
+async function signProfessionalConsentDocument(identifier, payload = {}, userId = null, requestMeta = {}) {
+    const initial = await findDocumentByIdentifier(identifier);
+    if (!initial) throw Object.assign(new Error('consent_document_not_found'), { statusCode: 404 });
+    const shown = getPlain(initial);
+    const evidence = normalizeProfessionalSignatureEvidence(payload, requestMeta, userId);
+    const expectedHash = toCleanString(payload.expected_snapshot_hash);
+    if (!/^[a-f0-9]{64}$/i.test(expectedHash || '')) throw Object.assign(new Error('professional_signature_snapshot_required'), { statusCode: 400 });
     await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
-        await lockConsentPackages([plainDoc.package_id], transaction);
-        // A patient-signed package is still active for its professional
-        // countersignature; cancelled and expired packages are not.
-        if (plainDoc.package_id) await requireCurrentActiveConsentPackage(plainDoc.package_id, transaction);
-        const [changed] = await db.PatientConsentDocument.update({
-            professional_signed_by: evidence.professional_id || null,
-            professional_signed_at: new Date(evidence.signed_at),
-            snapshot_json: nextSnapshot,
-            snapshot_hash: nextHash,
-        }, { where: { id: plainDoc.id, status: plainDoc.status,
-            professional_signed_at: null, revoked_at: plainDoc.revoked_at || null,
-            snapshot_hash: plainDoc.snapshot_hash || null }, transaction });
+        await lockConsentPackages([shown.package_id], transaction);
+        if (shown.package_id) await requireCurrentActiveConsentPackage(shown.package_id, transaction);
+        const current = getPlain(await db.PatientConsentDocument.findByPk(shown.id, { transaction, lock: transaction.LOCK?.UPDATE }));
+        if (!current || ['id', 'package_id', 'paciente_id', 'clinica_id'].some(key => String(current[key] ?? '') !== String(shown[key] ?? ''))) {
+            throw Object.assign(new Error('consent_document_signature_conflict'), { statusCode: 409 });
+        }
+        assertProfessionalDocumentOpen(current);
+        const actor = await verifiedConsentProfessional(evidence.professional_id, current.clinica_id, transaction);
+        const previous = current.snapshot_json?.professional_signature_evidence;
+        if (current.professional_signed_at) {
+            if (Number(current.professional_signed_by) === actor.id
+                && (current.snapshot_hash === expectedHash || previous?.snapshot_hash_before_signature === expectedHash)) return;
+            throw Object.assign(new Error('professional_signature_already_recorded'), { statusCode: 409 });
+        }
+        if (current.snapshot_hash !== expectedHash) throw Object.assign(new Error('consent_document_signature_conflict'), { statusCode: 409 });
+        const snapshot = current.snapshot_json && typeof current.snapshot_json === 'object' ? current.snapshot_json : {};
+        evidence.professional_name = actor.name;
+        evidence.clinic_id = actor.clinic_id;
+        evidence.snapshot_hash_before_signature = expectedHash;
+        evidence.informing_professional = true;
+        evidence.professional_id_at_issue = toIntOrNull(snapshot.context?.profesional?.id);
+        const nextSnapshot = { ...snapshot, professional_signature_evidence: evidence };
+        const nextHash = hashRenderedSnapshot(nextSnapshot, current.snapshot_html || '');
+        const [changed] = await db.PatientConsentDocument.update({ professional_signed_by: actor.id,
+            professional_signed_at: new Date(evidence.signed_at), snapshot_json: nextSnapshot, snapshot_hash: nextHash,
+        }, { where: { id: current.id, clinica_id: current.clinica_id, paciente_id: current.paciente_id, status: current.status,
+            signed_at: current.signed_at, professional_signed_at: null, revoked_at: null, snapshot_hash: expectedHash }, transaction });
         if (changed !== 1) throw Object.assign(new Error('consent_document_signature_conflict'), { statusCode: 409 });
-        await db.ConsentDeliveryEvent.create({
-            package_id: plainDoc.package_id || null,
-            patient_consent_document_id: plainDoc.id,
-            channel: 'internal',
-            status: 'viewed',
-            recipient: evidence.professional_name || (evidence.professional_id ? `usuario:${evidence.professional_id}` : 'professional'),
+        await db.ConsentDeliveryEvent.create({ package_id: current.package_id || null,
+            patient_consent_document_id: current.id, channel: 'internal', status: 'viewed', recipient: actor.name,
             event_payload: { event: 'professional_signed_document', evidence, snapshot_hash: nextHash },
         }, { transaction });
-        if (plainDoc.package_id) await refreshPackageCounts(plainDoc.package_id, transaction);
+        if (current.package_id) await refreshPackageCounts(current.package_id, transaction);
     });
-    return findDocumentByIdentifier(plainDoc.id);
+    return withConsentClinicTime(await findDocumentByIdentifier(shown.id));
 }
 
 async function listProfessionalPendingDocuments(filters = {}, userId = null) {
@@ -3641,6 +3679,8 @@ async function listProfessionalPendingDocuments(filters = {}, userId = null) {
         professional_signed_at: null,
     };
     if (clinicId) where.clinica_id = clinicId;
+    const mine = toIntOrNull(userId);
+    if (mine && normalizeBoolean(filters.only_mine ?? filters.solo_mios, false)) where['snapshot_json.context.profesional.id'] = mine;
 
     const documents = await db.PatientConsentDocument.findAll({
         where,
@@ -3657,11 +3697,12 @@ async function listProfessionalPendingDocuments(filters = {}, userId = null) {
 
     return documents
         .map(withConsentClinicTime)
-        .filter((doc) => documentRequiresProfessionalSignature(doc))
+        .filter((doc) => documentRequiresProfessionalSignature(doc) && signatureProgress(doc).pending_party === 'professional'
+            && !['cancelled', 'expired'].includes(doc.package?.status) && (!doc.package?.expires_at || new Date(doc.package.expires_at).getTime() > Date.now()))
         .filter((doc) => {
             const filterUserId = toIntOrNull(userId);
             if (!filterUserId || !normalizeBoolean(filters.only_mine ?? filters.solo_mios, false)) return true;
-            return toIntOrNull(doc.cita?.doctor_id) === filterUserId;
+            return toIntOrNull(doc.snapshot_json?.context?.profesional?.id) === filterUserId;
         });
 }
 
@@ -4003,6 +4044,7 @@ module.exports = {
     generateConsentDocumentPdf,
     signConsentDocument,
     signProfessionalConsentDocument,
+    getProfessionalSigningContext,
     listProfessionalPendingDocuments,
     listClinicPendingPatientDocuments,
     revokeConsentDocument,

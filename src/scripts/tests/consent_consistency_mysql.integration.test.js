@@ -73,20 +73,20 @@ test('consent/care consistency: actual services, tablet JWT and concurrent trans
       await assert.rejects(f.start(cita), error => error.code === 'appointment_consent_required');
       await assert.rejects(consents.signProfessionalConsentDocument(doc.id, { accepted_statement: true }, null), failure('professional_signature_actor_required'));
       await assert.rejects(consents.signProfessionalConsentDocument(doc.id, { accepted_statement: true, professional_id: 8 }, 7), failure('professional_signature_actor_mismatch'));
-      await consents.signProfessionalConsentDocument(doc.id, { accepted_statement: true }, 7);
+      await consents.signProfessionalConsentDocument(doc.id, { accepted_statement: true, expected_snapshot_hash: (await db.PatientConsentDocument.findByPk(doc.id, {raw:true,hooks:false})).snapshot_hash }, 7);
       signed = await db.PatientConsentDocument.findByPk(doc.id);
       assert.deepEqual(signed.snapshot_json.signature_evidence, patientEvidence);
       assert.equal(signed.professional_signed_by, 7);
       const dualHash = signed.snapshot_hash;
-      await consents.signProfessionalConsentDocument(doc.id, { accepted_statement: true }, 7);
+      await consents.signProfessionalConsentDocument(doc.id, { accepted_statement: true, expected_snapshot_hash: (await db.PatientConsentDocument.findByPk(doc.id, {raw:true,hooks:false})).snapshot_hash }, 7);
       assert.equal((await f.signatureEvents(doc)).length, 2);
       assert.equal((await db.PatientConsentDocument.findByPk(doc.id)).snapshot_hash, dualHash);
       const starts = await Promise.all([f.start(cita), f.start(cita)]);
       assert.equal(starts.filter(row => row.replayed).length, 1);
       assert.equal(await db.AppointmentCareEvent.count({ where: { appointment_id: cita.id_cita, action: 'start' } }), 1);
       assert.equal(await db.PatientOperationalEvent.count({ where: { patient_id: 1, metadata: { appointment_id: cita.id_cita, action: 'start' } } }), 1);
-      assert.equal((await db.CitaPaciente.findByPk(cita.id_cita)).estado, 'info_confirmada');
-      record('Two real public-package devices race with captured identical hash: one CAS succeeds, one 409, one signature event; no re-signing or regeneration of signed evidence. Authenticated professional ID is checked; dual signature preserves patient evidence. Concurrent care starts produce one append-only start and no status/payment/communication mutation');
+      assert.equal((await db.CitaPaciente.findByPk(cita.id_cita)).estado, 'en_atencion');
+      record('Two real public-package devices race with captured identical hash: one CAS succeeds, one 409, one signature event; no re-signing or regeneration of signed evidence. Authenticated professional ID is checked; dual signature preserves patient evidence. Concurrent care starts produce one append-only start and canonical en_atencion status, without payment or communication mutation');
 
       // Event failure must roll the signature and aggregate count back together.
       const rollback = await f.prepare(12), beforeRollback = rollback.doc.snapshot_hash;
@@ -128,16 +128,16 @@ test('consent/care consistency: actual services, tablet JWT and concurrent trans
         if (++mixedCount === 2) captured.resolve(); await mixedRelease.promise;
       });
       const mixedResult = Promise.allSettled([consents.signConsentDocument(mixed.doc.id, f.signature('mixed-patient')),
-        consents.signProfessionalConsentDocument(mixed.doc.id, { accepted_statement: true }, 7)]);
+        consents.signProfessionalConsentDocument(mixed.doc.id, { accepted_statement: true, expected_snapshot_hash: (await db.PatientConsentDocument.findByPk(mixed.doc.id, {raw:true,hooks:false})).snapshot_hash }, 7)]);
       await captured.promise; mixedRelease.resolve(); const mixedOutcomes = await mixedResult;
       db.ConsentSignaturePackage.removeHook('beforeFind', 'owned-patient-professional');
       assert.equal(mixedOutcomes.filter(row => row.status === 'fulfilled').length, 1);
-      assert.equal(mixedOutcomes.filter(row => row.status === 'rejected' && row.reason.message === 'consent_document_signature_conflict').length, 1);
+      assert.equal(mixedOutcomes.filter(row => row.status === 'rejected' && ['consent_document_signature_conflict','professional_signature_patient_required'].includes(row.reason.message)).length, 1);
       let mixedDoc = await db.PatientConsentDocument.findByPk(mixed.doc.id);
       await f.arrive(mixed.cita);
       await assert.rejects(f.start(mixed.cita), error => error.code === 'appointment_consent_required');
       if (!mixedDoc.signed_at) await consents.signConsentDocument(mixed.doc.id, f.signature('mixed-patient-reread'));
-      else await consents.signProfessionalConsentDocument(mixed.doc.id, { accepted_statement: true }, 7);
+      else await consents.signProfessionalConsentDocument(mixed.doc.id, { accepted_statement: true, expected_snapshot_hash: (await db.PatientConsentDocument.findByPk(mixed.doc.id, {raw:true,hooks:false})).snapshot_hash }, 7);
       mixedDoc = await db.PatientConsentDocument.findByPk(mixed.doc.id);
       assert(mixedDoc.snapshot_json.signature_evidence); assert(mixedDoc.snapshot_json.professional_signature_evidence);
       assert.equal((await f.signatureEvents(mixed.doc)).length, 2); await f.start(mixed.cita);
@@ -179,12 +179,15 @@ test('consent/care consistency: actual services, tablet JWT and concurrent trans
       record('Replacement insertion failure and supplied caller rollback preserve prior requirements; missing exact template version rolls back partial package/document creation. No finished transaction is reused for final signature reads');
 
       const multiple = await f.prepare(14), aggregates = deferred(), aggregatesRelease = deferred(); let aggregateReads = 0;
-      await consents.signProfessionalConsentDocument(multiple.doc.id, { accepted_statement: true }, 7);
+      await consents.signConsentDocument(multiple.doc.id, f.signature('multiple-patient-first'));
       db.ConsentSignaturePackage.addHook('beforeFind', 'owned-two-document-count', async options => {
         if (!packageAnchor(options, multiple.pkg.id) || aggregateReads >= 2) return;
         if (++aggregateReads === 2) aggregates.resolve(); await aggregatesRelease.promise;
       });
-      const multipleDone = Promise.allSettled(multiple.pkg.documents.map(row => consents.signConsentDocument(row.id, f.signature('independent-' + row.id))));
+      const multipleHash = (await db.PatientConsentDocument.findByPk(multiple.doc.id, {raw:true,hooks:false})).snapshot_hash;
+      const multipleDone = Promise.allSettled(multiple.pkg.documents.map(row => Number(row.id) === Number(multiple.doc.id)
+        ? consents.signProfessionalConsentDocument(row.id, {accepted_statement:true,expected_snapshot_hash:multipleHash}, 7)
+        : consents.signConsentDocument(row.id, f.signature('independent-' + row.id))));
       await aggregates.promise;
       aggregatesRelease.resolve(); const multipleResults = await multipleDone;
       db.ConsentSignaturePackage.removeHook('beforeFind', 'owned-two-document-count');
@@ -209,7 +212,9 @@ test('consent/care consistency: actual services, tablet JWT and concurrent trans
       assert.equal((await publicRefreshDone)[0].status, 'fulfilled'); assert.equal((await secondSignatureDone)[0].status, 'fulfilled');
       db.PatientConsentDocument.removeHook('afterFind', 'owned-nonTx-refresh');
       const finalCount = await db.ConsentSignaturePackage.findByPk(nonTx.pkg.id);
-      assert.equal(finalCount.signed_count, 2); assert.equal(finalCount.status, 'signed');
+      assert.equal(finalCount.signed_count, 1); assert.equal(finalCount.status, 'pending');
+      await consents.signProfessionalConsentDocument(nonTx.pkg.documents[0].id, {accepted_statement:true,expected_snapshot_hash:(await db.PatientConsentDocument.findByPk(nonTx.pkg.documents[0].id)).snapshot_hash},7);
+      assert.equal((await db.ConsentSignaturePackage.findByPk(nonTx.pkg.id)).signed_count,2);
       record('Public refresh with NO supplied transaction now locks its parent before count read; a concurrent second signature waits and writes fresh count2 after that refresh, never overwritten by stale count1');
 
       const reusableA = await f.prepare(15), reusableB = await f.prepare(16), capturedCandidates = deferred(), continueCandidates = deferred();

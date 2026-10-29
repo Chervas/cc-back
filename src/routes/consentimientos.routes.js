@@ -69,6 +69,7 @@ router.get('/documents/:id', consentimientosController.getDocument);
 router.get('/documents/:id/render', consentimientosController.renderDocument);
 router.get('/documents/:id/pdf', consentimientosController.getDocumentPdf);
 router.post('/documents/:id/sign', consentimientosController.signDocument);
+router.get('/documents/:id/professional-signing', consentimientosController.getProfessionalSigningContext);
 router.post('/documents/:id/sign-professional', consentimientosController.signProfessionalDocument);
 router.post('/documents/:id/revoke', consentimientosController.revokeDocument);
 

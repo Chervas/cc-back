@@ -53,7 +53,7 @@ test('consent post-signature reads/mock delivery/revocation preserve native SQL 
       const staleRevoke = Promise.allSettled([consents.revokeConsentDocument(revoking.doc.id, { reason: 'Revocación ficticia después de ambas firmas' })]);
       await revokeCaptured.promise;
       await consents.signConsentDocument(revoking.doc.id, f.signature('revoke-patient-winner'));
-      await consents.signProfessionalConsentDocument(revoking.doc.id, { accepted_statement: true }, 7);
+      await consents.signProfessionalConsentDocument(revoking.doc.id, { accepted_statement: true, expected_snapshot_hash: (await db.PatientConsentDocument.findByPk(revoking.doc.id, {raw:true,hooks:false})).snapshot_hash }, 7);
       const revokeSigned = (await db.PatientConsentDocument.findByPk(revoking.doc.id)).toJSON();
       revokeRelease.resolve(); const [revokeResult] = await staleRevoke;
       db.PatientConsentDocument.removeHook('afterFind', 'owned-stale-revoke');

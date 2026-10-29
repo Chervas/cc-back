@@ -16,18 +16,7 @@ function consentError(code, message, count = null) {
   return error;
 }
 
-function isCurrentSignedDocument(document, template, now) {
-  const doc = plain(document);
-  const signed = new Date(doc.signed_at).getTime();
-  if (doc.status !== 'signed' || !doc.signed_at || !Number.isFinite(signed) || signed > now.getTime() || doc.revoked_at) return false;
-  if (doc.expires_at && (!Number.isFinite(new Date(doc.expires_at).getTime()) || new Date(doc.expires_at) <= now)) return false;
-  // The signed snapshot remains authoritative if a template changes later.
-  const snapshotTemplate = object(doc.snapshot_json).template;
-  const needsProfessional = snapshotTemplate && Object.hasOwn(snapshotTemplate, 'requires_professional_signature')
-    ? snapshotTemplate.requires_professional_signature === true : template.requires_professional_signature === true;
-  return !needsProfessional || (positive(doc.professional_signed_by) && !!doc.professional_signed_at
-    && Number.isFinite(new Date(doc.professional_signed_at).getTime()) && new Date(doc.professional_signed_at) <= now);
-}
+const { isCurrentSignedDocument } = require('../lib/consent-signature-progress');
 
 /** Pure decision: configured clinical requirements only. Optional/marketing
  * documents never become a condition for receiving clinical care. No procedure

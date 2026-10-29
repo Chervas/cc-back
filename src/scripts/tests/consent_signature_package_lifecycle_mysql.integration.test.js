@@ -23,7 +23,7 @@ test('patient/professional signature rechecks current package lifecycle after an
         });
         const late = Promise.allSettled([actor === 'patient'
           ? consents.signConsentDocument(item.doc.id, f.signature('late-patient'))
-          : consents.signProfessionalConsentDocument(item.doc.id, { accepted_statement: true }, 7)]);
+          : consents.signProfessionalConsentDocument(item.doc.id, { accepted_statement: true, expected_snapshot_hash: (await db.PatientConsentDocument.findByPk(item.doc.id, {raw:true,hooks:false})).snapshot_hash }, 7)]);
         await captured.promise;
         const closing = closure === 'date_expired' ? { expires_at: new Date(Date.now() - 1000) } : { status: closure };
         await db.ConsentSignaturePackage.update(closing, { where: { id: item.pkg.id } });
@@ -57,8 +57,8 @@ test('patient/professional signature rechecks current package lifecycle after an
       }
       const validCountersign = await f.prepare();
       await consents.signConsentDocument(validCountersign.doc.id, f.signature('normal-patient'));
-      assert.equal((await db.ConsentSignaturePackage.findByPk(validCountersign.pkg.id)).status, 'signed');
-      await consents.signProfessionalConsentDocument(validCountersign.doc.id, { accepted_statement: true }, 7);
+      assert.equal((await db.ConsentSignaturePackage.findByPk(validCountersign.pkg.id)).status, 'pending');
+      await consents.signProfessionalConsentDocument(validCountersign.doc.id, { accepted_statement: true, expected_snapshot_hash: (await db.PatientConsentDocument.findByPk(validCountersign.doc.id, {raw:true,hooks:false})).snapshot_hash }, 7);
       const valid = await db.PatientConsentDocument.findByPk(validCountersign.doc.id);
       assert(valid.signed_at); assert(valid.professional_signed_at); assert(valid.snapshot_json.signature_evidence);
       await f.arrive(validCountersign.cita); await f.start(validCountersign.cita);

@@ -24,6 +24,8 @@ async function createOwnedDocumentationComponentFixture(context) {
     nombre: 'Paciente', apellidos: 'Ficticio Componente', fecha_nacimiento: '1990-01-01' });
   await db.Usuario.bulkCreate([{ id_usuario: 50, nombre: 'Profesional', apellidos: 'Ficticio Principal' },
     { id_usuario: 53, nombre: 'Profesional', apellidos: 'Ficticio Extracción' }]);
+  await db.UsuarioClinica.bulkCreate([50,53].map(id_usuario=>({id_usuario,id_clinica:66,rol_clinica:'personaldeclinica',subrol_clinica:'Doctores',estado_invitacion:'aceptada'})));
+  await db.DoctorClinica.bulkCreate([50,53].map(doctor_id=>({doctor_id,clinica_id:66,activo:true})));
   await db.Tratamiento.bulkCreate([{ id_tratamiento: 688, clinica_id: 66, nombre: 'PRP OWNED ficticio', origen: 'clinica',
     activo: true, precio_base: 120, eliminado_por_clinica: [],
     clinical_config: { catalog_status: 'active', source_reference: 'service:2798745' } },

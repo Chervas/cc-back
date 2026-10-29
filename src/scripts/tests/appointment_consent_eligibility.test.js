@@ -38,14 +38,26 @@ test('optional, soft and nonclinical documentation never blocks receiving clinic
     assert.deepEqual(decision([], [{ ...requirement, ...change }]), { allowed: true, blocking_count: 0, required_clinical_count: 0 });
   }
 });
-test('professional signature is checked against the signed snapshot', () => {
+test('professional signature is checked only against the immutable issued snapshot', () => {
   const requirements = [{ ...requirement, clinicTemplate: { ...template, requires_professional_signature: true } }];
-  assert.equal(decision([signed], requirements).allowed, false);
-  assert.equal(decision([{ ...signed, professional_signed_by: 1, professional_signed_at: '2026-09-21T07:30:00Z' }], requirements).allowed, true);
-  assert.equal(decision([{ ...signed, professional_signed_by: 1, professional_signed_at: '2026-09-22' }], requirements).allowed, false);
+  const dual = { ...signed, snapshot_json: { template: { requires_professional_signature: true } } };
+  assert.equal(decision([dual], requirements).allowed, false);
+  assert.equal(decision([{ ...dual, professional_signed_by: 1, professional_signed_at: '2026-09-21T07:30:00Z' }], requirements).allowed, true);
+  assert.equal(decision([{ ...dual, professional_signed_by: 1, professional_signed_at: '2026-09-22' }], requirements).allowed, false);
   assert.equal(decision([{ ...signed, snapshot_json: { template: { requires_professional_signature: false } } }], requirements).allowed, true);
-  assert.equal(decision([{ ...signed, snapshot_json: { template: { requires_professional_signature: true } } }]).allowed, false);
+  assert.equal(decision([dual]).allowed, false, 'a newer patient-only template cannot remove a frozen professional obligation');
 });
+test('activating a template never adds a professional obligation to historical documents missing that frozen policy', () => {
+  const requirements = [{ ...requirement, clinicTemplate: { ...template, requires_professional_signature: true } }];
+  for (const snapshot of [undefined, {}, { template: {} }, { template: { name: 'Documento histórico' } }]) {
+    const doc = { ...signed, ...(snapshot === undefined ? {} : { snapshot_json: snapshot }) };
+    const before = JSON.stringify(doc);
+    assert.equal(decision([doc]).allowed, true);
+    assert.equal(decision([doc], requirements).allowed, true);
+    assert.equal(JSON.stringify(doc), before, 'no signed snapshot or hash is rewritten');
+  }
+});
+
 test('dangling clinical requirement fails closed; archived templates cannot authorize new acts', () => {
   assert.throws(() => decision([], [{ ...requirement, clinicTemplate: null }]), { code: 'appointment_consent_configuration_required' });
   assert.equal(decision([signed], [{ ...requirement, clinicTemplate: { ...template, status: 'archived' } }]).allowed, false);

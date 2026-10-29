@@ -602,6 +602,15 @@ exports.signDocument = asyncHandler(async (req, res) => {
     }
 });
 
+exports.getProfessionalSigningContext = asyncHandler(async (req, res) => {
+    try {
+        const clinicId = await resolveDocumentClinicId(req.params.id);
+        await requireConsentFeature(req, 'consents.manage', clinicId);
+        await requireConsentFeature(req, 'clinical.reports.manage', clinicId);
+        return res.json(await consentimientosService.getProfessionalSigningContext(req.params.id, getUserId(req)));
+    } catch (error) { return sendError(res, error); }
+});
+
 exports.signProfessionalDocument = asyncHandler(async (req, res) => {
     try {
         const clinicId = await resolveDocumentClinicId(req.params.id);

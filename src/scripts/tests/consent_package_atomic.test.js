@@ -208,3 +208,17 @@ test('linked-source packages fail closed before producing documents if canonical
   await assert.rejects(h.prepare(), { code: 'program_session_not_found' });
   assert.equal(h.state.packages.length, 0); assert.equal(h.state.documents.length, 0);
 });
+
+
+test('new appointment documents freeze explicit professional-policy booleans and retain them after live template edits', async () => {
+  const h=harness();
+  h.requirements[0].clinicTemplate.requires_professional_signature=true;
+  h.requirements[1].clinicTemplate.requires_professional_signature=false;
+  await h.prepare();
+  assert.deepEqual(h.state.documents.map(row=>row.snapshot_json.template.requires_professional_signature),[true,false]);
+  const before=JSON.stringify(h.state.documents);
+  h.requirements[0].clinicTemplate.requires_professional_signature=false;
+  h.requirements[1].clinicTemplate.requires_professional_signature=true;
+  await h.prepare();
+  assert.equal(JSON.stringify(h.state.documents),before);
+});

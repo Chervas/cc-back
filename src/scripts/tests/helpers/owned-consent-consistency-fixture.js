@@ -24,12 +24,16 @@ async function createOwnedConsentConsistencyFixture({ sql, models: db }) {
   const D = S.DataTypes;
   db.Sequelize = S;
   const define = (name, tableName, attrs) => db[name] = sql.define(name, attrs, { tableName, timestamps: false });
+  define('GrupoClinica','GruposClinicas',{id_grupo:{type:D.INTEGER,primaryKey:true},nombre_grupo:D.STRING});
   define('Clinica', 'Clinicas', { id_clinica: { type: D.INTEGER, primaryKey: true }, grupoClinicaId: D.INTEGER,
     nombre_clinica: D.STRING, url_avatar: D.STRING, datos_fiscales_clinica: D.JSON, configuracion: D.JSON });
+  db.Clinica.belongsTo(db.GrupoClinica,{foreignKey:'grupoClinicaId',targetKey:'id_grupo',as:'grupoClinica'});
   define('Paciente', 'Pacientes', { id_paciente: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER,
     public_id: D.STRING, nombre: D.STRING, apellidos: D.STRING, fecha_nacimiento: D.DATEONLY,
     dni: D.STRING, telefono_movil: D.STRING, email: D.STRING });
-  define('Usuario', 'Usuarios', { id_usuario: { type: D.INTEGER, primaryKey: true }, nombre: D.STRING, apellidos: D.STRING });
+  define('Usuario', 'Usuarios', { id_usuario: { type: D.INTEGER, primaryKey: true }, nombre: D.STRING, apellidos: D.STRING, estado_cuenta: {type:D.STRING,defaultValue:'activo'}, isProfesional: {type:D.BOOLEAN,defaultValue:true} });
+  define('UsuarioClinica','UsuarioClinica',{id_usuario:{type:D.INTEGER,primaryKey:true},id_clinica:{type:D.INTEGER,primaryKey:true},rol_clinica:D.STRING,subrol_clinica:D.STRING,estado_invitacion:D.STRING});
+  define('DoctorClinica','DoctorClinicas',{id:{type:D.INTEGER,primaryKey:true,autoIncrement:true},doctor_id:D.INTEGER,clinica_id:D.INTEGER,activo:D.BOOLEAN});
   define('Tratamiento', 'Tratamientos', { id_tratamiento: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER,
     nombre: D.STRING, disciplina: D.STRING, origen: D.STRING, grupo_clinica_id: D.INTEGER,
     eliminado_por_clinica: { type: D.JSON, defaultValue: [] }, activo: D.BOOLEAN, precio_base: D.DECIMAL(10, 2),
@@ -56,6 +60,8 @@ async function createOwnedConsentConsistencyFixture({ sql, models: db }) {
     apellidos: 'Ficticio A', fecha_nacimiento: '1990-01-01' }, { id_paciente: 2, clinica_id: 200,
     public_id: 'owned_consent_patient_2', nombre: 'Paciente', apellidos: 'Ficticio B', fecha_nacimiento: '1991-01-01' }]);
   await db.Usuario.bulkCreate([{ id_usuario: 7, nombre: 'Profesional', apellidos: 'Ficticio A' }, { id_usuario: 8, nombre: 'Profesional', apellidos: 'Ficticio B' }]);
+  await db.UsuarioClinica.bulkCreate([{id_usuario:7,id_clinica:100,rol_clinica:'personaldeclinica',subrol_clinica:'Doctores',estado_invitacion:'aceptada'},{id_usuario:8,id_clinica:200,rol_clinica:'personaldeclinica',subrol_clinica:'Doctores',estado_invitacion:'aceptada'}]);
+  await db.DoctorClinica.bulkCreate([{doctor_id:7,clinica_id:100,activo:true},{doctor_id:8,clinica_id:200,activo:true}]);
   await db.Tratamiento.bulkCreate([11, 12, 13, 14, 15, 16].map(id => ({ id_tratamiento: id, clinica_id: 100,
     nombre: 'Técnica ficticia ' + id, disciplina: 'Ficticia', origen: 'clinica', eliminado_por_clinica: [], activo: true, precio_base: 10 })));
   // Protocol tables intentionally remain EMPTY. This consent fixture never
