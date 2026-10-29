@@ -119,6 +119,16 @@ test('provider timeouts remain failures for the existing queue retry policy', as
   await assert.rejects(unavailable.run(f.queued[0].data), { code: 'provider_timeout' });
 });
 
+test('an explicit custody denial is recorded as skipped without retrying or inventing a Meta disconnection', async () => {
+  for (const code of ['connection_blocked', 'scope_denied', 'whatsapp_authorized_scope_blocked']) {
+    const f = fixture(); await f.service.enqueue();
+    const denied = createService({ broker: f.broker, loadAsset: async id => f.assets.get(id),
+      refresh: async () => { throw Object.assign(Error(code), { code }); } });
+    assert.deepEqual(await denied.run(f.queued[0].data), { skipped: true, reason: code, asset_id: 1 });
+    assert.equal(f.refreshed.length, 0);
+  }
+});
+
 test('the existing cron and JobRequest executor route authorized checks without invoking legacy Graph or BullMQ', async () => {
   const native = require('../../services/whatsappPhones.service');
   const sync = require('../../services/whatsappAuthorizedPhoneSync.service');

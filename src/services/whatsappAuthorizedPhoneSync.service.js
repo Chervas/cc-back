@@ -8,6 +8,8 @@ const BINDING_KEYS = ['connectionRef', 'authorizationId', 'clinicId', 'assetId',
   'phoneId', 'wabaId', 'revision', 'sendEnabled', 'messageNotBefore'];
 const positiveId = value => Number.isInteger(value) && value > 0;
 const DEDUPE_STATUSES = ['pending', 'queued', 'running', 'waiting', 'completed', 'failed', 'cancelled'];
+const DENIED = new Set(['connection_blocked', 'scope_denied', 'whatsapp_authorized_scope_blocked',
+  'whatsapp_authorized_binding_invalid', 'whatsapp_authorized_binding_changed']);
 const active = asset => asset?.assetType === 'whatsapp_phone_number'
   && (asset.isActive === true || asset.isActive === 1);
 const sameBinding = (left, right) => !!left && !!right
@@ -68,11 +70,18 @@ function createService({
       || expectedBinding?.assetId !== assetId || expectedBinding?.clinicId !== clinicId) {
       throw Object.assign(Error('whatsapp_authorized_phone_sync_invalid'), { code: 'whatsapp_authorized_phone_sync_invalid' });
     }
-    const target = await eligible(expectedBinding);
-    if (!target) return { skipped: true, reason: 'whatsapp_authorized_phone_sync_superseded' };
-    const result = await refresh({ asset: target.asset, clinicId });
-    return { asset_id: assetId, state: result.health?.state || 'unknown',
-      can_send: result.health?.can_send ?? null };
+    try {
+      const target = await eligible(expectedBinding);
+      if (!target) return { skipped: true, reason: 'whatsapp_authorized_phone_sync_superseded' };
+      const result = await refresh({ asset: target.asset, clinicId });
+      return { asset_id: assetId, state: result.health?.state || 'unknown',
+        can_send: result.health?.can_send ?? null };
+    } catch (error) {
+      // An explicit custody/scope denial is not a transient provider outage and
+      // says nothing about Meta's current phone status. Keep its last snapshot.
+      if (DENIED.has(error?.code)) return { skipped: true, reason: error.code, asset_id: assetId };
+      throw error;
+    }
   }
 
   return Object.freeze({ enqueue, run });
