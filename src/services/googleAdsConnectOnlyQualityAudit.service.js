@@ -1,6 +1,8 @@
 'use strict';
 
 const { googleAdsRequest, normalizeCustomerId } = require('../lib/googleAdsClient');
+const googleLegacyCredentials = require('./googleLegacyCredentials.service');
+const { safe: safeBrokerReadError } = require('./googleAdsBrokerReader.service');
 const {
   GOOGLE_ADS_SCOPE,
   resolveScopedGoogleAdsRuntime,
@@ -228,14 +230,39 @@ function buildCampaignGoalGaql(campaignIds) {
   ].join('\n');
 }
 
-async function searchGoogleAds({ runtime, query, request = googleAdsRequest }) {
-  const response = await request('POST', `customers/${runtime.customerId}/googleAds:search`, {
-    accessToken: runtime.accessToken,
-    loginCustomerId: runtime.loginCustomerId || undefined,
-    singleAttempt: true,
-    timeoutMs: 20_000,
-    data: { query },
-  });
+async function searchGoogleAds({ runtime, campaignIds, section, includeOptimizationScore = true,
+  request = googleAdsRequest, credentials = googleLegacyCredentials }) {
+  if (runtime.deliveryMode === 'broker') {
+    // The captured broker context rechecks mapping, tenant, grants and revocation
+    // before and after every page. A managed failure never opens token fallback.
+    try {
+      return await runtime.broker.read(runtime.account, runtime.brokerContext, 'campaign_quality', {
+        campaignIds, section, includeOptimizationScore: section === 'goals' ? false : includeOptimizationScore,
+      });
+    } catch (error) {
+      const code = safeBrokerReadError(error); throw Object.assign(Error(code), { code });
+    }
+  }
+  const query = section === 'goals' ? buildCampaignGoalGaql(campaignIds)
+    : section === 'existence' ? buildCampaignExistenceGaql(campaignIds, { includeOptimizationScore })
+      : buildCampaignQualityGaql(campaignIds, { includeOptimizationScore });
+  // Keep the established legacy field-compatibility retry possible. request()
+  // sanitizes provider errors, so use the same eight-registry assertion around
+  // both successful and failed requests without exposing a managed fallback.
+  await credentials.assert(runtime.connection);
+  let response;
+  try {
+    response = await request('POST', `customers/${runtime.customerId}/googleAds:search`, {
+      accessToken: runtime.accessToken,
+      loginCustomerId: runtime.loginCustomerId || undefined,
+      singleAttempt: true,
+      timeoutMs: 20_000,
+      data: { query },
+    });
+  } catch (error) {
+    await credentials.assert(runtime.connection); throw error;
+  }
+  await credentials.assert(runtime.connection);
   return Array.isArray(response?.results) ? response.results : [];
 }
 
@@ -622,6 +649,7 @@ async function auditConnectOnlyCampaignQuality({
   }
   const resolveRuntime = dependencies.resolveRuntime || resolveScopedGoogleAdsRuntime;
   const request = dependencies.request || googleAdsRequest;
+  const credentials = dependencies.credentials || googleLegacyCredentials;
   const accounts = [];
   const allIssues = [];
   const allRecommendations = [];
@@ -659,20 +687,17 @@ async function auditConnectOnlyCampaignQuality({
         try {
           chunkQualityRows = await searchGoogleAds({
             runtime,
-            request,
-            query: buildCampaignQualityGaql(campaignIds, {
-              includeOptimizationScore: optimizationScoreAvailable,
-            }),
+            request, credentials, campaignIds, section: 'metrics',
+            includeOptimizationScore: optimizationScoreAvailable,
           });
           requestCount += 1;
         } catch (error) {
           const providerMessage = String(error?.response?.data?.error?.message || error?.message || '').toLowerCase();
-          if (!optimizationScoreAvailable || !providerMessage.includes('optimization_score')) throw error;
+          if (runtime.deliveryMode === 'broker' || !optimizationScoreAvailable || !providerMessage.includes('optimization_score')) throw error;
           optimizationScoreAvailable = false;
           chunkQualityRows = await searchGoogleAds({
             runtime,
-            request,
-            query: buildCampaignQualityGaql(campaignIds, { includeOptimizationScore: false }),
+            request, credentials, campaignIds, section: 'metrics', includeOptimizationScore: false,
           });
           requestCount += 2;
         }
@@ -683,18 +708,15 @@ async function auditConnectOnlyCampaignQuality({
         if (missingFromMetricQuery.length) {
           const existenceRows = await searchGoogleAds({
             runtime,
-            request,
-            query: buildCampaignExistenceGaql(missingFromMetricQuery, {
-              includeOptimizationScore: optimizationScoreAvailable,
-            }),
+            request, credentials, campaignIds: missingFromMetricQuery, section: 'existence',
+            includeOptimizationScore: optimizationScoreAvailable,
           });
           requestCount += 1;
           chunkQualityRows = [...chunkQualityRows, ...existenceRows];
         }
         const chunkGoalRows = await searchGoogleAds({
           runtime,
-          request,
-          query: buildCampaignGoalGaql(campaignIds),
+          request, credentials, campaignIds, section: 'goals',
         });
         requestCount += 1;
         qualityRows.push(...chunkQualityRows);

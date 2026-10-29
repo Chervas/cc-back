@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
-const assert = require('node:assert/strict');
-const db = require('../../../models');
+const { createLegacyServices, dataAssert: assert } = require('./fixtures/google_ads_quality_vm.fixture');
+const { quality, policy } = createLegacyServices();
 const {
   assessCanonicalGoalAlignment,
   auditConnectOnlyCampaignQuality,
@@ -15,11 +15,11 @@ const {
   extractGoogleCampaignReferences,
   mergeConnectOnlyQualityCampaignReferences,
   sanitizeCampaignQualityReport,
-} = require('../../services/googleAdsConnectOnlyQualityAudit.service');
+} = quality;
 const {
   discoverGoalPolicyAuditTargets,
   executePersistedGoalPolicyAudit,
-} = require('../../services/googleAdsClinicaclickGoalPolicy.service');
+} = policy;
 
 const CUSTOMER = '1851215478';
 const CUSTOMER_599 = '5992356722';
@@ -559,7 +559,4 @@ main()
   .catch((error) => {
     console.error(error);
     process.exitCode = 1;
-  })
-  .finally(async () => {
-    await db.sequelize.close();
   });

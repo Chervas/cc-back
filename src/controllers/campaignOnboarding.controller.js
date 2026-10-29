@@ -1531,6 +1531,30 @@ function preferDirectClinicMappings(rows, scope) {
   return direct.length ? direct : candidates;
 }
 
+// The connect-only entry shares the same scoped broker-first resolver as the
+// existing conversion readiness. This does not grant readiness or mutate Ads.
+async function prepareGoogleCampaignOnboardingRuntime({ userId, scope, customerId,
+  resolveRuntime = resolveScopedGoogleAdsRuntime } = {}) {
+  const expected = normalizeCustomerId(customerId);
+  const runtime = await resolveRuntime({ userId, clinicId: scope.clinic_id,
+    groupId: scope.group_id, assignmentScope: scope.assignment_scope,
+    customerId: expected, requiredScopes: [GOOGLE_ADS_SCOPE] });
+  if (!runtime || normalizeCustomerId(runtime.customerId) !== expected
+    || !expected || runtime.deliveryMode && runtime.deliveryMode !== 'broker') {
+    throw Object.assign(new Error('No se pudo acreditar el acceso a la cuenta Ads seleccionada'),
+      { code: 'GOOGLE_CAMPAIGN_RUNTIME_INVALID', httpStatus: 409 });
+  }
+  if (runtime.deliveryMode === 'broker') {
+    const current = await runtime.broker.assert(runtime.account, runtime.brokerContext);
+    if (current.customerId !== expected) throw Object.assign(new Error('La cuenta Ads gestionada cambió'),
+      { code: 'GOOGLE_CAMPAIGN_RUNTIME_INVALID', httpStatus: 409 });
+  } else if (typeof runtime.accessToken !== 'string' || !runtime.accessToken) {
+    throw Object.assign(new Error('No se pudo acreditar el acceso a la cuenta Ads seleccionada'),
+      { code: 'GOOGLE_CAMPAIGN_RUNTIME_INVALID', httpStatus: 409 });
+  }
+  return new Map([[expected, runtime]]);
+}
+
 async function resolveGoogleCampaignMappingAccess({
   scope,
   customerId,
@@ -8996,18 +9020,25 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
         throw new Error('No hay customer_id de Google Ads mapeado para este scope');
       }
 
-      const googleMappedAccess = await resolveGoogleCampaignMappingAccess({
-        scope,
-        customerId: selectedCustomer
-      });
-      const googleConnection = googleMappedAccess.connection;
-      if (!googleMappedAccess.account || !googleConnection) {
-        const mappingError = new Error('No existe un único grant Google para la cuenta Ads seleccionada');
-        mappingError.code = String(googleMappedAccess.reason || 'GOOGLE_ACCOUNT_MAPPING_UNAVAILABLE').toUpperCase();
-        mappingError.httpStatus = 409;
-        throw mappingError;
+      let onboardingRuntimeCache = null;
+      if (mode === CAMPAIGN_MODES.MEASURE) {
+        onboardingRuntimeCache = await prepareGoogleCampaignOnboardingRuntime({
+          userId, scope, customerId: selectedCustomer
+        });
+      } else {
+        const googleMappedAccess = await resolveGoogleCampaignMappingAccess({
+          scope,
+          customerId: selectedCustomer
+        });
+        const googleConnection = googleMappedAccess.connection;
+        if (!googleMappedAccess.account || !googleConnection) {
+          const mappingError = new Error('No existe un único grant Google para la cuenta Ads seleccionada');
+          mappingError.code = String(googleMappedAccess.reason || 'GOOGLE_ACCOUNT_MAPPING_UNAVAILABLE').toUpperCase();
+          mappingError.httpStatus = 409;
+          throw mappingError;
+        }
+        await ensureGoogleAdsAccess(googleConnection);
       }
-      await ensureGoogleAdsAccess(googleConnection);
       markStep(steps, 'google_connect', 'done');
 
       markStep(steps, 'google_map_account', 'done', { customer_id: selectedCustomer });
@@ -9021,7 +9052,8 @@ exports.startCampaignOnboarding = asyncHandler(async (req, res) => {
         fallbackCustomerId: selectedCustomer,
         currency: req.body?.google_ads?.currency || 'EUR',
         createMissing: autoCreate,
-        consentReadiness
+        consentReadiness,
+        runtimeCache: onboardingRuntimeCache
       });
 
       if (!conversionReadiness.ready || !conversionReadiness.validated) {
