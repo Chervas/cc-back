@@ -8,6 +8,8 @@
 
 const crypto = require('node:crypto');
 const db = require('../../models');
+const googleLegacyCredentials = require('./googleLegacyCredentials.service');
+const { safe: safeBrokerReadError } = require('./googleAdsBrokerReader.service');
 const { googleAdsRequest, normalizeCustomerId } = require('../lib/googleAdsClient');
 const notificationsService = require('./notifications.service');
 const {
@@ -484,22 +486,42 @@ function conversionTrackingFromRows(rows, customerId) {
   };
 }
 
-async function searchGoogleAds({ runtime, query, request = googleAdsRequest }) {
-  const response = await request('POST', `customers/${runtime.customerId}/googleAds:search`, {
-    accessToken: runtime.accessToken,
-    loginCustomerId: runtime.loginCustomerId || undefined,
-    singleAttempt: true,
-    timeoutMs: 20_000,
-    data: { query },
-  });
+async function searchGoogleAds({ runtime, query, request = googleAdsRequest, credentials = googleLegacyCredentials }) {
+  await credentials.assert(runtime.connection);
+  let response;
+  try {
+    response = await request('POST', `customers/${runtime.customerId}/googleAds:search`, {
+      accessToken: runtime.accessToken,
+      loginCustomerId: runtime.loginCustomerId || undefined,
+      singleAttempt: true,
+      timeoutMs: 20_000,
+      data: { query },
+    });
+  } catch (error) { await credentials.assert(runtime.connection); throw error; }
+  await credentials.assert(runtime.connection);
   return Array.isArray(response?.results) ? response.results : [];
 }
 
-async function fetchGoalPolicySnapshot({ runtime, account, request = googleAdsRequest }) {
+async function fetchGoalPolicySnapshot({ runtime, account, request = googleAdsRequest, credentials = googleLegacyCredentials }) {
   const campaignFilter = account.campaign_ids.join(', ');
-  const trackingRows = await searchGoogleAds({
+  const deadline = Date.now() + 120000; let brokerRows = 0, brokerBytes = 0;
+  async function managed(section) {
+    try {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw Object.assign(Error('broker_timeout'), { code: 'broker_timeout' });
+      const rows = await runtime.broker.read(runtime.account, runtime.brokerContext, 'goal_policy',
+        { section, campaignIds: account.campaign_ids }, { timeoutMs: Math.min(20000, remaining) });
+      if (!Array.isArray(rows) || section === 'tracking' && rows.length !== 1 || Date.now() >= deadline)
+        throw Object.assign(Error('broker_response_invalid'), { code: 'broker_response_invalid' });
+      brokerRows += rows.length; brokerBytes += Buffer.byteLength(JSON.stringify(rows));
+      if (brokerRows > 25001 || brokerBytes > 33554432) throw Object.assign(Error('broker_response_invalid'), { code: 'broker_response_invalid' });
+      return rows;
+    } catch (error) { const code = safeBrokerReadError(error); throw Object.assign(Error(code), { code }); }
+  }
+  const trackingRows = runtime.deliveryMode === 'broker' ? await managed('tracking') : await searchGoogleAds({
     runtime,
     request,
+    credentials,
     query: [
       'SELECT',
       '  customer.id,',
@@ -508,9 +530,10 @@ async function fetchGoalPolicySnapshot({ runtime, account, request = googleAdsRe
       'FROM customer',
     ].join('\n'),
   });
-  const conversionActionRows = await searchGoogleAds({
+  const conversionActionRows = runtime.deliveryMode === 'broker' ? await managed('actions') : await searchGoogleAds({
     runtime,
     request,
+    credentials,
     query: [
       'SELECT',
       '  conversion_action.id,',
@@ -526,9 +549,10 @@ async function fetchGoalPolicySnapshot({ runtime, account, request = googleAdsRe
       'FROM conversion_action',
     ].join('\n'),
   });
-  const customGoalRows = await searchGoogleAds({
+  const customGoalRows = runtime.deliveryMode === 'broker' ? await managed('custom_goals') : await searchGoogleAds({
     runtime,
     request,
+    credentials,
     query: [
       'SELECT',
       '  custom_conversion_goal.id,',
@@ -539,9 +563,10 @@ async function fetchGoalPolicySnapshot({ runtime, account, request = googleAdsRe
       'FROM custom_conversion_goal',
     ].join('\n'),
   });
-  const campaignConfigRows = await searchGoogleAds({
+  const campaignConfigRows = runtime.deliveryMode === 'broker' ? await managed('campaign_configs') : await searchGoogleAds({
     runtime,
     request,
+    credentials,
     query: [
       'SELECT',
       '  conversion_goal_campaign_config.resource_name,',
@@ -559,9 +584,10 @@ async function fetchGoalPolicySnapshot({ runtime, account, request = googleAdsRe
       "WHERE campaign.status != 'REMOVED'",
     ].join('\n'),
   });
-  const campaignGoalRows = await searchGoogleAds({
+  const campaignGoalRows = runtime.deliveryMode === 'broker' ? await managed('campaign_goals') : await searchGoogleAds({
     runtime,
     request,
+    credentials,
     query: [
       'SELECT',
       '  campaign_conversion_goal.resource_name,',
@@ -575,9 +601,10 @@ async function fetchGoalPolicySnapshot({ runtime, account, request = googleAdsRe
       `WHERE campaign.id IN (${campaignFilter})`,
     ].join('\n'),
   });
-  const customerGoalRows = await searchGoogleAds({
+  const customerGoalRows = runtime.deliveryMode === 'broker' ? await managed('customer_goals') : await searchGoogleAds({
     runtime,
     request,
+    credentials,
     query: [
       'SELECT',
       '  customer_conversion_goal.resource_name,',
@@ -1202,7 +1229,7 @@ async function previewAccount({ account, scope, dependencies }) {
     if (cleanCustomerId(runtime?.customerId) !== account.customer_id) {
       throw runtimeError('GOAL_POLICY_RUNTIME_ACCOUNT_MISMATCH', 'El runtime pertenece a otra cuenta', 403);
     }
-    const snapshot = await fetchSnapshot({ runtime, account, request });
+    const snapshot = await fetchSnapshot({ runtime, account, request, credentials: dependencies.credentials || googleLegacyCredentials });
     const plan = buildClinicaclickGoalPolicyPlan({ account, snapshot });
     return {
       customer_id: account.customer_id,
@@ -1463,6 +1490,19 @@ async function applyClinicaclickGoalPolicy({
     );
   }
   const account = accounts[0];
+  // This early observation only closes managed apply. Never reuse it as
+  // mutation authority after preview: the original fresh resolution below stays.
+  const earlyRuntime = await (dependencies.resolveRuntime || resolveScopedGoogleAdsRuntime)({
+    userId: scope?.user_id ?? scope?.userId ?? null,
+    clinicId: scope?.clinic_id ?? scope?.clinicId ?? null,
+    groupId: scope?.group_id ?? scope?.groupId ?? null,
+    assignmentScope: scope?.assignment_scope ?? scope?.assignmentScope ?? null,
+    customerId: account.customer_id, requiredScopes: [GOOGLE_ADS_SCOPE],
+  });
+  if (cleanCustomerId(earlyRuntime?.customerId) !== account.customer_id)
+    throw runtimeError('GOAL_POLICY_RUNTIME_ACCOUNT_MISMATCH', 'El runtime pertenece a otra cuenta', 403);
+  if (earlyRuntime.deliveryMode === 'broker') throw runtimeError('GOAL_POLICY_BROKER_APPLY_UNAVAILABLE',
+    'El preview gestionado no autoriza aplicar objetivos', 409);
   const initialPreview = await previewClinicaclickGoalPolicy({ scope, configuredAccounts: accounts, dependencies });
   if (initialPreview.digest !== expectedDigest) {
     throw runtimeError(
@@ -1502,6 +1542,9 @@ async function applyClinicaclickGoalPolicy({
   if (cleanCustomerId(runtime?.customerId) !== account.customer_id) {
     throw runtimeError('GOAL_POLICY_RUNTIME_ACCOUNT_MISMATCH', 'El runtime pertenece a otra cuenta', 403);
   }
+
+  if (runtime.deliveryMode === 'broker') throw runtimeError('GOAL_POLICY_BROKER_APPLY_UNAVAILABLE',
+    'La identidad pasó a gestionada durante el preview; no se aplicaron objetivos', 409);
 
   const goalOperation = plan.operations.custom_goal;
   const createsGoal = !!goalOperation?.create;

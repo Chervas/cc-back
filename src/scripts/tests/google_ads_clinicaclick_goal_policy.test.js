@@ -22,6 +22,17 @@ const {
 } = require('../../services/googleAdsClinicaclickGoalPolicy.service');
 
 const CUSTOMER = '1851215478';
+// Fictional credential metadata only. Exercise the genuine eight-registry guard
+// without the application pool, providers or a real connection row.
+const FIXTURE_CONNECTION = { id: 71, googleUserId: 'fictitious-goal-legacy' };
+const { createGoogleLegacyCredentials } = require('../../services/googleLegacyCredentials.service');
+const FIXTURE_CREDENTIALS = createGoogleLegacyCredentials({
+  connectionModel: { findByPk: async id => ({ ...FIXTURE_CONNECTION, id }) },
+  ...Object.fromEntries(['bindingModel', 'searchConsoleModel', 'analyticsModel', 'propertyRevocationModel',
+    'adsModel', 'adsRevocationModel', 'enrollmentScopeModel', 'enrollmentRequestModel']
+    .map(name => [name, { findOne: async () => null }])),
+});
+
 const FOREIGN_CUSTOMER = '5992356722';
 const GOAL_RESOURCE = `customers/${CUSTOMER}/customConversionGoals/77`;
 const NEW_GOAL_RESOURCE = `customers/${CUSTOMER}/customConversionGoals/88`;
@@ -177,6 +188,7 @@ function runtimeResolver() {
     customerId,
     loginCustomerId: '2863224233',
     accessToken: 'secret-access-token',
+    connection: FIXTURE_CONNECTION,
   });
 }
 
@@ -697,7 +709,8 @@ async function testDefaultProviderPreviewOnlySearches() {
     } }],
   };
   const snapshot = await fetchGoalPolicySnapshot({
-    runtime: { customerId: CUSTOMER, accessToken: 'token', loginCustomerId: '2863224233' },
+    runtime: { customerId: CUSTOMER, accessToken: 'token', loginCustomerId: '2863224233', connection: FIXTURE_CONNECTION },
+    credentials: FIXTURE_CREDENTIALS,
     account: normalizeConfiguredAccounts([configuredAccount()])[0],
     request: async (_method, requestPath, options) => {
       paths.push(requestPath);
@@ -719,6 +732,7 @@ async function previewDigestFor(state, account = configuredAccount({ owned_custo
     scope: { group_id: 5, assignment_scope: 'group' },
     configuredAccounts: [account],
     dependencies: {
+      credentials: FIXTURE_CREDENTIALS,
       now: deterministicClock(),
       resolveRuntime: runtimeResolver(),
       fetchSnapshot: async () => clone(state),
@@ -752,6 +766,7 @@ async function testApplyRequiresConfirmationAndFreshDigest() {
       expectedDigest: digest,
       confirmExternalMutation: true,
       dependencies: {
+      credentials: FIXTURE_CREDENTIALS,
         now: deterministicClock(),
         resolveRuntime: runtimeResolver(),
         fetchSnapshot: async () => clone(mutated),
@@ -777,6 +792,7 @@ async function testApplyExistingGoalValidatesBeforeMutation() {
     expectedDigest: digest,
     confirmExternalMutation: true,
     dependencies: {
+      credentials: FIXTURE_CREDENTIALS,
       now: deterministicClock(),
       resolveRuntime: runtimeResolver(),
       fetchSnapshot: async () => clone(state),
@@ -839,6 +855,7 @@ async function testApplyRejectsLegacySupplementalAdCallBeforeMutation() {
       expectedDigest: digest,
       confirmExternalMutation: true,
       dependencies: {
+      credentials: FIXTURE_CREDENTIALS,
         now: deterministicClock(),
         resolveRuntime: runtimeResolver(),
         fetchSnapshot: async () => clone(state),
@@ -863,6 +880,7 @@ async function testApplyNewGoalReturnsAndCanPersistOwnership() {
     expectedDigest: digest,
     confirmExternalMutation: true,
     dependencies: {
+      credentials: FIXTURE_CREDENTIALS,
       now: deterministicClock(),
       resolveRuntime: runtimeResolver(),
       fetchSnapshot: async () => clone(state),
@@ -925,6 +943,7 @@ async function testOwnershipPersistenceFailureStopsBeforeCampaignMutation() {
       expectedDigest: digest,
       confirmExternalMutation: true,
       dependencies: {
+      credentials: FIXTURE_CREDENTIALS,
         now: deterministicClock(),
         resolveRuntime: runtimeResolver(),
         fetchSnapshot: async () => clone(state),
@@ -976,6 +995,7 @@ async function testDriftAfterValidateOnlyStopsBeforeRealMutation() {
       expectedDigest: digest,
       confirmExternalMutation: true,
       dependencies: {
+      credentials: FIXTURE_CREDENTIALS,
         now: deterministicClock(),
         resolveRuntime: runtimeResolver(),
         fetchSnapshot: async () => clone(state),
@@ -1002,6 +1022,7 @@ async function testAuditIsReadOnlyAndIncludesDiagnosticsFreshness() {
     scope: { group_id: 5, assignment_scope: 'group' },
     configuredAccounts: [configuredAccount({ owned_custom_goal_resource_name: GOAL_RESOURCE })],
     dependencies: {
+      credentials: FIXTURE_CREDENTIALS,
       now: deterministicClock(),
       resolveRuntime: runtimeResolver(),
       fetchSnapshot: async () => clone(snapshot),
@@ -1038,6 +1059,7 @@ async function testAuditIncludesAndAlertsUnsafeSupplementalAction() {
       supplemental_action_ids: ['10'],
     })],
     dependencies: {
+      credentials: FIXTURE_CREDENTIALS,
       now: deterministicClock(),
       resolveRuntime: runtimeResolver(),
       fetchSnapshot: async () => clone(snapshot),
@@ -1190,6 +1212,7 @@ async function testPersistedAuditIncludesConnectOnlyMeasurementTargets() {
   };
   const result = await executePersistedGoalPolicyAudit({
     dependencies: {
+      credentials: FIXTURE_CREDENTIALS,
       now: deterministicClock(),
       syncLogModel: {
         async create(values) {
@@ -1244,6 +1267,7 @@ async function testPersistedAuditUsesSyncLogAndExistingAlertFlow() {
   const notifications = [];
   const result = await executePersistedGoalPolicyAudit({
     dependencies: {
+      credentials: FIXTURE_CREDENTIALS,
       now: deterministicClock(),
       syncLogModel: {
         async create(values) {

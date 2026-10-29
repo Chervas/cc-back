@@ -7,12 +7,13 @@ const optimization = require('./google-optimization-contract');
 const optimizationEvidence = require('./google-optimization-evidence-contract');
 const optimizationTargets = require('./google-optimization-targets-contract');
 const campaignQuality = require('./google-campaign-quality-contract');
+const goalPolicy = require('./google-goal-policy-contract');
 const PROVIDER = 'google_ads';
 const PREFIX = 'google.ads.';
 const API_VERSION = 'v24';
 const SCOPES = Object.freeze(['https://www.googleapis.com/auth/adwords']);
 const FAMILIES = Object.freeze(['account', 'campaigns', 'campaign_metrics', 'adgroup_metrics',
-  'publishing_campaigns', 'landing_pages', 'ads', 'ad_metrics', 'discovery', 'conversion_actions', 'conversion_settings', 'leads', 'campaign_destinations', 'optimization', 'optimization_targets', 'campaign_quality', ...optimizationEvidence.FAMILIES]);
+  'publishing_campaigns', 'landing_pages', 'ads', 'ad_metrics', 'discovery', 'conversion_actions', 'conversion_settings', 'leads', 'campaign_destinations', 'optimization', 'optimization_targets', 'campaign_quality', 'goal_policy', ...optimizationEvidence.FAMILIES]);
 const singleResult = name => ['account', 'discovery', 'conversion_settings'].includes(name);
 const OPERATIONS = Object.freeze(FAMILIES.map(name => PREFIX + name + '.read.v1'));
 const REVOKE_OPERATION = PREFIX + 'asset.revoke.v1';
@@ -20,7 +21,7 @@ const PROVIDER_PAGE_SIZE = 10000;
 const PAGE_SIZE = 250;
 const MAX_ROWS = 100000;
 const rowLimit = (name, payload) => optimizationEvidence.FAMILIES.includes(name) ? optimizationEvidence.limit(name, payload)
-  : name === 'campaign_quality' ? payload.campaignIds.length : singleResult(name) ? 1 : name === 'leads' ? leads.MAX_ROWS : name === 'optimization_targets' ? optimizationTargets.MAX_ROWS : name === 'optimization' ? optimization.MAX_ROWS : name === 'campaign_destinations' ? destinations.MAX_ROWS : ['campaigns', 'publishing_campaigns', 'conversion_actions'].includes(name) ? 5000
+  : name === 'goal_policy' ? goalPolicy.limit(payload) : name === 'campaign_quality' ? payload.campaignIds.length : singleResult(name) ? 1 : name === 'leads' ? leads.MAX_ROWS : name === 'optimization_targets' ? optimizationTargets.MAX_ROWS : name === 'optimization' ? optimization.MAX_ROWS : name === 'campaign_destinations' ? destinations.MAX_ROWS : ['campaigns', 'publishing_campaigns', 'conversion_actions'].includes(name) ? 5000
   : ['ads', 'ad_metrics'].includes(name) ? 200000 : MAX_ROWS;
 const RESOURCE_FIELDS = ['customer.id', 'campaign.id', 'campaign.name', 'campaign.status',
   'campaign.serving_status', 'campaign.primary_status', 'campaign.primary_status_reasons'];
@@ -61,6 +62,7 @@ function family(operation) {
 function validate(operation, payload) {
   const name = family(operation);
   if (name === 'campaign_quality') return campaignQuality.validate(payload);
+  if (name === 'goal_policy') return goalPolicy.validate(payload);
   validators[name](payload);
   if (optimizationEvidence.FAMILIES.includes(name)) optimizationEvidence.validate(name, payload);
   if (name === 'leads' && !leads.date(payload.sinceDate)) fail('invalid_request');
@@ -76,6 +78,7 @@ function query(name, payload, account) {
   if (name === 'optimization') return optimization.query(payload, account);
   if (name === 'optimization_targets') return optimizationTargets.query(payload, account);
   if (name === 'campaign_quality') return campaignQuality.query(payload);
+  if (name === 'goal_policy') return goalPolicy.query(payload);
   if (optimizationEvidence.FAMILIES.includes(name)) return optimizationEvidence.query(name, payload);
   if (name === 'leads') return leads.query(payload);
   if (name === 'discovery') return 'SELECT customer.id, customer.descriptive_name, customer.manager, customer.currency_code, customer.time_zone, customer.status FROM customer LIMIT 2';
@@ -156,6 +159,7 @@ function rowKey(result) {
   for (const key of ['conversionGoalCampaignConfig', 'customConversionGoal', 'recommendation']) {
     if (result[key]) return JSON.stringify([result.customer.id, key, result[key].resourceName]);
   }
+  if (result.customerConversionGoal) return JSON.stringify([result.customer.id, 'customer_goal', result.customerConversionGoal.resourceName]);
   if (result.campaignConversionGoal) return JSON.stringify([result.customer.id, 'campaign_goal', result.campaignConversionGoal.campaign,
     result.campaignConversionGoal.category, result.campaignConversionGoal.origin]);
   return JSON.stringify([result.customer.id, result.campaign?.id, result.adGroup?.id, result.adGroupAd?.ad?.id,
@@ -165,6 +169,7 @@ function projectPage(name, raw, payload, account) {
   if (!FAMILIES.includes(name) || !plain(raw) || raw.error || raw.errors || raw.partialFailureError || raw.partial_failure_error
     || raw.results !== undefined && !Array.isArray(raw.results)) fail('provider_failed');
   const rows = raw.results || [];
+  if (name === 'goal_policy' && payload.section === 'tracking' && rows.length !== 1) fail('provider_failed');
   if (rows.length > PROVIDER_PAGE_SIZE || singleResult(name) && rows.length !== 1) fail('provider_failed');
   const results = rows.map(row => {
     if (!plain(row) || !plain(row.customer) || row.customer.id !== account.customerId) fail('provider_failed');
@@ -172,6 +177,7 @@ function projectPage(name, raw, payload, account) {
     if (name === 'optimization') return optimization.project(row, payload, account);
     if (name === 'optimization_targets') return optimizationTargets.project(row, payload, account);
     if (name === 'campaign_quality') return campaignQuality.project(row, payload, account);
+    if (name === 'goal_policy') return goalPolicy.project(row, payload, account);
     if (optimizationEvidence.FAMILIES.includes(name)) return optimizationEvidence.project(name, row, payload, account);
     if (name === 'leads') return leads.project(row, payload, account);
     if (name === 'conversion_settings') {

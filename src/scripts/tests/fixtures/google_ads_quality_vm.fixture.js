@@ -47,7 +47,9 @@ function createLegacyServices() {
   } };
   const policy = load('src/services/googleAdsClinicaclickGoalPolicy.service.js', { '../../models': db,
     '../lib/googleAdsClient': f.client, './notifications.service': {}, '../controllers/campaignOnboarding.controller': {},
-    './googleAdsScopedRuntime.service': f.scoped, './googleAdsConnectOnlyQualityAudit.service': quality });
+    './googleAdsScopedRuntime.service': f.scoped, './googleAdsConnectOnlyQualityAudit.service': quality,
+    './googleLegacyCredentials.service': f.credentials,
+    './googleAdsBrokerReader.service': createRequire(path.join(root, 'src/services/googleAdsBrokerReader.service.js'))('./googleAdsBrokerReader.service') });
   return { quality, policy };
 }
 module.exports = { fixture, createLegacyServices, dataAssert, root, read, load, customer, connection };
