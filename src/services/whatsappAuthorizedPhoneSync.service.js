@@ -7,6 +7,7 @@ const ASSET_ATTRIBUTES = ['id', 'assetType', 'isActive', 'assignmentScope', 'cli
 const BINDING_KEYS = ['connectionRef', 'authorizationId', 'clinicId', 'assetId',
   'phoneId', 'wabaId', 'revision', 'sendEnabled', 'messageNotBefore'];
 const positiveId = value => Number.isInteger(value) && value > 0;
+const DEDUPE_STATUSES = ['pending', 'queued', 'running', 'waiting', 'completed', 'failed', 'cancelled'];
 const active = asset => asset?.assetType === 'whatsapp_phone_number'
   && (asset.isActive === true || asset.isActive === 1);
 const sameBinding = (left, right) => !!left && !!right
@@ -15,7 +16,7 @@ const sameBinding = (left, right) => !!left && !!right
 function createService({
   broker = require('../lib/whatsappAuthorizedBrokerClient'),
   loadAsset = assetId => require('../../models').ClinicMetaAsset.findByPk(assetId, { attributes: ASSET_ATTRIBUTES }),
-  enqueueJob = (data, options) => require('./whatsappPhones.service').enqueueSyncPhonesJob(data, options),
+  enqueueJob = input => require('./jobRequests.service').enqueueUniqueJobRequest(input, { activeStatuses: DEDUPE_STATUSES }),
   refresh = input => require('./whatsappAuthorizedPhoneRefresh.service').refresh(input),
   now = () => new Date(),
 } = {}) {
@@ -47,14 +48,16 @@ function createService({
         throw error;
       }
       if (!target) { summary.skipped += 1; continue; }
-      await enqueueJob({ mode: 'authorized', assetId: candidate.assetId,
-        clinicId: candidate.clinicId, expectedBinding: target.binding }, {
-        jobId: `wa-phone-health-${candidate.assetId}-${hour}`,
-        // Retain completion briefly so concurrent cron runs cannot repeat reads.
-        removeOnComplete: { age: 7200, count: 2000 },
+      const result = await enqueueJob({ type: 'whatsapp_phones_sync', priority: 'low',
+        origin: 'scheduled_whatsapp_profile', maxAttempts: 3,
+        payload: { mode: 'authorized', assetId: candidate.assetId,
+          clinicId: candidate.clinicId, expectedBinding: target.binding },
+        // Include terminal jobs in native transactional deduplication. A second
+        // pass in the same hour must not repeat a completed provider read.
+        dedupeScope: `wa-phone-health-${candidate.assetId}-${hour}`,
       });
       seen.add(candidate.assetId);
-      summary.queued += 1;
+      if (result.created) summary.queued += 1;
     }
     return summary;
   }

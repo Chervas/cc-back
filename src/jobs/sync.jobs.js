@@ -1926,7 +1926,10 @@ class MetaSyncJobs {
     return enqueueSyncForAllWabas({ onlyAccountEvents: true });
   }
 
-  async executeWhatsappPhonesSync() {
+  async executeWhatsappPhonesSync(payload = {}) {
+    if (payload.mode === 'authorized') {
+      return { status: 'completed', ...await require('../services/whatsappAuthorizedPhoneSync.service').run(payload) };
+    }
     console.log('📱 Ejecutando sincronización de números WhatsApp...');
     const syncLog = await SyncLog.create({
       job_type: 'whatsapp_phones_sync',

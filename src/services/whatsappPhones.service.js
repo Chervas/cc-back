@@ -597,11 +597,7 @@ async function resolveAccessToken(wabaId) {
   );
 }
 
-async function syncPhonesForWaba(input = {}) {
-  if (input.mode === 'authorized') {
-    return require('./whatsappAuthorizedPhoneSync.service').run(input);
-  }
-  const { wabaId, accessToken, ensureTemplates = true, mode = 'auto' } = input;
+async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true, mode = 'auto' }) {
   if (!wabaId) {
     throw new Error('wabaId_required');
   }
@@ -841,10 +837,9 @@ async function syncPhonesForWaba(input = {}) {
   };
 }
 
-async function enqueueSyncPhonesJob(data, { jobId, removeOnComplete = true } = {}) {
+async function enqueueSyncPhonesJob(data) {
   return queues.whatsappPhoneSync.add('sync', data, {
-    ...(jobId ? { jobId } : {}),
-    removeOnComplete,
+    removeOnComplete: true,
     attempts: 3,
     backoff: { type: 'exponential', delay: 3000 },
   });

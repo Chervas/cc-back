@@ -17,7 +17,7 @@ function fixture(bindings = [binding(1)]) {
   const broker = { configuration: () => ({ bindings }),
     binding: async (clinicId, assetId) => bindings.find(value => value.clinicId === clinicId && value.assetId === assetId) || null };
   const service = createService({ broker, loadAsset: async id => assets.get(id),
-    enqueueJob: async (data, options) => { queued.push({ data, options }); },
+    enqueueJob: async input => { queued.push({ data: input.payload, request: input }); return { created: true }; },
     refresh: async input => { refreshed.push(input); return { health: { state: 'healthy', can_send: true } }; },
     now: () => new Date('2026-10-29T14:00:00Z') });
   return { service, assets, queued, refreshed, broker };
@@ -85,12 +85,13 @@ test('an invalid binding is isolated but a database/queue outage is not silently
   await assert.rejects(unavailable.enqueue(), /database_unavailable/);
 });
 
-test('concurrent scheduler passes share a retained per-phone/hour job ID', async () => {
+test('concurrent scheduler passes share a per-phone/hour native deduplication scope', async () => {
   const f = fixture();
   await Promise.all([f.service.enqueue(), f.service.enqueue()]);
   assert.equal(f.queued.length, 2);
-  assert.equal(new Set(f.queued.map(job => job.options.jobId)).size, 1);
-  assert.deepEqual(f.queued[0].options.removeOnComplete, { age: 7200, count: 2000 });
+  assert.equal(new Set(f.queued.map(job => job.request.dedupeScope)).size, 1);
+  assert.equal(f.queued[0].request.type, 'whatsapp_phones_sync');
+  assert.equal(f.queued[0].request.maxAttempts, 3);
 });
 
 test('revocation or identity rotation after enqueue cannot refresh a replaced phone', async () => {
@@ -118,7 +119,7 @@ test('provider timeouts remain failures for the existing queue retry policy', as
   await assert.rejects(unavailable.run(f.queued[0].data), { code: 'provider_timeout' });
 });
 
-test('the existing cron and phone worker route authorized checks without invoking legacy Graph', async () => {
+test('the existing cron and JobRequest executor route authorized checks without invoking legacy Graph or BullMQ', async () => {
   const native = require('../../services/whatsappPhones.service');
   const sync = require('../../services/whatsappAuthorizedPhoneSync.service');
   const { queues } = require('../../services/queue.service');
@@ -127,13 +128,14 @@ test('the existing cron and phone worker route authorized checks without invokin
   try {
     sync.enqueue = async () => ({ queued: 1, skipped: 0, mode: 'authorized' });
     sync.run = async input => { assert.deepEqual(input, data); return { state: 'healthy' }; };
+    queues.whatsappPhoneSync.add = () => assert.fail('Legacy BullMQ pause must be preserved');
     assert.deepEqual(await native.enqueueSyncPhonesForAllWabas({ mode: 'full' }), { queued: 1, skipped: 0, mode: 'authorized' });
-    assert.deepEqual(await native.syncPhonesForWaba(data), { state: 'healthy' });
-    queues.whatsappPhoneSync.add = async (name, payload, options) => {
-      assert.equal(name, 'sync'); assert.deepEqual(payload, data);
-      assert.equal(options.attempts, 3); assert.equal(options.jobId, 'synthetic-health-job');
-      assert.deepEqual(options.removeOnComplete, { age: 7200, count: 2000 });
-    };
-    await native.enqueueSyncPhonesJob(data, { jobId: 'synthetic-health-job', removeOnComplete: { age: 7200, count: 2000 } });
+    const fs = require('node:fs'), vm = require('node:vm');
+    const source = fs.readFileSync(require.resolve('../../jobs/sync.jobs'), 'utf8');
+    const method = source.slice(source.indexOf('  async executeWhatsappPhonesSync('), source.indexOf('  async executeAnalyticsBackfillForProperties('));
+    const NativeJobs = vm.runInNewContext('(class {' + method + '})', { require: name => {
+      assert.equal(name, '../services/whatsappAuthorizedPhoneSync.service'); return sync;
+    } });
+    assert.equal((await new NativeJobs().executeWhatsappPhonesSync(data)).state, 'healthy');
   } finally { sync.enqueue = originals.enqueue; sync.run = originals.run; queues.whatsappPhoneSync.add = originals.add; }
 });
