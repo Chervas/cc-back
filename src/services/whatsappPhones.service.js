@@ -597,7 +597,11 @@ async function resolveAccessToken(wabaId) {
   );
 }
 
-async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true, mode = 'auto' }) {
+async function syncPhonesForWaba(input = {}) {
+  if (input.mode === 'authorized') {
+    return require('./whatsappAuthorizedPhoneSync.service').run(input);
+  }
+  const { wabaId, accessToken, ensureTemplates = true, mode = 'auto' } = input;
   if (!wabaId) {
     throw new Error('wabaId_required');
   }
@@ -837,43 +841,19 @@ async function syncPhonesForWaba({ wabaId, accessToken, ensureTemplates = true, 
   };
 }
 
-async function enqueueSyncPhonesJob(data) {
+async function enqueueSyncPhonesJob(data, { jobId, removeOnComplete = true } = {}) {
   return queues.whatsappPhoneSync.add('sync', data, {
-    removeOnComplete: true,
+    ...(jobId ? { jobId } : {}),
+    removeOnComplete,
     attempts: 3,
     backoff: { type: 'exponential', delay: 3000 },
   });
 }
 
 async function enqueueSyncPhonesForAllWabas({ mode = 'auto' } = {}) {
-  const wabas = await ClinicMetaAsset.findAll({
-    where: {
-      wabaId: { [db.Sequelize.Op.ne]: null },
-      assetType: 'whatsapp_phone_number',
-      isActive: true,
-      waAccessToken: { [db.Sequelize.Op.ne]: null },
-      [db.Sequelize.Op.or]: [
-        { clinicaId: { [db.Sequelize.Op.ne]: null } },
-        { grupoClinicaId: { [db.Sequelize.Op.ne]: null } },
-      ],
-    },
-    attributes: ['wabaId', 'waAccessToken'],
-    raw: true,
-  });
-
-  const seen = new Set();
-  for (const row of wabas) {
-    if (!row.wabaId || seen.has(row.wabaId)) continue;
-    seen.add(row.wabaId);
-    await enqueueSyncPhonesJob({
-      wabaId: row.wabaId,
-      accessToken: row.waAccessToken,
-      mode,
-      ensureTemplates: mode !== 'health',
-    });
-  }
-
-  return { queued: seen.size };
+  // Legacy token discovery excludes every phone whose custody moved to AWS.
+  // Both full/health schedules now use the authorized, phone-scoped read path.
+  return require('./whatsappAuthorizedPhoneSync.service').enqueue({ mode });
 }
 
 module.exports = {

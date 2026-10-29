@@ -1941,10 +1941,10 @@ class MetaSyncJobs {
         status: 'completed',
         end_time: new Date(),
         records_processed: result?.queued || 0,
-        status_report: { queued: result?.queued || 0 },
+        status_report: result || { queued: 0 },
       });
       console.log(`✅ Números WhatsApp encolados para sincronización: ${result?.queued || 0}`);
-      return { status: 'completed', queued: result?.queued || 0 };
+      return { status: 'completed', ...(result || { queued: 0 }) };
     } catch (error) {
       await syncLog.update({
         status: 'failed',
