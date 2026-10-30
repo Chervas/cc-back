@@ -2,19 +2,26 @@
 const { schema } = require('./contracts');
 const { fail } = require('./errors');
 const leads = require('./google-leads-contract');
+const destinations = require('./google-campaign-destinations-contract');
+const optimization = require('./google-optimization-contract');
+const optimizationEvidence = require('./google-optimization-evidence-contract');
+const optimizationTargets = require('./google-optimization-targets-contract');
+const campaignQuality = require('./google-campaign-quality-contract');
+const goalPolicy = require('./google-goal-policy-contract');
 const PROVIDER = 'google_ads';
 const PREFIX = 'google.ads.';
 const API_VERSION = 'v24';
 const SCOPES = Object.freeze(['https://www.googleapis.com/auth/adwords']);
 const FAMILIES = Object.freeze(['account', 'campaigns', 'campaign_metrics', 'adgroup_metrics',
-  'publishing_campaigns', 'landing_pages', 'ads', 'ad_metrics', 'discovery', 'conversion_actions', 'conversion_settings', 'leads']);
+  'publishing_campaigns', 'landing_pages', 'ads', 'ad_metrics', 'discovery', 'conversion_actions', 'conversion_settings', 'leads', 'campaign_destinations', 'optimization', 'optimization_targets', 'campaign_quality', 'goal_policy', ...optimizationEvidence.FAMILIES]);
 const singleResult = name => ['account', 'discovery', 'conversion_settings'].includes(name);
 const OPERATIONS = Object.freeze(FAMILIES.map(name => PREFIX + name + '.read.v1'));
 const REVOKE_OPERATION = PREFIX + 'asset.revoke.v1';
 const PROVIDER_PAGE_SIZE = 10000;
 const PAGE_SIZE = 250;
 const MAX_ROWS = 100000;
-const rowLimit = name => singleResult(name) ? 1 : name === 'leads' ? leads.MAX_ROWS : ['campaigns', 'publishing_campaigns', 'conversion_actions'].includes(name) ? 5000
+const rowLimit = (name, payload) => optimizationEvidence.FAMILIES.includes(name) ? optimizationEvidence.limit(name, payload)
+  : name === 'goal_policy' ? goalPolicy.limit(payload) : name === 'campaign_quality' ? payload.campaignIds.length : singleResult(name) ? 1 : name === 'leads' ? leads.MAX_ROWS : name === 'optimization_targets' ? optimizationTargets.MAX_ROWS : name === 'optimization' ? optimization.MAX_ROWS : name === 'campaign_destinations' ? destinations.MAX_ROWS : ['campaigns', 'publishing_campaigns', 'conversion_actions'].includes(name) ? 5000
   : ['ads', 'ad_metrics'].includes(name) ? 200000 : MAX_ROWS;
 const RESOURCE_FIELDS = ['customer.id', 'campaign.id', 'campaign.name', 'campaign.status',
   'campaign.serving_status', 'campaign.primary_status', 'campaign.primary_status_reasons'];
@@ -40,6 +47,11 @@ const cursor = { pageToken: { type: ['string', 'null'], maxLength: 4096 } };
 const windowFields = { startDate: { type: 'string' }, endDate: { type: 'string' } };
 const campaignFilter = { campaignId: { type: ['string', 'null'], pattern: '^[1-9][0-9]{0,19}$' } };
 const validators = { account: schema({}), discovery: schema({}), conversion_settings: schema({}), campaigns: schema(cursor), conversion_actions: schema(cursor),
+  ...Object.fromEntries(optimizationEvidence.FAMILIES.map(name => [name, schema({ ...cursor, ...windowFields,
+    campaignId: { type: 'string', pattern: '^[1-9][0-9]{0,19}$' }, section: { type: 'string', enum: optimizationEvidence.SECTIONS[name] } })])),
+  campaign_destinations: schema({ ...cursor, campaignId: { type: 'string', pattern: '^[1-9][0-9]{0,19}$' }, section: { type: 'string', enum: destinations.SECTIONS } }),
+  optimization: schema({ ...cursor, campaignId: { type: 'string', pattern: '^[1-9][0-9]{0,19}$' }, section: { type: 'string', enum: optimization.SECTIONS } }),
+  optimization_targets: schema({ ...cursor, campaignId: { type: 'string', pattern: '^[1-9][0-9]{0,19}$' }, section: { type: 'string', enum: optimizationTargets.SECTIONS } }),
   leads: schema({ ...cursor, sinceDate: { type: 'string' } }),
   campaign_metrics: schema({ ...cursor, ...windowFields }), adgroup_metrics: schema({ ...cursor, ...windowFields }),
   publishing_campaigns: schema(cursor), landing_pages: schema({ ...cursor, ...windowFields }),
@@ -48,16 +60,26 @@ function family(operation) {
   const index = OPERATIONS.indexOf(operation); if (index < 0) fail('operation_denied'); return FAMILIES[index];
 }
 function validate(operation, payload) {
-  const name = family(operation); validators[name](payload);
+  const name = family(operation);
+  if (name === 'campaign_quality') return campaignQuality.validate(payload);
+  if (name === 'goal_policy') return goalPolicy.validate(payload);
+  validators[name](payload);
+  if (optimizationEvidence.FAMILIES.includes(name)) optimizationEvidence.validate(name, payload);
   if (name === 'leads' && !leads.date(payload.sinceDate)) fail('invalid_request');
   const maxDays = name === 'landing_pages' ? 30 : 15;
   if ((name.endsWith('_metrics') || name === 'landing_pages') && (!date(payload.startDate) || !date(payload.endDate)
     || payload.endDate < payload.startDate || Date.parse(payload.endDate) - Date.parse(payload.startDate) > (maxDays - 1) * 86400000)) fail('invalid_request');
   return payload;
 }
-function query(name, payload) {
+function query(name, payload, account) {
   if (!FAMILIES.includes(name)) fail('operation_denied');
   validate(PREFIX + name + '.read.v1', payload);
+  if (name === 'campaign_destinations') return destinations.query(payload, account);
+  if (name === 'optimization') return optimization.query(payload, account);
+  if (name === 'optimization_targets') return optimizationTargets.query(payload, account);
+  if (name === 'campaign_quality') return campaignQuality.query(payload);
+  if (name === 'goal_policy') return goalPolicy.query(payload);
+  if (optimizationEvidence.FAMILIES.includes(name)) return optimizationEvidence.query(name, payload);
   if (name === 'leads') return leads.query(payload);
   if (name === 'discovery') return 'SELECT customer.id, customer.descriptive_name, customer.manager, customer.currency_code, customer.time_zone, customer.status FROM customer LIMIT 2';
   if (name === 'account') return 'SELECT customer.id, customer.manager, customer.currency_code, customer.time_zone FROM customer LIMIT 2';
@@ -130,8 +152,16 @@ function projectAd(row, payload, result, inventory) {
     policySummary: { approvalStatus: enumText(policy?.approvalStatus), reviewStatus: enumText(policy?.reviewStatus) } });
 }
 function rowKey(result) {
+  if (result.asset || result.assetGroup) return JSON.stringify([result.customer.id, result.campaign?.id,
+    result.adGroup?.id, result.assetGroup?.id, result.asset?.id]);
   if (result.leadFormSubmissionData) return JSON.stringify([result.customer.id, 'lead', result.leadFormSubmissionData.id]);
-  if (result.conversionAction) return JSON.stringify([result.customer.id, 'conversion_action', result.conversionAction.id]);
+  if (result.conversionAction) return JSON.stringify([result.customer.id, 'conversion_action', result.conversionAction.id || result.conversionAction.resourceName]);
+  for (const key of ['conversionGoalCampaignConfig', 'customConversionGoal', 'recommendation']) {
+    if (result[key]) return JSON.stringify([result.customer.id, key, result[key].resourceName]);
+  }
+  if (result.customerConversionGoal) return JSON.stringify([result.customer.id, 'customer_goal', result.customerConversionGoal.resourceName]);
+  if (result.campaignConversionGoal) return JSON.stringify([result.customer.id, 'campaign_goal', result.campaignConversionGoal.campaign,
+    result.campaignConversionGoal.category, result.campaignConversionGoal.origin]);
   return JSON.stringify([result.customer.id, result.campaign?.id, result.adGroup?.id, result.adGroupAd?.ad?.id,
     result.landingPageView?.unexpandedFinalUrl, result.segments?.date, result.segments?.adNetworkType, result.segments?.device]);
 }
@@ -139,9 +169,16 @@ function projectPage(name, raw, payload, account) {
   if (!FAMILIES.includes(name) || !plain(raw) || raw.error || raw.errors || raw.partialFailureError || raw.partial_failure_error
     || raw.results !== undefined && !Array.isArray(raw.results)) fail('provider_failed');
   const rows = raw.results || [];
+  if (name === 'goal_policy' && payload.section === 'tracking' && rows.length !== 1) fail('provider_failed');
   if (rows.length > PROVIDER_PAGE_SIZE || singleResult(name) && rows.length !== 1) fail('provider_failed');
   const results = rows.map(row => {
     if (!plain(row) || !plain(row.customer) || row.customer.id !== account.customerId) fail('provider_failed');
+    if (name === 'campaign_destinations') return destinations.project(row, payload, account);
+    if (name === 'optimization') return optimization.project(row, payload, account);
+    if (name === 'optimization_targets') return optimizationTargets.project(row, payload, account);
+    if (name === 'campaign_quality') return campaignQuality.project(row, payload, account);
+    if (name === 'goal_policy') return goalPolicy.project(row, payload, account);
+    if (optimizationEvidence.FAMILIES.includes(name)) return optimizationEvidence.project(name, row, payload, account);
     if (name === 'leads') return leads.project(row, payload, account);
     if (name === 'conversion_settings') {
       const settings = row.customer.conversionTrackingSetting;
