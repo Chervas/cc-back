@@ -1322,6 +1322,7 @@ const NODE_TYPES_V2 = [
       { key: 'subrole', label: 'Subrol (opcional)', input_type: 'select', required: false, options: [] },
       { key: 'display_mode', label: 'Presentación', input_type: 'select', required: true, options: ['inbox', 'persistent_alert'] },
       { key: 'replace_previous_persistent_alerts', label: 'Sustituir avisos persistentes anteriores del flujo', input_type: 'boolean', required: false },
+      { key: 'appointment_confirmation_pending_only', label: 'Sólo si la confirmación de cita sigue pendiente', input_type: 'boolean', required: false },
       { key: 'alert_level', label: 'Severidad', input_type: 'select', required: true, options: ['warning', 'error'] },
     ],
   },
@@ -5927,10 +5928,12 @@ exports.createTemplateDraft = async (req, res) => {
     }
 
     const body = req.body || {};
-    if (body.single_notice_source_id != null && body.message_copy_source_id != null) return res.status(400).json({success:false,error:'publication_operation_ambiguous'});
-    const sourceField = body.message_copy_source_id != null ? 'message_copy_source_id' : 'single_notice_source_id';
-    const preservedPublication = require(sourceField === 'message_copy_source_id'
-      ? '../lib/appointment-copy-publication' : '../lib/appointment-single-notice-publication');
+    const publicationSources = ['single_notice_source_id', 'message_copy_source_id', 'acknowledgement_review_source_id'].filter(key => body[key] != null);
+    if (publicationSources.length > 1) return res.status(400).json({success:false,error:'publication_operation_ambiguous'});
+    const sourceField = publicationSources[0] || 'single_notice_source_id';
+    const preservedPublication = require(sourceField === 'acknowledgement_review_source_id'
+      ? '../lib/day-before-acknowledgement-publication' : sourceField === 'message_copy_source_id'
+        ? '../lib/appointment-copy-publication' : '../lib/appointment-single-notice-publication');
     let singleNoticeSource = null;
     if (body[sourceField] != null) {
       if (!Number.isSafeInteger(body[sourceField]) || body[sourceField] <= 0) return res.status(400).json({ success:false,error:'publication_source_invalid' });
@@ -6498,10 +6501,12 @@ exports.publishTemplateVersion = async (req, res) => {
   try {
     const access = await resolveAccess(req);
     let familyWhere = await resolveTemplateFamilyWhere(req.params?.template_ref || req.params?.template_key);
-    if (req.body?.single_notice_source_id != null && req.body?.message_copy_source_id != null) return res.status(400).json({success:false,error:'publication_operation_ambiguous'});
-    const sourceField = req.body?.message_copy_source_id != null ? 'message_copy_source_id' : 'single_notice_source_id';
-    const preservedPublication = require(sourceField === 'message_copy_source_id'
-      ? '../lib/appointment-copy-publication' : '../lib/appointment-single-notice-publication');
+    const publicationSources = ['single_notice_source_id', 'message_copy_source_id', 'acknowledgement_review_source_id'].filter(key => req.body?.[key] != null);
+    if (publicationSources.length > 1) return res.status(400).json({success:false,error:'publication_operation_ambiguous'});
+    const sourceField = publicationSources[0] || 'single_notice_source_id';
+    const preservedPublication = require(sourceField === 'acknowledgement_review_source_id'
+      ? '../lib/day-before-acknowledgement-publication' : sourceField === 'message_copy_source_id'
+        ? '../lib/appointment-copy-publication' : '../lib/appointment-single-notice-publication');
     let singleNoticeSource = null;
     if (req.body?.[sourceField] != null) {
       const id=req.body[sourceField];
@@ -6713,7 +6718,7 @@ exports.publishTemplateVersion = async (req, res) => {
       }, { transaction });
     });
 
-    const scheduledBackfill = singleNoticeSource && sourceField === 'message_copy_source_id'
+    const scheduledBackfill = singleNoticeSource && ['message_copy_source_id', 'acknowledgement_review_source_id'].includes(sourceField)
       ? { success: true, skipped: true, reason: 'copy_only_publication' }
       : await runScheduledTemplateBackfill(row, req, access);
 

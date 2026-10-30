@@ -5,7 +5,11 @@ const {loadSource}=require('./fixtures/business_profile_flow_runtime.fixture');
 const notice=require('../../lib/appointment-single-notice-flow');
 
 withIsolatedCampaignMysql(async({sql,models:db,report})=>{
+  const net=require('node:net'),ownedConnect=net.connect,ownedCreateConnection=net.createConnection;
   require('./fixtures/security_offline_runtime.cjs');db.Sequelize=D;
+  // Additional native publication transactions use the fixture-owned socket;
+  // its Socket.prototype guard continues to reject all unrelated connections.
+  net.connect=ownedConnect;net.createConnection=ownedCreateConnection;
   for(const file of ['automationflowtemplatev2','flowexecutionv2','flowexecutionlogv2','message','citapaciente']){
     const model=require('../../../models/'+file)(sql,D);db[model.name]=model;
   }
@@ -101,7 +105,7 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   // Real create/publish controllers and InnoDB, with provider/configuration
   // validators isolated. Graph validation is the actual native implementation.
   const controller=fs.readFileSync(require.resolve('../../controllers/automationsV2.controller'),'utf8');
-  const native={};let activationConflict=false;const cleanString=v=>String(v??'').trim()||null;
+  const native={};let activationConflict=false,backfills=0;const cleanString=v=>String(v??'').trim()||null;
   const sanitizeTemplateKey=v=>String(v||'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');
   const context={exports:native,console:{error(){}},structuredClone,db,Op:D.Op,AutomationFlowTemplateV2:db.AutomationFlowTemplateV2,
     Clinica:{findOne:async()=>({grupoClinicaId:99})},cleanString,sanitizeTemplateKey,buildTemplateKey:({templateKey})=>sanitizeTemplateKey(templateKey),
@@ -121,12 +125,14 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     findAppointmentReminderTriggerConflict:async()=>activationConflict?{id:999}:null,
     loadClinicNameMapFromRows:async()=>new Map(),loadCatalogBindingMapForRows:async()=>new Map(),loadLatestActivePublishedVersionMap:async()=>new Map(),
     mapTemplateWithLifecycle:row=>displayProjection(row.toJSON()),resolveTemplateFamilyWhere:async ref=>({public_id:ref}),
-    runScheduledTemplateBackfill:async row=>({skipped:!row.is_active}),
+    runScheduledTemplateBackfill:async row=>{backfills++;return {skipped:!row.is_active};},
     require:name=>{if(name==='../lib/automation-runtime-stop')return stop;
       if(name==='../lib/appointment-single-notice-publication')return require('../../lib/appointment-single-notice-publication');
       if(name==='../lib/appointment-copy-publication')return require('../../lib/appointment-copy-publication');
+      if(name==='../lib/day-before-acknowledgement-publication')return require('../../lib/day-before-acknowledgement-publication');
       if(name==='../lib/appointment-template-scope')return require('../../lib/appointment-template-scope');
       if(name==='../lib/patient-mobile-verification')return require('../../lib/patient-mobile-verification');
+      if(name==='../lib/patient-program-booking-confirmation')return require('../../lib/patient-program-booking-confirmation');
       assert.fail('Unexpected native publication dependency '+name);},
   };
   const graphStart=controller.indexOf('function validateFlowGraph('),graphEnd=controller.indexOf('\nfunction ',graphStart+10);
@@ -198,6 +204,29 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     assert.equal((await copyPublication.publishEntry(plan,request)).skipped,true);
   }
   report.checks.push('Copy-only native SQL publication preserves both manual switches and legacy node defaults, updates only allowlisted text, leaves trigger/config unchanged and repeated publication no-ops');
+  const ackPublication=require('../../lib/day-before-acknowledgement-publication');
+  const ackBackfills=backfills;
+  for(const is_active of [false,true]){
+    const ackNodes=[
+      {id:'N1',type:'trigger/appointment_reminder_window',config:{},outputs:{on_success:'N3'}},
+      {id:'N3',type:'condition/ai_analysis',config:{preset_key:'classify_intent',instruction:'TESTONLY unchanged'},outputs:{on_success:'N16'}},
+      {id:'N16',type:'condition/field_check',config:{mode:'multi_branch',branch_rules:[{id:'branch_ack'}]},outputs:{branch_ack:null,on_else:'N33'}},
+      {id:'N33',type:'action/send_system_notification',config:{assignee_type:'user',assignee_id:1,message:'TESTONLY reception',display_mode:'persistent_alert',alert_level:'warning'},outputs:{on_success:null}},
+    ];
+    const ackSource=await db.AutomationFlowTemplateV2.create({...source.toJSON(),id:undefined,
+      public_id:'TESTONLY_ack_'+is_active,template_key:'recordatorio_y_confirmacion_bed4b6__clinic_'+(is_active?31:32),
+      clinic_id:is_active?31:32,trigger_type:'appointment_reminder_window',version:1,nodes:ackNodes,is_active});
+    const ackPlan=ackPublication.planEntry(ackSource.toJSON());
+    const result=await ackPublication.publishEntry(ackPlan,request);
+    assert.equal(result.is_active,is_active);
+    const installed=await db.AutomationFlowTemplateV2.findOne({where:{public_id:ackSource.public_id,version:result.version}});
+    assert.equal(installed.nodes.find(n=>n.id==='N16').outputs.branch_ack,'N38');
+    assert.deepEqual(installed.trigger_config,ackSource.trigger_config);
+    assert.equal(ackPublication.hash(installed.nodes),ackPublication.hash(ackPlan.body.nodes));
+    assert.equal((await ackPublication.publishEntry(ackPlan,request)).skipped,true);
+  }
+  assert.equal(backfills,ackBackfills,'Acknowledgment publication must never schedule historical reminder events');
+  report.checks.push('Acknowledgment native draft/publish preserves on/off, exact graph and trigger; one reception node, no backfill, repeated publication no-ops');
   db.Notification=require('../../../models/notification')(sql,D);
   db.Clinica=sql.define('Clinica',{id_clinica:{type:D.INTEGER,primaryKey:true},configuracion:D.JSON},{tableName:'Clinicas'});
   db.ClinicaHorario=require('../../../models/clinicahorario')(sql,D);

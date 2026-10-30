@@ -5613,6 +5613,11 @@ async function handleCreateTask(node, context, runtime) {
 }
 
 async function handleSendSystemNotification(node, context, runtime) {
+  const acknowledgementReview = require('./appointmentAcknowledgementReview.service');
+  if (node?.config?.[acknowledgementReview.FLAG] === true && !runtime?.appointmentReviewScope) {
+    return acknowledgementReview.withPending(node, context, runtime, scope =>
+      handleSendSystemNotification(node, context, { ...runtime, appointmentReviewScope: scope }));
+  }
   if (isProgramBookingProtocol(runtime?.execution) && !runtime.programBookingNotification) {
     return require('./patientProgramBookingNotice.service').current().withNotification({ execution: runtime.execution, node }, scope =>
       handleSendSystemNotification(node, mergeContextPatch(context, { program_confirmation: {
@@ -5626,9 +5631,10 @@ async function handleSendSystemNotification(node, context, runtime) {
       } }), { ...runtime, mobileVerificationNotification: scope }));
   }
   const mobileScope = runtime?.mobileVerificationNotification;
-  const notificationOptions = mobileScope ? { transaction: mobileScope.transaction } : {};
-  const emitCreated = notification => mobileScope ? mobileScope.transaction.afterCommit(() => emitNotificationCreated(notification)) : emitNotificationCreated(notification);
-  const emitUpdated = notification => mobileScope ? mobileScope.transaction.afterCommit(() => emitNotificationUpdated(notification)) : emitNotificationUpdated(notification);
+  const notificationScope = mobileScope || runtime?.appointmentReviewScope;
+  const notificationOptions = notificationScope ? { transaction: notificationScope.transaction } : {};
+  const emitCreated = notification => notificationScope ? notificationScope.transaction.afterCommit(() => emitNotificationCreated(notification)) : emitNotificationCreated(notification);
+  const emitUpdated = notification => notificationScope ? notificationScope.transaction.afterCommit(() => emitNotificationUpdated(notification)) : emitNotificationUpdated(notification);
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   let targets = resolveRuntimeTargets(runtime?.execution, context);
   targets = await backfillRuntimeTargets(runtime?.execution, targets);
@@ -5861,6 +5867,7 @@ async function handleSendSystemNotification(node, context, runtime) {
       patient_conversation_link: conversationLink,
       patient_detail_link: patientDetailLink,
       conversation_action: conversationAction,
+      ...(runtime?.appointmentReviewScope ? { appointment_confirmation_review_required: true } : {}),
       status: 'created',
     },
     next_node_id: readOutputTarget(node, 'on_success'),
@@ -8332,7 +8339,11 @@ async function syncConversationAutomationStateAfterExecution(execution) {
   );
   const expectsResponse = normalized?.necesita_respuesta === true
     || confirmationOutcome?.needsResponse === true;
-  const humanReply = expectsResponse && sourceMessageId
+  const acknowledgementReview = require('./appointmentAcknowledgementReview.service');
+  const acknowledgementReviewObserved = acknowledgementReview.observed(context);
+  const acknowledgementReviewPending = acknowledgementReviewObserved
+    && !await acknowledgementReview.inspect(execution, context);
+  const humanReply = (expectsResponse || acknowledgementReviewObserved) && sourceMessageId
     ? await findHumanReplyAfterMessage(conversationId, sourceMessageId)
     : null;
   const appointmentIntentApplied = hasAppliedAppointmentIntent(context, effectiveIntent);
@@ -8344,11 +8355,13 @@ async function syncConversationAutomationStateAfterExecution(execution) {
   const explicitNoActionExit = isExplicitSameDayNoActionExit(execution, normalized, state);
   const persistedManualReason = state.manual_action_required === true
     && state.needs_response !== true
+    && (!acknowledgementReviewObserved || (acknowledgementReviewPending && !humanReply))
     && !explicitNoActionExit
     && !appointmentIntentApplied
     && !appointmentIntentResolvedExternally
     && !appointmentIntentAlreadyResolved;
   const manualActionRequired = appointmentStatus === 'cambio_solicitado'
+    || (acknowledgementReviewPending && !humanReply)
     || conversationAction === 'schedule_new_appointment'
     || persistedManualReason
     || (confirmationOutcome?.manualActionRequired === true && !humanReply)
@@ -8496,7 +8509,11 @@ async function runExecution(executionId, options = {}) {
   const latestForNotice = singleNotice.scoped(template)
     ? await require('../lib/automation-runtime-stop').assertTemplateActive(template) : null;
   const noticeRuntime = await resolveSingleNoticeRuntime(execution, template, latestForNotice);
-  const nodes = Array.isArray(noticeRuntime.nodes) ? noticeRuntime.nodes : [];
+  const acknowledgementPatch = require('../lib/day-before-acknowledgement-review');
+  const latestForAcknowledgement = acknowledgementPatch.inScope(template)
+    ? latestForNotice || await require('../lib/automation-runtime-stop').assertTemplateActive(template) : null;
+  const nodes = acknowledgementPatch.runtimeNodes(template, latestForAcknowledgement,
+    Array.isArray(noticeRuntime.nodes) ? noticeRuntime.nodes : []);
   const noticePatch = singleNotice.waitingCutoverPatch(execution, noticeRuntime);
   if (noticePatch) {
     if (noticePatch.waiting_meta) noticePatch.waiting_meta.runtime_namespace = CURRENT_RUNTIME_NAMESPACE;
