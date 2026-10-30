@@ -435,7 +435,7 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
         started: !!(latestDate(row.last_sent_at, stats.last_sent_at, stats.email_last_sent_at)
           || processed > 0 || effectiveStatus === 'sending' && dispatch.started_at),
         started_at: dispatch.started_at || null,
-        review_source: row.criteria?.review_audience_mode || row.criteria?.review_source || 'manual_selection',
+        review_source: row.criteria?.review_audience_mode || row.criteria?.review_source || 'configured',
         review_sender_name: row.criteria?.review_sender_name || null,
         review_display_name: row.criteria?.review_display_clinic_name || clinicNameById.get(scopedClinicIds[0]) || null,
         profile_name: row.criteria?.review_profile_alias_location_name || row.criteria?.review_display_clinic_name || clinicNameById.get(scopedClinicIds[0]) || null,

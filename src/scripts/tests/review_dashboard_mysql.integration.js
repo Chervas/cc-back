@@ -122,6 +122,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const clinicQueues = await nativeQueues({userId:1,scopeRaw:'31'});
   assert(!clinicQueues.some(r=>r.source_id===3),'sibling clinic list must not leak through its group membership');
   assert.equal(clinicQueues.find(r=>r.source_id===4).pending,1,'shared list counts only items inside the requested clinic');
+  assert.equal(clinicQueues.find(r=>r.source_id===4).review_source,'configured','missing selection metadata must not be presented as manual selection');
   const groupQueues = await nativeQueues({userId:1,scopeRaw:'group:5'});
   assert.equal(groupQueues.find(r=>r.source_id===4).pending,2,'group list excludes an unrelated clinic item');
   assert(!groupQueues.some(r=>r.source_id===2),'ordinary mass sends are not review queues');
