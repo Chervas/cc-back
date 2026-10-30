@@ -6723,6 +6723,7 @@ exports.getLeadById = asyncHandler(async (req, res) => {
       clinicId: out.clinica_id,
       contactId: out.telefono,
       leadId,
+      preserveExistingLead: true,
       createIfMissing: false,
     });
     out.conversation_id = conversation?.id || null;
@@ -6782,6 +6783,7 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
       clinicId: lead.clinica_id,
       contactId: lead.telefono,
       leadId,
+      preserveExistingLead: true,
       createIfMissing: false,
     });
   }

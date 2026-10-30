@@ -1438,6 +1438,7 @@ exports.listConversations = async (req, res) => {
         clinicId: clinicToResolve,
         contactId: lead.telefono,
         leadId,
+        preserveExistingLead: true,
         createIfMissing: false,
       });
       canonicalConversationId = canonical?.id || null;
@@ -1653,6 +1654,7 @@ exports.getMessages = async (req, res) => {
         patientId: conversation.patient_id || null,
         leadId: conversation.lead_id || null,
         createIfMissing: false,
+        preserveExistingLead: true,
       });
       if (canonical?.id && Number(canonical.id) !== Number(conversation.id)) {
         conversation = await Conversation.findByPk(canonical.id, {
@@ -1846,6 +1848,7 @@ exports.getConversationByLead = async (req, res) => {
       clinicId: clinicToResolve,
       contactId: contactPhone,
       leadId: Number(leadId),
+      preserveExistingLead: true,
       createIfMissing: shouldCreate,
     });
 

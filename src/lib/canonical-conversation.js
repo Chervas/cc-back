@@ -214,6 +214,7 @@ async function findCanonicalWhatsappConversation({
   contactId,
   patientId = null,
   leadId = null,
+  preserveExistingLead = false,
   createIfMissing = false,
   requireExactContact = false,
   isolatePatientContact = false,
@@ -236,7 +237,7 @@ async function findCanonicalWhatsappConversation({
         { code: 'whatsapp_contact_identity_conflict', status: 409 });
     }
     if (!transaction) return db.sequelize.transaction(owned => findCanonicalWhatsappConversation({
-      clinicId, contactId, patientId, leadId, createIfMissing, requireExactContact,
+      clinicId, contactId, patientId, leadId, preserveExistingLead, createIfMissing, requireExactContact,
       isolatePatientContact, lastMessageAt, transaction: owned,
     }));
     await db.Clinica.findByPk(normalizedClinicId, { transaction, lock: transaction.LOCK.SHARE });
@@ -345,7 +346,10 @@ async function findCanonicalWhatsappConversation({
   if (patientId && Number(canonical.patient_id || 0) !== Number(patientId)) {
     patch.patient_id = patientId;
   }
-  if (leadId && Number(canonical.lead_id || 0) !== Number(leadId)) {
+  // Reading an older request may attach an unlinked chat, but must not replace
+  // the request already associated with it. Reception retains the default.
+  if (leadId && Number(canonical.lead_id || 0) !== Number(leadId)
+    && (!preserveExistingLead || canonical.lead_id == null)) {
     patch.lead_id = leadId;
   }
   if (lastMessageAt && (!canonical.last_message_at || new Date(lastMessageAt).getTime() > new Date(canonical.last_message_at).getTime())) {
