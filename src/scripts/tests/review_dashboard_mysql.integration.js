@@ -95,6 +95,14 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(overview.automation, null, 'group read does not activate or select a clinic automation');
   assert.equal((await query('SELECT COUNT(*) total FROM MarketingPatientContactEvents'))[0].total, before);
   report.checks.push('group read model has per-clinic tiers, canonical review de-duplication and historical attribution; no weighted group rating or writes');
+  await event('mass_campaign_message_sent',4,1,{});
+  const historyReader = require('../../lib/review-request-history').readReviewRequestHistory;
+  const ordinaryHistory = await historyReader({query,clinicIds:[31]});
+  const batchedHistory = (await historyReader({query,clinicIds:[31],byClinic:true})).get(31);
+  assert.deepEqual([...batchedHistory.patientIds].sort(),[...ordinaryHistory.patientIds].sort());
+  assert.deepEqual([...batchedHistory.phoneKeys].sort(),[...ordinaryHistory.phoneKeys].sort());
+  assert(batchedHistory.patientIds.has(4),'a real acceptance following a test must still block a repeated request');
+  report.checks.push('folded event flags and distinct rows preserve ordinary history, including tests followed by real sends');
   await sql.query(`ALTER TABLE MarketingPatientLists ADD grupo_clinica_id INT NULL, ADD name VARCHAR(80),
     ADD channel VARCHAR(32) DEFAULT 'whatsapp',ADD counters JSON,ADD email_dispatch JSON,ADD template_snapshot JSON,
     ADD safety_gates JSON,ADD created_at DATETIME,ADD updated_at DATETIME,ADD last_sent_at DATETIME`);

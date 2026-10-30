@@ -65,19 +65,31 @@ async function readReviewRequestHistory({ query, clinicIds = [], byClinic = fals
   const ids = [...new Set(clinicIds.filter(id => Number.isSafeInteger(id) && id > 0))];
   if (!ids.length) return buildReviewRequestHistory();
   const replacements = { clinicIds: ids };
+  const realEvents = "'mass_campaign_message_accepted','mass_campaign_message_held','mass_campaign_message_sent','mass_campaign_message_delivered','mass_campaign_message_read','mass_campaign_message_replied'";
+  // Reporting can see hundreds of draft copies of the same recipients. Fold
+  // event flags once before joining them, preserving the send path's rules.
+  const reportFlags = byClinic ? `, report_flags AS (SELECT e.list_id,e.item_id,
+      MAX(e.event_type LIKE 'mass_campaign_test_%') has_test_event,
+      MAX(e.event_type IN (${realEvents})) has_real_event
+    FROM MarketingPatientContactEvents e JOIN MarketingPatientListItems fi ON fi.id=e.item_id AND fi.list_id=e.list_id
+    JOIN MarketingPatientLists fl ON fl.id=fi.list_id
+    WHERE COALESCE(fi.clinica_id,fl.clinica_id) IN (:clinicIds)
+      AND (e.event_type LIKE 'mass_campaign_test_%' OR e.event_type IN (${realEvents}))
+    GROUP BY e.list_id,e.item_id)` : '';
   const items = await query(`WITH review_scope_items AS (
       SELECT id FROM MarketingPatientListItems WHERE clinica_id IN (:clinicIds)
       UNION ALL SELECT i.id FROM MarketingPatientLists l JOIN MarketingPatientListItems i ON i.list_id=l.id
         WHERE l.clinica_id IN (:clinicIds) AND i.clinica_id IS NULL
-    ) SELECT COALESCE(i.clinica_id,l.clinica_id) history_clinic_id,i.paciente_id,i.phone,i.status,i.selected,i.dispatch_status,i.sent_at,i.provider_message_id,i.app_message_id,
+    ) ${reportFlags} SELECT ${byClinic ? 'DISTINCT' : ''} COALESCE(i.clinica_id,l.clinica_id) history_clinic_id,i.paciente_id,i.phone,i.status,i.selected,i.dispatch_status,i.sent_at,i.provider_message_id,i.app_message_id,
       l.status AS list_status,m.metadata AS message_metadata,
-      EXISTS(SELECT 1 FROM MarketingPatientContactEvents e WHERE e.list_id=i.list_id AND e.item_id=i.id
+      ${byClinic ? 'COALESCE(rf.has_test_event,0) AS has_test_event,COALESCE(rf.has_real_event,0) AS has_real_event' : `EXISTS(SELECT 1 FROM MarketingPatientContactEvents e WHERE e.list_id=i.list_id AND e.item_id=i.id
         AND e.event_type LIKE 'mass_campaign_test_%') AS has_test_event,
       EXISTS(SELECT 1 FROM MarketingPatientContactEvents e WHERE e.list_id=i.list_id AND e.item_id=i.id
         AND e.event_type IN ('mass_campaign_message_accepted','mass_campaign_message_held','mass_campaign_message_sent',
-          'mass_campaign_message_delivered','mass_campaign_message_read','mass_campaign_message_replied')) AS has_real_event
+          'mass_campaign_message_delivered','mass_campaign_message_read','mass_campaign_message_replied')) AS has_real_event`}
     FROM review_scope_items s JOIN MarketingPatientListItems i ON i.id=s.id JOIN MarketingPatientLists l ON l.id=i.list_id
     LEFT JOIN Messages m ON m.id=i.app_message_id
+    ${byClinic ? 'LEFT JOIN report_flags rf ON rf.list_id=i.list_id AND rf.item_id=i.id' : ''}
     WHERE l.objective_id='mass_sends' AND (
       JSON_UNQUOTE(JSON_EXTRACT(l.criteria,'$.review_request')) IN ('true','1')
       OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria,'$.template_usage')) IN ('solicitud_resena','resena','review_request','reviews')

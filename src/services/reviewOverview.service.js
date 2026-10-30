@@ -45,7 +45,7 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
           AND f.field_key IN ('fecha_ultima_cita_asistida','ultima_cita_asistida','last_attended_appointment_date',
             'last_attended_visit_date','fecha_ultima_cita','fecha_ultimo_tratamiento','fecha_tratamiento')) date_fields
         FROM memberships m JOIN Pacientes p ON p.id_paciente=m.id_paciente`, { clinicIds }),
-      query(`SELECT COALESCE(i.clinica_id,l.clinica_id) clinica_id,i.paciente_id,i.phone
+      query(`SELECT DISTINCT COALESCE(i.clinica_id,l.clinica_id) clinica_id,i.paciente_id,i.phone
         FROM MarketingPatientListItems i JOIN MarketingPatientLists l ON l.id=i.list_id
         WHERE COALESCE(i.clinica_id,l.clinica_id) IN (:clinicIds) AND l.status IN ('ready','scheduled','sending','paused')
           AND i.selected=1 AND i.status='ready' AND i.sent_at IS NULL AND (i.dispatch_status IS NULL OR i.dispatch_status IN ('pending','queued','sending','accepted','held_quality'))`, { clinicIds }),
