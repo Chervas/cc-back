@@ -1,3 +1,5 @@
+
+const googleCutoverAdmission = require('../lib/googleCutoverAdmission').application;
 // backendclinicaclick/src/routes/oauth.routes.js
 const express = require('express');
 const axios = require('axios');
@@ -494,6 +496,8 @@ function googleTokenError(code, message) {
 }
 
 async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
+  return await googleCutoverAdmission.run('oauth_refresh', async () => {
+
     if (!conn) {
         throw googleTokenError('NO_CONNECTION', 'No existe conexión Google para este usuario');
     }
@@ -547,6 +551,8 @@ async function ensureGoogleAccessToken(conn, { allowExpired = false } = {}) {
     }
 
     return { accessToken, expiresAt, expired: isExpired };
+
+  });
 }
 
 function hasScopeText(scopesText, scope) {
@@ -1435,6 +1441,8 @@ router.get('/meta/callback', metaHttp.middleware, async (req, res) => {
 router.get('/google/connect', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
+  return await googleCutoverAdmission.run('oauth_begin', async () => {
+
         const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });
         await assertGatewayGoogleLegacyAllowed();
@@ -1464,7 +1472,9 @@ router.get('/google/connect', async (req, res) => {
         });
         const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
         return res.json({ success: true, authUrl });
-    } catch (e) {
+
+  });
+} catch (e) {
         const closed = e?.code === 'google_oauth_legacy_closed';
         return res.status(closed ? 409 : 503).json({ success: false, error: closed ? 'google_oauth_legacy_closed' : 'google_oauth_unavailable' });
     }
@@ -1480,6 +1490,8 @@ router.get('/google/callback', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.set('Referrer-Policy', 'no-referrer');
     try {
+  return await googleCutoverAdmission.run('oauth_callback', async () => {
+
         const { code, state, error } = req.query;
         await assertGatewayGoogleLegacyAllowed();
         const oauthState = await consumeOAuthState('google', state);
@@ -1551,7 +1563,9 @@ router.get('/google/callback', async (req, res) => {
 
         // 4) Redirigir al frontend
         return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?connected=google&googleUserId=${googleUserId}`));
-    } catch (err) {
+
+  });
+} catch (err) {
         return res.redirect(buildFrontendSettingsRedirect(frontendOrigin, `?error=${encodeURIComponent('Error en autenticación de Google')}`));
     }
 });

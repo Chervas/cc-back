@@ -1,4 +1,6 @@
 'use strict';
+const googleCutoverAdmission = require('./googleCutoverAdmission').application;
+
 
 const axios = require('axios');
 const { ApiUsageCounter } = require('../../models');
@@ -163,6 +165,8 @@ async function googleAdsRequest(method = 'GET', path, {
     Number(process.env.GOOGLE_ADS_HTTP_TIMEOUT_MS || process.env.SYNC_PROVIDER_HTTP_TIMEOUT_MS || 30000) || 30000
   )
 } = {}) {
+  return await googleCutoverAdmission.run('ads_http', async () => {
+
   const { developerToken } = ensureGoogleAdsConfig();
   const quotaLimit = parseInt(process.env.GOOGLE_ADS_DAILY_QUOTA || '1500', 10);
   await ensureDailyWindow(quotaLimit);
@@ -271,6 +275,8 @@ async function googleAdsRequest(method = 'GET', path, {
   const fallbackError = new Error('No se pudo contactar con Google Ads API');
   fallbackError.code = 'ADS_API_UNREACHABLE';
   throw fallbackError;
+
+  });
 }
 
 async function getGoogleAdsUsageStatus() {

@@ -1,4 +1,5 @@
 'use strict';
+const googleCutoverAdmission = require('./googleCutoverAdmission').application;
 
 // No models, .env loading, AWS SDK, bootstrap or provider tokens in this consumer adapter.
 const https = require('node:https');
@@ -21,8 +22,7 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
       || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(audience) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > maxTimeout
       || !['default', 'whatsapp-onboarding'].includes(transportProfile)) throw Error();
   } catch { throw error('broker_configuration_invalid'); }
-  return {
-    execute(command, options = {}) {
+  const executeOriginal = (command, options = {}) => {
       const operationLimit = onboarding && command.operation !== activationLimits.ACTIVATE ? 30000 : maxTimeout;
       const budget = options.timeoutMs === undefined ? Math.min(timeoutMs, operationLimit) : options.timeoutMs;
       if (!Number.isInteger(budget) || budget < 1 || budget > operationLimit
@@ -54,6 +54,13 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
         req.on('error', () => finish(error('broker_unavailable')));
         req.end(body);
       });
+    };
+  return {
+    execute(command, options = {}) {
+      if (typeof command?.operation === 'string' && command.operation.startsWith('google.')) {
+        return googleCutoverAdmission.run('broker_rpc', () => executeOriginal(command, options));
+      }
+      return executeOriginal(command, options);
     },
   };
 }
