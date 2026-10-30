@@ -46,6 +46,7 @@ function createLegacyServices() {
       ...(resolve ? { resolveRuntime: async (...args) => ({ ...await resolve(...args), connection }) } : {}) } });
   } };
   const policy = load('src/services/googleAdsClinicaclickGoalPolicy.service.js', { '../../models': db,
+    '../../services/integrations-broker/src/google-goal-policy-plan': require('../../../../services/integrations-broker/src/google-goal-policy-plan'),
     '../lib/googleAdsClient': f.client, './notifications.service': {}, '../controllers/campaignOnboarding.controller': {},
     './googleAdsScopedRuntime.service': f.scoped, './googleAdsConnectOnlyQualityAudit.service': quality,
     './googleLegacyCredentials.service': f.credentials,

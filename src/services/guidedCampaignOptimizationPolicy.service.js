@@ -1,4 +1,5 @@
 'use strict';
+const {goalPolicyFailureSummary}=require('../lib/googleAdsGoalPolicyFailure');
 
 const crypto = require('node:crypto');
 const db = require('../../models');
@@ -591,6 +592,7 @@ async function applyGuidedCampaignGoalPolicy({
   provisioning,
   actorUserId = null,
   finalizePolicy = true,
+  leaseToken = null,
   dependencies = {},
 } = {}) {
   const context = provisioning;
@@ -685,6 +687,8 @@ async function applyGuidedCampaignGoalPolicy({
           dependencies: {
             ...(dependencies.goalPolicyDependencies || {}),
             persistOwnership,
+            managedGoalPolicyContext:{policyId:Number(plain(context.policy)?.id),intakeConfigId:Number(plain(context.intakeConfig)?.id),
+              actorUserId:Number(actor),leaseToken:applicationLeaseToken||leaseToken},
           },
         });
         if (!['applied', 'unchanged'].includes(result?.outcome) || result?.verification?.healthy !== true) {
@@ -706,12 +710,16 @@ async function applyGuidedCampaignGoalPolicy({
           result,
         });
       } catch (error) {
-        await persistAccountApplication(configuredAccount, {
-          status: 'failed',
-          readback_healthy: false,
-          applied_at: null,
-          error_code: String(error.code || 'GUIDED_GOAL_POLICY_APPLY_FAILED').slice(0, 120),
-        });
+        try {
+          await persistAccountApplication(configuredAccount, {
+            status: 'failed',
+            readback_healthy: false,
+            applied_at: null,
+            error_code: String(error.code || 'GUIDED_GOAL_POLICY_APPLY_FAILED').slice(0, 120),
+          });
+        } catch (housekeepingError) {
+          if (!goalPolicyFailureSummary(error)) throw housekeepingError;
+        }
         throw error;
       }
     }
@@ -764,12 +772,16 @@ async function applyGuidedCampaignGoalPolicy({
     if (applicationLeaseToken && state.execution_lease?.token === applicationLeaseToken) {
       delete nextState.execution_lease;
     }
-    await context.policy.update({
-      status: 'paused',
-      lifecycleState: nextState,
-      nextEvaluationAt: null,
-      version: Number(policyRow.version || 1) + 1,
-    });
+    try {
+      await context.policy.update({
+        status: 'paused',
+        lifecycleState: nextState,
+        nextEvaluationAt: null,
+        version: Number(policyRow.version || 1) + 1,
+      });
+    } catch (housekeepingError) {
+      if (!goalPolicyFailureSummary(error)) throw housekeepingError;
+    }
     throw error;
   }
 }

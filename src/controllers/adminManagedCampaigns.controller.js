@@ -1491,6 +1491,7 @@ exports.transitionCampaign = asyncHandler(async (req, res) => {
           provisioning,
           targetStatus: nextStatus,
           actorUserId: userId,
+          leaseToken: optimizationLeaseToken,
         });
         optimization = {
           policy_id: Number(provisioning.policy?.id) || null,
@@ -1688,6 +1689,7 @@ exports.applyGoalPolicy = asyncHandler(async (req, res) => {
       targetStatus,
       expectedDigest,
       actorUserId: userId,
+      leaseToken: executionLeaseToken,
     });
     const released = await releaseManagedCampaignOptimizationLease({
       managedCampaignId: row.id,

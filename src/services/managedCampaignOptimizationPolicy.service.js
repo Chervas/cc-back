@@ -742,6 +742,7 @@ async function executeManagedCampaignGoalPolicy({
   targetStatus = null,
   expectedDigest = null,
   actorUserId = null,
+  leaseToken = null,
   transaction = null,
   dependencies = {},
 } = {}) {
@@ -796,9 +797,13 @@ async function executeManagedCampaignGoalPolicy({
       dependencies: {
         ...(dependencies.goalPolicyDependencies || {}),
         persistOwnership,
+        beforeExternalMutation:dependencies.beforeExternalMutation,
+        managedGoalPolicyContext:{policyId:Number(plain(context.policy)?.id),intakeConfigId:Number(plain(context.intakeConfig)?.id),
+          actorUserId:Number(actorUserId),leaseToken},
       },
     });
   } catch (error) {
+    if(error?.goalPolicyFailure===true)throw error; // Typed ACK/UNKNOWN needs its own exact receipt, never a legacy name search.
     // applyClinicaclickGoalPolicy expone el resource_name si Google alcanzó a
     // crear el goal antes de detectar drift. Persistirlo evita duplicados en
     // un retry aunque el status de ManagedCampaign permanezca sin avanzar.
@@ -843,6 +848,7 @@ module.exports = {
   MANAGED_GOOGLE_FAMILIES,
   MAX_CAMPAIGNS,
   SCHEMA_VERSION,
+  assertManagementConsent,
   acquireManagedCampaignOptimizationLease,
   buildProvisioningPlan,
   activateManagedCampaignOptimizationPolicy,

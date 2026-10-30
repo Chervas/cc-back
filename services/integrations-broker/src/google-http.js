@@ -4,8 +4,8 @@ const { BrokerError, fail } = require('./errors');
 const HOSTS = new Set(['mybusiness.googleapis.com', 'businessprofileperformance.googleapis.com',
   'mybusinessbusinessinformation.googleapis.com', 'mybusinessverifications.googleapis.com', 'mybusinessaccountmanagement.googleapis.com']);
 // This transport is private to reviewed operations. It never accepts consumer headers or URLs.
-function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManagerEnabled = false, actionManagementEnabled = false, businessProfileWritesEnabled = false, optimizationEnabled = false } = {}) {
-  return async function googleHttp({ hostname, path, token, form, json, signal, developerToken, loginCustomerId, quotaProjectId, businessProfileMutation, optimizationMutation }) {
+function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManagerEnabled = false, actionManagementEnabled = false, businessProfileWritesEnabled = false, optimizationEnabled = false, goalPolicyEnabled = false } = {}) {
+  return async function googleHttp({ hostname, path, token, form, json, signal, developerToken, loginCustomerId, quotaProjectId, businessProfileMutation, optimizationMutation, goalPolicyMutation }) {
     // A private operation selector, never a consumer-controlled HTTP method.
     const gbpMethods = { replyUpdate: 'PUT', replyDelete: 'DELETE', photo: 'POST', hours: 'PATCH' };
     const gbpWrite = businessProfileMutation !== undefined;
@@ -28,7 +28,12 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManag
       if (optimizationEnabled !== true || hostname !== 'googleads.googleapis.com') fail('invalid_request');
       require('./google-optimization-write-contract').validateMutation(path, optimizationMutation, json);
     }
-    const adsWrite = optimizationWrite || actionManagementEnabled === true && hostname === 'googleads.googleapis.com'
+    const goalWrite = goalPolicyMutation !== undefined;
+    if (goalWrite) {
+      if (goalPolicyEnabled !== true || optimizationWrite || hostname !== 'googleads.googleapis.com') fail('invalid_request');
+      require('./google-goal-policy-write-contract').validateMutation(path, goalPolicyMutation, json);
+    }
+    const adsWrite = goalWrite || optimizationWrite || actionManagementEnabled === true && hostname === 'googleads.googleapis.com'
       && /^\/v24\/customers\/[0-9]{10}\/conversionActions:mutate$/.test(path);
     const ads = adsWrite || hostname === 'googleads.googleapis.com' && /^\/v24\/customers\/[0-9]{10}\/googleAds:search$/.test(path);
     const dmWrite = dataManagerEnabled === true && hostname === 'datamanager.googleapis.com' && path === '/v1/events:ingest';

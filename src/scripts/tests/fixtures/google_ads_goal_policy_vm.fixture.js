@@ -44,7 +44,7 @@ function fixture(){
  const client={googleAdsRequest:()=>{throw Error('PROVIDER_NOT_INJECTED');},normalizeCustomerId:value=>String(value||'').replace(/[^0-9]/g,'')};
  const scoped={GOOGLE_ADS_SCOPE:'https://www.googleapis.com/auth/adwords',resolveScopedGoogleAdsRuntime:()=>{throw Error('RUNTIME_NOT_INJECTED');},runtimeError:(code,_message,status)=>Object.assign(Error(code),{code,httpStatus:status})};
  const quality=load('src/services/googleAdsConnectOnlyQualityAudit.service.js',{'../lib/googleAdsClient':client,'./googleAdsScopedRuntime.service':scoped,'./googleLegacyCredentials.service':credentials,'./googleAdsBrokerReader.service':reader});
- const service=load('src/services/googleAdsClinicaclickGoalPolicy.service.js',{'../../models':{},'../lib/googleAdsClient':client,'./notifications.service':{},'../controllers/campaignOnboarding.controller':{},'./googleAdsScopedRuntime.service':scoped,'./googleAdsConnectOnlyQualityAudit.service':quality,'./googleLegacyCredentials.service':credentials,'./googleAdsBrokerReader.service':reader});
+ const service=load('src/services/googleAdsClinicaclickGoalPolicy.service.js',{'../../models':{},'../../services/integrations-broker/src/google-goal-policy-plan':require('../../../../services/integrations-broker/src/google-goal-policy-plan'),'../lib/googleAdsClient':client,'./notifications.service':{},'../controllers/campaignOnboarding.controller':{},'./googleAdsScopedRuntime.service':scoped,'./googleAdsConnectOnlyQualityAudit.service':quality,'./googleLegacyCredentials.service':credentials,'./googleAdsBrokerReader.service':reader});
  return{state,service,credentials,names};
 }
 function scopedFixture(){return depRequire('./src/scripts/tests/fixtures/google_ads_broker_scope.fixture').scopeFixture();}

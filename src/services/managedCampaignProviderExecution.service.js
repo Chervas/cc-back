@@ -15,6 +15,7 @@ const {
 const {
   findManagedCampaignAssociationAccountScope,
 } = require('./managedCampaignAssociationScopes.service');
+const {goalPolicyFailureSummary}=require('../lib/googleAdsGoalPolicyFailure');
 const managedCampaignOptimizationPolicy = require('./managedCampaignOptimizationPolicy.service');
 
 const EXECUTE_JOB_TYPE = 'managed_campaign.google_search_create.v1';
@@ -1710,6 +1711,7 @@ async function runDefaultManagedGoalPolicy({ claimed, dependencies }) {
       provisioning,
       targetStatus: 'launching',
       actorUserId: claimed.execution.activation_requested_by_user_id,
+      leaseToken,
       dependencies: {
         ...(dependencies.optimizationExecutionDependencies || {}),
         beforeExternalMutation: async (...args) => {
@@ -2275,7 +2277,8 @@ async function runActivationJob(payload = {}, jobRequest = null, dependencies = 
         },
       };
     }
-    if (retryableProviderError(error) && jobHasRetryRemaining(jobRequest)) {
+    if (!goalPolicyFailureSummary(error)
+      && retryableProviderError(error) && jobHasRetryRemaining(jobRequest)) {
       await resetActivationForRetry(claimed, error, dependencies);
       return {
         status: 'waiting',
@@ -2293,12 +2296,18 @@ async function runActivationJob(payload = {}, jobRequest = null, dependencies = 
     if (error?.activationPhase && !terminalError.activationPhase) {
       terminalError.activationPhase = error.activationPhase;
     }
-    await finalizeActivation({
-      claimed,
-      error: terminalError,
-      manualRecoveryRequired,
-      dependencies,
-    });
+    let goalLocalFinalizeFailed = false;
+    try {
+      await finalizeActivation({
+        claimed,
+        error: terminalError,
+        manualRecoveryRequired,
+        dependencies,
+      });
+    } catch (housekeepingError) {
+      if (!goalPolicyFailureSummary(error)) throw housekeepingError;
+      goalLocalFinalizeFailed = true;
+    }
     return {
       status: 'failed',
       retryable: false,
@@ -2309,7 +2318,8 @@ async function runActivationJob(payload = {}, jobRequest = null, dependencies = 
           ? 'La activación es ambigua y requiere reconciliación manual.'
           : 'La activación terminó sin mutar Google.'
       ),
-      result: { execution_id: executionId, manual_recovery_required: manualRecoveryRequired },
+      result: { execution_id: executionId, manual_recovery_required: manualRecoveryRequired,
+        ...(goalPolicyFailureSummary(error)?{goal_policy:goalPolicyFailureSummary(error),goal_local_finalize_failed:goalLocalFinalizeFailed}:{}) },
     };
   }
 }

@@ -37,6 +37,7 @@ const validate = new Ajv({ strict: true }).compile(object({
     googleDataManagerEnrollment: require('./google-destination-contract').bindingSchema,
     googleAdsActionManagement: require('./google-action-management-contract').bindingSchema,
     googleAdsOptimization: require('./google-optimization-write-contract').bindingSchema,
+    googleAdsGoalPolicy: require('./google-goal-policy-write-contract').bindingSchema,
     googleBusinessProfileWrites: require('./google-business-profile-write-contract').bindingSchema,
     oauth: require('./google-oauth-contract').bindingSchema }, ['connectionRef', 'provider', 'initialState']) },
   grants: { type: 'array', maxItems: 100000, items: object({ principalId: ref, tenantRef: ref, connectionRef: ref, assetRef: ref, operations: strings }) },
@@ -58,6 +59,7 @@ function validatePolicy(policy) {
     if (binding.metaMarketingOAuth) require('./meta-marketing-oauth-contract').bindingFor(binding);
     if (binding.googleAdsActionManagement) require('./google-action-management-contract').validateBinding(binding);
     if (binding.googleAdsOptimization) require('./google-optimization-write-contract').validateBinding(binding);
+    if (binding.googleAdsGoalPolicy) require('./google-goal-policy-write-contract').validateBinding(binding);
     if (binding.googleBusinessProfileWrites) require('./google-business-profile-write-contract').validateBinding(binding);
     if (binding.googleDataManager) require('./google-data-manager-contract').validateBinding(binding);
     if (binding.googleDataManagerEnrollment) require('./google-destination-contract').validateBinding(binding);

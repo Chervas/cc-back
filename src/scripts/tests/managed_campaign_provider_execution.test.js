@@ -1553,3 +1553,20 @@ test('durable schema, background lane and routes expose no deceptive execute sho
   assert.match(controller, /Idempotency-Key/);
   assert.match(controller, /enqueueActivation/);
 });
+
+test('typed Goal stop keeps ACK/UNKNOWN journal metadata and never schedules automatic provider retry',async()=>{
+ const {store,dependencies}=await succeededCreationStore();const activation=await executionService.enqueueActivation({campaignId:store.campaign.id,executionId:store.executions[0].id,actorUserId:1,expectedPlanHash:store.plan.plan_hash,idempotencyKey:'goal-journal-safe-stop',changeReference:'OPS-FICTITIOUS-GOAL',confirmation:activationConfirmations()},{...dependencies,getAdapter:()=>googleSearchAdapter});
+ const {failure}=require('../../services/googleAdsGoalPolicyJournal.service');const uuid=require('node:crypto').randomUUID;
+ const error=failure('GOAL_POLICY_MANUAL_RECOVERY_REQUIRED',uuid(),{phase:'goal',dispatched:true,outcome:'ACK',requestId:uuid(),knownMutationCount:1,attemptedMutationCount:1,receiptSha256:'a'.repeat(64),ownGoalResourceName:'customers/1234567890/customConversionGoals/88'});let mutations=0;
+ const result=await executionService.runActivationJob({execution_id:store.executions[0].id},{id:activation.job.id,attempts:1,max_attempts:5},{...dependencies,getAdapter:()=>({...googleSearchAdapter,activate:async()=>{mutations++;throw Error('ENABLE_MUST_NOT_RUN');}}),ensureManagedGoalPolicy:async()=>{throw error;}});
+ assert.equal(result.status,'failed');assert.equal(result.retryable,false);assert.equal(mutations,0);assert.equal(store.executions[0].status,'manual_recovery_required');assert.equal(result.result.goal_policy.outcome.knownMutationCount,1);assert.equal(result.result.goal_policy.outcome.ownGoalResourceName,'customers/1234567890/customConversionGoals/88');
+});
+
+test('typed Goal ACK stays terminal when genuine provider finalize transaction also fails',async()=>{
+ const {store,dependencies}=await succeededCreationStore();const activation=await executionService.enqueueActivation({campaignId:store.campaign.id,executionId:store.executions[0].id,actorUserId:1,expectedPlanHash:store.plan.plan_hash,idempotencyKey:'goal-double-store-failure',changeReference:'OPS-FICTITIOUS-GOAL',confirmation:activationConfirmations()},{...dependencies,getAdapter:()=>googleSearchAdapter});
+ const {failure}=require('../../services/googleAdsGoalPolicyJournal.service'),uuid=require('node:crypto').randomUUID;
+ const error=failure('GOAL_POLICY_MANUAL_RECOVERY_REQUIRED',uuid(),{phase:'goal',dispatched:true,outcome:'ACK',requestId:uuid(),knownMutationCount:1,attemptedMutationCount:1,receiptSha256:'a'.repeat(64),ownGoalResourceName:'customers/5992356722/customConversionGoals/88'});let failedFinalize=false,mutations=0;
+ const sequelize={...dependencies.sequelize,transaction:async(...args)=>{if(failedFinalize)throw Error('FICTIONAL_FINALIZE_DATABASE_DOWN');return dependencies.sequelize.transaction(...args);}};
+ const result=await executionService.runActivationJob({execution_id:store.executions[0].id},{id:activation.job.id,attempts:1,max_attempts:5},{...dependencies,sequelize,getAdapter:()=>({...googleSearchAdapter,activate:async()=>{mutations++;throw Error('ENABLE_MUST_NOT_RUN');}}),ensureManagedGoalPolicy:async()=>{failedFinalize=true;throw error;}});
+ assert.equal(result.status,'failed');assert.equal(result.retryable,false);assert.equal(mutations,0);assert.equal(result.result.goal_local_finalize_failed,true);assert.equal(result.result.goal_policy.outcome.knownMutationCount,1);assert.equal(result.result.goal_policy.outcome.ownGoalResourceName,error.goalPolicyOutcome.ownGoalResourceName);assert.equal(store.executions[0].status,'activating');
+});

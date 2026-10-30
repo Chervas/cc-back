@@ -5,6 +5,7 @@ const { createGoogleAdsBrokerReader, safe } = require('./googleAdsBrokerReader.s
 const { createGoogleDataManagerBrokerClient } = require('./googleDataManagerBrokerClient.service');
 const { createGoogleAdsActionManagementBrokerClient } = require('./googleAdsActionManagementBrokerClient.service');
 const { createGoogleDataManagerDestinationsBrokerClient } = require('./googleDataManagerDestinationsBrokerClient.service');
+const { createGoogleAdsGoalPolicyBrokerClient } = require('./googleAdsGoalPolicyBrokerClient.service');
 const { createGoogleAdsOptimizationBrokerClient } = require('./googleAdsOptimizationBrokerClient.service');
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const fail = code => { throw Object.assign(Error(code), { code }); };
@@ -22,6 +23,9 @@ function createGoogleAdsBroker(options) {
   const optimization = options.optimizationClient ? createGoogleAdsOptimizationBrokerClient({ client: options.optimizationClient,
     assertContext: scope.assertContext, ...(options.now ? { now: options.now } : {}),
     ...(options.optimizationEnabled ? { enabled: options.optimizationEnabled } : {}) }) : null;
+  const goalPolicy = options.goalPolicyClient ? createGoogleAdsGoalPolicyBrokerClient({ client: options.goalPolicyClient,
+    assertContext: scope.assertContext, confirmOwnershipCommitAndReadBack: options.confirmGoalOwnershipCommitAndReadBack,
+    ...(options.now ? { now: options.now } : {}), ...(options.goalPolicyEnabled ? { enabled: options.goalPolicyEnabled } : {}) }) : null;
   const discoveryReader = createGoogleAdsBrokerReader({ client: options.client, assertContext: discoveryScope.assertContext, ...(options.now ? { now: options.now } : {}) });
   const check = scope => async (account, context, options) => {
     const captured = await scope.assertContext(context, options); const requested = identity(account);
@@ -30,6 +34,26 @@ function createGoogleAdsBroker(options) {
   };
   const assert = check(scope); const assertDiscovery = check(discoveryScope);
   return { prepare: scope.prepare, assert, prepareDiscovery: discoveryScope.prepare, assertDiscovery,
+    withGoalPolicyOwnership(confirmOwnershipCommitAndReadBack) {
+      if (!options.goalPolicyClient || typeof confirmOwnershipCommitAndReadBack !== 'function') fail('broker_cohort_disabled');
+      const local = createGoogleAdsGoalPolicyBrokerClient({client:options.goalPolicyClient,assertContext:scope.assertContext,
+        confirmOwnershipCommitAndReadBack,...(options.now?{now:options.now}:{}),...(options.goalPolicyEnabled?{enabled:options.goalPolicyEnabled}:{})});
+      return {
+        async goalPolicy(account,context,family,input,options) {await assert(account,context);return local.execute(context,family,input,options);},
+        async goalPolicyOwnership(account,context,input) {await assert(account,context);return local.ownershipProof(context,input);},
+      };
+    },
+    async goalPolicyOwnership(account, context, input) {
+      if (!goalPolicy) fail('broker_cohort_disabled');
+      await assert(account, context); return goalPolicy.ownershipProof(context, input);
+    },
+    async goalPolicy(account, context, family, input, options) {
+      if (!goalPolicy) fail('broker_cohort_disabled');
+      await assert(account, context);
+      // The typed client performs the post-await scope check while retaining ACK.
+      // A second throwing wrapper after it would lose that safe outcome packet.
+      return goalPolicy.execute(context, family, input, options);
+    },
     async optimizationAuthority(account, context, options) {
       if (!optimization) fail('broker_cohort_disabled');
       await assert(account, context, options); return optimization.authority(context, options);
@@ -122,12 +146,39 @@ function createConfiguredGoogleAdsOptimizationClient({ env = process.env, readPr
   };
   return { identity() { load(); return identity; }, execute(command, budget) { return load().execute(command, budget); } };
 }
+function createConfiguredGoogleAdsGoalPolicyClient({ env = process.env, readPrivateFile = privateFile, createClient = createIntegrationsBrokerClient } = {}) {
+  let transport, identity, saved;
+  const load = () => {
+    if (env.GOOGLE_ADS_GOAL_POLICY_BROKER_ENABLED !== 'true') fail('broker_cohort_disabled');
+    const current = Object.fromEntries(['ORIGIN', 'AUDIENCE', 'KEY_ID', 'KEY_FILE', 'CA_FILE'].map(key => [key, env['GOOGLE_ADS_GOAL_POLICY_BROKER_' + key]]));
+    Object.assign(current, { readerKeyId: env.GOOGLE_ADS_BROKER_KEY_ID, readerKeyFile: env.GOOGLE_ADS_BROKER_KEY_FILE });
+    if (saved && JSON.stringify(current) !== JSON.stringify(saved)) fail('broker_configuration_invalid');
+    if (!transport) {
+      try {
+        if (!current.readerKeyId || !current.readerKeyFile || current.readerKeyId === current.KEY_ID
+          || current.readerKeyFile === current.KEY_FILE) fail('broker_configuration_invalid');
+        const crypto = require('node:crypto'); const privateKey = readPrivateFile(current.KEY_FILE), ca = readPrivateFile(current.CA_FILE);
+        const publicKey = value => crypto.createPublicKey(value).export({ type: 'spki', format: 'der' }).toString('base64');
+        const publicWriter = publicKey(privateKey);
+        if (publicWriter === publicKey(readPrivateFile(current.readerKeyFile))) fail('broker_configuration_invalid');
+        transport = createClient({ origin: current.ORIGIN, audience: current.AUDIENCE, keyId: current.KEY_ID, privateKey, ca, timeoutMs: 30000 });
+        identity = require('../../services/integrations-broker/src/google-optimization-write-contract').hash({
+          origin: current.ORIGIN, audience: current.AUDIENCE, key: current.KEY_ID, publicKey: publicWriter,
+          ca: crypto.createHash('sha256').update(ca).digest('hex') });
+        saved = current;
+      } catch { fail('broker_configuration_invalid'); }
+    }
+    return transport;
+  };
+  return { identity() { load(); return identity; }, execute(command, budget) { return load().execute(command, budget); } };
+}
 const optimizationClient = createConfiguredGoogleAdsOptimizationClient();
-const service = createGoogleAdsBroker({ client, optimizationClient, ...createGoogleAdsScopeRepository(() => require('../../models')) });
+const goalPolicyClient = createConfiguredGoogleAdsGoalPolicyClient();
+const service = createGoogleAdsBroker({ client, optimizationClient, goalPolicyClient, ...createGoogleAdsScopeRepository(() => require('../../models')) });
 const modelServices = new WeakMap();
 function forModels(models) {
   if (!models || typeof models !== 'object') fail('broker_configuration_invalid');
-  if (!modelServices.has(models)) modelServices.set(models, createGoogleAdsBroker({ client, optimizationClient, ...createGoogleAdsScopeRepository(() => models) }));
+  if (!modelServices.has(models)) modelServices.set(models, createGoogleAdsBroker({ client, optimizationClient, goalPolicyClient, ...createGoogleAdsScopeRepository(() => models) }));
   return modelServices.get(models);
 }
-module.exports = { ...service, createGoogleAdsBroker, createConfiguredGoogleAdsClient, createConfiguredGoogleAdsOptimizationClient, forModels, safe };
+module.exports = { ...service, createGoogleAdsBroker, createConfiguredGoogleAdsClient, createConfiguredGoogleAdsOptimizationClient, createConfiguredGoogleAdsGoalPolicyClient, forModels, safe };

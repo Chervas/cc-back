@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../../models');
+const {goalPolicyFailureSummary}=require('../lib/googleAdsGoalPolicyFailure');
 const { Op } = require('sequelize');
 const jobRequestsService = require('./jobRequests.service');
 const {
@@ -302,6 +303,7 @@ async function runGuidedLifecycleTransitionJob(payload = {}, dependencies = {}) 
       provisioning,
       actorUserId: lease.verified.actor_user_id,
       finalizePolicy: false,
+      leaseToken: token,
       dependencies: dependencies.applicationDependencies || {},
     });
     const finalized = await (dependencies.finalize || finalizeGuidedTransition)({
@@ -341,9 +343,16 @@ async function runGuidedLifecycleTransitionJob(payload = {}, dependencies = {}) 
 }
 
 async function runGuidedCampaignOptimizationJob(payload = {}, dependencies = {}) {
-  return positiveInteger(payload.evaluation_id ?? payload.evaluationId)
-    ? runGuidedLifecycleTransitionJob(payload, dependencies)
-    : runGuidedGoalPolicyApplyJob(payload, dependencies);
+  try {
+    return await (positiveInteger(payload.evaluation_id ?? payload.evaluationId)
+      ? runGuidedLifecycleTransitionJob(payload, dependencies)
+      : runGuidedGoalPolicyApplyJob(payload, dependencies));
+  } catch(error) {
+    const stop=goalPolicyFailureSummary(error);
+    if (stop) return {status:'failed',retryable:false,error:{code:stop.code,message:'GoalPolicy requiere reconciliación manual.'},
+      result:{manual_recovery_required:true,goal_policy_journal_id:stop.journalId,goal_policy_outcome:stop.outcome}};
+    throw error;
+  }
 }
 
 module.exports = {
