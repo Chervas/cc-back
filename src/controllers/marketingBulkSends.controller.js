@@ -158,7 +158,7 @@ exports.getReviewOverview = async (req, res) => {
     res.set('Cache-Control', 'no-store');
     return res.json(await require('../services/reviewOverview.service').current().overview(scope, {
       userId: req.userData?.userId,
-      scopeRaw: scope.scope === 'group' ? `group:${scope.groupId}` : scope.clinicIds.join(','), period: req.query.period || '30d',
+      scopeRaw: scope.scope === 'group' ? `group:${scope.groupId}` : scope.clinicIds.join(','), period: req.query.period || '30d', compact:req.query.compact === '1',
     }));
   } catch (error) { return sendError(res, error, 'No se pudo cargar el resumen de reseñas'); }
 };
@@ -190,7 +190,7 @@ exports.getReviewQueues = async (req, res) => {
     res.set('Cache-Control', 'no-store');
     return res.json(await require('../services/reviewOverview.service').current().queueReport(scope, {
       userId: req.userData?.userId, scopeRaw: scope.scope === 'group' ? `group:${scope.groupId}` : scope.clinicIds.join(','),
-      view: req.query.view || 'active', limit: req.query.limit, offset: req.query.offset,
+      view: req.query.view || 'active', limit: req.query.limit, offset: req.query.offset, compact:req.query.compact === '1',
     }));
   } catch (error) { return sendError(res, error, 'No se pudieron cargar las colas de reseñas'); }
 };

@@ -93,3 +93,9 @@ test('incidents are separate from running sends and inactive history; compact ro
  assert.deepEqual(queuePage(rows,{view:'inactive',now}).items.map(x=>x.id),['d','e']);
  assert.equal(queuePage(rows,{now}).items[0].message_preview,undefined);assert.equal(queuePage(rows,{now}).items[0].message_image_url,undefined);
 });
+
+test('legacy readers retain previews and the complete inactive tab during rolling publication',()=>{
+ const {queuePage}=require('../../services/reviewOverview.service');const rows=[{id:'marketing:1',status:'paused_quality',status_group:'paused',pending:4,total:5,processed:1,failed:1,message_preview:'Hola {{1}}',schedule:'L-V'}];
+ const legacy=queuePage(rows,{view:'inactive',compact:false});assert.equal(legacy.total,1);assert.equal(legacy.items[0].preview_body,'Hola [nombre]');assert.equal(legacy.items[0].schedule,'L-V');
+ assert.equal(queuePage(rows,{view:'inactive',compact:true}).total,0);assert.equal(queuePage(rows,{view:'issues',compact:true}).items[0].schedule,undefined);
+});

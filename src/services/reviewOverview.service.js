@@ -37,7 +37,7 @@ function queueCompact(row) {
   return { ...Object.fromEntries(fields.map(key => [key,row[key]])), progress_percent: queueSummary([row]).percent,
     sent_count: Math.max(0, Number(row.processed || 0) - Number(row.failed || 0)) };
 }
-function queuePage(rows, { group = false, view = 'active', limit = 5, offset = 0, now = new Date() } = {}) {
+function queuePage(rows, { group = false, view = 'active', limit = 5, offset = 0, now = new Date(), compact = true } = {}) {
   if (!['active', 'inactive', 'issues'].includes(view)) throw Object.assign(Error('Vista de colas inválida'), { status: 400 });
   if (group && view === 'inactive') view = 'active';
   limit = Math.min(25, Math.max(1, Number.parseInt(limit, 10) || 5));
@@ -45,9 +45,9 @@ function queuePage(rows, { group = false, view = 'active', limit = 5, offset = 0
   const unique = [...new Map(rows.map(row => [row.id, row])).values()];
   const active = unique.filter(row => row.status_group === 'active' && (!group || row.started));
   const issues = unique.filter(row => isQueueIssue(row,now));
-  const inactive = group ? [] : unique.filter(row => row.status_group !== 'active' && !isQueueIssue(row,now));
+  const inactive = group ? [] : unique.filter(row => row.status_group !== 'active' && (!compact || !isQueueIssue(row,now)));
   const selected = view === 'active' ? active : view === 'issues' ? issues : inactive;
-  return { items: selected.slice(offset, offset + limit).map(queueCompact), total: selected.length,
+  return { items: selected.slice(offset, offset + limit).map(row=>compact ? queueCompact(row) : {...row,...queueCompact(row),preview_body:reviewPreview(row)}), total: selected.length,
     counts: { active: active.length, inactive: inactive.length, issues: issues.length },
     summary: queueSummary(selected), view, limit, offset };
 }
@@ -127,7 +127,7 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
     return result;
   }
 
-  async function overview(scope, { userId, scopeRaw, period = '30d' } = {}) {
+  async function overview(scope, { userId, scopeRaw, period = '30d', compact = true } = {}) {
     const clinicIds = positiveIds(scope.clinicIds);
     if (!clinicIds.length) throw Object.assign(Error('Selecciona una clínica o grupo'), { status: 400 });
     const range = reportRange(period, now());
@@ -174,7 +174,7 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
         shared_with: shared.length > 1 ? shared.map(p => p.clinic_name) : [] };
     });
     const sent = Number(counts[0]?.requests_sent || 0);
-    const queueReport = queueBundle(queueRows, { group: scope.scope === 'group',now:now() });
+    const queueReport = queueBundle(queueRows, { group: scope.scope === 'group',now:now(),compact });
     return { success: true, generated_at: cached.generated_at, aggregate_cache: {status:cached.status}, scope: { type: scope.scope, group_id: scope.groupId || null,
       name: scope.group?.nombre_grupo || scope.group?.nombre || (clinics.length === 1 ? clinics[0].nombre_clinica : 'Grupo de clínicas'), clinic_count: clinics.length },
       potential_patients: { total: potentials.reduce((s, r) => s + r.count, 0), by_clinic: potentials, excludes_queued: true },
