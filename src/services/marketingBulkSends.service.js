@@ -3331,16 +3331,19 @@ function buildPatientDisplayName(patient) {
   return [patient?.nombre, patient?.apellidos].filter(Boolean).join(' ').trim() || 'Paciente';
 }
 
-async function resolveReviewBusinessLocationIdsForClinics(clinicIds = []) {
+async function resolveReviewBusinessLocationIdsForClinics(clinicIds = [], { withOwners = false } = {}) {
   const ids = new Set();
+  const locationOwners = {}, clinicNames = {};
   await Promise.all((Array.isArray(clinicIds) ? clinicIds : []).map(async (clinicId) => {
     const safeClinicId = Number(clinicId || 0);
     if (!Number.isInteger(safeClinicId) || safeClinicId <= 0) return;
     try {
       const profile = await resolveClinicGoogleReviewProfile(safeClinicId);
+      clinicNames[safeClinicId] = profile?.clinic?.nombre_clinica || `Clínica ${safeClinicId}`;
       const businessLocationId = Number(profile?.location?.id || profile?.links?.business_location_id || 0);
       if (Number.isInteger(businessLocationId) && businessLocationId > 0) {
         ids.add(businessLocationId);
+        locationOwners[businessLocationId] = [...(locationOwners[businessLocationId] || []), safeClinicId];
       }
     } catch (error) {
       console.warn('[marketing-bulk-sends] No se pudo resolver la ficha Google de reseñas', {
@@ -3349,7 +3352,7 @@ async function resolveReviewBusinessLocationIdsForClinics(clinicIds = []) {
       });
     }
   }));
-  return Array.from(ids);
+  return withOwners ? { locationIds: Array.from(ids), locationOwners, clinicNames } : Array.from(ids);
 }
 
 function resolveReviewTreatmentLabel(appointment, source = 'manual_selection') {
@@ -4814,8 +4817,8 @@ async function getMissingGoogleReviews(scope, options = {}) {
 async function getReviewActivityReport(scope, options = {}) {
   const effectiveScope = applyReviewClinicFilter(scope, options);
   const clinicIds = Array.isArray(effectiveScope?.clinicIds) ? effectiveScope.clinicIds.filter(Number.isInteger) : [];
-  const locationIds = await resolveReviewBusinessLocationIdsForClinics(clinicIds);
-  return require('./reviewActivityReport.service').readReport(db, { clinicIds, locationIds, period: options.period });
+  const ownership = await resolveReviewBusinessLocationIdsForClinics(clinicIds, { withOwners: true });
+  return require('./reviewActivityReport.service').readReport(db, { clinicIds, ...ownership, period: options.period });
 }
 
 async function getAttributedGoogleReviews(scope, options = {}) {
@@ -11136,6 +11139,7 @@ async function removeCampaign(scope, campaignId, userId = null) {
 }
 
 module.exports = {
+  buildGoogleRatingSummary,
   reviewReminderAllowedAt,
   assertReviewRequestCommunicationAllowed,
   deferredDispatchAllowedAt,

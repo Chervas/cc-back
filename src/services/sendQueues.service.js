@@ -294,18 +294,21 @@ function listClinicIds(row) {
   ].filter(Boolean)));
 }
 
-async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) {
+async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, reviewOnly = false }) {
   if (!clinicIds.length) return [];
   const groupIds = Array.from(clinicsByGroupId.keys());
   const rows = await db.MarketingPatientList.findAll({
     where: {
+      ...(reviewOnly ? { [Op.and]: [db.Sequelize.literal(`objective_id='mass_sends' AND status<>'archived' AND
+        (JSON_UNQUOTE(JSON_EXTRACT(criteria,'$.review_request')) IN ('true','1')
+          OR JSON_UNQUOTE(JSON_EXTRACT(criteria,'$.template_usage'))='solicitud_resena')`)] } : {}),
       [Op.or]: [
         { clinica_id: { [Op.in]: clinicIds } },
-        ...(groupIds.length ? [{ grupo_clinica_id: { [Op.in]: groupIds } }] : []),
+        ...(groupIds.length ? [{ grupo_clinica_id: { [Op.in]: groupIds }, ...(reviewOnly ? { clinica_id: null } : {}) }] : []),
       ],
     },
     order: [['updated_at', 'DESC']],
-    limit: 250,
+    ...(reviewOnly ? {} : { limit: 250 }),
     raw: true,
   });
   const rowIds = rows.map((row) => Number(row.id)).filter(Number.isInteger);
@@ -326,9 +329,11 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
             MAX(sent_at) AS last_sent_at
           FROM MarketingPatientListItems
           WHERE list_id IN (:rowIds)
+          ${reviewOnly ? `AND COALESCE(clinica_id,(SELECT l.clinica_id FROM MarketingPatientLists l
+            WHERE l.id=MarketingPatientListItems.list_id)) IN (:clinicIds)` : ''}
           GROUP BY list_id
         `,
-        { replacements: { rowIds }, type: db.Sequelize.QueryTypes.SELECT },
+        { replacements: { rowIds, clinicIds }, type: db.Sequelize.QueryTypes.SELECT },
       )
     : [];
   const itemStatsByListId = new Map(itemStats.map((item) => [Number(item.list_id), item]));
@@ -422,6 +427,7 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId }) 
       template_name: templateSnapshot.display_name || templateSnapshot.name || null,
       message_preview: templateSnapshot.body || null,
       sender: dispatch.account_quality?.phone_number_id || null,
+      sender_label: dispatch.sender_display_name || dispatch.sender_phone_number || dispatch.account_quality?.display_phone_number || null,
       error: humanizeQueueReason(dispatch.paused_reason || dispatch.last_error || row.safety_gates?.reason),
       can_pause: group === 'active' && pending > 0,
       can_resume: group === 'paused' && pending > 0 && !cannotResume,
@@ -776,6 +782,22 @@ async function mutateSendQueue({ userId, queueId, action }) {
 }
 
 module.exports = {
+  // Same campaign projection as Settings > queues, with no extra producer,
+  // patient previews or provider reads for the review dashboard.
+  async listReviewQueues({ userId, scopeRaw }) {
+    const clinics = await resolveScopedClinics({ userId, scopeRaw });
+    const clinicIds = clinics.map(c => Number(c.id_clinica));
+    const clinicNameById = new Map(clinics.map(c => [Number(c.id_clinica), c.nombre_clinica]));
+    const clinicsByGroupId = new Map();
+    for (const clinic of clinics) {
+      const key = toInt(clinic.grupoClinicaId);
+      if (key) clinicsByGroupId.set(key, [...(clinicsByGroupId.get(key) || []), Number(clinic.id_clinica)]);
+    }
+    const group = String(scopeRaw).startsWith('group:');
+    return (await marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, reviewOnly: true }))
+      .filter(row => row.type === 'review_request' && (row.status_group !== 'history'
+        || !group && row.status === 'completed' && +new Date(row.updated_at) >= Date.now() - 72 * 3600000));
+  },
   listSendQueues,
   mutateSendQueue,
   statusGroup,

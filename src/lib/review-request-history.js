@@ -61,7 +61,7 @@ function hasPriorReviewRequest(history, item = {}) {
   return history.patientIds.has(id) || !!phone && history.phoneKeys.has(phone);
 }
 
-async function readReviewRequestHistory({ query, clinicIds = [] }) {
+async function readReviewRequestHistory({ query, clinicIds = [], byClinic = false }) {
   const ids = [...new Set(clinicIds.filter(id => Number.isSafeInteger(id) && id > 0))];
   if (!ids.length) return buildReviewRequestHistory();
   const replacements = { clinicIds: ids };
@@ -69,7 +69,7 @@ async function readReviewRequestHistory({ query, clinicIds = [] }) {
       SELECT id FROM MarketingPatientListItems WHERE clinica_id IN (:clinicIds)
       UNION ALL SELECT i.id FROM MarketingPatientLists l JOIN MarketingPatientListItems i ON i.list_id=l.id
         WHERE l.clinica_id IN (:clinicIds) AND i.clinica_id IS NULL
-    ) SELECT i.paciente_id,i.phone,i.status,i.selected,i.dispatch_status,i.sent_at,i.provider_message_id,i.app_message_id,
+    ) SELECT COALESCE(i.clinica_id,l.clinica_id) history_clinic_id,i.paciente_id,i.phone,i.status,i.selected,i.dispatch_status,i.sent_at,i.provider_message_id,i.app_message_id,
       l.status AS list_status,m.metadata AS message_metadata,
       EXISTS(SELECT 1 FROM MarketingPatientContactEvents e WHERE e.list_id=i.list_id AND e.item_id=i.id
         AND e.event_type LIKE 'mass_campaign_test_%') AS has_test_event,
@@ -85,7 +85,7 @@ async function readReviewRequestHistory({ query, clinicIds = [] }) {
       OR i.dispatch_status IN ('queued','sending','accepted','held_quality','sent','delivered','read','replied')
       OR (l.status IN ('ready','sending','sent','completed','scheduled','paused') AND i.selected=TRUE AND i.status='ready'
         AND (i.dispatch_status IS NULL OR i.dispatch_status='pending')))`, replacements);
-  const messages = await query(`SELECT m.status,m.metadata,m.content,c.patient_id,c.contact_id,
+  const messages = await query(`SELECT c.clinic_id history_clinic_id,m.status,m.metadata,m.content,c.patient_id,c.contact_id,
       t.catalog_template_id,t.name AS template_name
     FROM Conversations c JOIN Messages m ON m.conversation_id=c.id
     LEFT JOIN WhatsappTemplates t ON t.id=CAST(JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.template_id')) AS UNSIGNED)
@@ -97,7 +97,8 @@ async function readReviewRequestHistory({ query, clinicIds = [] }) {
         OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.template_name')) REGEXP 'review|rese[n\u00f1]a|solicitud_de_opinion|solicitud_de_valoracion|opinion_tras_visita'
         OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.catalog_template_id'))='9'
         OR (JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.origin'))='mobile_app' AND m.content REGEXP 'rese[n\u00f1]a|ressenya|review|valoraci[o\u00f3]n|g.page|writereview'))`, replacements);
-  return buildReviewRequestHistory(items, messages);
+  return byClinic ? new Map(ids.map(id => [id, buildReviewRequestHistory(items.filter(r => Number(r.history_clinic_id) === id),
+    messages.filter(r => Number(r.history_clinic_id) === id))])) : buildReviewRequestHistory(items, messages);
 }
 
 module.exports = { buildReviewRequestHistory, readReviewRequestHistory, hasPriorReviewRequest,

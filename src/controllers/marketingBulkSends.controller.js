@@ -151,6 +151,27 @@ exports.getReviewRequestSummary = async (req, res) => {
   }
 };
 
+exports.getReviewOverview = async (req, res) => {
+  try {
+    const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });
+    await requireReviewHistoryAccess(req, scope);
+    res.set('Cache-Control', 'no-store');
+    return res.json(await require('../services/reviewOverview.service').current().overview(scope, {
+      userId: req.userData?.userId,
+      scopeRaw: scope.scope === 'group' ? `group:${scope.groupId}` : scope.clinicIds.join(','), period: req.query.period || '30d',
+    }));
+  } catch (error) { return sendError(res, error, 'No se pudo cargar el resumen de reseñas'); }
+};
+
+exports.getReviewPrivateRatings = async (req, res) => {
+  try {
+    const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });
+    await requireReviewHistoryAccess(req, scope);
+    res.set('Cache-Control', 'no-store');
+    return res.json(await require('../services/reviewOverview.service').current().privateRatings(scope, req.query));
+  } catch (error) { return sendError(res, error, 'No se pudieron cargar las valoraciones'); }
+};
+
 exports.getMissingGoogleReviews = async (req, res) => {
   try {
     const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });

@@ -183,6 +183,8 @@ router.put('/review-requests/draft', reviewWizardController.saveDraft);
 router.get('/review-requests/imported-lists/:listId/registration', reviewWizardController.previewRegistration);
 router.post('/review-requests/imported-lists/:listId/registration', reviewWizardController.applyRegistration);
 router.get('/review-requests/summary', marketingBulkSendsController.getReviewRequestSummary);
+router.get('/review-requests/overview', marketingBulkSendsController.getReviewOverview);
+router.get('/review-requests/private-ratings', marketingBulkSendsController.getReviewPrivateRatings);
 router.get('/review-requests/imported-lists', marketingBulkSendsController.listReviewImportedLists);
 router.get('/review-requests/missing-reviews', marketingBulkSendsController.getMissingGoogleReviews);
 router.get('/review-requests/attributed-reviews', marketingBulkSendsController.getAttributedGoogleReviews);
