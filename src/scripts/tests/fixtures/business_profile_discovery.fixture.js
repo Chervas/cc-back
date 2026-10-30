@@ -3,7 +3,10 @@ const fs = require('node:fs'); const vm = require('node:vm'); const path = requi
 const root = path.resolve(__dirname, '../../..');
 // Pure policy helpers are executed as production code; transports and models
 // still require explicit injection and retain the closed dependency fallback.
-const pureDependencies = { '../lib/delegatedOperationPolicy': require('../../../lib/delegatedOperationPolicy') };
+const pureDependencies = {
+  '../lib/delegatedOperationPolicy': require('../../../lib/delegatedOperationPolicy'),
+  '../lib/lead-patient-context': require('../../../lib/lead-patient-context'),
+};
 function loadDiscoverySource(relative, dependencies, { env = {}, logs = [] } = {}) {
   const filename = path.join(root, relative); const module = { exports: {} };
   const forbidden = () => { throw Error('UNEXPECTED_DEPENDENCY_IN_DISCOVERY_QA'); };

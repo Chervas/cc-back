@@ -640,6 +640,20 @@ async function ensureAssignment({
       return null;
     }
 
+    if (positiveInt(leadId)) {
+      const lead = await LeadIntake.findByPk(leadId, { transaction });
+      if (!lead || Number(lead.clinica_id) !== cid || lead.archived_at) return null;
+      const context = await require('./leadPatientContext.service').createLeadPatientContextService(db).get(lead, { transaction });
+      const choice = (await require('./leadPatientAttention.service').createLeadPatientAttentionService(db)
+        .decisions([Number(leadId)], { transaction })).get(Number(leadId));
+      if (choice?.decision === 'clinic') return null;
+      if (['existing_patient', 'possible_patient'].includes(context?.relationship) && choice?.decision !== 'director') {
+        // Visible in the director's pending work, without assuming they already attend it or changing sender.
+        if (!lead.asignado_a) await lead.update({ asignado_a: setting.director_user_id }, { transaction });
+        return null;
+      }
+    }
+
     const existing = await findAssignment({
       phone: normalizedPhone,
       directorPhoneAssetId: setting.director_phone_asset_id,
@@ -647,6 +661,13 @@ async function ensureAssignment({
       lock: true,
     });
     if (existing) {
+      if (startReason === 'existing_patient_request_accepted' && existing.lead_intake_id
+          && Number(existing.lead_intake_id) !== Number(leadId)) {
+        const error = new Error('patient_direction_request_conflict');
+        error.code = 'patient_direction_request_conflict';
+        error.status = 409;
+        throw error;
+      }
       if (existing.clinic_id && Number(existing.clinic_id) !== cid) {
         const error = new Error('patient_direction_phone_already_assigned');
         error.code = 'patient_direction_phone_already_assigned';
@@ -1108,26 +1129,44 @@ async function resolveOutboundPolicy({
       requiresTakeConfirmation: false,
     };
   }
-  let assignment = await findAssignment({
-    clinicId: cid,
-    phone,
-    conversationId,
-    leadId,
-    patientId,
-  });
-  if (!assignment && positiveInt(leadId)) {
+  // Review the current request before phone/patient lookup can return an older
+  // assignment for the same person. Consent routing above remains independent.
+  const clinicOnlyPurpose = ['bulk_campaigns', 'review_requests', 'lead_first_contact'].includes(cleanText(purpose).toLowerCase());
+  let reviewRequired = false;
+  let mayAssign = true;
+  if (positiveInt(leadId)) {
+    const lead = await LeadIntake.findByPk(leadId);
+    if (!lead || Number(lead.clinica_id) !== cid) mayAssign = false;
+    else {
+      const context = await require('./leadPatientContext.service').createLeadPatientContextService(db).get(lead);
+      reviewRequired = ['existing_patient', 'possible_patient'].includes(context?.relationship);
+      if (reviewRequired) {
+        const choice = (await require('./leadPatientAttention.service').createLeadPatientAttentionService(db)
+          .decisions([Number(leadId)])).get(Number(leadId));
+        mayAssign = choice?.decision === 'director'
+          && (choice.clinic_id == null || Number(choice.clinic_id) === cid);
+      }
+    }
+  }
+  let assignment = mayAssign ? await findAssignment(reviewRequired
+    ? { clinicId: cid, leadId }
+    : { clinicId: cid, phone, conversationId, leadId, patientId }) : null;
+  if (mayAssign && !assignment && positiveInt(leadId) && !(reviewRequired && clinicOnlyPurpose)) {
     assignment = await ensureAssignment({
       clinicId: cid,
       phone,
       leadId,
       conversationId,
       patientId,
-      startReason: automation ? 'automatic_first_contact' : 'manual_first_contact',
+      startReason: reviewRequired ? 'existing_patient_request_accepted'
+        : automation ? 'automatic_first_contact' : 'manual_first_contact',
       actorUserId,
       requireNoHumanContact: true,
     });
   }
-  if (['bulk_campaigns', 'review_requests', 'lead_first_contact'].includes(cleanText(purpose).toLowerCase())) {
+  if (reviewRequired && assignment
+      && (Number(assignment.lead_intake_id) !== Number(leadId) || Number(assignment.clinic_id) !== cid)) assignment = null;
+  if (clinicOnlyPurpose) {
     return {
       mode: 'clinic_default',
       clinicConfig: await whatsappService.getClinicConfig(cid, { purpose }),
@@ -1216,6 +1255,14 @@ async function handleAppointmentChange({ appointment, previousStatus = null, act
     patientId: cita.paciente_id,
   });
   if (!assignment) return null;
+  if (assignment.lead_intake_id) {
+    const lead = await LeadIntake.findByPk(assignment.lead_intake_id);
+    const context = lead && await require('./leadPatientContext.service').createLeadPatientContextService(db).get(lead);
+    if (['existing_patient', 'possible_patient'].includes(context?.relationship)
+      && (Number(cita.lead_intake_id) !== Number(assignment.lead_intake_id)
+        || Number(cita.clinica_id) !== Number(assignment.clinic_id)
+        || assignment.patient_id && Number(cita.paciente_id) !== Number(assignment.patient_id))) return null;
+  }
   let shouldLinkAppointment = !assignment.first_appointment_id;
   if (assignment.first_appointment_id && Number(assignment.first_appointment_id) !== Number(cita.id_cita)) {
     const currentFirstAppointment = await CitaPaciente.findByPk(assignment.first_appointment_id, {

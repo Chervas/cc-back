@@ -10,16 +10,47 @@ const TEMPORARY_DIRECTOR_CLINICS = Object.freeze([66, 72, 77]);
 
 function temporaryQuickChatEligibilitySql() {
   const clinicIds = TEMPORARY_DIRECTOR_CLINICS.join(',');
+  const attention = `(SELECT JSON_EXTRACT(qc_decision.attribution_steps, '$.lead_patient_attention_v1')
+    FROM LeadAttributionAudits AS qc_decision
+    WHERE qc_decision.lead_intake_id = \`Conversation\`.\`lead_id\`
+      AND JSON_UNQUOTE(JSON_EXTRACT(qc_decision.attribution_steps, '$.type')) = 'lead_patient_attention_v1'
+      AND JSON_EXTRACT(qc_decision.attribution_steps, '$.lead_patient_attention_v1.version') = 1
+      AND JSON_UNQUOTE(JSON_EXTRACT(qc_decision.attribution_steps, '$.lead_patient_attention_v1.decision')) IN ('director','clinic')
+      AND JSON_UNQUOTE(JSON_EXTRACT(qc_decision.attribution_steps, '$.lead_patient_attention_v1.request_kind')) IN ('commercial','patient_care')
+    ORDER BY qc_decision.id DESC LIMIT 1)`;
+  const decision = `COALESCE(JSON_UNQUOTE(JSON_EXTRACT(${attention}, '$.decision')), '')`;
+  const director = `COALESCE(JSON_UNQUOTE(JSON_EXTRACT(${attention}, '$.director_user_id')), '')`;
   const event = kind => `EXISTS (
     SELECT 1 FROM \`Messages\` AS \`qc_attention\`
-    WHERE \`qc_attention\`.\`conversation_id\` = \`Conversation\`.\`id\`
-      AND \`qc_attention\`.\`message_type\` = 'event'
+    WHERE \`qc_attention\`.\`message_type\` = 'event'
       AND \`qc_attention\`.\`automation_delivery_key\` LIKE 'temporary-patient-direction:%'
+      AND JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.source')) = 'temporary_patient_direction'
+      AND JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.clinic_id')) = \`Conversation\`.\`clinic_id\`
+      AND JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.director_user_id')) = ${TEMPORARY_FOCUSED_ACCOUNT.userId}
       AND JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.kind')) = '${kind}'
+      AND (JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.lead_intake_id')) = \`Conversation\`.\`lead_id\`
+        OR (COALESCE(JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.lead_intake_id')), 'null') = 'null'
+          AND \`qc_attention\`.\`conversation_id\` = \`Conversation\`.\`id\`
+          AND (\`Conversation\`.\`lead_id\` IS NULL OR \`qc_attention\`.\`sent_at\` IS NULL
+            OR \`qc_attention\`.\`sent_at\` >= (SELECT qc_request.created_at FROM LeadIntakes AS qc_request
+              WHERE qc_request.id = \`Conversation\`.\`lead_id\`))))
   )`;
   return `(\`Conversation\`.\`clinic_id\` NOT IN (${clinicIds})
     OR \`Conversation\`.\`channel\` = 'internal'
-    OR (NOT ${event('temporary_patient_direction_handoff')} AND (
+    OR (NOT ${event('temporary_patient_direction_handoff')}
+      AND ${decision} <> 'clinic'
+      AND (${decision} <> 'director' OR ${director} = '${TEMPORARY_FOCUSED_ACCOUNT.userId}')
+      AND ((\`Conversation\`.\`lead_id\` IS NOT NULL AND EXISTS (
+        SELECT 1 FROM LeadIntakes AS qc_lead WHERE qc_lead.id = \`Conversation\`.\`lead_id\`
+          AND qc_lead.clinica_id = \`Conversation\`.\`clinic_id\`
+          AND (qc_lead.asignado_a IS NULL OR qc_lead.asignado_a = ${TEMPORARY_FOCUSED_ACCOUNT.userId})
+          AND qc_lead.archived_at IS NULL AND qc_lead.status_lead <> 'descartado'
+          AND (qc_lead.status_lead NOT IN ('acudio_cita','convertido')
+            OR ${event('temporary_patient_direction_started')})
+          AND NOT EXISTS (SELECT 1 FROM LeadContactAttempts AS qc_contact
+            WHERE qc_contact.lead_intake_id = qc_lead.id AND qc_contact.usuario_id IS NOT NULL
+              AND qc_contact.usuario_id <> ${TEMPORARY_FOCUSED_ACCOUNT.userId})
+      )) OR (\`Conversation\`.\`lead_id\` IS NULL AND (
       \`Conversation\`.\`patient_id\` IS NULL
       OR ${event('temporary_patient_direction_started')}
       OR EXISTS (SELECT 1 FROM \`CitasPacientes\` AS \`qc_own_appointment\`
@@ -37,7 +68,7 @@ function temporaryQuickChatEligibilitySql() {
           AND \`qc_human\`.\`direction\` = 'outbound'
           AND \`qc_human\`.\`message_type\` <> 'event'
           AND \`qc_human\`.\`automation_delivery_key\` IS NULL)
-    )))`;
+    )))))`;
 }
 
 function isTemporaryQuickChatFocusUser(actor) {

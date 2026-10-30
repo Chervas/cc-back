@@ -22,6 +22,9 @@ const {
   overviewCache,
 } = require('../services/marketingReportOverviewCache.service');
 
+const { loadReportingPatientContexts, patientContextBreakdown, isCommercialLead, PATIENT_CONTEXT_EXPLANATION } = require('../services/campaignWorkspace.service');
+const { leadPatientContextSql } = require('../lib/lead-patient-context');
+
 const {
   LeadIntake,
   Clinica,
@@ -369,6 +372,9 @@ const LEAD_ACQUISITION_CHANNEL_SQL = `CASE
   ELSE 'web'
 END`;
 
+// Preserve the bounded MIN query while using core's frozen snapshot/decision semantics.
+const COMMERCIAL_LEAD_SQL = `(${leadPatientContextSql().request_kind}) <> 'patient_care'`;
+
 async function resolvePaidAttributionCoverage(scope, dependencies = {}) {
   const LeadModel = dependencies.LeadIntake || LeadIntake;
   if (!LeadModel) {
@@ -387,6 +393,7 @@ async function resolvePaidAttributionCoverage(scope, dependencies = {}) {
     where: {
       archived_at: null,
       ...scopedWhere('clinica_id', scope),
+      [Op.and]: literal(COMMERCIAL_LEAD_SQL),
     },
     raw: true,
   });
@@ -777,152 +784,112 @@ function latestEffectiveGoogleSync(marketingState) {
     .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0] || null;
 }
 
-async function aggregateLeads(scope, range) {
-  const where = {
-    archived_at: null,
-    ...scopedWhere('clinica_id', scope),
-    ...buildSequelizeDateWhere('created_at', range),
-  };
+async function loadReportLeads(scope, range) {
+  if (!LeadIntake) return [];
   const rows = await LeadIntake.findAll({
-    attributes: [
-      [literal(LEAD_ACQUISITION_CHANNEL_SQL), 'channel_key'],
-      'status_lead',
-      [fn('COUNT', col('id')), 'count'],
-    ],
-    where,
-    group: [literal(LEAD_ACQUISITION_CHANNEL_SQL), 'status_lead'],
+    attributes: ['id', 'clinica_id', 'created_at', 'status_lead',
+      [fn('DATE', col('created_at')), 'date'], [literal(LEAD_ACQUISITION_CHANNEL_SQL), 'channel_key']],
+    where: { archived_at: null, ...scopedWhere('clinica_id', scope), ...buildSequelizeDateWhere('created_at', range) },
     raw: true,
   });
+  return loadReportingPatientContexts({ models: db, leads: rows });
+}
 
+async function aggregateLeads(scope, range, loadedLeads = null) {
+  const rows = loadedLeads || await loadReportLeads(scope, range);
   const channels = new Map();
   const totals = { leads: 0, contactados: 0, citas: 0, acudieron: 0, convertidos: 0 };
-
+  const seen = new Set();
   for (const row of rows) {
-    const count = toNumber(row.count);
-    const status = String(row.status_lead || '').toLowerCase();
+    const id = `${row.clinica_id}:${row.id}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
     const key = String(row.channel_key || deriveChannelKey(row));
     if (!channels.has(key)) channels.set(key, emptyChannelStats());
+    if (!isCommercialLead(row)) continue;
+    const status = String(row.status_lead || '').toLowerCase();
     const entry = channels.get(key);
-    entry.leads += count;
-    totals.leads += count;
-    if (CONTACTED_LEAD_STATUSES.has(status)) totals.contactados += count;
-    if (CITED_LEAD_STATUSES.has(status)) {
-      entry.citas += count;
-      totals.citas += count;
-    }
-    if (ATTENDED_LEAD_STATUSES.has(status)) {
-      entry.acudieron += count;
-      totals.acudieron += count;
-    }
-    if (CONVERTED_LEAD_STATUSES.has(status)) {
-      entry.convertidos += count;
-      totals.convertidos += count;
-    }
+    entry.leads++;
+    totals.leads++;
+    if (CONTACTED_LEAD_STATUSES.has(status)) totals.contactados++;
+    // Preserve the lead-created cohort: repeated appointments must not multiply
+    // cited/attended leads in the channel funnel.
+    if (CITED_LEAD_STATUSES.has(status)) { entry.citas++; totals.citas++; }
+    if (ATTENDED_LEAD_STATUSES.has(status)) { entry.acudieron++; totals.acudieron++; }
+    if (CONVERTED_LEAD_STATUSES.has(status)) { entry.convertidos++; totals.convertidos++; }
   }
-
-  return { totals, channels };
+  for (const [key, value] of channels) value.patient_context_breakdown = patientContextBreakdown(
+    rows.filter(row => String(row.channel_key || deriveChannelKey(row)) === key));
+  return { totals, channels, patient_context_breakdown: patientContextBreakdown(rows) };
 }
 
-async function aggregateLeadSeries(scope, range) {
-  if (!LeadIntake) return { leads: [], paidLeads: [], citas: [], acudieron: [], convertidos: [] };
+async function aggregateLeadSeries(scope, range, loadedLeads = null) {
   const labels = enumerateDateLabels(range);
-  const empty = labels.map(() => 0);
-  const byDate = new Map(labels.map((label) => [label, {
-    leads: 0,
-    paidLeads: 0,
-    citas: 0,
-    acudieron: 0,
-    convertidos: 0,
-  }]));
-
-  const rows = await LeadIntake.findAll({
-    attributes: [
-      [fn('DATE', col('created_at')), 'date'],
-      [literal(LEAD_ACQUISITION_CHANNEL_SQL), 'channel_key'],
-      'status_lead',
-      [fn('COUNT', col('id')), 'count'],
-    ],
-    where: {
-      archived_at: null,
-      ...scopedWhere('clinica_id', scope),
-      ...buildSequelizeDateWhere('created_at', range),
-    },
-    group: [literal('DATE(created_at)'), literal(LEAD_ACQUISITION_CHANNEL_SQL), 'status_lead'],
-    raw: true,
-  });
-
+  const byDate = new Map(labels.map(label => [label, { leads: 0, paidLeads: 0, citas: 0, acudieron: 0, convertidos: 0 }]));
+  const rows = loadedLeads || await loadReportLeads(scope, range);
+  const seen = new Set();
   for (const row of rows) {
-    const date = String(row.date || '').slice(0, 10);
+    const id = `${row.clinica_id}:${row.id}`;
+    if (seen.has(id) || !isCommercialLead(row)) continue;
+    seen.add(id);
+    const date = String(row.date || normalizeDateOnly(row.created_at) || '').slice(0, 10);
     const bucket = byDate.get(date);
     if (!bucket) continue;
-    const count = toNumber(row.count);
     const status = String(row.status_lead || '').toLowerCase();
     const channelKey = String(row.channel_key || deriveChannelKey(row));
-    bucket.leads += count;
-    if (channelKey === 'google_ads' || channelKey === 'meta_ads') bucket.paidLeads += count;
-    if (CITED_LEAD_STATUSES.has(status)) bucket.citas += count;
-    if (ATTENDED_LEAD_STATUSES.has(status)) bucket.acudieron += count;
-    if (CONVERTED_LEAD_STATUSES.has(status)) bucket.convertidos += count;
+    bucket.leads++;
+    if (channelKey === 'google_ads' || channelKey === 'meta_ads') bucket.paidLeads++;
+    if (CITED_LEAD_STATUSES.has(status)) bucket.citas++;
+    if (ATTENDED_LEAD_STATUSES.has(status)) bucket.acudieron++;
+    if (CONVERTED_LEAD_STATUSES.has(status)) bucket.convertidos++;
   }
-
-  if (!labels.length) return { leads: empty, paidLeads: empty, citas: empty, acudieron: empty, convertidos: empty };
-  return {
-    leads: labels.map((label) => byDate.get(label)?.leads || 0),
-    paidLeads: labels.map((label) => byDate.get(label)?.paidLeads || 0),
-    citas: labels.map((label) => byDate.get(label)?.citas || 0),
-    acudieron: labels.map((label) => byDate.get(label)?.acudieron || 0),
-    convertidos: labels.map((label) => byDate.get(label)?.convertidos || 0),
-  };
+  return Object.fromEntries(['leads', 'paidLeads', 'citas', 'acudieron', 'convertidos']
+    .map(key => [key, labels.map(label => byDate.get(label)[key])]));
 }
 
-async function countAppointments(scope, range) {
-  if (!CitaPaciente) return { creadas: 0, completadas: 0, noAsistio: 0 };
-  const baseWhere = {
-    ...scopedWhere('clinica_id', scope),
-    ...buildSequelizeDateWhere('created_at', range),
-    lead_intake_id: { [Op.ne]: null },
-  };
-  const [creadas, completadas, noAsistio] = await Promise.all([
-    CitaPaciente.count({ where: baseWhere }),
-    CitaPaciente.count({ where: { ...baseWhere, estado: { [Op.in]: require('../lib/status-catalog').CITA_ATTENDED_STATUSES } } }),
-    CitaPaciente.count({ where: { ...baseWhere, estado: 'no_asistio' } }),
-  ]);
-  return { creadas, completadas, noAsistio };
-}
-
-async function aggregateAppointmentSeries(scope, range) {
-  if (!CitaPaciente) return { citas: [], acudieron: [] };
-  const labels = enumerateDateLabels(range);
-  const byDate = new Map(labels.map((label) => [label, { citas: 0, acudieron: 0 }]));
-
+async function loadCommercialAppointments(scope, range, loadedLeads = []) {
+  if (!CitaPaciente) return [];
+  // Keep the existing appointment-created window and status eligibility. Care
+  // classification is scoped through the linked lead, including older leads.
   const rows = await CitaPaciente.findAll({
-    attributes: [
-      [fn('DATE', col('created_at')), 'date'],
-      'estado',
-      [fn('COUNT', col('id_cita')), 'count'],
-    ],
-    where: {
-      ...scopedWhere('clinica_id', scope),
-      ...buildSequelizeDateWhere('created_at', range),
-      lead_intake_id: { [Op.ne]: null },
-    },
-    group: [literal('DATE(created_at)'), 'estado'],
-    raw: true,
+    attributes: ['id_cita', 'clinica_id', 'lead_intake_id', 'created_at', 'estado', [fn('DATE', col('created_at')), 'date']],
+    where: { ...scopedWhere('clinica_id', scope), ...buildSequelizeDateWhere('created_at', range), lead_intake_id: { [Op.ne]: null } }, raw: true,
   });
-
-  for (const row of rows) {
-    const date = String(row.date || '').slice(0, 10);
-    const bucket = byDate.get(date);
-    if (!bucket) continue;
-    const count = toNumber(row.count);
-    bucket.citas += count;
-    if (require('../lib/status-catalog').hasAttendedAppointment(row)) bucket.acudieron += count;
+  const byId = new Map(loadedLeads.map(lead => [String(lead.id), lead]));
+  const missing = [...new Set(rows.map(row => String(row.lead_intake_id)).filter(id => !byId.has(id)))];
+  for (let offset = 0; offset < missing.length; offset += 500) {
+    const leads = await LeadIntake.findAll({ where: { ...scopedWhere('clinica_id', scope), id: { [Op.in]: missing.slice(offset, offset + 500) } },
+      attributes: ['id', 'clinica_id'], raw: true });
+    for (const lead of await loadReportingPatientContexts({ models: db, leads })) byId.set(String(lead.id), lead);
   }
+  const seen = new Set();
+  return rows.filter(row => {
+    const lead = byId.get(String(row.lead_intake_id));
+    if (seen.has(String(row.id_cita)) || !lead || !isCommercialLead(lead)
+      || Number(lead.clinica_id) !== Number(row.clinica_id)) return false;
+    seen.add(String(row.id_cita));
+    return true;
+  });
+}
 
-  return {
-    citas: labels.map((label) => byDate.get(label)?.citas || 0),
-    acudieron: labels.map((label) => byDate.get(label)?.acudieron || 0),
-  };
+async function countAppointments(scope, range, loadedAppointments = null) {
+  const rows = loadedAppointments || await loadCommercialAppointments(scope, range);
+  const { hasAttendedAppointment } = require('../lib/status-catalog');
+  return { creadas: rows.length, completadas: rows.filter(hasAttendedAppointment).length,
+    noAsistio: rows.filter(row => row.estado === 'no_asistio').length };
+}
+
+async function aggregateAppointmentSeries(scope, range, loadedAppointments = null) {
+  const labels = enumerateDateLabels(range);
+  const byDate = new Map(labels.map(label => [label, { citas: 0, acudieron: 0 }]));
+  const rows = loadedAppointments || await loadCommercialAppointments(scope, range);
+  for (const row of rows) {
+    const bucket = byDate.get(String(row.date || normalizeDateOnly(row.created_at) || '').slice(0, 10));
+    if (!bucket) continue;
+    bucket.citas++;
+    if (require('../lib/status-catalog').hasAttendedAppointment(row)) bucket.acudieron++;
+  }
+  return { citas: labels.map(label => byDate.get(label).citas), acudieron: labels.map(label => byDate.get(label).acudieron) };
 }
 
 async function aggregateSpendSeries(scope, range, marketingState = null, paidCoverageStart = null) {
@@ -1156,10 +1123,7 @@ async function resolveGoogleCampaignMeasurementContext(scope, campaignRows, rang
   const leadRows = LeadIntake && (scope?.isAll || leadScopeClauses.length)
     ? await LeadIntake.findAll({
         attributes: [
-          'google_ads_customer_id',
-          'google_ads_campaign_id',
-          'clinica_id',
-          [fn('COUNT', col('id')), 'count'],
+          'id', 'google_ads_customer_id', 'google_ads_campaign_id', 'clinica_id',
         ],
         where: {
           archived_at: null,
@@ -1180,7 +1144,6 @@ async function resolveGoogleCampaignMeasurementContext(scope, campaignRows, rang
             [Op.lt]: range.endExclusive,
           },
         },
-        group: ['google_ads_customer_id', 'google_ads_campaign_id', 'clinica_id'],
         raw: true,
       })
     : [];
@@ -1188,7 +1151,8 @@ async function resolveGoogleCampaignMeasurementContext(scope, campaignRows, rang
   const selectedClinicSet = new Set(selectedClinicIds);
   const scopedCrmLeads = new Map();
   const otherClinicCrmLeads = new Map();
-  for (const lead of leadRows) {
+  for (const lead of await loadReportingPatientContexts({ models: db, leads: leadRows })) {
+    if (!isCommercialLead(lead)) continue;
     const matchingRows = rows.filter((campaign) => (
       String(campaign.campaignId) === String(lead.google_ads_campaign_id)
       && (!lead.google_ads_customer_id
@@ -1196,7 +1160,7 @@ async function resolveGoogleCampaignMeasurementContext(scope, campaignRows, rang
     ));
     for (const campaign of matchingRows) {
       const key = googleCampaignKey(campaign.customerId, campaign.campaignId);
-      const count = toNumber(lead.count);
+      const count = 1;
       const belongsToSelectedScope = scope?.isAll || selectedClinicSet.has(Number(lead.clinica_id));
       const target = belongsToSelectedScope ? scopedCrmLeads : otherClinicCrmLeads;
       target.set(key, (target.get(key) || 0) + count);
@@ -2748,13 +2712,16 @@ async function aggregateSocialOrganic(scope, range, marketingState = null) {
   };
 }
 
-async function aggregateWebPages(scope, range, seoPages = []) {
+async function aggregateWebPages(scope, range, seoPages = [], loadedLeads = null) {
+  const leads = loadedLeads || await loadReportLeads(scope, range);
+  const excludedIds = [...new Set(leads.filter(lead => !isCommercialLead(lead)).map(lead => lead.id))];
   const replacements = {
     startTs: range.startSql,
     endTs: range.endExclusiveSql,
     startDate: range.startLabel,
     endDate: range.endLabel,
     limit: 5,
+    ...(excludedIds.length ? { patientCareLeadIds: excludedIds } : {}),
   };
   const leadClinicSql = scopedRawSql('clinica_id', scope, replacements, 'leadPageClinicIds');
   const formClinicSql = scopedRawSql('clinic_id', scope, replacements, 'formPageClinicIds');
@@ -2784,7 +2751,7 @@ async function aggregateWebPages(scope, range, seoPages = []) {
              UNION ALL` : ''}
              SELECT COALESCE(NULLIF(page_url, ''), NULLIF(landing_url, ''), 'Sin página') AS url,
                     0 AS visits,
-                    COUNT(*) AS leads,
+                    ${excludedIds.length ? 'SUM(CASE WHEN id IN (:patientCareLeadIds) THEN 0 ELSE 1 END)' : 'COUNT(*)'} AS leads,
                     SUM(CASE WHEN source = 'call_click' THEN 1 ELSE 0 END) AS clicks_tel,
                     0 AS clicks_wa,
                     0 AS whatsapp_confirmados,
@@ -2977,6 +2944,8 @@ function buildChannels(leadChannels, spendByKey) {
     return {
       name: label.name,
       icon: label.icon,
+      patient_context_breakdown: stats.patient_context_breakdown || patientContextBreakdown([]),
+      patient_context_explanation: PATIENT_CONTEXT_EXPLANATION,
       leads: stats.leads,
       citas: stats.citas,
       acudieron: stats.acudieron,
@@ -3926,6 +3895,10 @@ async function buildOverviewPayload({ scope, range, sourceChecks = [] }) {
   const marketingState = await resolveReportMarketingState(scope);
   const paidAttributionCoverage = await resolvePaidAttributionCoverage(scope);
   const paidCoverageSummary = buildPaidAttributionCoverageSummary(range, paidAttributionCoverage);
+  const [currentLeadRows, previousLeadRows] = await Promise.all([loadReportLeads(scope, range), loadReportLeads(scope, range.previous)]);
+  const [currentAppointmentRows, previousAppointmentRows] = await Promise.all([
+    loadCommercialAppointments(scope, range, currentLeadRows), loadCommercialAppointments(scope, range.previous, previousLeadRows),
+  ]);
 
   const [
     leads,
@@ -3948,12 +3921,12 @@ async function buildOverviewPayload({ scope, range, sourceChecks = [] }) {
     businessProfile,
     firstParty,
   ] = await Promise.all([
-    aggregateLeads(scope, range),
-    aggregateLeads(scope, range.previous),
-    aggregateLeadSeries(scope, range),
-    countAppointments(scope, range),
-    countAppointments(scope, range.previous),
-    aggregateAppointmentSeries(scope, range),
+    aggregateLeads(scope, range, currentLeadRows),
+    aggregateLeads(scope, range.previous, previousLeadRows),
+    aggregateLeadSeries(scope, range, currentLeadRows),
+    countAppointments(scope, range, currentAppointmentRows),
+    countAppointments(scope, range.previous, previousAppointmentRows),
+    aggregateAppointmentSeries(scope, range, currentAppointmentRows),
     aggregateSpendSeries(scope, range, marketingState, paidAttributionCoverage.start),
     aggregateForms(scope, range),
     aggregateWhatsappWebOrigins(scope, range),
@@ -3969,11 +3942,13 @@ async function buildOverviewPayload({ scope, range, sourceChecks = [] }) {
     webEventsService.getFirstPartySummary(scope, range),
   ]);
 
-  const webPages = await aggregateWebPages(scope, range, seo.pages);
+  const webPages = await aggregateWebPages(scope, range, seo.pages, currentLeadRows);
 
   const currentSpend = money(googleAds.totals.spend + metaAds.totals.spend);
   const previousSpend = money(previousGoogleAds.totals.spend + previousMetaAds.totals.spend);
 
+  // Keep the pre-existing overview policy: cohort/status counts and appointments
+  // created in the period are independent, and their maximum feeds the KPI.
   const citas = Math.max(leads.totals.citas, appointments.creadas);
   const acudieron = Math.max(leads.totals.acudieron, appointments.completadas);
   const convertidos = leads.totals.convertidos;
@@ -4015,6 +3990,12 @@ async function buildOverviewPayload({ scope, range, sourceChecks = [] }) {
       spend: spendSeries,
     }
   );
+
+  for (const kpi of kpis) {
+    kpi.patient_context_breakdown = leads.patient_context_breakdown;
+    kpi.previous_patient_context_breakdown = previousLeads.patient_context_breakdown;
+    kpi.patient_context_explanation = PATIENT_CONTEXT_EXPLANATION;
+  }
 
   const funnelBase = [
     { id: 'visitas', label: firstParty.pageviews ? 'Visitas web propias' : (ga.sessions ? 'Sesiones / visitas' : 'Visitas / clicks'), value: visitsOrClicks, color: '#6366f1', helpText: firstParty.pageviews ? 'Pageviews capturados por ClinicaClick Analytics con consentimiento.' : 'Sesiones GA4 si existen; si no, clicks medidos desde SEO y Ads.' },
@@ -4116,6 +4097,9 @@ async function buildOverviewPayload({ scope, range, sourceChecks = [] }) {
     sources,
     sync,
     kpis,
+    patient_context_breakdown: leads.patient_context_breakdown,
+    previous_patient_context_breakdown: previousLeads.patient_context_breakdown,
+    patient_context_explanation: PATIENT_CONTEXT_EXPLANATION,
     funnel,
     channels,
     webSummary,
@@ -4236,6 +4220,12 @@ exports.__testing = {
   buildPaidAttributionCoverageSummary,
   googleAdsRemoteFactGroup: GOOGLE_ADS_REMOTE_FACT_GROUP,
   aggregateLeads,
+  loadReportLeads,
+  aggregateLeadSeries,
+  loadCommercialAppointments,
+  countAppointments,
+  aggregateAppointmentSeries,
+  aggregateWebPages,
   aggregateGoogleAds,
   aggregateSpendSeries,
   channelLabel,

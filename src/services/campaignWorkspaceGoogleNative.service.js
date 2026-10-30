@@ -61,6 +61,7 @@ async function nativeLifecycleContext(input, dependencies = {}) {
     'source', 'source_detail', 'external_source', 'external_id', 'google_ads_customer_id', 'google_ads_campaign_id',
     'consentimiento_canal', 'status_lead', 'archived_at', 'gclid', 'email', 'telefono'], transaction });
   if (!lead || Number(lead.clinica_id) !== Number(input.clinicId) || lead.archived_at || lead.status_lead === 'descartado') fail('workspace_google_native_lead_unavailable');
+  if (await require('../lib/lead-request-purpose').isPatientCareRequest(lead, { models, transaction })) fail('workspace_patient_care_request');
   const identity = await resolveNativeGoogleLeadIdentity({ models, lead, transaction });
   if (!identity) fail('workspace_google_native_identity_required');
   const appointments = await models.CitaPaciente.findAll({ where: { lead_intake_id: lead.id, clinica_id: Number(input.clinicId),

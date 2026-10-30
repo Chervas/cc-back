@@ -9,8 +9,12 @@ const KEY_PREFIX = 'temporary-patient-direction:';
 const plain = row => row?.get ? row.get({ plain: true }) : row;
 const scoped = row => row?.channel === 'whatsapp' && TEMPORARY_DIRECTOR_CLINICS.includes(Number(row.clinic_id));
 const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0;
+const terminalLead = lead => lead.archived_at || ['descartado', 'acudio_cita', 'convertido'].includes(lead.status_lead);
+const abandonedLead = lead => lead.archived_at || lead.status_lead === 'descartado';
 
-function createTemporaryPatientDirectionService(db, { notify = () => {}, warn = () => {}, now = () => new Date() } = {}) {
+function createTemporaryPatientDirectionService(db, {
+  notify = () => {}, warn = () => {}, now = () => new Date(), patientContextService = null, patientAttentionService = null,
+} = {}) {
   async function safe(work) {
     try { return await work(); }
     catch (error) { warn(error?.original?.code || error?.code || 'temporary_attention_unavailable'); return null; }
@@ -23,18 +27,107 @@ function createTemporaryPatientDirectionService(db, { notify = () => {}, warn = 
     return String(user?.email_usuario || '').trim().toLowerCase() === TEMPORARY_FOCUSED_ACCOUNT.email ? user : null;
   }
 
-  function eventWhere(conversationIds) {
-    return { conversation_id: { [Op.in]: conversationIds }, message_type: 'event',
+  function eventWhere(conversationIds, leadIds = []) {
+    return { [Op.or]: [{ conversation_id: { [Op.in]: conversationIds } },
+      ...(leadIds.length ? [{ 'metadata.lead_intake_id': { [Op.in]: leadIds } }] : [])], message_type: 'event',
       automation_delivery_key: { [Op.like]: `${KEY_PREFIX}%` } };
   }
 
-  function stateFrom(events, conversation) {
+  function stateFrom(events, conversation, lead = null) {
     const valid = events.filter(row => row.metadata?.source === SOURCE
       && Number(row.metadata.clinic_id) === Number(conversation.clinic_id)
-      && Number(row.metadata.director_user_id) === TEMPORARY_FOCUSED_ACCOUNT.userId);
+      && Number(row.metadata.director_user_id) === TEMPORARY_FOCUSED_ACCOUNT.userId
+      && (positive(row.metadata.lead_intake_id)
+        ? Number(row.metadata.lead_intake_id) === Number(lead?.id)
+        : Number(row.conversation_id) === Number(conversation.id)
+          // Legacy marks have no request identity. Only inherit marks occurring
+          // during this request; an older handoff must not consume a new lead.
+          && (!lead || !lead.created_at || !row.sent_at
+            || new Date(row.sent_at) >= new Date(lead.created_at))));
     const start = valid.find(row => row.metadata.kind === 'temporary_patient_direction_started');
     const handoff = valid.find(row => row.metadata.kind === 'temporary_patient_direction_handoff');
     return { start, handoff };
+  }
+
+  function contexts() {
+    if (!patientContextService) patientContextService = require('./leadPatientContext.service').createLeadPatientContextService(db);
+    return patientContextService;
+  }
+
+  function attentionService() {
+    // Lazy: the attention service imports the temporary scope constants too.
+    if (!patientAttentionService) patientAttentionService = require('./leadPatientAttention.service').createLeadPatientAttentionService(db);
+    return patientAttentionService;
+  }
+
+  function requestFrom(lead, context, attention = {}, otherHuman = false) {
+    context = context || { relationship: 'unknown', patient_id: null, clinic_id: null,
+      clinic_name: null, same_clinic: null, captured_at: null, reason: 'context_unavailable', request_kind: 'commercial' };
+    const decision = ['director', 'clinic'].includes(attention.decision) ? attention.decision : null;
+    return { lead, context, decision, attention,
+      review: ['existing_patient', 'possible_patient'].includes(context.relationship),
+      blocked: Boolean((lead.asignado_a && Number(lead.asignado_a) !== TEMPORARY_FOCUSED_ACCOUNT.userId)
+        || otherHuman || (decision === 'director' && Number(attention.director_user_id) !== TEMPORARY_FOCUSED_ACCOUNT.userId)),
+    };
+  }
+
+  async function requestContext(conversation, { transaction = null, lead = null } = {}) {
+    if (!positive(conversation.lead_id)) return null;
+    lead = lead || plain(await db.LeadIntake.findByPk(conversation.lead_id, { transaction }));
+    if (!lead || Number(lead.clinica_id) !== Number(conversation.clinic_id)) return { blocked: true };
+    const attention = (await attentionService().decisions([Number(lead.id)], { transaction })).get(Number(lead.id));
+    let context;
+    try {
+      context = await contexts().get(lead, { transaction });
+    } catch (error) {
+      warn(error?.code || 'lead_patient_context_unavailable');
+    }
+    const otherHuman = db.LeadContactAttempt && await db.LeadContactAttempt.findOne({
+      where: { lead_intake_id: lead.id, usuario_id: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: TEMPORARY_FOCUSED_ACCOUNT.userId }] } },
+      attributes: ['id'], transaction,
+    });
+    return requestFrom(lead, context, attention, otherHuman);
+  }
+
+  async function requestContexts(rows) {
+    const ids = [...new Set(rows.map(row => Number(row.lead_id)).filter(positive))];
+    if (!ids.length) return new Map();
+    const leads = (await db.LeadIntake.findAll({ where: { id: { [Op.in]: ids } }, raw: true })).map(plain);
+    const byId = new Map(leads.map(lead => [Number(lead.id), lead]));
+    const byContext = new Map();
+    for (const row of rows) {
+      const lead = byId.get(Number(row.lead_id));
+      if (lead && Number(lead.clinica_id) === Number(row.clinic_id) && row.patient_context) {
+        byContext.set(Number(lead.id), row.patient_context);
+      }
+    }
+    const missing = leads.filter(lead => !byContext.has(Number(lead.id)));
+    if (missing.length) {
+      try {
+        for (const lead of await contexts().enrich(missing, { transaction: null })) {
+          byContext.set(Number(lead.id), lead.patient_context);
+        }
+      } catch (error) { warn(error?.code || 'lead_patient_context_unavailable'); }
+    }
+    const decisions = await attentionService().decisions(ids, { transaction: null });
+    const contacts = db.LeadContactAttempt ? await db.LeadContactAttempt.findAll({ where: {
+      lead_intake_id: { [Op.in]: ids },
+      usuario_id: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: TEMPORARY_FOCUSED_ACCOUNT.userId }] },
+    }, attributes: ['lead_intake_id'], raw: true }) : [];
+    const otherHumans = new Set(contacts.map(row => Number(plain(row).lead_intake_id)));
+    return new Map(leads.map(lead => [Number(lead.id), requestFrom(lead,
+      byContext.get(Number(lead.id)), decisions.get(Number(lead.id)), otherHumans.has(Number(lead.id)))]));
+  }
+
+  function view(user, request, start = null, appointment = null) {
+    const pending = request?.review && request.decision !== 'director';
+    return { id: start?.id || null, status: pending ? 'pending_review' : 'active', mode: 'temporary_clinic_phone',
+      director_user_id: user.id_usuario, director_name: user.nombre || 'Graci', director_avatar: user.avatar || null,
+      lead_id: request?.lead.id || null, patient_context: request?.context || null,
+      request_kind: request?.attention.request_kind || request?.context.request_kind || 'commercial',
+      decision: request?.decision || null, first_appointment_id: pending ? null : appointment?.id_cita || null,
+      started_at: pending ? null : start?.metadata.started_at || request?.attention.decided_at || null,
+      start_reason: pending ? 'lead_patient_review' : start?.metadata.start_reason || 'lead_patient_decision' };
   }
 
   async function provenance(conversation, actorUserId, transaction) {
@@ -72,13 +165,21 @@ function createTemporaryPatientDirectionService(db, { notify = () => {}, warn = 
     return message ? { reason: 'human_contact', since: message.sent_at || message.createdAt || now() } : null;
   }
 
-  async function firstAppointment(conversation, since, transaction) {
-    const identity = positive(conversation.patient_id) ? { paciente_id: conversation.patient_id }
+  async function firstAppointment(conversation, since, transaction, request) {
+    let identity = positive(conversation.patient_id) ? { paciente_id: conversation.patient_id }
       : positive(conversation.lead_id) ? { lead_intake_id: conversation.lead_id } : null;
+    if (request?.review) {
+      const patientId = conversation.patient_id || request.context.patient_id;
+      if (!positive(patientId) || (positive(request.context.patient_id)
+          && Number(patientId) !== Number(request.context.patient_id))) return null;
+      identity = { paciente_id: patientId, lead_intake_id: request.lead.id };
+      if (new Date(request.lead.created_at) > new Date(since)) since = request.lead.created_at;
+    }
     if (!identity) return null;
     return plain(await db.CitaPaciente.findOne({ where: {
       clinica_id: conversation.clinic_id, ...identity,
-      source_system: null, [Op.and]: [{ [Op.or]: [{ es_provisional: false }, { es_provisional: null }] }],
+      source_system: null, [Op.and]: [{ [Op.or]: [{ es_provisional: false }, { es_provisional: null }] },
+        ...(request?.review ? [{ [Op.or]: [{ care_legacy_attendance: false }, { care_legacy_attendance: null }] }] : [])],
       estado: { [Op.notIn]: ['cancelada', 'no_asistio'] },
       inicio: { [Op.gte]: new Date(since) },
     }, order: [['inicio', 'ASC'], ['id_cita', 'ASC']], transaction }));
@@ -90,15 +191,25 @@ function createTemporaryPatientDirectionService(db, { notify = () => {}, warn = 
     if (!user) return null;
     const changed = [];
     const result = await db.sequelize.transaction(async transaction => {
+      // Match decide(): chat before lead, with no snapshot reads before both
+      // locks. The subsequent audit read sees the decision that just committed.
       const conversation = plain(await db.Conversation.findByPk(conversationId, { transaction, lock: transaction.LOCK.UPDATE }));
-      if (!scoped(conversation)) return null;
-      let { start, handoff } = stateFrom((await db.Message.findAll({ where: eventWhere([conversation.id]),
-        order: [['id', 'ASC']], transaction })).map(plain), conversation);
-      if (handoff) return null;
+      if (!scoped(conversation)
+          || (conversation.assignee_id && Number(conversation.assignee_id) !== TEMPORARY_FOCUSED_ACCOUNT.userId)) return null;
+      const lead = positive(conversation.lead_id) && db.LeadIntake
+        ? plain(await db.LeadIntake.findByPk(conversation.lead_id, { transaction, lock: transaction.LOCK.UPDATE })) : null;
+      const request = await requestContext(conversation, { transaction, lead });
+      let { start, handoff } = stateFrom((await db.Message.findAll({ where: eventWhere([conversation.id], lead ? [lead.id] : []),
+        order: [['id', 'ASC']], transaction })).map(plain), conversation, lead);
+      if (handoff || request?.blocked || request?.decision === 'clinic'
+          || (request && (abandonedLead(request.lead) || !start && terminalLead(request.lead)))) return null;
+      if (request?.review && request.decision !== 'director') return view(user, request);
       if (!start) {
-        const origin = await provenance(conversation, actorUserId, transaction);
+        const origin = request?.decision === 'director'
+          ? { reason: 'lead_patient_decision', since: request.lead.created_at || now() }
+          : await provenance(conversation, actorUserId, transaction);
         if (!origin) return null;
-        if (origin.reason === 'lead_received') {
+        if (request) {
           await db.LeadIntake.update({ asignado_a: TEMPORARY_FOCUSED_ACCOUNT.userId }, { where: {
             id: conversation.lead_id, clinica_id: conversation.clinic_id, asignado_a: null,
           }, transaction });
@@ -107,29 +218,29 @@ function createTemporaryPatientDirectionService(db, { notify = () => {}, warn = 
         }
         start = plain(await db.Message.create({ conversation_id: conversation.id, sender_id: null,
           direction: 'outbound', message_type: 'event', status: 'sent', sent_at: now(),
-          automation_delivery_key: `${KEY_PREFIX}start:${conversation.id}`,
+          automation_delivery_key: request ? `${KEY_PREFIX}start:lead:${conversation.clinic_id}:${request.lead.id}` : `${KEY_PREFIX}start:${conversation.id}`,
           content: `Esta conversación está siendo atendida por nuestra directora de pacientes humana, ${user.nombre || 'Graci'}.`,
           metadata: { source: SOURCE, kind: 'temporary_patient_direction_started', clinic_id: conversation.clinic_id,
             director_user_id: user.id_usuario, director_name: user.nombre || 'Graci',
+            lead_intake_id: request?.lead.id || null, patient_id: conversation.patient_id || request?.context.patient_id || null,
             start_reason: origin.reason, started_at: new Date(origin.since).toISOString() },
         }, { transaction }));
         changed.push(start);
       }
-      const appointment = await firstAppointment(conversation, start.metadata.started_at, transaction);
+      const appointment = await firstAppointment(conversation, start.metadata.started_at, transaction, request);
       if (appointment && (require('../lib/status-catalog').hasAttendedAppointment(appointment) || careState(appointment).arrived_at)) {
         const event = await db.Message.create({ conversation_id: conversation.id, sender_id: null,
           direction: 'outbound', message_type: 'event', status: 'sent', sent_at: now(),
-          automation_delivery_key: `${KEY_PREFIX}handoff:${conversation.id}`,
+          automation_delivery_key: request ? `${KEY_PREFIX}handoff:lead:${conversation.clinic_id}:${request.lead.id}` : `${KEY_PREFIX}handoff:${conversation.id}`,
           content: 'Desde este momento, este paciente pasa a ser atendido por tu equipo.\nMotivo: el paciente ya ha acudido a su cita.',
           metadata: { source: SOURCE, kind: 'temporary_patient_direction_handoff', clinic_id: conversation.clinic_id,
-            director_user_id: user.id_usuario, director_name: user.nombre || 'Graci', appointment_id: appointment.id_cita },
+            director_user_id: user.id_usuario, director_name: user.nombre || 'Graci', appointment_id: appointment.id_cita,
+            lead_intake_id: request?.lead.id || null, patient_id: appointment.paciente_id || null },
         }, { transaction });
         changed.push(plain(event));
         return null;
       }
-      return { id: start.id, status: 'active', mode: 'temporary_clinic_phone', director_user_id: user.id_usuario,
-        director_name: user.nombre || 'Graci', director_avatar: user.avatar || null, first_appointment_id: appointment?.id_cita || null,
-        started_at: start.metadata.started_at, start_reason: start.metadata.start_reason };
+      return view(user, request, start, appointment);
     });
     for (const event of changed) await safe(() => notify(event));
     return result;
@@ -187,17 +298,25 @@ function createTemporaryPatientDirectionService(db, { notify = () => {}, warn = 
     const result = await safe(async () => {
       const user = await director();
       if (!user) return rows;
-      const events = (await db.Message.findAll({ where: eventWhere(scopedRows.map(row => row.id)),
-        attributes: ['id', 'conversation_id', 'metadata'], order: [['id', 'ASC']], raw: true })).map(plain);
-      return rows.map(row => {
-        if (!scoped(row) || row.patient_direction) return row;
-        const state = stateFrom(events.filter(event => Number(event.conversation_id) === Number(row.id)), row);
-        return { ...row, patient_direction: state.start && !state.handoff ? {
-          id: state.start.id, status: 'active', mode: 'temporary_clinic_phone', director_user_id: user.id_usuario,
-          director_name: user.nombre || 'Graci', director_avatar: user.avatar || null,
-          started_at: state.start.metadata.started_at, start_reason: state.start.metadata.start_reason,
-        } : null };
-      });
+      const events = (await db.Message.findAll({ where: eventWhere(scopedRows.map(row => row.id),
+        scopedRows.map(row => Number(row.lead_id)).filter(positive)),
+      attributes: ['id', 'conversation_id', 'metadata', 'sent_at'], order: [['id', 'ASC']], raw: true })).map(plain);
+      const requests = await requestContexts(scopedRows);
+      const enriched = [];
+      for (const row of rows) {
+        if (!scoped(row)) { enriched.push(row); continue; }
+        let request = positive(row.lead_id) ? requests.get(Number(row.lead_id)) : null;
+        if (positive(row.lead_id) && (!request || Number(request.lead.clinica_id) !== Number(row.clinic_id))) request = { blocked: true };
+        const state = stateFrom(events, row, request?.lead);
+        let direction = row.patient_direction || null;
+        if (state.handoff || request?.blocked || request?.decision === 'clinic'
+            || (row.assignee_id && Number(row.assignee_id) !== TEMPORARY_FOCUSED_ACCOUNT.userId)
+            || (request && (abandonedLead(request.lead) || !state.start && terminalLead(request.lead)))) direction = null;
+        else if (request?.review || request?.decision === 'director') direction = view(user, request, state.start);
+        else if (!direction && state.start) direction = view(user, request, state.start);
+        enriched.push({ ...row, patient_direction: direction });
+      }
+      return enriched;
     });
     return result || rows;
   }

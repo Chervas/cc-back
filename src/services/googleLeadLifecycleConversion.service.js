@@ -129,6 +129,10 @@ async function maybeUploadLeadLifecycleConversion({
     return { sent: false, reason: 'lead_event_required' };
   }
 
+  if (await require('../lib/lead-request-purpose').isPatientCareRequest(lead, { models: dependencies.models })) {
+    return { sent: false, reason: 'patient_care_request' };
+  }
+
   if (lead.external_source === 'google_lead_form') {
     const native = dependencies.nativeGoogleUpload
       || require('./campaignWorkspaceGoogleNative.service').maybeUploadNativeGoogleLifecycleConversion;

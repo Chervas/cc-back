@@ -1,7 +1,10 @@
 'use strict';
 
-const { Op } = require('sequelize');
-const { accountId, accountAliases, ownsCampaignAccount, mappingIdentity, reportPeriod, visibleCampaigns, aggregateReport, withFreshGoogleCampaignStates } = require('./campaignWorkspaceReport.service');
+const { Op, json, where } = require('sequelize');
+const { accountId, accountAliases, ownsCampaignAccount, mappingIdentity, reportPeriod, visibleCampaigns, aggregateReport, leadCampaign, TIME_ZONE, withFreshGoogleCampaignStates } = require('./campaignWorkspaceReport.service');
+const { formatDateLocal } = require('../lib/availability-calendar');
+const { jsonObject: patientContextObject, readContextSnapshot, readAttentionKind, unknownContext, plain,
+  LEAD_PATIENT_CONTEXT_TYPE, LEAD_PATIENT_ATTENTION_TYPE } = require('../lib/lead-patient-context');
 const { assessConsentMeasurementReadiness, resolveWebMeasurementMarketingState } = require('./campaignMeasurementReadiness.service');
 const { buildWorkspaceHealth } = require('./campaignWorkspaceHealth.service');
 const { campaignIncluded } = require('./campaignWorkspaceSettings.service');
@@ -16,6 +19,99 @@ const { loadGoogleSignalEvidence } = require('./campaignWorkspaceGoogleSignalEvi
 const LEAD_FIELDS = ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm_campaign', 'source_detail', 'google_ads_customer_id', 'google_ads_campaign_id', 'external_source', 'external_id', 'created_at'];
 const GOOGLE_MAPPING_FIELDS = ['id', 'customerId', 'descriptiveName', 'currencyCode', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'lastSyncedAt'];
 const META_MAPPING_FIELDS = ['id', 'metaAssetId', 'metaAssetName', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'ad_account_refreshed_at', 'additionalData'];
+
+const PATIENT_CONTEXT_EXPLANATION = 'Los leads comerciales suman nuevos contactos, pacientes existentes, posibles pacientes y desconocidos. Las gestiones de paciente (patient_care) se muestran aparte y se excluyen de leads y citas comerciales. Sin snapshot histórico, la relación es desconocida; una nueva solicitud comercial de un paciente existente no es un nuevo contacto. La atribución conserva el vínculo lead → cita → presupuesto.';
+const CONTEXT_SEGMENTS = Object.freeze({ new_contact: 'new_contacts', existing_patient: 'existing_patients',
+  possible_patient: 'possible_patients', unknown: 'unknown' });
+const emptyPatientContextBreakdown = () => ({ new_contacts: 0, existing_patients: 0, possible_patients: 0, unknown: 0, patient_care: 0 });
+
+function reportingPatientContext(lead) {
+  const value = patientContextObject(lead.patient_context);
+  // The core's legacy preview can contain a derived relationship. It is useful
+  // for attention, but is never a frozen acquisition fact for reporting.
+  const snapshot = value?.persisted === false ? null : readContextSnapshot({ version: 1, ...value });
+  const attention = patientContextObject(lead.patient_attention);
+  const relationship = snapshot?.relationship || 'unknown';
+  const requestKind = readAttentionKind({ version: 1, ...attention })
+    || snapshot?.request_kind || 'commercial';
+  return { relationship, request_kind: requestKind };
+}
+
+const isCommercialLead = lead => reportingPatientContext(lead).request_kind !== 'patient_care';
+
+function patientContextBreakdown(leads) {
+  const result = emptyPatientContextBreakdown();
+  const seen = new Set();
+  for (const lead of leads) {
+    const key = `${lead.clinica_id}:${lead.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const context = reportingPatientContext(lead);
+    result[context.request_kind === 'patient_care' ? 'patient_care' : CONTEXT_SEGMENTS[context.relationship]]++;
+  }
+  return result;
+}
+
+// Read only the two server-owned audit keys, never form payloads or a patient's current history.
+// Missing snapshots remain unknown even if the lead now has a linked patient.
+async function loadReportingPatientContexts({ models, leads, transaction = null }) {
+  const result = leads.map(lead => ({ ...plain(lead) }));
+  if (!result.length || !models.LeadAttributionAudit) return result;
+  const byId = new Map(result.map(lead => [String(lead.id), []]));
+  const ids = [...byId.keys()];
+  for (let offset = 0; offset < ids.length; offset += 500) {
+    const rows = await models.LeadAttributionAudit.findAll({ where: {
+      lead_intake_id: { [Op.in]: ids.slice(offset, offset + 500) },
+      [Op.and]: [where(json('attribution_steps.type'), { [Op.in]: [LEAD_PATIENT_CONTEXT_TYPE, LEAD_PATIENT_ATTENTION_TYPE] })],
+    }, attributes: ['id', 'lead_intake_id', [json('attribution_steps.type'), 'context_type'],
+      [json(`attribution_steps.${LEAD_PATIENT_CONTEXT_TYPE}`), 'patient_context'],
+      [json(`attribution_steps.${LEAD_PATIENT_ATTENTION_TYPE}`), 'patient_attention']],
+    order: [['id', 'ASC']], raw: true, transaction });
+    for (const row of rows) byId.get(String(row.lead_intake_id))?.push(row);
+  }
+  for (const lead of result) {
+    const rows = byId.get(String(lead.id));
+    // Match core's immutable first snapshot. Repeated audit receipts never
+    // reclassify an acquisition from today's patient state.
+    const snapshots = rows.filter(row => row.context_type === LEAD_PATIENT_CONTEXT_TYPE).sort((a, b) => Number(a.id) - Number(b.id));
+    if (snapshots.length) lead.patient_context = readContextSnapshot(snapshots[0].patient_context)
+      || unknownContext('snapshot_invalid', null, true);
+    const decisions = rows.filter(row => row.context_type === LEAD_PATIENT_ATTENTION_TYPE)
+      .map(row => ({ id: Number(row.id), value: patientContextObject(row.patient_attention) }))
+      .filter(({ value }) => readAttentionKind(value)
+        && (value.clinic_id == null || Number(value.clinic_id) === Number(lead.clinica_id)))
+      .sort((a, b) => b.id - a.id || Number(b.value.request_kind === 'patient_care') - Number(a.value.request_kind === 'patient_care'));
+    if (decisions.length) lead.patient_attention = decisions[0].value;
+  }
+  return result;
+}
+
+function aggregateCommercialWorkspace(input) {
+  const { leads, campaigns, period } = input;
+  const report = aggregateReport({ ...input, leads: leads.filter(isCommercialLead) });
+  const periodLeads = { current: [], previous: [] };
+  const campaignLeads = new Map(campaigns.map(campaign => [campaign.id, { current: [], previous: [] }]));
+  for (const lead of leads) {
+    const date = new Date(lead.created_at);
+    if (!Number.isFinite(+date)) continue;
+    const day = formatDateLocal(date, TIME_ZONE);
+    if (day < period.previousStart || day > period.end) continue;
+    const target = day < period.start ? 'previous' : 'current';
+    const key = leadCampaign(lead, campaigns);
+    if (!key) continue;
+    campaignLeads.get(key)[target].push(lead);
+    periodLeads[target].push(lead);
+  }
+  for (const target of ['current', 'previous']) {
+    report[target].patient_context_breakdown = patientContextBreakdown(periodLeads[target]);
+    for (const row of report.rows) row[target].patient_context_breakdown = patientContextBreakdown(campaignLeads.get(row.campaign.id)[target]);
+  }
+  report.patient_context_breakdown = report.current.patient_context_breakdown;
+  report.previous_patient_context_breakdown = report.previous.patient_context_breakdown;
+  report.patient_context_explanation = PATIENT_CONTEXT_EXPLANATION;
+  for (const row of report.rows) row.patient_context_explanation = PATIENT_CONTEXT_EXPLANATION;
+  return report;
+}
 
 async function loadWorkspaceInventory({ models, scope, transaction = null, accountReference = null }) {
   if (!scope.clinicIds?.length) throw Object.assign(new Error('empty_scope'), { status: 400 });
@@ -149,7 +245,7 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
       date: row.date, segment: [row.publisher_platform || '', row.platform_position || ''], spend: Number(row.spend), updatedAt: row.updated_at });
   }
   const timeWhere = { [Op.gte]: period.from, [Op.lt]: period.until };
-  const leads = await models.LeadIntake.findAll({ where: { clinica_id: { [Op.in]: scope.clinicIds }, created_at: timeWhere },
+  let leads = await models.LeadIntake.findAll({ where: { clinica_id: { [Op.in]: scope.clinicIds }, created_at: timeWhere },
     attributes: LEAD_FIELDS, raw: true });
   const appointments = await models.CitaPaciente.findAll({ where: { clinica_id: { [Op.in]: scope.clinicIds },
     lead_intake_id: { [Op.ne]: null }, created_at: timeWhere },
@@ -160,8 +256,13 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
     clinica_id: { [Op.in]: scope.clinicIds } }, attributes: LEAD_FIELDS, raw: true }));
   const ads = await loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere });
   await attachLeadAdvertisingIdentities({ models, leads });
-  const budgetAttribution = await loadBudgetCampaignAttribution({ models, campaigns, ads, period });
-  const metrics = aggregateReport({ campaigns, facts, leads, appointments, ads, budgetAttribution, period, now });
+  leads = await loadReportingPatientContexts({ models, leads });
+  // The budget reader still follows its explicit lead/appointment chain. A care lead
+  // cannot supply a commercial origin, including when the lead predates the report.
+  const commercialModels = { ...models, LeadIntake: { findAll: async options =>
+    (await loadReportingPatientContexts({ models, leads: await models.LeadIntake.findAll(options) })).filter(isCommercialLead) } };
+  const budgetAttribution = await loadBudgetCampaignAttribution({ models: commercialModels, campaigns, ads, period });
+  const metrics = aggregateCommercialWorkspace({ campaigns, facts, leads, appointments, ads, budgetAttribution, period, now });
   const evidence = await loadWebEvidence({ models, campaigns, selectedClinics, groups, scope, now });
   const signals = await loadMetaSignalEvidence({ models, campaigns, selectedClinics, now });
   for (const [campaignId, delivery] of signals) evidence.set(campaignId, { ...evidence.get(campaignId), signals: delivery });
@@ -170,7 +271,7 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   const optimization = await require('./campaignWorkspaceOptimizationHistory.service').loadOptimizationIncidentEvidence({ models, campaigns });
   for (const [campaignId, pending] of optimization) evidence.set(campaignId, { ...evidence.get(campaignId), optimization: pending });
   const report = buildWorkspaceHealth(metrics, evidence, now);
-  const recommendations = require('./campaignWorkspaceRecommendations.service').buildAdCostRecommendations({ report, facts, ads, leads, evidence, now });
+  const recommendations = require('./campaignWorkspaceRecommendations.service').buildAdCostRecommendations({ report, facts, ads, leads: leads.filter(isCommercialLead), evidence, now });
   report.recommendations = recommendations;
   for (const block of report.healthBlocks) block.recommendations = recommendations.filter(item => item.category === block.id);
   return { success: true, version: 1, scope: { clinicIds: scope.clinicIds, groupId: scope.groupId || null },
@@ -268,4 +369,6 @@ async function loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere 
   return ads;
 }
 
-module.exports = { loadCampaignWorkspace, loadWorkspaceInventory, loadWorkspaceAds, loadWebEvidence, selectedByWorkspace, workspaceAccounts };
+module.exports = { loadCampaignWorkspace, loadWorkspaceInventory, loadWorkspaceAds, loadWebEvidence, selectedByWorkspace, workspaceAccounts,
+  loadReportingPatientContexts, reportingPatientContext, isCommercialLead, patientContextBreakdown,
+  PATIENT_CONTEXT_EXPLANATION, aggregateCommercialWorkspace };

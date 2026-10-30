@@ -694,11 +694,11 @@ const redactLeadForPrivacy = (lead) => {
   });
 };
 
-const protectLeadRowsForRequest = async (req, rows = []) => Promise.all(rows.map(async (lead) => (
-  await canAccessLeadFeature(req, lead, 'leads.sensitive.view')
-    ? toPlain(lead)
-    : redactLeadForPrivacy(lead)
-)));
+const protectLeadRowsForRequest = async (req, rows = []) => {
+  const enriched = await require('../services/leadPatientAttention.service').enrich(rows, { actorId: req.userData?.userId });
+  return Promise.all(enriched.map(async lead => await canAccessLeadFeature(req, lead, 'leads.sensitive.view')
+    ? toPlain(lead) : redactLeadForPrivacy(lead)));
+};
 
 const canSearchSensitiveLeadFields = async (query, userId) => {
   const actorId = parseInteger(userId);
@@ -2527,7 +2527,8 @@ const enrichLeadsForUi = async (leadRows = []) => {
   const withAttribution = await enrichLeadsWithAttributionView(leadRows);
   const withPatientMatches = await enrichLeadsWithPatientMatches(withAttribution);
   const withAppointments = await enrichLeadsWithLinkedAppointments(withPatientMatches);
-  return enrichLeadsWithConversationState(withAppointments);
+  const withConversations = await enrichLeadsWithConversationState(withAppointments);
+  return require('../services/leadPatientContext.service').enrich(withConversations);
 };
 
 const resolveClinicIdsForSocket = async ({ clinicId, groupId }) => {
@@ -6733,6 +6734,26 @@ exports.getLeadById = asyncHandler(async (req, res) => {
   res.status(200).json(protectedLead || redactLeadForPrivacy(out));
 });
 
+exports.decidePatientAttention = asyncHandler(async (req, res) => {
+  const id = parseInteger(req.params.id);
+  const lead = id && await LeadIntake.findByPk(id);
+  if (!lead) return res.status(404).json({ error: 'lead_not_found' });
+  if (!(await ensureLeadFeatureAccess(req, res, lead, 'leads.manage'))) return;
+  try {
+    await require('../services/leadPatientAttention.service').decide({
+      leadId: id, actorId: req.userData?.userId,
+      decision: req.body?.decision, requestKind: req.body?.request_kind,
+    });
+    // The GET returns the same ACL-filtered DTO used by both surfaces.
+    return exports.getLeadById(req, res);
+  } catch (error) {
+    const status = error.status >= 400 && error.status < 500 ? error.status : 503;
+    return res.status(status).json({ error: status === 503 ? 'patient_attention_unavailable' : error.code,
+      message: status === 409 ? 'La solicitud ha cambiado. Actualiza la conversación antes de decidir.'
+        : status === 403 ? 'No tienes permiso para gestionar esta solicitud.' : 'No se ha podido guardar la decisión.' });
+  }
+});
+
 exports.getLeadActivity = asyncHandler(async (req, res) => {
   const leadId = parseInteger(req.params.id);
   if (!leadId) {
@@ -7078,7 +7099,10 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
     groupIdRaw,
   });
 
-  // Obtener conteos por estado
+  const { loadReportingPatientContexts, patientContextBreakdown, PATIENT_CONTEXT_EXPLANATION } = require('../services/campaignWorkspace.service');
+  const segmentRows = await LeadIntake.findAll({ where, attributes: ['id', 'clinica_id'], raw: true });
+  const patientContext = patientContextBreakdown(await loadReportingPatientContexts({ models: db, leads: segmentRows }));
+  // Operational counters still include all pending requests; commercial segmentation is explicit.
   const total = await LeadIntake.count({ where });
   const nuevos = await LeadIntake.count({ where: { ...where, status_lead: 'nuevo' } });
   const contactados = await LeadIntake.count({ where: { ...where, status_lead: 'contactado' } });
@@ -7114,6 +7138,8 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
     convertidos,
     descartados,
     tasa_conversion,
+    patient_context_breakdown: patientContext,
+    patient_context_explanation: PATIENT_CONTEXT_EXPLANATION,
     competition
   });
 });

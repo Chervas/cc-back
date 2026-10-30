@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Op } = require('sequelize');
+const { Op, fn, col, where, json } = require('sequelize');
 const db = require('../../models');
 const jobRequestsService = require('./jobRequests.service');
 
@@ -18,7 +18,9 @@ const OVERVIEW_CACHE_REFRESH_LEASE_MS = Math.max(
   5 * 60 * 1000,
   Math.min(2 * 60 * 60 * 1000, Number(process.env.MARKETING_REPORT_OVERVIEW_CACHE_REFRESH_LEASE_MS || 30 * 60 * 1000))
 );
-const OVERVIEW_CACHE_VERSION = process.env.MARKETING_REPORT_OVERVIEW_CACHE_VERSION || 'marketing-overview-v1';
+// The schema suffix also applies when deployments pin the previous base version.
+// Old payloads have neither patient segments nor the commercial-care exclusion.
+const OVERVIEW_CACHE_VERSION = `${process.env.MARKETING_REPORT_OVERVIEW_CACHE_VERSION || 'marketing-overview-v1'}-patient-context-v1`;
 const OVERVIEW_REFRESH_JOB_TYPE = 'marketing_reports_cache_refresh';
 
 const {
@@ -237,6 +239,37 @@ function isMissingCacheTableError(error) {
     || /MarketingReportOverviewCaches|Unknown column|doesn't exist/i.test(message);
 }
 
+// Call after the decision transaction commits. One atomic UPDATE both expires
+// every affected period/version and revokes any reader/worker's outstanding lease.
+async function invalidateOverviewCacheForScope({ clinicId, groupId = null } = {}, {
+  model = MarketingReportOverviewCache,
+} = {}) {
+  const id = value => (typeof value === 'number' || typeof value === 'string' && /^[1-9]\d*$/.test(value))
+    && Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
+  const clinic = id(clinicId);
+  const group = groupId == null ? null : id(groupId);
+  if (!clinic || groupId != null && !group) throw Object.assign(new Error('overview_cache_scope_invalid'), { code: 'overview_cache_scope_invalid' });
+  if (!model) throw Object.assign(new Error('overview_cache_model_unavailable'), { code: 'overview_cache_model_unavailable' });
+  const contains = (path, value) => where(fn('JSON_CONTAINS', col('scope_payload'), JSON.stringify(value), path), 1);
+  const scopes = [
+    { primary_clinic_id: clinic }, { scope_type: 'all' },
+    where(json('scope_payload.type'), 'all'), where(json('scope_payload.scope'), 'all'),
+    where(json('scope_payload.all'), 'true'), where(json('scope_payload.isAll'), 'true'),
+    where(json('scope_payload.clinic_id'), String(clinic)), where(json('scope_payload.clinicId'), String(clinic)),
+    // Normalized scopes, legacy camelCase scopes and direct ID arrays. Match
+    // numbers and strings exactly: clinic 1 must never invalidate clinic 11.
+    ...['$.clinic_ids', '$.clinicIds', '$'].flatMap(path => [contains(path, clinic), contains(path, String(clinic))]),
+    ...(group ? [{ group_id: group }, where(json('scope_payload.group_id'), String(group)),
+      where(json('scope_payload.groupId'), String(group))] : []),
+  ];
+  const [invalidated] = await model.update({
+    payload: null, generated_at: null, data_cutoff_at: null, fresh_until: null, expires_at: null,
+    refresh_state: 'invalidated', refresh_lock_token: crypto.randomUUID(), refresh_locked_until: null,
+    last_refresh_error: null,
+  }, { where: { [Op.or]: scopes } });
+  return { invalidated };
+}
+
 function createOverviewCacheCoordinator({
   model = MarketingReportOverviewCache,
   now = () => new Date(),
@@ -278,6 +311,7 @@ function createOverviewCacheCoordinator({
     const where = {
       cache_key: identity.cache_key,
       generated_at: expectedGeneratedAt || null,
+      refresh_lock_token: rowValue(current, 'refresh_lock_token') || null,
       [Op.or]: [
         { refresh_locked_until: null },
         { refresh_locked_until: { [Op.lte]: acquiredAt } },
@@ -296,19 +330,20 @@ function createOverviewCacheCoordinator({
   }
 
   async function release(identity, token, error = null) {
+    if (!token) return;
     const finishedAt = now();
     await model.update({
       refresh_state: error ? 'failed' : 'idle',
-      refresh_lock_token: null,
       refresh_locked_until: null,
       last_refresh_finished_at: finishedAt,
       last_refresh_error: error ? String(error?.message || error).slice(0, 4000) : null,
     }, {
-      where: { cache_key: identity.cache_key, refresh_lock_token: token },
+      where: { cache_key: identity.cache_key, refresh_lock_token: token, refresh_state: 'refreshing' },
     });
   }
 
   async function persist(identity, payload, token = null) {
+    if (!token) throw Object.assign(new Error('Se necesita un lease para persistir el informe'), { code: 'OVERVIEW_CACHE_REFRESH_LEASE_REQUIRED', status: 409 });
     const generatedAt = now();
     const update = {
       ...identity,
@@ -318,32 +353,31 @@ function createOverviewCacheCoordinator({
       fresh_until: new Date(generatedAt.getTime() + OVERVIEW_CACHE_FRESH_TTL_MS),
       expires_at: new Date(generatedAt.getTime() + OVERVIEW_CACHE_EXPIRES_TTL_MS),
       refresh_state: 'idle',
-      refresh_lock_token: null,
+      // Retain the generation token after completion, so an invalidation or a
+      // newer generation is detectable even when generated_at has equal precision.
+      refresh_lock_token: token,
       refresh_locked_until: null,
       last_refresh_finished_at: generatedAt,
       last_refresh_error: null,
     };
-    if (token) {
-      const [updated] = await model.update(update, {
-        where: { cache_key: identity.cache_key, refresh_lock_token: token },
-      });
-      const stored = await find(identity);
-      if (updated !== 1 || !stored) {
-        const error = new Error('Se perdió el lease antes de persistir el informe');
-        error.code = 'OVERVIEW_CACHE_REFRESH_LEASE_LOST';
-        throw error;
-      }
-      return stored;
+    const [updated] = await model.update(update, {
+      where: { cache_key: identity.cache_key, refresh_lock_token: token, refresh_state: 'refreshing' },
+    });
+    const stored = await find(identity);
+    if (updated !== 1 || !stored || rowValue(stored, 'refresh_lock_token') !== token
+      || rowValue(stored, 'refresh_state') !== 'idle') {
+      const error = new Error('Se perdió el lease antes de persistir el informe');
+      error.code = 'OVERVIEW_CACHE_REFRESH_LEASE_LOST';
+      error.status = 409;
+      throw error;
     }
-
-    await ensure(identity);
-    await model.update(update, { where: { cache_key: identity.cache_key } });
-    return find(identity);
+    return stored;
   }
 
   async function generateAndPersist(identity, token, generate) {
     try {
       await validateIdentity?.(identity);
+      if (!token) throw Object.assign(new Error('Se necesita un lease para generar el informe'), { code: 'OVERVIEW_CACHE_REFRESH_LEASE_REQUIRED', status: 409 });
       const payload = await generate();
       await validateIdentity?.(identity);
       const stored = await persist(identity, payload, token);
@@ -370,42 +404,40 @@ function createOverviewCacheCoordinator({
         if (status === 'fresh') {
           return withOverviewCacheMetadata(payloadFromRow(row), row, { now: now(), status });
         }
-        if (lease.acquired && typeof scheduleRefresh === 'function') {
+        if (status === 'stale' && lease.acquired && typeof scheduleRefresh === 'function') {
           try {
             await scheduleRefresh({ identity, token: lease.token });
           } catch (error) {
             await release(identity, lease.token, error).catch(() => {});
             logger?.warn?.('No se pudo encolar refresco de informe persistente:', error?.message || error);
-            return withOverviewCacheMetadata(payloadFromRow(row), row, {
-              now: now(),
-              status,
-              refreshPending: false,
-            });
           }
         }
-        return withOverviewCacheMetadata(payloadFromRow(row), row, {
-          now: now(),
-          status,
-          refreshPending: lease.acquired || refreshInProgress(row, now()),
-        });
+        // Invalidation can race either lease acquisition or queue submission.
+        // Re-read before serving stale data; an invalidated row is a miss.
+        row = await find(identity);
+        status = overviewCacheStatus(row, now());
+        if (status === 'fresh' || status === 'stale') return withOverviewCacheMetadata(payloadFromRow(row), row, { now: now(), status });
       }
 
-      const lease = await acquire(identity, row);
+      let lease = await acquire(identity, row);
       if (!lease.acquired) {
         const current = lease.row || await find(identity);
         const currentStatus = overviewCacheStatus(current, now());
-        if (currentStatus !== 'miss') {
+        if (currentStatus === 'fresh' || currentStatus === 'stale') {
           return withOverviewCacheMetadata(payloadFromRow(current), current, {
             now: now(),
             status: currentStatus,
             refreshPending: refreshInProgress(current, now()),
           });
         }
+        // A revoked lease may have changed the row between observation and CAS.
+        // Retry only against that new observation, before any generation starts.
+        if (!refreshInProgress(current, now())) lease = await acquire(identity, current);
       }
-      const token = lease.acquired ? lease.token : null;
-      const payload = await generate();
-      const stored = token ? await persist(identity, payload, token) : await persist(identity, payload);
-      return withOverviewCacheMetadata(payloadFromRow(stored), stored, { now: now() });
+      if (!lease.acquired || !lease.token) throw Object.assign(new Error('Otro proceso está refrescando el informe'), {
+        code: 'OVERVIEW_CACHE_REFRESH_BUSY', status: 503,
+      });
+      return await generateAndPersist(identity, lease.token, generate);
     } catch (error) {
       if (isMissingCacheTableError(error)) {
         logger?.warn?.('MarketingReportOverviewCaches no disponible; calculando informe sin caché persistente.');
@@ -434,6 +466,11 @@ function createOverviewCacheCoordinator({
     const currentToken = cleanString(rowValue(row, 'refresh_lock_token'));
     if (expectedToken && currentToken === expectedToken && refreshInProgress(row, now())) {
       return { acquired: true, reused: true, token: expectedToken, row };
+    }
+    // An enqueued job must not mint a new lease after its original one was
+    // invalidated, replaced, or completed. A failed attempt may still retry.
+    if (expectedToken && (currentToken !== expectedToken || !['refreshing', 'failed'].includes(rowValue(row, 'refresh_state')))) {
+      return { acquired: false, reused: false, obsolete: true, token: null, row };
     }
     const lease = await acquire(identity, row);
     return { ...lease, reused: false };
@@ -550,6 +587,7 @@ async function refreshOverviewSnapshots({
       const range = buildRange(requestedIdentity.period_start, requestedIdentity.period_end, 30);
       const scope = requestedIdentity.scope_payload || rowValue(requestedIdentity, 'scope_payload') || {};
       const claim = await overviewCache.claimForRefresh(requestedIdentity, refreshToken);
+      if (claim.obsolete) return { status: 'completed', processed: 0, deleted, skipped: true, reason: 'cache_refresh_superseded' };
       if (!claim.acquired || !claim.token) {
         return {
           status: 'waiting',
@@ -649,6 +687,7 @@ module.exports = {
   overviewCache,
   refreshOverviewSnapshots,
   cleanupOverviewCache,
+  invalidateOverviewCacheForScope,
   __testing: {
     stableStringify,
     normalizeScope,

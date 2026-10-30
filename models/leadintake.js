@@ -119,7 +119,31 @@ module.exports = (sequelize, DataTypes) => {
     tableName: 'LeadIntakes',
     underscored: true,
     createdAt: 'created_at',
-    updatedAt: 'updated_at'
+    updatedAt: 'updated_at',
+    hooks: {
+      async afterCreate(lead, options) {
+        // Only local models, inside the reception transaction when supplied.
+        // hooks:false imports must explicitly call capture; reads never backfill.
+        try {
+          const { createLeadPatientContextService } = require('../src/services/leadPatientContext.service');
+          await createLeadPatientContextService({ ...sequelize.models, sequelize })
+            .capture(lead, { transaction: options.transaction, atCreation: true });
+        } catch (error) {
+          // A caller-owned transaction can roll back the lead as well as its audit.
+          if (options.transaction) throw error;
+          // Otherwise the INSERT already committed. Do not turn successful reception
+          // into an error/retry or claim that the missing snapshot was persisted.
+          const { unknownContext } = require('../src/lib/lead-patient-context');
+          lead.setDataValue('patient_context', unknownContext('snapshot_capture_failed'));
+          const code = error?.original?.code || error?.code;
+          const knownCodes = new Set(['ER_BAD_FIELD_ERROR', 'ER_NO_SUCH_TABLE', 'ER_LOCK_DEADLOCK',
+            'ER_LOCK_WAIT_TIMEOUT', 'ECONNREFUSED', 'ETIMEDOUT']);
+          try {
+            console.warn('lead_patient_context_capture_failed', { code: knownCodes.has(code) ? code : 'capture_error' });
+          } catch { /* Logging cannot invalidate an already committed reception. */ }
+        }
+      },
+    },
   });
 
   return LeadIntake;

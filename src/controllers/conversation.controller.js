@@ -1290,11 +1290,35 @@ async function enrichQuickChatLeadAppointments(conversations = []) {
   });
 }
 
-async function enrichPatientDirectionAssignments(conversations = []) {
+async function enrichLeadPatientAttention(conversations, actorId) {
+  const ids = [...new Set(conversations.map(row => Number(row.lead_id)).filter(id => id > 0))];
+  if (!ids.length) return conversations;
+  const allowed = new Map();
+  for (const row of conversations) {
+    if (!allowed.has(Number(row.clinic_id))) allowed.set(Number(row.clinic_id),
+      await canUserAccessFeature({ actorId, clinicId: row.clinic_id, featureKey: 'leads.sensitive.view' }));
+  }
+  const leads = await LeadIntake.findAll({ where: { id: { [Op.in]: ids },
+    clinica_id: { [Op.in]: [...allowed].filter(([, value]) => value).map(([id]) => id) } }, raw: true });
+  const contextual = await require('../services/leadPatientContext.service').enrich(leads);
+  const enriched = await require('../services/leadPatientAttention.service').enrich(contextual, { actorId });
+  const byId = new Map(enriched.map(lead => [Number(lead.id), lead]));
+  return conversations.map(row => {
+    const lead = byId.get(Number(row.lead_id));
+    if (!lead || Number(row.clinic_id) !== Number(lead.clinica_id)) {
+      const direction = row.patient_direction ? { ...row.patient_direction } : null;
+      if (direction) delete direction.patient_context;
+      return { ...row, patient_direction: direction };
+    }
+    return { ...row, patient_context: lead.patient_context, patient_attention: lead.patient_attention };
+  });
+}
+
+async function enrichPatientDirectionAssignments(conversations = [], actorId = null) {
   const rows = Array.isArray(conversations) ? conversations.map((row) => toPlain(row)) : [];
   const conversationIds = rows.map((row) => parsePositiveInt(row?.id)).filter(Boolean);
   if (!conversationIds.length) return rows;
-  if (!db.PatientDirectionAssignment) return require('../services/temporaryPatientDirection.service').enrich(rows);
+  if (!db.PatientDirectionAssignment) return enrichLeadPatientAttention(await require('../services/temporaryPatientDirection.service').enrich(rows), actorId);
   const assignments = await db.PatientDirectionAssignment.findAll({
     where: {
       conversation_id: { [Op.in]: conversationIds },
@@ -1325,10 +1349,10 @@ async function enrichPatientDirectionAssignments(conversations = []) {
       });
     }
   }
-  return require('../services/temporaryPatientDirection.service').enrich(rows.map((row) => ({
+  return enrichLeadPatientAttention(await require('../services/temporaryPatientDirection.service').enrich(rows.map((row) => ({
     ...row,
     patient_direction: byConversation.get(Number(row.id)) || null,
-  })));
+  }))), actorId);
 }
 
 exports.listConversations = async (req, res) => {
@@ -1525,7 +1549,7 @@ exports.listConversations = async (req, res) => {
     }));
     const withRestrictions = await attachContactRestrictions(rawPayload);
     const withLeadAppointments = await enrichQuickChatLeadAppointments(withRestrictions);
-    const withPatientDirection = await enrichPatientDirectionAssignments(withLeadAppointments);
+    const withPatientDirection = await enrichPatientDirectionAssignments(withLeadAppointments, userId);
     const withRouting = await attachRoutingReviews(await hydrateMarketingContactFallbacks(withPatientDirection, { searchQuery }), userId);
     const payload = await attachTemporaryQuickChatEligibility(withRouting, req.userData, CitaPaciente);
     const totalUnread = payload.reduce((total, item) => {
@@ -1652,7 +1676,7 @@ exports.getMessages = async (req, res) => {
 
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
-    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
+    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload], userId);
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
     const [withRouting] = await attachRoutingReviews([conversationPayload], userId);
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([withRouting], req.userData, CitaPaciente);
@@ -1778,7 +1802,7 @@ exports.getConversationByPatient = async (req, res) => {
 
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
-    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
+    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload], userId);
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([conversationPayload], req.userData, CitaPaciente);
     return res.json({ conversation: focusedPayload, messages, messages_page: messagesPage });
@@ -1840,7 +1864,7 @@ exports.getConversationByLead = async (req, res) => {
 
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
-    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload]);
+    const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload], userId);
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([conversationPayload], req.userData, CitaPaciente);
     return res.json({ conversation: focusedPayload, messages, messages_page: messagesPage });

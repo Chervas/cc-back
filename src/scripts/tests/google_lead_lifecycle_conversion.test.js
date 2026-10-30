@@ -2,6 +2,9 @@
 
 const assert = require('node:assert/strict');
 const db = require('../../../models');
+// Purpose is persisted internally; this suite owns a synthetic commercial-only audit store.
+db.LeadAttributionAudit.findAll = async () => [];
+
 const {
   buildLifecycleConversionPayload,
   maybeUploadLeadLifecycleConversion,

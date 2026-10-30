@@ -47,6 +47,7 @@ async function resolveLifecycleSignal(input, dependencies = {}) {
   const lead = await models.LeadIntake.findByPk(input.lead_id, { raw: true, attributes: ['id', 'clinica_id',
     'source', 'external_source', 'external_id', 'consentimiento_canal', 'status_lead', 'archived_at'], ...query });
   if (!lead || Number(lead.clinica_id) !== input.clinic_id || lead.archived_at || lead.status_lead === 'descartado') fail('meta_crm_lead_unavailable');
+  if (await require('../lib/lead-request-purpose').isPatientCareRequest(lead, { models, transaction })) fail('meta_crm_patient_care_request');
   const consent = lead.consentimiento_canal;
   if (!consent || typeof consent !== 'object' || Array.isArray(consent)
     || normalizeGoogleConsent(consent) !== 'GRANTED') fail('meta_crm_consent_required');
