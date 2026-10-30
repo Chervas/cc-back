@@ -1,9 +1,15 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const { countPotential } = require('../../services/reviewOverview.service');
+const { countPotential, queueSummary } = require('../../services/reviewOverview.service');
 const { buildReviewRequestHistory, readReviewRequestHistory } = require('../../lib/review-request-history');
 const { aggregateReport, reportRange } = require('../../services/reviewActivityReport.service');
 const fs = require('node:fs'), vm = require('node:vm');
+
+test('queue report is aggregated in backend from recipient totals, with failures separated from sends', () => {
+  assert.deepEqual(queueSummary([{total:10,processed:8,pending:2,failed:1},{total:90,processed:2,pending:88,failed:0}]),
+    {total:100,processed:10,sent:9,pending:90,failed:1,percent:10});
+  assert.equal(queueSummary([]).percent,0);
+});
 
 test('potential excludes a patient in any queue by patient ID or normalized phone, even with duplicate fichas', () => {
   const history = { patientIds: new Set([3]), phoneKeys: new Set(['34600000004']) };

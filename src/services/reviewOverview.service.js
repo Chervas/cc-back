@@ -12,6 +12,15 @@ const isReview = `l.objective_id='mass_sends' AND (JSON_UNQUOTE(JSON_EXTRACT(l.c
 const testExclusion = `NOT EXISTS (SELECT 1 FROM MarketingPatientContactEvents te WHERE te.list_id=i.list_id AND te.item_id=i.id
   AND te.event_type IN ('mass_campaign_test_sent','mass_campaign_test_failed'))`;
 
+function queueSummary(rows) {
+  const counts = rows.reduce((s, row) => {
+    const n = key => Math.max(0, Number(row[key]) || 0);
+    return { total: s.total + n('total'), processed: s.processed + n('processed'),
+      sent: s.sent + Math.max(0, n('processed') - n('failed')), pending: s.pending + n('pending'), failed: s.failed + n('failed') };
+  }, { total: 0, processed: 0, sent: 0, pending: 0, failed: 0 });
+  return { ...counts, percent: counts.total ? Math.min(100, Math.round(counts.processed / counts.total * 100)) : 0 };
+}
+
 function countPotential(patients, history, queued = [], optOuts = [], now = new Date()) {
   const queuedPatients = new Set(queued.map(r => Number(r.paciente_id)).filter(Boolean));
   const queuedPhones = new Set(queued.map(r => phoneKey(r.phone)).filter(Boolean));
@@ -104,12 +113,13 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
       return { ...row, rating: score ? ratingSummary(score) : null, last_seen_at: score?.last_seen_at || null,
         shared_with: shared.length > 1 ? shared.map(p => p.clinic_name) : [] };
     });
-    const sent = Number(counts[0]?.requests_sent || 0);
+    const sent = Number(counts[0]?.requests_sent || 0), queueTotals = queueSummary(queueRows);
     return { success: true, generated_at: now().toISOString(), scope: { type: scope.scope, group_id: scope.groupId || null,
       name: scope.group?.nombre_grupo || scope.group?.nombre || (clinics.length === 1 ? clinics[0].nombre_clinica : 'Grupo de clínicas'), clinic_count: clinics.length },
       potential_patients: { total: potentials.reduce((s, r) => s + r.count, 0), by_clinic: potentials, excludes_queued: true },
-      google_profiles: googleProfiles, queues: queueRows,
-      current: { queued: queueRows.reduce((sum, r) => sum + Number(r.pending || 0), 0), opt_outs: Number(optOuts[0]?.total || 0) },
+      google_profiles: googleProfiles, queues: queueRows.map(row => ({ ...row, progress_percent: queueSummary([row]).percent,
+        sent_count: Math.max(0, Number(row.processed || 0) - Number(row.failed || 0)) })), queue_summary: queueTotals,
+      current: { queued: queueTotals.pending, opt_outs: Number(optOuts[0]?.total || 0) },
       ratings_in_period: ratings.total, period: range.period,
       historical: { requests_sent: sent, attributed_reviews: attributed, conversion: sent ? attributed / sent * 100 : null },
       automation: auto, provider_requests: 0 };
@@ -155,4 +165,4 @@ function current() {
     queues: require('./sendQueues.service').listReviewQueues, ratingSummary: bulk.buildGoogleRatingSummary,
     automation: scope => bulk.getReviewRequestAutomationStatus(scope) });
 }
-module.exports = { createService, current, countPotential, positiveIds };
+module.exports = { createService, current, countPotential, positiveIds, queueSummary };
