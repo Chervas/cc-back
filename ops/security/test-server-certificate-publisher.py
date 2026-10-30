@@ -18,7 +18,9 @@ class PublisherTest(unittest.TestCase):
     def test_dedicated_ports_are_bound_to_the_declared_service_identities(self):
         for identity,port in [('email-staging',8451),('email-dev',8452),('publisher',8450),('bedrock-staging',8449),
                               ('meta-marketing-dev',8453),('meta-marketing-staging',8454),('public-media-dev',8455),
-                              ('google-business-profile-staging',8456)]:
+                              ('google-business-profile-staging',8456),('google-search-console-staging',8457),
+                              ('google-analytics-staging',8458),('google-ads-staging',8459),
+                              ('google-ads-goal-policy-staging',8460)]:
             self.assertTrue(P.target_port_valid({'id':identity,'port':port}))
         for identity,port in [('foreign',8451),('foreign',8452),('email-dev',8451),('email-staging',8452),
                               ('email-dev',8449),('email-staging',8450),('email-dev',8453),('email-dev','8452'),
@@ -27,7 +29,13 @@ class PublisherTest(unittest.TestCase):
                               ('meta-marketing-dev',8455),('meta-marketing-dev',8449),('meta-marketing-staging',8450),
                               ('meta-marketing-dev','8453'),('public-media-dev','8455'),('foreign',8456),
                               ('google-business-profile-staging',8455),('google-business-profile-staging','8456'),
-                              ('public-media-dev',8456),('meta-marketing-staging',8456)]:
+                              ('public-media-dev',8456),('meta-marketing-staging',8456),
+                              ('foreign',8457),('foreign',8458),('foreign',8459),('foreign',8460),
+                              ('google-search-console-staging',8458),('google-analytics-staging',8457),
+                              ('google-ads-staging',8460),('google-ads-goal-policy-staging',8459),
+                              ('google-search-console-staging','8457'),('google-analytics-staging',8458.0),
+                              ('google-ads-staging',True),('google-ads-goal-policy-staging',None),
+                              ('google-search-console-dev',8457),('google-ads-goal-policy-staging',8461)]:
             self.assertFalse(P.target_port_valid({'id':identity,'port':port}))
 
     def setUp(self):

@@ -14,7 +14,11 @@ const SERVER_LABELS = { 'maintenance-client': 'Mantenimiento de la comunicación
   'meta-marketing-dev': 'Conexiones Meta de publicidad (DEV)',
   'meta-marketing-staging': 'Conexiones Meta de publicidad (staging)',
   'public-media-dev': 'Imágenes públicas de marketing (DEV)',
-  'google-business-profile-staging': 'Perfil de Empresa de Google (staging)' };
+  'google-business-profile-staging': 'Perfil de Empresa de Google (staging)',
+  'google-search-console-staging': 'Search Console de Google (staging)',
+  'google-analytics-staging': 'Google Analytics (staging)',
+  'google-ads-staging': 'Google Ads y conversiones (staging)',
+  'google-ads-goal-policy-staging': 'Objetivos de Google Ads (staging)' };
 function readHealth({ enabled = process.env.TRANSPORT_CERTIFICATE_MONITOR_ENABLED === 'true',
   serversEnabled = process.env.SERVER_CERTIFICATE_MONITOR_ENABLED === 'true',
   filename = STATUS_FILE, serverFilename = SERVER_STATUS_FILE, now = Date.now(), read = fs.readFileSync, stat = fs.lstatSync } = {}) {

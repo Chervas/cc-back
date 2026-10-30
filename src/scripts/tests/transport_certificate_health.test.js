@@ -79,3 +79,28 @@ test('enrolled AI, email and Meta identities are healthy or alert individually; 
   servers.expectedIds.push('foreign-runtime');servers.certificates.push({...healthy.certificates[0],id:'foreign-runtime'});
   assert.equal(readHealth(o)[0].entity_id,'server-maintenance');
 });
+
+test('four new Google identities are admitted only as exact known health IDs; nineteen entries include maintenance',()=>{
+  const current=['maintenance-client','publisher','authorized','onboarding','inbox','audit-writer','audit-reader',
+    'ai-staging','bedrock-staging','email-staging','email-dev','meta-marketing-dev','meta-marketing-staging',
+    'public-media-dev','google-business-profile-staging'];
+  const added=['google-search-console-staging','google-analytics-staging','google-ads-staging','google-ads-goal-policy-staging'];
+  const ids=current.concat(added),servers={...healthy,expectedIds:ids,certificates:ids.map(id=>({...healthy.certificates[0],id}))};
+  assert.equal(ids.length,19);const size=Buffer.byteLength(JSON.stringify(servers));assert(size<16384);
+  const o={...options(),enabled:false,serversEnabled:true,read:()=>JSON.stringify(servers),
+    stat:()=>({isFile:()=>true,isSymbolicLink:()=>false,uid:0,mode:0o640,size})};
+  assert.deepEqual(readHealth(o),[]);
+  for(const id of added){const row=servers.certificates.find(c=>c.id===id);row.status='failed';
+    const alerts=readHealth(o);assert.equal(alerts.length,1);assert.equal(alerts[0].entity_id,id);
+    assert.match(alerts[0].label,/Google/);assert.match(alerts[0].detail,/no pausa/);row.status='healthy';}
+  servers.certificates.pop();assert.equal(readHealth(o)[0].entity_id,'server-maintenance');
+});
+test('new Google health identities cannot mask duplicate, foreign or incomplete server status',()=>{
+  const ids=['maintenance-client','publisher','authorized','onboarding','inbox','google-search-console-staging'];
+  const fixture=()=>({...healthy,expectedIds:[...ids],certificates:ids.map(id=>({...healthy.certificates[0],id}))});
+  for(const mutate of [s=>s.expectedIds.push('foreign-runtime'),s=>s.expectedIds.push(ids[0]),
+    s=>s.certificates[0].id='google-analytics-staging',s=>s.certificates.pop()]){
+    const servers=fixture();mutate(servers);const o={...options(),enabled:false,serversEnabled:true,read:()=>JSON.stringify(servers)};
+    assert.equal(readHealth(o)[0].entity_id,'server-maintenance');
+  }
+});
