@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('node:fs'); const path = require('node:path');
 const { createGoogleAdsBrokerScope, createGoogleAdsScopeRepository, identity } = require('./googleAdsBrokerScope.service');
+const { createGoogleAdsCanonicalAliasScope } = require('./googleAdsCanonicalAliasScope.service');
 const { createGoogleAdsBrokerReader, safe } = require('./googleAdsBrokerReader.service');
 const { createGoogleDataManagerBrokerClient } = require('./googleDataManagerBrokerClient.service');
 const { createGoogleAdsActionManagementBrokerClient } = require('./googleAdsActionManagementBrokerClient.service');
@@ -10,8 +11,8 @@ const { createGoogleAdsOptimizationBrokerClient } = require('./googleAdsOptimiza
 const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerClient');
 const fail = code => { throw Object.assign(Error(code), { code }); };
 function createGoogleAdsBroker(options) {
-  const scope = createGoogleAdsBrokerScope({ ...options, discoveryOnly: false });
-  const discoveryScope = createGoogleAdsBrokerScope({ ...options, discoveryOnly: true });
+  const scope = createGoogleAdsCanonicalAliasScope({ ...options, nativeScope: createGoogleAdsBrokerScope({ ...options, discoveryOnly: false }) });
+  const discoveryScope = createGoogleAdsCanonicalAliasScope({ ...options, nativeScope: createGoogleAdsBrokerScope({ ...options, discoveryOnly: true }) });
   const reader = createGoogleAdsBrokerReader({ client: options.client, assertContext: scope.assertContext, ...(options.now ? { now: options.now } : {}) });
   const conversions = createGoogleDataManagerBrokerClient({ client: options.client, assertContext: scope.assertContext,
     ...(options.now ? { now: options.now } : {}), ...(options.conversionsEnabled ? { enabled: options.conversionsEnabled } : {}),
