@@ -15,6 +15,13 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
 }, async () => withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   sql.define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true } }, { tableName: 'Clinicas', timestamps: false });
   sql.define('Paciente', { id_paciente: { type: D.INTEGER, primaryKey: true } }, { tableName: 'Pacientes', timestamps: false });
+  db.PatientDirectionSetting = sql.define('PatientDirectionSetting', {
+    id: { type: D.INTEGER, primaryKey: true, autoIncrement: true },
+    clinic_id: { type: D.INTEGER, allowNull: false, unique: true },
+    is_enabled: { type: D.BOOLEAN, allowNull: false, defaultValue: false },
+    director_user_id: { type: D.INTEGER, allowNull: true },
+    default_successor_user_id: { type: D.INTEGER, allowNull: true },
+  }, { tableName: 'PatientDirectionSettings', timestamps: false });
   for (const file of ['usuario', 'leadintake', 'leadattributionaudit', 'leadcontactattempt', 'citapaciente', 'conversation', 'message', 'patientoperationalevent']) {
     const model = require('../../../models/' + file)(sql, D); db[model.name] = model;
   }
@@ -23,6 +30,7 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
   await sql.models.Clinica.bulkCreate([66, 72, 77, 35].map(id_clinica => ({ id_clinica })));
   await sql.models.Paciente.bulkCreate([100, 101, 102].map(id_paciente => ({ id_paciente })));
   await db.Usuario.create({ id_usuario: 44, nombre: 'Graci', email_usuario: 'maria.gonzalez@modmarketing.net' });
+  await db.PatientDirectionSetting.create({ clinic_id: 72, is_enabled: false, director_user_id: 44 });
   // This fixture seeds explicit snapshots below; intake classification is tested
   // by the context suite, not against these deliberately minimal patient tables.
   const lead = await db.LeadIntake.create({ clinica_id: 72 }, { hooks: false });
@@ -319,6 +327,66 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
   } }), 1, 'the observer cannot reclaim or restart the lead after waiting for the decision lock');
   assert.deepEqual(warnings, [], 'no swallowed SQL errors or deadlocks are accepted');
   report.checks.push('A real clinic decision holds its transaction while the temporal observer requests the same row lock; after commit the observer reads clinic ownership, never reclaims the lead, and raises no SQL warning.');
+
+  // T2 reproduces activation's setting -> lead writes while T1 runs real decide().
+  // The setting stays disabled so the decision uses only the temporary domain.
+  const activationLead = await db.LeadIntake.create({ clinica_id: 72 }, { hooks: false });
+  await snapshot(activationLead.id, existingContext);
+  await conversation.update({ lead_id: activationLead.id });
+  const t2 = await sql.transaction();
+  let t1, t1Transaction, settingRequested;
+  const requestingSetting = new Promise(resolve => { settingRequested = resolve; });
+  db.PatientDirectionSetting.addHook('beforeFind', 'observeActivationSettingWait', options => {
+    if (options.lock && options.transaction && options.transaction !== t2) {
+      t1Transaction = options.transaction;
+      settingRequested();
+    }
+  });
+  try {
+    const setting = await db.PatientDirectionSetting.findOne({ where: { clinic_id: 72 },
+      transaction: t2, lock: t2.LOCK.UPDATE });
+    assert.equal(setting.is_enabled, false);
+    assert.equal((await attention.directorFor(activationLead)).temporary, true);
+    t1 = attention.decide({ leadId: activationLead.id, actorId: 44, decision: 'director' });
+    t1.catch(() => {});
+    await bounded(requestingSetting);
+    // Confirm a server-side lock wait, not just that a JavaScript hook ran.
+    const wait = await (async () => {
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        const [waiting] = await sql.query(`SELECT trx_state AS state, trx_query AS statement
+          FROM information_schema.INNODB_TRX
+          WHERE trx_mysql_thread_id = :connectionId AND trx_state = 'LOCK WAIT'`,
+        { replacements: { connectionId: t1Transaction.connection.threadId } });
+        if (waiting.length) return waiting[0];
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      throw Error('SYNTHETIC_SETTING_LOCK_WAIT_NOT_OBSERVED');
+    })();
+    assert.match(wait.statement, /PatientDirectionSettings/);
+    await db.LeadIntake.update({ notas_internas: 'SYNTHETIC_ACTIVATION_COMMITTED' }, {
+      where: { id: activationLead.id }, transaction: t2,
+    });
+    await t2.commit();
+    assert.equal(t2.finished, 'commit', 'T2 must commit its setting -> lead work without a deadlock');
+    assert.equal((await bounded(t1)).changed, true, 'T1 continues after the setting lock is released');
+    assert.equal(t1Transaction.finished, 'commit');
+    await activationLead.reload();
+    assert.equal(activationLead.notas_internas, 'SYNTHETIC_ACTIVATION_COMMITTED');
+    assert.equal(activationLead.asignado_a, 44);
+    assert.equal((await attention.decisions([activationLead.id])).get(activationLead.id).decision, 'director');
+    assert.equal(await db.Message.count({ where: {
+      automation_delivery_key: `lead-patient-attention:${activationLead.id}:director:commercial`,
+    } }), 1);
+    report.settingLeadLockRace = { settingEnabled: false, t1Wait: wait.state,
+      waitedOn: 'PatientDirectionSettings', t2: t2.finished, t1: t1Transaction.finished,
+      leadUpdatePreserved: true, decision: 'director' };
+    report.checks.push('T2 locks the disabled setting row, then updates the lead while real decide T1 waits on that setting in InnoDB; T2 commits without deadlock and T1 resumes and commits its decision exactly once.');
+  } finally {
+    if (!t2.finished) await t2.rollback();
+    if (t1) await Promise.allSettled([t1]);
+    db.PatientDirectionSetting.removeHook('beforeFind', 'observeActivationSettingWait');
+  }
 
   await db.PatientOperationalEvent.drop();
   await sql.transaction(async transaction => {

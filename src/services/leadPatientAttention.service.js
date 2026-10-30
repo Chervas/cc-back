@@ -127,7 +127,11 @@ function createLeadPatientAttentionService(db, dependencies = {}) {
     if (!observed) throw failure(404, 'lead_not_found');
     if (!await authorize(actorId, observed.clinica_id)) throw failure(403, 'lead_manage_forbidden');
     const changed = await db.sequelize.transaction(async transaction => {
-      // Same lock order as canonical attention: conversation before lead. No outbound/provider operation.
+      // Formal activation locks settings before updating a lead. Take that lock
+      // first too; then preserve canonical attention's conversation -> lead order.
+      if (db.PatientDirectionSetting) await db.PatientDirectionSetting.findOne({
+        where: { clinic_id: observed.clinica_id }, transaction, lock: transaction.LOCK.UPDATE,
+      });
       const conversations = db.Conversation ? await db.Conversation.findAll({
         where: { clinic_id: observed.clinica_id, lead_id: Number(leadId) },
         order: [['id', 'ASC']], transaction, lock: transaction.LOCK.UPDATE,

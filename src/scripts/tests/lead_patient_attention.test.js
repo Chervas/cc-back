@@ -121,6 +121,18 @@ test('formal activation uses only a confirmed patient, never the old chat identi
   }
 });
 
+test('decision locks settings before conversation and lead, matching concurrent formal activation', async () => {
+  const f = fixture({ formal: true }), order = [];
+  for (const [model, method, name] of [[f.db.PatientDirectionSetting, 'findOne', 'settings'],
+    [f.db.Conversation, 'findAll', 'conversation'], [f.db.LeadIntake, 'findByPk', 'lead']]) {
+    const original = model[method].bind(model);
+    model[method] = async (...args) => { const query = method === 'findByPk' ? args[1] : args[0];
+      if (query?.lock) order.push(name); return original(...args); };
+  }
+  await f.service.decide({ leadId: 10, actorId: 44, decision: 'director' });
+  assert.deepEqual(order.slice(0, 3), ['settings', 'conversation', 'lead']);
+});
+
 for (const state of ['acudio_cita', 'convertido', 'descartado']) test(`${state}: cannot reopen closed request`, async () => {
   const f = fixture({ status: state });
   assert.equal((await f.service.enrich([f.lead], { actorId: 44 }))[0].patient_attention.state, 'completed');
