@@ -294,11 +294,12 @@ function listClinicIds(row) {
   ].filter(Boolean)));
 }
 
-async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, reviewOnly = false, includeHistory = false }) {
+async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, reviewOnly = false, includeHistory = false, queueId = null }) {
   if (!clinicIds.length) return [];
   const groupIds = Array.from(clinicsByGroupId.keys());
   const rows = await db.MarketingPatientList.findAll({
     where: {
+      ...(queueId ? { id:Number(String(queueId).split(':')[1]) } : {}),
       ...(reviewOnly ? { [Op.and]: [db.Sequelize.literal(`objective_id='mass_sends' ${includeHistory ? '' : "AND status<>'archived'"} AND
         (JSON_UNQUOTE(JSON_EXTRACT(criteria,'$.review_request')) IN ('true','1')
           OR JSON_UNQUOTE(JSON_EXTRACT(criteria,'$.template_usage'))='solicitud_resena')`)] } : {}),
@@ -431,6 +432,7 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
       sender_label: dispatch.sender_display_name || dispatch.sender_phone_number || dispatch.account_quality?.display_phone_number || null,
       ...(reviewOnly ? {
         title: row.name || dispatch.label || 'Solicitud de reseñas',
+        pause_reason: dispatch.paused_reason || dispatch.last_error || null,
         processed: Math.min(total, processed),
         started: !!(latestDate(row.last_sent_at, stats.last_sent_at, stats.email_last_sent_at)
           || processed > 0 || effectiveStatus === 'sending' && dispatch.started_at),
@@ -825,7 +827,7 @@ async function mutateSendQueue({ userId, queueId, action }) {
 module.exports = {
   // Same campaign projection as Settings > queues, with no extra producer,
   // patient previews or provider reads for the review dashboard.
-  async listReviewQueues({ userId, scopeRaw, includeHistory = false }) {
+  async listReviewQueues({ userId, scopeRaw, includeHistory = false, queueId = null }) {
     const clinics = await resolveScopedClinics({ userId, scopeRaw });
     const clinicIds = clinics.map(c => Number(c.id_clinica));
     const clinicNameById = new Map(clinics.map(c => [Number(c.id_clinica), c.nombre_clinica]));
@@ -835,7 +837,7 @@ module.exports = {
       if (key) clinicsByGroupId.set(key, [...(clinicsByGroupId.get(key) || []), Number(clinic.id_clinica)]);
     }
     const group = String(scopeRaw).startsWith('group:');
-    return (await marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, reviewOnly: true, includeHistory }))
+    return (await marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, reviewOnly: true, includeHistory, queueId }))
       .filter(row => row.type === 'review_request' && (row.status_group !== 'history'
         || includeHistory || !group && row.status === 'completed' && +new Date(row.updated_at) >= Date.now() - 72 * 3600000));
   },

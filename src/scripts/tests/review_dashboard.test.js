@@ -49,18 +49,18 @@ test('group series sum to the group total and shared profiles stay explicitly se
   assert.equal(result.by_clinic.find(r => r.clinic_id === 0).clinic_name, 'Fichas compartidas');
 });
 
-for (const endpoint of ['getReviewOverview', 'getReviewPrivateRatings', 'getReviewQueues']) {
+for (const endpoint of ['getReviewOverview', 'getReviewPrivateRatings', 'getReviewQueues','getReviewQueueDetail']) {
   test(endpoint + ' checks scope permissions before any SQL reader; aliases keep the canonical queue scope', async () => {
     let allowed = false, reads = 0, options; const scope = {isValid:true,scope:'clinic',clinicIds:[31]};
     const deps = { '../lib/clinicScope':{resolveClinicScope:async()=>scope},'../services/marketingBulkSends.service':{},
       '../lib/marketingScopeAccess':{hasMarketingClinicScopeAccess:async()=>allowed},
-      '../services/reviewOverview.service':{current:()=>({overview:async(s,o)=>{reads++;options=o;return {};},queueReport:async(s,o)=>{reads++;options=o;return {};},privateRatings:async()=>{reads++;return {};}})} };
+      '../services/reviewOverview.service':{current:()=>({overview:async(s,o)=>{reads++;options=o;return {};},queueReport:async(s,o)=>{reads++;options=o;return {};},queueDetail:async(s,o)=>{reads++;options=o;return {};},privateRatings:async()=>{reads++;return {};}})} };
     const ctx={exports:{},console,require:name=>{assert(name in deps,name);return deps[name];}};
     vm.runInNewContext(fs.readFileSync(require.resolve('../../controllers/marketingBulkSends.controller'),'utf8'),ctx);
     let code=200; const res={set(){},json(){},status(n){code=n;return this;}};
-    await ctx.exports[endpoint]({query:{clinicId:'31'},userData:{userId:1}},res);
+    await ctx.exports[endpoint]({query:{clinicId:'31'},params:{queueId:'marketing:1'},userData:{userId:1}},res);
     assert.equal(code,403); assert.equal(reads,0);
-    allowed=true; code=200; await ctx.exports[endpoint]({query:{clinicId:'31'},userData:{userId:1}},res);
+    allowed=true; code=200; await ctx.exports[endpoint]({query:{clinicId:'31'},params:{queueId:'marketing:1'},userData:{userId:1}},res);
     assert.equal(code,200);assert.equal(reads,1);
     if (options) assert.equal(options.scopeRaw,'31');
   });
@@ -81,4 +81,15 @@ test('queue tabs retain all inactive history while group shows only unique activ
 test('frozen review preview resolves clinic and sender and keeps patient/date as placeholders',()=>{
   assert.equal(reviewPreview({message_preview:'Hola {{1}}, soy {{2}} de {{3}}. {{4}}',review_sender_name:'Equipo QA',review_display_name:'Clínica QA'}),
     'Hola [nombre], soy Equipo QA de Clínica QA. [fecha de visita]');
+});
+
+
+test('incidents are separate from running sends and inactive history; compact rows do not carry heavy template data',()=>{
+ const now=new Date('2026-10-30T12:00:00Z');
+ const row=(id,status,status_group,extra={})=>({id,status,status_group,started:true,total:100,processed:10,pending:90,failed:3,updated_at:'2026-10-29T10:00:00Z',message_preview:'PRIVATE_TEMPLATE',message_image_url:'https://example.invalid/photo',...extra});
+ const rows=[row('a','waiting_next_batch','active'),row('b','paused_quality','paused'),row('c','completed','history',{pending:0}),row('d','failed','error',{updated_at:'2026-06-01'}),row('e','paused','paused',{pause_reason:'paused_by_user'})];
+ assert.deepEqual(queuePage(rows,{group:true,now}).items.map(x=>x.id),['a']);
+ assert.deepEqual(queuePage(rows,{group:true,view:'issues',now}).items.map(x=>x.id),['b','c']);
+ assert.deepEqual(queuePage(rows,{view:'inactive',now}).items.map(x=>x.id),['d','e']);
+ assert.equal(queuePage(rows,{now}).items[0].message_preview,undefined);assert.equal(queuePage(rows,{now}).items[0].message_image_url,undefined);
 });

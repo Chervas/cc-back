@@ -144,7 +144,11 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const {queuePage}=require('../../services/reviewOverview.service');
   const cancelled=queuePage(current,{view:'inactive',limit:25}).items.find(r=>r.source_id===6);
   assert.equal(cancelled.sent_count,1,'a cancelled queue must not present unsent recipients as sent');
-  assert.match(cancelled.schedule,/L, M 09:00-13:00/);assert.match(cancelled.schedule,/X 16:00-20:00/);
+  assert.equal(cancelled.schedule,undefined,'initial queue rows omit heavy configuration');
+  const details=createService({db,queues:nativeQueues});
+  const detail=await details.queueDetail({scope:'clinic',clinicIds:[31]},{userId:1,scopeRaw:'31',queueId:'marketing:6'});
+  await assert.rejects(details.queueDetail({scope:'clinic',clinicIds:[31]},{userId:1,scopeRaw:'31',queueId:'marketing:3'}),e=>e.status===404);
+  assert.match(detail.summary.schedule,/L, M 09:00-13:00/);assert.match(detail.summary.schedule,/X 16:00-20:00/);
   assert.equal(current.find(r=>r.source_id===7).started,false,'a future schedule alone is not a send already started');
   assert.equal(current.find(r=>r.source_id===8).status_group,'history','archived list wins over stale dispatch metadata');
   assert(!queuePage(current,{group:true,limit:25}).items.some(r=>[7,8].includes(r.source_id)));

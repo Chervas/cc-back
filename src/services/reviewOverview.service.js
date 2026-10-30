@@ -2,6 +2,7 @@
 
 const { normalizePhoneDigits } = require('../lib/phone');
 const { readReviewRequestHistory } = require('../lib/review-request-history');
+const { createReportReadCache } = require('../lib/report-read-cache');
 const { reportRange } = require('./reviewActivityReport.service');
 const { LAST_ATTENDED_DATE_KEYS, parseMarketingDate } = require('../lib/marketing-template-variables');
 const positiveIds = values => [...new Set((values || []).map(Number).filter(n => Number.isSafeInteger(n) && n > 0))];
@@ -21,22 +22,39 @@ function queueSummary(rows) {
   return { ...counts, percent: counts.total ? Math.min(100, Math.round(counts.processed / counts.total * 100)) : 0 };
 }
 
-function queuePage(rows, { group = false, view = 'active', limit = 5, offset = 0 } = {}) {
-  if (!['active', 'inactive'].includes(view)) throw Object.assign(Error('Vista de colas inválida'), { status: 400 });
-  if (group) view = 'active';
+function isQueueIssue(row, now = new Date()) {
+  if (row.status_group === 'active' || ['archived', 'cancelled'].includes(row.status)) return false;
+  if (row.status_group === 'paused' && Number(row.pending) > 0) {
+    return row.status !== 'paused' || !!row.pause_reason && row.pause_reason !== 'paused_by_user';
+  }
+  // Terminal failures belong in the recent incidents view, not the active queue.
+  return Number(row.failed) > 0 && Number(row.total) > 0
+    && +new Date(row.updated_at || row.started_at || 0) >= +now - 30 * 86400000;
+}
+function queueCompact(row) {
+  const fields = ['id','source_id','title','clinic_name','clinic_ids','status','status_group','status_label','status_explanation',
+    'total','processed','pending','failed','next_at','cadence','can_pause','can_resume','error','action_scope','started','updated_at'];
+  return { ...Object.fromEntries(fields.map(key => [key,row[key]])), progress_percent: queueSummary([row]).percent,
+    sent_count: Math.max(0, Number(row.processed || 0) - Number(row.failed || 0)) };
+}
+function queuePage(rows, { group = false, view = 'active', limit = 5, offset = 0, now = new Date() } = {}) {
+  if (!['active', 'inactive', 'issues'].includes(view)) throw Object.assign(Error('Vista de colas inválida'), { status: 400 });
+  if (group && view === 'inactive') view = 'active';
   limit = Math.min(25, Math.max(1, Number.parseInt(limit, 10) || 5));
   offset = Math.max(0, Number.parseInt(offset, 10) || 0);
   const unique = [...new Map(rows.map(row => [row.id, row])).values()];
   const active = unique.filter(row => row.status_group === 'active' && (!group || row.started));
-  const inactive = group ? [] : unique.filter(row => row.status_group !== 'active');
-  const selected = view === 'active' ? active : inactive;
-  const items = selected.slice(offset, offset + limit).map(row => ({ ...row,
-    progress_percent: queueSummary([row]).percent,
-    sent_count: Math.max(0, Number(row.processed || 0) - Number(row.failed || 0)),
-    preview_body: reviewPreview(row),
-  }));
-  return { items, total: selected.length, counts: { active: active.length, inactive: inactive.length },
+  const issues = unique.filter(row => isQueueIssue(row,now));
+  const inactive = group ? [] : unique.filter(row => row.status_group !== 'active' && !isQueueIssue(row,now));
+  const selected = view === 'active' ? active : view === 'issues' ? issues : inactive;
+  return { items: selected.slice(offset, offset + limit).map(queueCompact), total: selected.length,
+    counts: { active: active.length, inactive: inactive.length, issues: issues.length },
     summary: queueSummary(selected), view, limit, offset };
+}
+function queueBundle(rows, options) {
+  const page=queuePage(rows,options);
+  if(page.view==='active')page.issues=queuePage(rows,{...options,view:'issues',offset:0});
+  return page;
 }
 
 function reviewPreview(row) {
@@ -69,6 +87,14 @@ function countPotential(patients, history, queued = [], optOuts = [], now = new 
 
 function createService({ db, resolveProfile, queues, ratingSummary, automation, now = () => new Date() }) {
   const query = (sql, replacements = {}) => db.sequelize.query(sql, { replacements, type: db.Sequelize.QueryTypes.SELECT });
+  const aggregateCache = createReportReadCache({now:()=>+now()});
+  const queueCache = createReportReadCache({freshMs:1500,staleMs:1500,now:()=>+now()});
+  const scopeKey = scope => [scope.scope,scope.groupId||0,...positiveIds(scope.clinicIds).sort((a,b)=>a-b)].join(':');
+  async function readQueues(scope,{userId,scopeRaw}) {
+    return (await queueCache.read(scopeKey(scope)+':'+userId,()=>queues({userId,scopeRaw,includeHistory:true}))).value;
+  }
+  function invalidate(){aggregateCache.clear();queueCache.clear();}
+
   async function potentialByClinic(clinicIds) {
     const [patients, queued, optOuts, histories] = await Promise.all([
       query(`WITH memberships AS (
@@ -115,8 +141,11 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
         profile_url: profile?.links?.url_perfil_google || null, review_url: profile?.links?.url_dejar_resena || null };
     }));
     const locationIds = positiveIds(profiles.map(r => r.business_location_id));
-    const [potentials, queueRows, ratingRows, counts, auto] = await Promise.all([
-      potentialByClinic(clinicIds), queues({ userId, scopeRaw, includeHistory: true }),
+    const key=scopeKey(scope)+':'+locationIds.slice().sort((a,b)=>a-b).join(',')+':'+range.from+':'+range.to;
+    const [cached,queueRows,auto,ratings] = await Promise.all([
+      aggregateCache.read(key,async()=>{
+        const [potentials,ratingRows,counts,attributed,optOuts] = await Promise.all([
+          potentialByClinic(clinicIds),
       locationIds.length ? query(`WITH ranked AS (SELECT r.*,ROW_NUMBER() OVER (
         PARTITION BY business_location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
         ORDER BY google_missing_at IS NULL DESC,last_seen_at DESC,id DESC) rank_id
@@ -127,14 +156,17 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
         GROUP BY business_location_id`, { locationIds }) : [],
       query(`SELECT COUNT(*) requests_sent FROM MarketingPatientListItems i JOIN MarketingPatientLists l ON l.id=i.list_id
         WHERE COALESCE(i.clinica_id,l.clinica_id) IN (:clinicIds) AND ${isReview} AND i.sent_at IS NOT NULL AND ${testExclusion}`, { clinicIds }),
+          require('./googleReviewHistory.service').countHistoricalMatches(db, clinicIds),
+          query(`SELECT COUNT(DISTINCT CONCAT(clinica_id,':',phone_digits)) total FROM MarketingContactOptOuts
+            WHERE clinica_id IN (:clinicIds) AND status='active' AND channel='whatsapp'`, {clinicIds}),
+        ]);
+        return {potentials,ratingRows,counts,attributed,optOuts};
+      }),
+      readQueues(scope,{userId,scopeRaw}),
       scope.scope === 'clinic' ? automation(scope) : null,
+      privateRatings(scope,{period,summaryOnly:true}),
     ]);
-    const [attributed, optOuts, ratings] = await Promise.all([
-      require('./googleReviewHistory.service').countHistoricalMatches(db, clinicIds),
-      query(`SELECT COUNT(DISTINCT CONCAT(clinica_id,':',phone_digits)) total FROM MarketingContactOptOuts
-        WHERE clinica_id IN (:clinicIds) AND status='active' AND channel='whatsapp'`, { clinicIds }),
-      privateRatings(scope, { period, summaryOnly: true }),
-    ]);
+    const {potentials,ratingRows,counts,attributed,optOuts}=cached.value;
     const googleProfiles = profiles.map(row => {
       const score = ratingRows.find(r => Number(r.business_location_id) === row.business_location_id);
       const shared = profiles.filter(p => p.business_location_id && p.business_location_id === row.business_location_id);
@@ -142,8 +174,8 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
         shared_with: shared.length > 1 ? shared.map(p => p.clinic_name) : [] };
     });
     const sent = Number(counts[0]?.requests_sent || 0);
-    const queueReport = queuePage(queueRows, { group: scope.scope === 'group' });
-    return { success: true, generated_at: now().toISOString(), scope: { type: scope.scope, group_id: scope.groupId || null,
+    const queueReport = queueBundle(queueRows, { group: scope.scope === 'group',now:now() });
+    return { success: true, generated_at: cached.generated_at, aggregate_cache: {status:cached.status}, scope: { type: scope.scope, group_id: scope.groupId || null,
       name: scope.group?.nombre_grupo || scope.group?.nombre || (clinics.length === 1 ? clinics[0].nombre_clinica : 'Grupo de clínicas'), clinic_count: clinics.length },
       potential_patients: { total: potentials.reduce((s, r) => s + r.count, 0), by_clinic: potentials, excludes_queued: true },
       google_profiles: googleProfiles, queues: queueReport.items, queue_summary: queueReport.summary, queue_page: queueReport,
@@ -189,15 +221,25 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
           percent: total ? Number(totals[0]?.['r'+rating] || 0) / total * 100 : 0 })) } };
   }
   async function queueReport(scope, { userId, scopeRaw, ...options }) {
-    return { success: true, ...queuePage(await queues({ userId, scopeRaw, includeHistory: true }), { ...options, group: scope.scope === 'group' }) };
+    return { success:true,...queueBundle(await readQueues(scope,{userId,scopeRaw}),{...options,group:scope.scope==='group',now:now()}) };
   }
-  return { overview, privateRatings, potentialByClinic, queueReport };
+  async function queueDetail(scope,{userId,scopeRaw,queueId}) {
+    if(!/^marketing:[1-9]\d*$/.test(String(queueId)))throw Object.assign(Error('Cola inválida'),{status:400});
+    const rows=await queues({userId,scopeRaw,includeHistory:true,queueId});
+    const row=rows.find(r=>r.id===queueId);
+    if(!row)throw Object.assign(Error('Cola no encontrada'),{status:404});
+    return {success:true,summary:{...row,preview_body:reviewPreview(row)}};
+  }
+  return { overview, privateRatings, potentialByClinic, queueReport, queueDetail, invalidate };
+
 }
 
+let currentService;
 function current() {
+  if(currentService)return currentService;
   const db = require('../../models'), bulk = require('./marketingBulkSends.service');
-  return createService({ db, resolveProfile: require('./googleLocalLinks.service').resolveClinicGoogleReviewProfile,
+  return currentService=createService({ db, resolveProfile: require('./googleLocalLinks.service').resolveClinicGoogleReviewProfile,
     queues: require('./sendQueues.service').listReviewQueues, ratingSummary: bulk.buildGoogleRatingSummary,
     automation: scope => bulk.getReviewRequestAutomationStatus(scope) });
 }
-module.exports = { createService, current, countPotential, positiveIds, queueSummary, queuePage, reviewPreview };
+module.exports = { createService, current, countPotential, positiveIds, queueSummary, queuePage, reviewPreview, isQueueIssue, queueCompact, invalidate:()=>currentService?.invalidate() };

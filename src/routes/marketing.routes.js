@@ -77,6 +77,17 @@ router.get(
 
 router.use(authMiddleware);
 const webRateLimit = createMarketingWebRateLimiter();
+// Successful audience/configuration writes retire report snapshots; preview and
+// test requests do not. The transport and its operational state are never cached.
+router.use((req,res,next)=>{
+  if(['POST','PUT','PATCH','DELETE'].includes(req.method)
+    && /^\/(bulk-sends|review-requests)(?:\/|$)/.test(req.path)
+    && !/\/(draft|preview|test(?:-send)?)(?:\/|$)/.test(req.path)) {
+    res.once('finish',()=>{if(res.statusCode<400)require('../services/reviewOverview.service').invalidate();});
+  }
+  next();
+});
+
 const limitWebSaves = webRateLimit({ operation: 'web_draft_save', limit: 90, windowMs: 60 * 1000 });
 const limitWebRevisions = webRateLimit({ operation: 'web_revision_create', limit: 12, windowMs: 10 * 60 * 1000 });
 const limitWebProjects = webRateLimit({ operation: 'web_project_create', limit: 20, windowMs: 60 * 60 * 1000 });
@@ -185,6 +196,7 @@ router.post('/review-requests/imported-lists/:listId/registration', reviewWizard
 router.get('/review-requests/summary', marketingBulkSendsController.getReviewRequestSummary);
 router.get('/review-requests/overview', marketingBulkSendsController.getReviewOverview);
 router.get('/review-requests/queues', marketingBulkSendsController.getReviewQueues);
+router.get('/review-requests/queues/:queueId/summary', marketingBulkSendsController.getReviewQueueDetail);
 router.get('/review-requests/private-ratings', marketingBulkSendsController.getReviewPrivateRatings);
 router.get('/review-requests/imported-lists', marketingBulkSendsController.listReviewImportedLists);
 router.get('/review-requests/missing-reviews', marketingBulkSendsController.getMissingGoogleReviews);

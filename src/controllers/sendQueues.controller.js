@@ -25,6 +25,7 @@ async function mutate(req, res, action) {
       queueId: req.params.queueId,
       action,
     });
+    require('../services/reviewOverview.service').invalidate();
     return res.json({ success: true, data });
   } catch (error) {
     if (!error.status || error.status >= 500) {
