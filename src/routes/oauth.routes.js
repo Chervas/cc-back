@@ -1810,6 +1810,11 @@ router.get('/google/connection-status', async (req, res) => {
         const binding = await googleOAuthBroker.bindingFor(metadata.connection?.id, req.query?.google_service);
         if (binding) {
             await authorizeExplicitConnectionScope(req, 'write');
+            if (req.query?.google_service === 'search_console') {
+                const addition = await require('../services/googleReviewedSearchConsoleMapping.service')
+                    .additionStatus(() => googleAdsMappingScope(req, 'write'));
+                if (addition) return res.json(addition);
+            }
             return res.json(await googleOAuthBroker.status({ binding, scopeKey: metadata.scope?.scopeKey,
                 actorId: getUserIdFromToken(req), sessionRef: req.authSession?.id, sessionExpiresAt: req.authSession?.expiresAt }));
         }

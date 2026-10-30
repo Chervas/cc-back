@@ -6,6 +6,12 @@ const projection = require('../../services/integrations-broker/src/google-proper
 const revocations = require('./googlePropertyRevocation.contract');
 const CONFIG = '/etc/clinicaclick-google-search-console/reviewed-properties.json';
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+const additionCapabilities = new WeakMap();
+async function inspectAdditionCapability(capability, input) {
+  const inspect = additionCapabilities.get(capability);
+  if (!inspect) fail();
+  return inspect(input);
+}
 const KEYS = ['descriptorId','scopeKey','clinicId','connectionId','googleUserId','connectionRef','siteUrl','assetRef',
   'authorizationBindingDigest','reviewedAtEpochMs','expiresAtEpochMs'].sort().join(',');
 const fail = (code = 'broker_binding_invalid', httpStatus = 409) => { throw Object.assign(Error(code), { code, httpStatus }); };
@@ -52,7 +58,7 @@ function loadDescriptors() {
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 function createReviewedSearchConsoleMapping({ models, sessions, readSite, descriptors = loadDescriptors,
-  authorize = require('./googleOAuthCohortScope.service').authorize,
+  authorize = require('./googleOAuthCohortScope.service').authorizeReviewedAddition,
   enabled = () => process.env.GOOGLE_SEARCH_CONSOLE_BROKER_ENABLED === 'true', now = Date.now }) {
   let active = 0;
   const getModels = () => typeof models === 'function' ? models() : models;
@@ -82,9 +88,22 @@ function createReviewedSearchConsoleMapping({ models, sessions, readSite, descri
     if (!binding || binding.policy_version !== C.POLICY || C.cohortOf(C.validate(binding)) !== 'search_console'
       || Number(binding.google_connection_id) !== entry.connectionId || binding.connection_ref !== entry.connectionRef
       || C.digest(binding) !== entry.authorizationBindingDigest) fail('broker_discovery_scope_unconfigured');
-    await authorize({ models: m, binding, requestScopeKey: input.scopeKey, actorId: input.actorId,
-      sessionRef: input.sessionRef, expiresAt: new Date(input.sessionExpiresAt), transaction,
-      sessions: sessions || require('./accessSession.service') });
+    // The capability is never accepted from HTTP. Only this fresh Root
+    // descriptor check can mint it, and it expires when this check returns.
+    const capability = Object.freeze({});
+    additionCapabilities.set(capability, async request => {
+      if (request.models !== m || request.requestScopeKey !== input.scopeKey || request.actorId !== input.actorId
+        || request.sessionRef !== input.sessionRef || request.transaction !== transaction
+        || C.digest(request.binding) !== entry.authorizationBindingDigest) fail();
+      await input.revalidate();
+      if (now() >= entry.expiresAtEpochMs || !(await load()).some(row => key(row) === key(entry))) fail();
+      return entry;
+    });
+    try {
+      await authorize({ models: m, binding, requestScopeKey: input.scopeKey, actorId: input.actorId,
+        sessionRef: input.sessionRef, expiresAt: new Date(input.sessionExpiresAt), transaction,
+        sessions: sessions || require('./accessSession.service') }, capability);
+    } finally { additionCapabilities.delete(capability); }
     const rows = await m.GooglePropertyBrokerRevocation.findAll({ ...options,
       where: { kind: 'search_console', asset_ref: entry.assetRef }, limit: 1001 });
     revocations.inspectRevocations('search_console', entry.assetRef, entry.clinicId, entry.connectionRef, rows);
@@ -112,6 +131,21 @@ function createReviewedSearchConsoleMapping({ models, sessions, readSite, descri
     try { return await work(now() + 60000); } finally { active--; }
   }
   return {
+    async additionStatus(getInput) {
+      const entries = await load(); if (!entries.length) return null;
+      const input = await getInput(); validateInput(input);
+      const selected = matching(entries, input); if (!selected.length) return null;
+      return bounded(async deadline => {
+        for (const entry of selected) {
+          await getModels().sequelize.transaction({ isolationLevel: 'SERIALIZABLE' }, transaction => check(input, entry, transaction));
+          if (now() >= deadline) fail('broker_discovery_timeout', 503);
+        }
+        // Permission to attempt the exact reviewed inventory, not OAuth success
+        // or a fabricated resource. Sites.get remains a separate actual read.
+        return { mode: 'broker_reviewed_addition', connected: false, google_service: 'search_console',
+          inventory_access: 'operator_reviewed_exact_property' };
+      });
+    },
     async inventory(getInput) {
       const entries = await load(); if (!entries.length) return [];
       const input = await getInput(); validateInput(input); const selected = matching(entries, input);
@@ -169,5 +203,6 @@ function createReviewedSearchConsoleMapping({ models, sessions, readSite, descri
 let singleton;
 const service = () => singleton ||= createReviewedSearchConsoleMapping({ models: () => require('../../models'),
   readSite: require('./searchConsoleBroker.service').readReviewedSite });
-module.exports = { CONFIG, descriptor, loadDescriptors, createReviewedSearchConsoleMapping,
+module.exports = { CONFIG, descriptor, loadDescriptors, createReviewedSearchConsoleMapping, inspectAdditionCapability,
+  additionStatus: (...args) => service().additionStatus(...args),
   inventory: (...args) => service().inventory(...args), map: (...args) => service().map(...args) };

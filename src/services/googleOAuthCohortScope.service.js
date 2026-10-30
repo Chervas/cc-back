@@ -135,7 +135,7 @@ async function consumers(models, kind, binding, options) {
   if (!affected.size || affected.size > 1000) C.fail();
   return { affected, usage };
 }
-async function authorize({ models, binding, requestScopeKey, actorId, sessionRef, expiresAt, expectedClinicIds, transaction, sessions }) {
+async function inspectAuthority({ models, binding, requestScopeKey, actorId, sessionRef, expiresAt, expectedClinicIds, transaction, sessions }, reviewedAddition = false) {
   C.validate(binding); if (binding.policy_version !== C.POLICY || !transaction) C.fail();
   const options = optionsFor(transaction);
   const fresh = await models.GoogleOAuthBrokerBinding.findOne({ ...options, where: C.keyFor(binding) });
@@ -146,7 +146,7 @@ async function authorize({ models, binding, requestScopeKey, actorId, sessionRef
   for (const kind of Object.keys(SPECS)) {
     const result = await consumers(models, kind, binding, options); if (result) selected = result;
   }
-  if (!selected || !requested.clinicIds.some(clinicId => selected.usage.has(clinicId))) C.fail('google_oauth_scope_forbidden', 403);
+  if (!selected || !reviewedAddition && !requested.clinicIds.some(clinicId => selected.usage.has(clinicId))) C.fail('google_oauth_scope_forbidden', 403);
   const clinicIds = [...new Set([...selected.affected, ...requested.clinicIds])].sort((a, b) => a - b);
   if (clinicIds.length > 1000 || expectedClinicIds && JSON.stringify(clinicIds) !== JSON.stringify(expectedClinicIds)) C.fail();
   const clinics = await bounded(models.Clinica.findAll({ ...options, attributes: ['id_clinica'], where: { id_clinica: { [Op.in]: clinicIds } } }));
@@ -154,4 +154,14 @@ async function authorize({ models, binding, requestScopeKey, actorId, sessionRef
   await permission(models, actorId, clinicIds, options);
   return { binding: fresh, clinicIds };
 }
-module.exports = { authorize, authorizeConnection };
+// Ordinary OAuth never accepts a caller-selected relaxation.
+async function authorize(input) { return inspectAuthority(input); }
+async function authorizeReviewedAddition(input, capability) {
+  if (C.cohortOf(C.validate(input.binding)) !== 'search_console') C.fail();
+  const inspect = require('./googleReviewedSearchConsoleMapping.service').inspectAdditionCapability;
+  await inspect(capability, input);
+  const result = await inspectAuthority(input, true);
+  await inspect(capability, input);
+  return result;
+}
+module.exports = { authorize, authorizeConnection, authorizeReviewedAddition };
