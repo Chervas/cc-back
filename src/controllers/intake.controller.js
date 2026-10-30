@@ -1,3 +1,5 @@
+
+const googleCutoverAdmission = require('../lib/googleCutoverAdmission').application;
 const crypto = require('crypto');
 const axios = require('axios');
 const asyncHandler = require('express-async-handler');
@@ -3045,6 +3047,8 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
 }
 
 exports.ingestLead = asyncHandler(async (req, res) => {
+  return await googleCutoverAdmission.run('intake_leads', async () => {
+
   const body = req.body || {};
   const eventId = (req.headers[EVENT_ID_HEADER] || body?.event_id || body?.eventId || null) || null;
 
@@ -4069,6 +4073,8 @@ exports.ingestLead = asyncHandler(async (req, res) => {
       : {}),
   });
 
+
+  });
 });
 
 exports.previewLeadImport = asyncHandler(async (req, res) => {
@@ -6081,6 +6087,8 @@ exports.registerWhatsappOrigin = asyncHandler(async (req, res) => {
 });
 
 exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
+  return await googleCutoverAdmission.run('intake_events', async () => {
+
   const body = req.body || {};
 
   const eventName = body.event_name || body.eventName || 'ViewContent';
@@ -6461,6 +6469,8 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
   }
 
   res.json({ success: true });
+
+  });
 });
 
 exports.verifyMetaWebhook = asyncHandler(async (req, res) => {

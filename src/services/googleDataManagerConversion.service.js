@@ -1,4 +1,6 @@
 'use strict';
+const googleCutoverAdmission = require('../lib/googleCutoverAdmission').application;
+
 
 const crypto = require('crypto');
 const axios = require('axios');
@@ -475,6 +477,8 @@ async function uploadConversionEvent({
   quotaProjectId = null,
   ...input
 } = {}) {
+  return await googleCutoverAdmission.run('data_manager_http', async () => {
+
   if (!accessToken) throw scopedCredentialError();
   const resolvedQuotaProjectId = requireQuotaProjectId(quotaProjectId);
   const data = buildDataManagerEventRequest(input);
@@ -491,6 +495,8 @@ async function uploadConversionEvent({
     throw Object.assign(new Error('Google devolvio una respuesta de validacion no reconocida'), { code: 'DATA_MANAGER_VALIDATION_UNCONFIRMED' });
   }
   return response?.data || {};
+
+  });
 }
 
 async function retrieveRequestStatus({
@@ -500,6 +506,8 @@ async function retrieveRequestStatus({
   timeoutMs = 10000,
   quotaProjectId = null
 } = {}) {
+  return await googleCutoverAdmission.run('data_manager_http', async () => {
+
   if (!accessToken) throw scopedCredentialError();
   const resolvedQuotaProjectId = requireQuotaProjectId(quotaProjectId);
   const normalizedRequestId = cleanString(requestId);
@@ -517,6 +525,8 @@ async function retrieveRequestStatus({
     timeout: timeoutMs
   });
   return response?.data || {};
+
+  });
 }
 
 module.exports = {

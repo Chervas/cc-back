@@ -1,4 +1,6 @@
 'use strict';
+const googleCutoverAdmission = require('../lib/googleCutoverAdmission').application;
+
 const { Op, literal } = require('sequelize');
 
 const CODES = new Set(['google_oauth_legacy_closed', 'google_connection_missing',
@@ -60,11 +62,15 @@ function createGoogleLegacyCredentials({ connectionModel, bindingModel, searchCo
       await check(connection.id, connection.googleUserId);
     }),
     request: guarded(async (connection, send) => {
+  return await googleCutoverAdmission.run('legacy_request', async () => {
+
       await captured(connection);
       const response = await send();
       await check(connection.id, connection.googleUserId);
       return response;
-    }),
+
+  });
+}),
   };
   return service;
 }

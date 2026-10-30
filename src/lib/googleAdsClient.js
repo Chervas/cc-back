@@ -1,4 +1,6 @@
 'use strict';
+const googleCutoverAdmission = require('./googleCutoverAdmission').application;
+
 
 const axios = require('axios');
 const { ApiUsageCounter } = require('../../models');
@@ -164,6 +166,8 @@ async function googleAdsRequest(method = 'GET', path, {
     Number(process.env.GOOGLE_ADS_HTTP_TIMEOUT_MS || process.env.SYNC_PROVIDER_HTTP_TIMEOUT_MS || 30000) || 30000
   )
 } = {}) {
+  return await googleCutoverAdmission.run('ads_http', async () => {
+
   const { developerToken } = ensureGoogleAdsConfig();
   const [baseUrl] = buildBaseUrls(apiVersion);
   if (typeof method !== 'string' || !/^(GET|POST|PUT|PATCH|DELETE)$/.test(method)) {
@@ -232,6 +236,8 @@ async function googleAdsRequest(method = 'GET', path, {
   } finally {
     await updateGoogleUsageCounter({ usagePct: lastGoogleUsagePct, pauseUntil: googleAdsPauseUntil ? new Date(googleAdsPauseUntil) : null, quota: quotaLimit });
   }
+
+  });
 }
 
 async function getGoogleAdsUsageStatus() {

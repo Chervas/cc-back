@@ -1,4 +1,6 @@
 'use strict';
+const googleCutoverAdmission = require('../lib/googleCutoverAdmission').application;
+
 
 const axios = require('axios');
 const { Op, fn, col, literal } = require('sequelize');
@@ -771,6 +773,8 @@ function serializeReviewRow(review) {
 }
 
 async function updateReviewReply(resolved, reviewIdRaw, payload = {}, options = {}) {
+  return await googleCutoverAdmission.run('gbp_mutation', async () => {
+
   const comment = cleanString(payload.comment);
   if (!comment) {
     const error = new Error('business_profile_review_reply_required');
@@ -831,9 +835,13 @@ async function updateReviewReply(resolved, reviewIdRaw, payload = {}, options = 
   });
 
   return { success: true, review: serializeReviewRow(review) };
+
+  });
 }
 
 async function deleteReviewReply(resolved, reviewIdRaw, payload = {}, options = {}) {
+  return await googleCutoverAdmission.run('gbp_mutation', async () => {
+
   const { review, location } = await findReviewForMutation(resolved, reviewIdRaw);
   const reviewName = cleanString(review.review_name);
   if (!reviewName || !reviewName.includes('/reviews/')) {
@@ -869,6 +877,8 @@ async function deleteReviewReply(resolved, reviewIdRaw, payload = {}, options = 
   });
 
   return { success: true, review: serializeReviewRow(review) };
+
+  });
 }
 
 async function listPosts(resolved, query = {}) {
@@ -1245,6 +1255,8 @@ async function buildDashboard(resolved, query = {}) {
 }
 
 async function ensureGoogleAccessToken(connectionId) {
+  return await googleCutoverAdmission.run('oauth_refresh', async () => {
+
   const connection = await legacyCredentials.load(connectionId);
   if (!connection) {
     const error = new Error('google_connection_not_found');
@@ -1284,6 +1296,8 @@ async function ensureGoogleAccessToken(connectionId) {
   }
   await legacyCredentials.assert(connection);
   return { accessToken, connection };
+
+  });
 }
 
 function buildBusinessProfileV4LocationPath(location) {
@@ -1295,6 +1309,8 @@ function buildBusinessProfileV4LocationPath(location) {
 }
 
 async function publishPhoto(resolved, payload = {}, options = {}) {
+  return await googleCutoverAdmission.run('gbp_mutation', async () => {
+
   const location = resolved.locations[0] || null;
   if (!location) {
     const error = new Error('business_profile_location_not_configured');
@@ -1371,6 +1387,8 @@ async function publishPhoto(resolved, payload = {}, options = {}) {
     }, { transaction });
   });
   return { success: true, photo: normalizeMediaItem(media, 0) };
+
+  });
 }
 
 function specialHoursError(message, status = 400) {
@@ -1523,6 +1541,8 @@ function buildGoogleSpecialHourPeriods(plan) {
 }
 
 async function updateSpecialHours(resolved, payload = {}, options = {}) {
+  return await googleCutoverAdmission.run('gbp_mutation', async () => {
+
   const location = resolved?.locations?.[0] || null;
   if (!location) throw specialHoursError('business_profile_location_not_configured', 409);
   const raw = rawPayload(location);
@@ -1589,6 +1609,8 @@ async function updateSpecialHours(resolved, payload = {}, options = {}) {
     timeZone: plan.timeZone,
     syncedAt,
   };
+
+  });
 }
 
 function todayInTimeZone(timeZone = DEFAULT_TIME_ZONE, date = new Date()) {
