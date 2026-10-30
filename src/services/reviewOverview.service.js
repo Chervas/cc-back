@@ -21,6 +21,34 @@ function queueSummary(rows) {
   return { ...counts, percent: counts.total ? Math.min(100, Math.round(counts.processed / counts.total * 100)) : 0 };
 }
 
+function queuePage(rows, { group = false, view = 'active', limit = 5, offset = 0 } = {}) {
+  if (!['active', 'inactive'].includes(view)) throw Object.assign(Error('Vista de colas inválida'), { status: 400 });
+  if (group) view = 'active';
+  limit = Math.min(25, Math.max(1, Number.parseInt(limit, 10) || 5));
+  offset = Math.max(0, Number.parseInt(offset, 10) || 0);
+  const unique = [...new Map(rows.map(row => [row.id, row])).values()];
+  const active = unique.filter(row => row.status_group === 'active' && (!group || row.started));
+  const inactive = group ? [] : unique.filter(row => row.status_group !== 'active');
+  const selected = view === 'active' ? active : inactive;
+  const items = selected.slice(offset, offset + limit).map(row => ({ ...row,
+    progress_percent: queueSummary([row]).percent,
+    sent_count: Math.max(0, Number(row.processed || 0) - Number(row.failed || 0)),
+    preview_body: reviewPreview(row),
+  }));
+  return { items, total: selected.length, counts: { active: active.length, inactive: inactive.length },
+    summary: queueSummary(selected), view, limit, offset };
+}
+
+function reviewPreview(row) {
+  const clinic = row.review_display_name || row.clinic_name || '[clínica]', sender = row.review_sender_name || '[remitente]';
+  const body = String(row.message_preview || ''), senderFirst = /soy\s*\{\{\s*2\s*\}\}\s+de\s+\{\{\s*3\s*\}\}/i.test(body);
+  return body.replace(/\{\{\s*(nombre|nombre_paciente|nombrepaciente|1)\s*\}\}/gi, '[nombre]')
+    .replace(/\{\{\s*2\s*\}\}/g, senderFirst ? sender : clinic).replace(/\{\{\s*3\s*\}\}/g, senderFirst ? clinic : sender)
+    .replace(/\{\{\s*(clinica|nombre_clinica|nombreclinica)\s*\}\}/gi, clinic)
+    .replace(/\{\{\s*(firma_resenas|nombre_remitente_resenas|remitente_resena|review_sender_name)\s*\}\}/gi, sender)
+    .replace(/\{\{\s*(fecha_ultima_cita_asistida|ultima_cita_asistida|last_attended_appointment_date|fecha|4)\s*\}\}/gi, '[fecha de visita]');
+}
+
 function countPotential(patients, history, queued = [], optOuts = [], now = new Date()) {
   const queuedPatients = new Set(queued.map(r => Number(r.paciente_id)).filter(Boolean));
   const queuedPhones = new Set(queued.map(r => phoneKey(r.phone)).filter(Boolean));
@@ -88,7 +116,7 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
     }));
     const locationIds = positiveIds(profiles.map(r => r.business_location_id));
     const [potentials, queueRows, ratingRows, counts, auto] = await Promise.all([
-      potentialByClinic(clinicIds), queues({ userId, scopeRaw }),
+      potentialByClinic(clinicIds), queues({ userId, scopeRaw, includeHistory: true }),
       locationIds.length ? query(`WITH ranked AS (SELECT r.*,ROW_NUMBER() OVER (
         PARTITION BY business_location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
         ORDER BY google_missing_at IS NULL DESC,last_seen_at DESC,id DESC) rank_id
@@ -105,7 +133,7 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
       require('./googleReviewHistory.service').countHistoricalMatches(db, clinicIds),
       query(`SELECT COUNT(DISTINCT CONCAT(clinica_id,':',phone_digits)) total FROM MarketingContactOptOuts
         WHERE clinica_id IN (:clinicIds) AND status='active' AND channel='whatsapp'`, { clinicIds }),
-      privateRatings(scope, { period, limit: 1 }),
+      privateRatings(scope, { period, summaryOnly: true }),
     ]);
     const googleProfiles = profiles.map(row => {
       const score = ratingRows.find(r => Number(r.business_location_id) === row.business_location_id);
@@ -113,14 +141,14 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
       return { ...row, rating: score ? ratingSummary(score) : null, last_seen_at: score?.last_seen_at || null,
         shared_with: shared.length > 1 ? shared.map(p => p.clinic_name) : [] };
     });
-    const sent = Number(counts[0]?.requests_sent || 0), queueTotals = queueSummary(queueRows);
+    const sent = Number(counts[0]?.requests_sent || 0);
+    const queueReport = queuePage(queueRows, { group: scope.scope === 'group' });
     return { success: true, generated_at: now().toISOString(), scope: { type: scope.scope, group_id: scope.groupId || null,
       name: scope.group?.nombre_grupo || scope.group?.nombre || (clinics.length === 1 ? clinics[0].nombre_clinica : 'Grupo de clínicas'), clinic_count: clinics.length },
       potential_patients: { total: potentials.reduce((s, r) => s + r.count, 0), by_clinic: potentials, excludes_queued: true },
-      google_profiles: googleProfiles, queues: queueRows.map(row => ({ ...row, progress_percent: queueSummary([row]).percent,
-        sent_count: Math.max(0, Number(row.processed || 0) - Number(row.failed || 0)) })), queue_summary: queueTotals,
-      current: { queued: queueTotals.pending, opt_outs: Number(optOuts[0]?.total || 0) },
-      ratings_in_period: ratings.total, period: range.period,
+      google_profiles: googleProfiles, queues: queueReport.items, queue_summary: queueReport.summary, queue_page: queueReport,
+      current: { queued: queueSummary(queueRows.filter(row => ['active','paused'].includes(row.status_group))).pending, opt_outs: Number(optOuts[0]?.total || 0) },
+      ratings_in_period: ratings.total, private_ratings_summary: ratings.summary, period: range.period,
       historical: { requests_sent: sent, attributed_reviews: attributed, conversion: sent ? attributed / sent * 100 : null },
       automation: auto, provider_requests: 0 };
   }
@@ -147,16 +175,23 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
       SELECT * FROM ranked WHERE rn=1 ${rating >= 1 && rating <= 5 ? 'AND rating = :rating' : ''}`;
     const values = { clinicIds, start: range?.start, end: range?.end, rating, limit, offset };
     const [totals, rows] = await Promise.all([
-      query(`SELECT COUNT(*) total FROM (${cte}) counted`, values),
-      query(`SELECT r.*,(SELECT JSON_UNQUOTE(JSON_EXTRACT(f.payload,'$.content')) FROM MarketingPatientContactEvents f
+      query(`SELECT COUNT(*) total,COALESCE(SUM(rating),0) rating_sum,${[1,2,3,4,5].map(n => `COALESCE(SUM(rating=${n}),0) r${n}`).join(',')}
+        FROM (${cte}) counted`, values),
+      (options.summaryOnly === true || options.summary_only === '1') ? [] : query(`SELECT r.*,(SELECT JSON_UNQUOTE(JSON_EXTRACT(f.payload,'$.content')) FROM MarketingPatientContactEvents f
         WHERE f.list_id=r.list_id AND f.item_id=r.item_id AND f.event_type='review_private_feedback_received'
         ORDER BY f.occurred_at DESC LIMIT 1) comment FROM (${cte}) r
         ORDER BY ${sort} ${direction},id DESC LIMIT :limit OFFSET :offset`, values),
     ]);
-    return { success: true, items: rows.map(({ payload, rn, ...r }) => ({ ...r, rating: Number(r.rating) })),
-      total: Number(totals[0]?.total || 0), limit, offset };
+    const total = Number(totals[0]?.total || 0);
+    return { success: true, items: rows.map(({ payload, rn, ...r }) => ({ ...r, rating: Number(r.rating) })), total, limit, offset,
+      summary: { total, average: total ? Number(totals[0]?.rating_sum || 0) / total : null,
+        distribution: [5,4,3,2,1].map(rating => ({ rating, count: Number(totals[0]?.['r'+rating] || 0),
+          percent: total ? Number(totals[0]?.['r'+rating] || 0) / total * 100 : 0 })) } };
   }
-  return { overview, privateRatings, potentialByClinic };
+  async function queueReport(scope, { userId, scopeRaw, ...options }) {
+    return { success: true, ...queuePage(await queues({ userId, scopeRaw, includeHistory: true }), { ...options, group: scope.scope === 'group' }) };
+  }
+  return { overview, privateRatings, potentialByClinic, queueReport };
 }
 
 function current() {
@@ -165,4 +200,4 @@ function current() {
     queues: require('./sendQueues.service').listReviewQueues, ratingSummary: bulk.buildGoogleRatingSummary,
     automation: scope => bulk.getReviewRequestAutomationStatus(scope) });
 }
-module.exports = { createService, current, countPotential, positiveIds, queueSummary };
+module.exports = { createService, current, countPotential, positiveIds, queueSummary, queuePage, reviewPreview };

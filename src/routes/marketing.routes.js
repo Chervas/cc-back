@@ -184,6 +184,7 @@ router.get('/review-requests/imported-lists/:listId/registration', reviewWizardC
 router.post('/review-requests/imported-lists/:listId/registration', reviewWizardController.applyRegistration);
 router.get('/review-requests/summary', marketingBulkSendsController.getReviewRequestSummary);
 router.get('/review-requests/overview', marketingBulkSendsController.getReviewOverview);
+router.get('/review-requests/queues', marketingBulkSendsController.getReviewQueues);
 router.get('/review-requests/private-ratings', marketingBulkSendsController.getReviewPrivateRatings);
 router.get('/review-requests/imported-lists', marketingBulkSendsController.listReviewImportedLists);
 router.get('/review-requests/missing-reviews', marketingBulkSendsController.getMissingGoogleReviews);

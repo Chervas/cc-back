@@ -172,6 +172,18 @@ exports.getReviewPrivateRatings = async (req, res) => {
   } catch (error) { return sendError(res, error, 'No se pudieron cargar las valoraciones'); }
 };
 
+exports.getReviewQueues = async (req, res) => {
+  try {
+    const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });
+    await requireReviewHistoryAccess(req, scope);
+    res.set('Cache-Control', 'no-store');
+    return res.json(await require('../services/reviewOverview.service').current().queueReport(scope, {
+      userId: req.userData?.userId, scopeRaw: scope.scope === 'group' ? `group:${scope.groupId}` : scope.clinicIds.join(','),
+      view: req.query.view || 'active', limit: req.query.limit, offset: req.query.offset,
+    }));
+  } catch (error) { return sendError(res, error, 'No se pudieron cargar las colas de reseñas'); }
+};
+
 exports.getMissingGoogleReviews = async (req, res) => {
   try {
     const scope = await resolveReviewRequestSummaryScope(req, { allowAll: false });

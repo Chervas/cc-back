@@ -1,6 +1,6 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const { countPotential, queueSummary } = require('../../services/reviewOverview.service');
+const { countPotential, queueSummary, queuePage, reviewPreview } = require('../../services/reviewOverview.service');
 const { buildReviewRequestHistory, readReviewRequestHistory } = require('../../lib/review-request-history');
 const { aggregateReport, reportRange } = require('../../services/reviewActivityReport.service');
 const fs = require('node:fs'), vm = require('node:vm');
@@ -49,12 +49,12 @@ test('group series sum to the group total and shared profiles stay explicitly se
   assert.equal(result.by_clinic.find(r => r.clinic_id === 0).clinic_name, 'Fichas compartidas');
 });
 
-for (const endpoint of ['getReviewOverview', 'getReviewPrivateRatings']) {
+for (const endpoint of ['getReviewOverview', 'getReviewPrivateRatings', 'getReviewQueues']) {
   test(endpoint + ' checks scope permissions before any SQL reader; aliases keep the canonical queue scope', async () => {
     let allowed = false, reads = 0, options; const scope = {isValid:true,scope:'clinic',clinicIds:[31]};
     const deps = { '../lib/clinicScope':{resolveClinicScope:async()=>scope},'../services/marketingBulkSends.service':{},
       '../lib/marketingScopeAccess':{hasMarketingClinicScopeAccess:async()=>allowed},
-      '../services/reviewOverview.service':{current:()=>({overview:async(s,o)=>{reads++;options=o;return {};},privateRatings:async()=>{reads++;return {};}})} };
+      '../services/reviewOverview.service':{current:()=>({overview:async(s,o)=>{reads++;options=o;return {};},queueReport:async(s,o)=>{reads++;options=o;return {};},privateRatings:async()=>{reads++;return {};}})} };
     const ctx={exports:{},console,require:name=>{assert(name in deps,name);return deps[name];}};
     vm.runInNewContext(fs.readFileSync(require.resolve('../../controllers/marketingBulkSends.controller'),'utf8'),ctx);
     let code=200; const res={set(){},json(){},status(n){code=n;return this;}};
@@ -65,3 +65,20 @@ for (const endpoint of ['getReviewOverview', 'getReviewPrivateRatings']) {
     if (options) assert.equal(options.scopeRaw,'31');
   });
 }
+
+
+test('queue tabs retain all inactive history while group shows only unique active started sends',()=>{
+  const rows=[{id:'a',status_group:'active',started:true,total:10,processed:2,failed:0,pending:8},
+    {id:'a',status_group:'active',started:true,total:10,processed:2,failed:0,pending:8},
+    {id:'b',status_group:'active',started:false,total:20,processed:0,failed:0,pending:20},
+    {id:'c',status_group:'paused',started:true},{id:'d',status_group:'error',started:true},
+    {id:'e',status_group:'history',updated_at:'2026-01-01'}];
+  const group=queuePage(rows,{group:true});assert.equal(group.total,1);assert.equal(group.items[0].id,'a');assert.equal(group.summary.pending,8);
+  const individual=queuePage(rows,{limit:1,offset:1});assert.equal(individual.total,2);assert.equal(individual.items[0].id,'b');
+  const inactive=queuePage(rows,{view:'inactive'});assert.equal(inactive.total,3);assert.equal(inactive.items[2].id,'e');
+  assert.throws(()=>queuePage(rows,{view:'unsafe'}),e=>e.status===400);
+});
+test('frozen review preview resolves clinic and sender and keeps patient/date as placeholders',()=>{
+  assert.equal(reviewPreview({message_preview:'Hola {{1}}, soy {{2}} de {{3}}. {{4}}',review_sender_name:'Equipo QA',review_display_name:'Clínica QA'}),
+    'Hola [nombre], soy Equipo QA de Clínica QA. [fecha de visita]');
+});

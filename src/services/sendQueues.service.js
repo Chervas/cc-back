@@ -294,12 +294,12 @@ function listClinicIds(row) {
   ].filter(Boolean)));
 }
 
-async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, reviewOnly = false }) {
+async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, reviewOnly = false, includeHistory = false }) {
   if (!clinicIds.length) return [];
   const groupIds = Array.from(clinicsByGroupId.keys());
   const rows = await db.MarketingPatientList.findAll({
     where: {
-      ...(reviewOnly ? { [Op.and]: [db.Sequelize.literal(`objective_id='mass_sends' AND status<>'archived' AND
+      ...(reviewOnly ? { [Op.and]: [db.Sequelize.literal(`objective_id='mass_sends' ${includeHistory ? '' : "AND status<>'archived'"} AND
         (JSON_UNQUOTE(JSON_EXTRACT(criteria,'$.review_request')) IN ('true','1')
           OR JSON_UNQUOTE(JSON_EXTRACT(criteria,'$.template_usage'))='solicitud_resena')`)] } : {}),
       [Op.or]: [
@@ -352,13 +352,14 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
     const preferEmail = channels.includes('email') && (!channels.includes('whatsapp')
       || (!activeStatuses.has(whatsappStatus) && activeStatuses.has(emailStatus)));
     const dispatch = preferEmail ? { ...emailDispatch, context: 'email', label: 'Envío masivo por email' } : whatsappDispatch;
-    const effectiveStatus = String(dispatch.status || row.status || '').toLowerCase();
+    const effectiveStatus = reviewOnly && row.status === 'archived' ? 'archived' : String(dispatch.status || row.status || '').toLowerCase();
     const visibleStatuses = new Set([
       'queued', 'sending', 'scheduled', 'waiting', 'waiting_next_batch',
       'waiting_template_approval', 'held_meta', 'awaiting_delivery',
       'paused', 'paused_quality', 'paused_limit', 'paused_template', 'paused_config', 'paused_review',
       'failed', 'completed', 'cancelled',
     ]);
+    if (reviewOnly && includeHistory) visibleStatuses.add('archived');
     if (!visibleStatuses.has(effectiveStatus)) return [];
     const counters = row.counters || {};
     const stats = itemStatsByListId.get(Number(row.id)) || {};
@@ -419,7 +420,7 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
       cadence_note: cadence.cadence_note,
       batch_size: numberValue(dispatch.delivery_governance?.effective_batch_size, dispatch.batch_size || 1),
       configured_batch_size: numberValue(dispatch.batch_size, 1),
-      schedule: businessHours.label || (
+      schedule: (reviewOnly ? describeReviewSchedule(businessHours) : null) || businessHours.label || (
         businessHours.start_time && businessHours.end_time
           ? `${businessHours.start_time}-${businessHours.end_time}`
           : null
@@ -428,6 +429,22 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
       message_preview: templateSnapshot.body || null,
       sender: dispatch.account_quality?.phone_number_id || null,
       sender_label: dispatch.sender_display_name || dispatch.sender_phone_number || dispatch.account_quality?.display_phone_number || null,
+      ...(reviewOnly ? {
+        title: row.name || dispatch.label || 'Solicitud de reseñas',
+        processed: Math.min(total, processed),
+        started: !!(latestDate(row.last_sent_at, stats.last_sent_at, stats.email_last_sent_at)
+          || processed > 0 || effectiveStatus === 'sending' && dispatch.started_at),
+        started_at: dispatch.started_at || null,
+        review_source: row.criteria?.review_audience_mode || row.criteria?.review_source || 'manual_selection',
+        review_sender_name: row.criteria?.review_sender_name || null,
+        review_display_name: row.criteria?.review_display_clinic_name || clinicNameById.get(scopedClinicIds[0]) || null,
+        profile_name: row.criteria?.review_profile_alias_location_name || row.criteria?.review_display_clinic_name || clinicNameById.get(scopedClinicIds[0]) || null,
+        sender_label: dispatch.sender_snapshot?.label || dispatch.sender_display_name || dispatch.sender_phone_number || null,
+        message_image_url: [row.criteria?.review_team_photo_url, templateSnapshot.header_image_url, templateSnapshot.image_url, templateSnapshot.media_url]
+          .find(url => typeof url === 'string' && /^https:\/\//i.test(url)) || null,
+        excluded: Math.max(0, numberValue(counters.total, total) - total),
+        schedule_source: businessHours.source || dispatch.time_mode || null,
+      } : {}),
       error: humanizeQueueReason(dispatch.paused_reason || dispatch.last_error || row.safety_gates?.reason),
       can_pause: group === 'active' && pending > 0,
       can_resume: group === 'paused' && pending > 0 && !cannotResume,
@@ -437,6 +454,30 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
       updated_at: row.updated_at,
     }];
   });
+}
+
+function describeReviewSchedule(hours = {}) {
+  const days = values => {
+    const list = [...new Set(values.map(Number).filter(n => Number.isInteger(n) && n >= 1 && n <= 7))].sort((a,b)=>a-b);
+    if (list.join(',') === '1,2,3,4,5') return 'L-V';
+    if (list.length === 7) return 'L-D';
+    return list.map(n => ['','L','M','X','J','V','S','D'][n]).join(', ');
+  };
+  const configured = days(Array.isArray(hours.allowed_weekdays) ? hours.allowed_weekdays : []);
+  if (hours.label) return [configured,hours.label].filter(Boolean).join(' · ');
+  const intervals = hours.intervals_by_weekday || hours.intervalsByWeekday;
+  if (intervals && typeof intervals === 'object') {
+    const groups = new Map();
+    for (const [day,list] of Object.entries(intervals)) {
+      const text = (Array.isArray(list) ? list : []).map(i => {
+        const start = i?.start_time || i?.start, end = i?.end_time || i?.end;
+        return start && end ? `${start}-${end}` : '';
+      }).filter(Boolean).join(' / ');
+      if (text) groups.set(text,[...(groups.get(text)||[]),day]);
+    }
+    if (groups.size) return [...groups].map(([time,weekdays]) => `${days(weekdays)} ${time}`).join(' · ');
+  }
+  return hours.start_time && hours.end_time ? [configured,`${hours.start_time}-${hours.end_time}`].filter(Boolean).join(' · ') : null;
 }
 
 function summarizeLeadBackfillQueue({ summary = {}, related = [], jobStatus = 'completed', now = new Date() } = {}) {
@@ -784,7 +825,7 @@ async function mutateSendQueue({ userId, queueId, action }) {
 module.exports = {
   // Same campaign projection as Settings > queues, with no extra producer,
   // patient previews or provider reads for the review dashboard.
-  async listReviewQueues({ userId, scopeRaw }) {
+  async listReviewQueues({ userId, scopeRaw, includeHistory = false }) {
     const clinics = await resolveScopedClinics({ userId, scopeRaw });
     const clinicIds = clinics.map(c => Number(c.id_clinica));
     const clinicNameById = new Map(clinics.map(c => [Number(c.id_clinica), c.nombre_clinica]));
@@ -794,15 +835,16 @@ module.exports = {
       if (key) clinicsByGroupId.set(key, [...(clinicsByGroupId.get(key) || []), Number(clinic.id_clinica)]);
     }
     const group = String(scopeRaw).startsWith('group:');
-    return (await marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, reviewOnly: true }))
+    return (await marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, reviewOnly: true, includeHistory }))
       .filter(row => row.type === 'review_request' && (row.status_group !== 'history'
-        || !group && row.status === 'completed' && +new Date(row.updated_at) >= Date.now() - 72 * 3600000));
+        || includeHistory || !group && row.status === 'completed' && +new Date(row.updated_at) >= Date.now() - 72 * 3600000));
   },
   listSendQueues,
   mutateSendQueue,
   statusGroup,
   statusPresentation,
   describeDispatchCadence,
+  describeReviewSchedule,
   humanizeQueueReason,
   marketingQueuePresentation,
   summarizeLeadBackfillQueue,

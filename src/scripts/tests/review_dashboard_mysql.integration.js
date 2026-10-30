@@ -92,6 +92,9 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(overview.historical.attributed_reviews, 1);
   assert.equal(overview.historical.requests_sent, 2, 'failed test is excluded');
   assert.equal(overview.ratings_in_period, 2);
+  assert.equal(overview.private_ratings_summary.average,4.5);
+  assert.equal(overview.private_ratings_summary.distribution.find(r=>r.rating===5).count,1);
+  assert.equal(overview.private_ratings_summary.distribution.find(r=>r.rating===4).percent,50);
   assert.equal(overview.automation, null, 'group read does not activate or select a clinic automation');
   assert.equal((await query('SELECT COUNT(*) total FROM MarketingPatientContactEvents'))[0].total, before);
   report.checks.push('group read model has per-clinic tiers, canonical review de-duplication and historical attribution; no weighted group rating or writes');
@@ -122,6 +125,29 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const groupQueues = await nativeQueues({userId:1,scopeRaw:'group:5'});
   assert.equal(groupQueues.find(r=>r.source_id===4).pending,2,'group list excludes an unrelated clinic item');
   assert(!groupQueues.some(r=>r.source_id===2),'ordinary mass sends are not review queues');
+  await db.MarketingPatientList.create({id:5,clinica_id:31,objective_id:'mass_sends',status:'completed',criteria:{review_request:true},updated_at:new Date('2026-01-01T00:00:00Z')});
+  const allHistory=await nativeQueues({userId:1,scopeRaw:'31',includeHistory:true});
+  assert(allHistory.some(r=>r.source_id===5),'history must not be cut at 72 hours');
+  assert(!clinicQueues.some(r=>r.source_id===5));
+  await db.MarketingPatientList.bulkCreate([
+    {id:6,clinica_id:31,name:'Cancelled partial',objective_id:'mass_sends',status:'cancelled',criteria:{review_request:true,dispatch:{status:'cancelled',business_hours:{intervals_by_weekday:{1:[{start_time:'09:00',end_time:'13:00'}],2:[{start_time:'09:00',end_time:'13:00'}],3:[{start_time:'16:00',end_time:'20:00'}]}}}},updated_at:new Date()},
+    {id:7,clinica_id:31,objective_id:'mass_sends',status:'scheduled',criteria:{review_request:true,dispatch:{status:'scheduled',started_at:new Date().toISOString()}},updated_at:new Date()},
+    {id:8,clinica_id:31,objective_id:'mass_sends',status:'archived',criteria:{review_request:true,dispatch:{status:'sending',started_at:new Date().toISOString()}},updated_at:new Date()},
+  ]);
+  await insert('MarketingPatientListItems',[
+    {...item(10,6,1),list_id:6,dispatch_status:'sent',sent_at:new Date()},
+    {...item(11,7,1),list_id:6,dispatch_status:'failed',failed_at:new Date()},
+    {...item(12,8,1),list_id:6},{...item(13,9,1),list_id:7},{...item(14,10,1),list_id:8}
+  ]);
+  const current=await nativeQueues({userId:1,scopeRaw:'31',includeHistory:true});
+  const {queuePage}=require('../../services/reviewOverview.service');
+  const cancelled=queuePage(current,{view:'inactive',limit:25}).items.find(r=>r.source_id===6);
+  assert.equal(cancelled.sent_count,1,'a cancelled queue must not present unsent recipients as sent');
+  assert.match(cancelled.schedule,/L, M 09:00-13:00/);assert.match(cancelled.schedule,/X 16:00-20:00/);
+  assert.equal(current.find(r=>r.source_id===7).started,false,'a future schedule alone is not a send already started');
+  assert.equal(current.find(r=>r.source_id===8).status_group,'history','archived list wins over stale dispatch metadata');
+  assert(!queuePage(current,{group:true,limit:25}).items.some(r=>[7,8].includes(r.source_id)));
+  report.checks.push('cancelled preview keeps actual sends; weekday schedules retained; group excludes future unstarted and archived stale dispatch');
   report.checks.push('native queue SQL: group and clinic scope, no sibling leakage or unrelated items, paused review included and ordinary mass send excluded');
   report.coverage = { providerRequests: 0, realPatients: 0, dataWrittenOnlyToOwnedFixture: true };
 }).catch(error => { console.error(error.stack); process.exitCode = 1; });
