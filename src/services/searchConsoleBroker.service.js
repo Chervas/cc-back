@@ -8,8 +8,24 @@ const fail = (code = 'broker_binding_invalid') => { throw Object.assign(Error(co
 const positive = value => /^[1-9]\d{0,9}$/.test(String(value)) && Number(value) <= 2147483647;
 const marked = row => row.broker_read_connection_ref != null || row.broker_read_asset_ref != null;
 function createSearchConsoleBroker({ client, loadMapping, loadBindings, loadConnection, loadRevocations,
-  enabled = () => process.env.GOOGLE_SEARCH_CONSOLE_BROKER_ENABLED === 'true', now = () => Date.now() }) {
+  enabled = () => process.env.GOOGLE_SEARCH_CONSOLE_BROKER_ENABLED === 'true', now = () => Date.now(),
+  pause = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
   const contexts = new WeakMap();
+  // SC only: pace this principal's mapped reads; other callers still receive the broker's 429.
+  let sends = Promise.resolve(), nextSendAt = 0;
+  async function paced(send, checkBudget, deadline) {
+    const turn = sends.then(async () => {
+      while (now() < nextSendAt) {
+        const budget = await checkBudget();
+        const delay = Math.min(1000, nextSendAt - now(), deadline - now(), budget.timeoutMs);
+        if (delay <= 0) fail('broker_timeout');
+        await pause(delay);
+      }
+      return send();
+    });
+    sends = turn.catch(() => {});
+    return turn;
+  }
   async function inspect(mapping, expected) {
     if (!mapping || !positive(mapping.id) || !positive(mapping.clinicaId) || !positive(mapping.googleConnectionId)) fail();
     const resource = contract.site(mapping.siteUrl);
@@ -40,16 +56,39 @@ function createSearchConsoleBroker({ client, loadMapping, loadBindings, loadConn
     if (!enabled()) fail('broker_cohort_disabled');
     return captured;
   }
-  async function page(mapping, context, family, payload, beforeExecute) {
+  async function page(mapping, context, family, payload, beforeExecute, deadline) {
     const captured = context && typeof context === 'object' && contexts.get(context);
     const operation = contract.PREFIX + family + '.read.v1';
     if (!captured || captured.id !== Number(mapping.id)) fail(); contract.validate(operation, payload);
-    await inspect(mapping, captured); const budget = await beforeExecute?.();
-    const result = await client.execute({ operation, connectionRef: captured.connectionRef, assetRef: captured.assetRef, tenantRef: captured.tenantRef, payload }, budget);
-    await inspect(mapping, captured); await beforeExecute?.();
-    if (!result || !result.data || typeof result.data !== 'object') fail('broker_response_invalid');
-    const projected = family === 'discovery' ? discovery.projectSC(result.data, captured.siteUrl) : contract.project(family, result.data, payload);
-    return { ...projected, ...(family === 'queries' ? { nextPageToken: result.data.nextPageToken, rowLimitReached: result.data.rowLimitReached } : {}) };
+    const fixedPayload = Object.freeze({ ...payload });
+    const checkBudget = async () => {
+      if (now() >= deadline) fail('broker_timeout');
+      const budget = await beforeExecute?.();
+      if (now() >= deadline) fail('broker_timeout');
+      return { ...budget, timeoutMs: Math.min(30000, deadline - now(), budget?.timeoutMs ?? 30000) };
+    };
+    const retryPage = Symbol('retry_sc_page');
+    for (let retry = 0; ; retry++) {
+      const result = await paced(async () => {
+        await inspect(mapping, captured); const budget = await checkBudget();
+        // Re-enter the existing signer on every attempt: no replayed signed envelope/nonce.
+        nextSendAt = now() + 1000;
+        try { return await client.execute({ operation, connectionRef: captured.connectionRef, assetRef: captured.assetRef,
+          tenantRef: captured.tenantRef, payload: fixedPayload }, budget); }
+        catch (error) {
+          if (error?.code === 'rate_limited') {
+            nextSendAt = Math.max(nextSendAt, (Math.floor(now() / 60000) + 1) * 60000 + 25);
+            if (retry < 2) return retryPage;
+          }
+          throw error;
+        }
+      }, checkBudget, deadline);
+      if (result === retryPage) continue;
+      await inspect(mapping, captured); await checkBudget();
+      if (!result || !result.data || typeof result.data !== 'object') fail('broker_response_invalid');
+      const projected = family === 'discovery' ? discovery.projectSC(result.data, captured.siteUrl) : contract.project(family, result.data, fixedPayload);
+      return { ...projected, ...(family === 'queries' ? { nextPageToken: result.data.nextPageToken, rowLimitReached: result.data.rowLimitReached } : {}) };
+    }
   }
   return {
     async prepare(mapping) {
@@ -58,15 +97,16 @@ function createSearchConsoleBroker({ client, loadMapping, loadBindings, loadConn
       const context = Object.freeze({}); contexts.set(context, captured); return context;
     },
     async read(mapping, context, family, payload, { beforeExecute } = {}) {
-      if (!['queries', 'pages'].includes(family)) return { data: await page(mapping, context, family, payload, beforeExecute) };
-      const rows = []; const seen = new Set(); const deadline = now() + 450000; let bytes = 0; let pageToken = null; let rowLimitReached = false;
+      const deadline = now() + 450000;
+      if (!['queries', 'pages'].includes(family)) return { data: await page(mapping, context, family, payload, beforeExecute, deadline) };
+      const rows = []; const seen = new Set(); let bytes = 0; let pageToken = null; let rowLimitReached = false;
       if (family === 'pages' && (!Number.isInteger(payload.rowLimit) || payload.rowLimit < 1 || payload.rowLimit > contract.MAX_ROWS
         || !Number.isInteger(payload.startRow) || payload.startRow < 0 || payload.startRow + payload.rowLimit > contract.MAX_ROWS)) fail('invalid_request');
       for (let i = 0; i < contract.MAX_ROWS / contract.PAGE_SIZE; i++) {
         if (now() >= deadline) fail('broker_timeout');
         const request = family === 'queries' ? { ...payload, pageToken }
           : { ...payload, startRow: payload.startRow + rows.length, rowLimit: Math.min(contract.PAGE_SIZE, payload.rowLimit - rows.length) };
-        const result = await page(mapping, context, family, request, beforeExecute);
+        const result = await page(mapping, context, family, request, beforeExecute, deadline);
         if (now() >= deadline) fail('broker_timeout');
         if (!Array.isArray(result.rows) || result.rows.length > contract.PAGE_SIZE) fail('broker_response_invalid');
         bytes += Buffer.byteLength(JSON.stringify(result.rows)); if (bytes > 40000000) fail('broker_response_invalid');

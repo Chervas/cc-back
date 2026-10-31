@@ -21,11 +21,11 @@ function searchConsoleFixture() {
         ...(family === 'queries' ? { nextPageToken: null, rowLimitReached: false } : {}), privateField: 'FICTITIOUS_HIDDEN' };
     await state.afterCall?.(); return { data };
   } };
-  const create = () => createSearchConsoleBroker({ client, now: () => state.at, enabled: () => state.enabled,
+  const create = (overrides = {}) => createSearchConsoleBroker({ client, pause: async ms => { state.at += ms; }, now: () => state.at, enabled: () => state.enabled,
     loadMapping: async id => { assert.equal(id, 91); return state.mapping; },
     loadBindings: async hash => { assert.equal(hash, resource.siteHash); return [...(state.record ? [state.record] : []), ...(state.otherBindings || [])]; },
     loadRevocations: async () => state.revocations || [],
-    loadConnection: async (id, subject) => { assert.equal(id, 81); assert.equal(subject, 'fictitious-subject'); state.checks++; return state.connection; } });
+    loadConnection: async (id, subject) => { assert.equal(id, 81); assert.equal(subject, 'fictitious-subject'); state.checks++; return state.connection; }, ...overrides });
   return { state, resource, mapping, record, service: create(), create };
 }
 module.exports = { searchConsoleFixture };
