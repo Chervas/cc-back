@@ -6,7 +6,8 @@ const PROVIDER = 'google_search_console'; const PREFIX = 'google.search_console.
 const REVOKE_OPERATION = PREFIX + 'asset.revoke.v1';
 const SCOPES = Object.freeze(['https://www.googleapis.com/auth/webmasters.readonly', 'https://www.googleapis.com/auth/webmasters']);
 const OPERATIONS = Object.freeze(['timeseries', 'queries', 'pages', 'inspection', 'discovery'].map(v => PREFIX + v + '.read.v1'));
-const PAGE_SIZE = 500; const MAX_ROWS = 25000;
+const MAX_ROWS = 25000; const PAGE_SIZE = MAX_ROWS;
+const MAX_QUERY_RESPONSE_BYTES = 16 * 1024 * 1024;
 const date = v => typeof v === 'string' && /^20\d\d-\d\d-\d\d$/.test(v) && Number.isFinite(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
 function site(value) {
   if (typeof value !== 'string' || value.length > 512 || /[\s\\%?#]/.test(value)) fail('scope_denied');
@@ -68,7 +69,7 @@ function project(family, raw, payload) {
     if (!['auto', 'byPage', 'byProperty'].includes(raw.responseAggregationType)) fail('provider_failed');
     result.responseAggregationType = raw.responseAggregationType;
   }
-  if (Buffer.byteLength(JSON.stringify(result)) > 786432) fail('provider_failed');
+  if (Buffer.byteLength(JSON.stringify(result)) > (['queries', 'pages'].includes(family) ? MAX_QUERY_RESPONSE_BYTES : 786432)) fail('provider_failed');
   return result;
 }
-module.exports = { PROVIDER, PREFIX, SCOPES, OPERATIONS, REVOKE_OPERATION, PAGE_SIZE, MAX_ROWS, date, site, resource, validate, project };
+module.exports = { PROVIDER, PREFIX, SCOPES, OPERATIONS, REVOKE_OPERATION, PAGE_SIZE, MAX_ROWS, MAX_QUERY_RESPONSE_BYTES, date, site, resource, validate, project };

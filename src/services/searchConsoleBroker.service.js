@@ -79,6 +79,11 @@ function createSearchConsoleBroker({ client, loadMapping, loadBindings, loadConn
           if (error?.code === 'rate_limited') {
             nextSendAt = Math.max(nextSendAt, (Math.floor(now() / 60000) + 1) * 60000 + 25);
             if (retry < 2) return retryPage;
+          } else if (error?.code === 'provider_timeout' && retry < 2) {
+            // Typed provider READ timeout only. Keep the same payload, re-enter the
+            // signer and all authority/budget checks after bounded 1s/2s backoff.
+            nextSendAt = Math.max(nextSendAt, now() + (retry + 1) * 1000);
+            return retryPage;
           }
           throw error;
         }

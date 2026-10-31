@@ -70,7 +70,7 @@ test('four closed SC operations select only registered properties, fixed dimensi
   }
   assert.equal(f.state.refreshes, 1); assert.equal(f.calls.length, 4);
   assert.deepEqual(f.calls[0].json.dimensions, ['date']); assert.equal(f.calls[0].json.dataState, 'final'); assert.equal(f.calls[0].json.type, 'web');
-  assert.deepEqual(f.calls[1].json.dimensions, ['date', 'query', 'page']); assert.equal(f.calls[1].json.rowLimit, 500);
+  assert.deepEqual(f.calls[1].json.dimensions, ['date', 'query', 'page']); assert.equal(f.calls[1].json.rowLimit, 25000);
   assert.equal(f.calls[2].json.startRow, 0); assert.equal(f.calls[2].json.rowLimit, 10);
   assert.equal(f.calls[3].path, '/v1/urlInspection/index:inspect'); assert.deepEqual(f.calls[3].json, { siteUrl: SITE.siteUrl, inspectionUrl: 'https://example.invalid/', languageCode: 'en-US' });
   assert(f.calls.slice(0, 3).every(r => r.hostname === 'www.googleapis.com' && r.path === '/webmasters/v3/sites/sc-domain%3Aexample.invalid/searchAnalytics/query'));
@@ -85,25 +85,23 @@ test('tenant, property, operation, date and arbitrary-payload denials precede an
   await assert.rejects(f.execute('inspection', { inspectionUrl: 'https://foreign.invalid/' }), { code: 'invalid_request' });
   assert.equal(f.calls.length + f.sdkCalls.length + f.state.refreshes, 0);
 });
-test('opaque query cursors bind operation, property, scope, policy and date range; expired cursors cannot send', async t => {
-  const f = await scFixture(t); f.state.response = request => ({ rows: Array.from({ length: request.json.startRow ? 1 : 500 }, (_, i) => ({
-    keys: [START, 'query-' + (request.json.startRow + i), 'https://example.invalid/page'], clicks: 1, impressions: 2, ctr: 0.5, position: 1 })) });
+test('single-fetch queries issue no continuation cursor; supplied old/foreign cursor tokens cannot reach the provider', async t => {
+  const f = await scFixture(t); f.state.response = request => ({ rows: Array.from({ length: 25000 }, (_, i) => ({
+    keys: [START, 'query-' + i, 'https://example.invalid/page'], clicks: 1, impressions: 2, ctr: 0.5, position: 1 })) });
   const first = (await f.execute('queries', { startDate: START, endDate: END, pageToken: null })).data;
-  assert(first.nextPageToken); assert(!first.nextPageToken.includes('startRow')); assert.equal(first.rowLimitReached, false);
-  await assert.rejects(f.execute('queries', { startDate: START, endDate: '2026-09-03', pageToken: first.nextPageToken }), { code: 'invalid_request' });
-  await assert.rejects(f.execute('queries', { startDate: START, endDate: END, pageToken: first.nextPageToken.slice(0, -1) }), { code: 'invalid_request' });
+  assert.equal(first.nextPageToken, null); assert.equal(first.rowLimitReached, true);
+  for (const payload of [{ startDate: START, endDate: END, pageToken: 'FICTITIOUS_OLD_PAGE_TOKEN' },
+    { startDate: START, endDate: '2026-09-03', pageToken: 'FICTITIOUS_FOREIGN_PAGE_TOKEN' }])
+    await assert.rejects(f.execute('queries', payload), { code: 'invalid_request' });
+  f.advance(600001); await assert.rejects(f.execute('queries', { startDate: START, endDate: END, pageToken: 'FICTITIOUS_EXPIRED_PAGE_TOKEN' }), { code: 'invalid_request' });
   assert.equal(f.calls.length, 1);
-  const second = (await f.execute('queries', { startDate: START, endDate: END, pageToken: first.nextPageToken })).data;
-  assert.equal(f.calls[1].json.startRow, 500); assert.equal(second.nextPageToken, null);
-  f.advance(600001); await assert.rejects(f.execute('queries', { startDate: START, endDate: END, pageToken: first.nextPageToken }), { code: 'invalid_request' });
-  assert.equal(f.calls.length, 2);
 });
 test('25,000-row query ceiling is explicit and prevents an extra page', async t => {
-  const f = await scFixture(t); f.state.response = r => ({ rows: Array.from({ length: 500 }, (_, i) => ({
+  const f = await scFixture(t); f.state.response = r => ({ rows: Array.from({ length: 25000 }, (_, i) => ({
     keys: [START, 'query-' + (r.json.startRow + i), 'https://example.invalid/page'], clicks: 1, impressions: 1, ctr: 1, position: 1 })) });
   let pageToken = null; let count = 0; let result;
   do { result = (await f.execute('queries', { startDate: START, endDate: END, pageToken })).data; count += result.rows.length; pageToken = result.nextPageToken; } while (pageToken);
-  assert.equal(count, 25000); assert.equal(f.calls.length, 50); assert.equal(result.rowLimitReached, true);
+  assert.equal(count, 25000); assert.equal(f.calls.length, 1); assert.equal(result.rowLimitReached, true);
 });
 test('oversized, malformed, duplicate or credential-bearing result fields cannot cross the broker', async t => {
   const f = await scFixture(t);

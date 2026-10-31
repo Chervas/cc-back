@@ -40,7 +40,7 @@ test('actual SC TLS runtime and backend adapter preserve scoped revocation and c
       assert.equal(request.path, '/webmasters/v3/sites/https%3A%2F%2Fexample.invalid%2F');
       return { siteUrl: site.siteUrl, permissionLevel: 'siteOwner', ignored: ACCESS };
     }
-    return { rows: Array.from({ length: request.json.startRow ? 1 : 500 }, (_, i) => ({ keys: [request.json.startDate, 'FICTITIOUS_QUERY_' + (request.json.startRow + i), 'https://example.invalid/page'],
+    return { rows: Array.from({ length: 501 }, (_, i) => ({ keys: [request.json.startDate, 'FICTITIOUS_QUERY_' + (request.json.startRow + i), 'https://example.invalid/page'],
       clicks: 2, impressions: 4, ctr: 0.5, position: 1, privateToken: ACCESS })), rawToken: ACCESS };
   } };
   let app = await runtime.main(filename, dependencies); allowPort(port);
@@ -56,13 +56,13 @@ test('actual SC TLS runtime and backend adapter preserve scoped revocation and c
     loadConnection: async () => ({ id: 81, googleUserId: 'fictitious-subject', credentials_external: 1 }) });
   const context = await consumer.prepare(mapping); assert.deepEqual(context, {});
   const data = (await consumer.read(mapping, context, 'queries', { startDate: '2026-09-01', endDate: '2026-09-02' })).data;
-  assert.equal(data.rows.length, 501); assert.equal(data.rowLimitReached, false); assert.equal(refreshes, 1); assert.equal(reads, 2);
-  assert(!JSON.stringify(data).includes(ACCESS)); assert.equal(descriptions, 4);
+  assert.equal(data.rows.length, 501); assert.equal(data.rowLimitReached, false); assert.equal(refreshes, 1); assert.equal(reads, 1);
+  assert(!JSON.stringify(data).includes(ACCESS)); assert.equal(descriptions, 2);
   const before = descriptions;
   await assert.rejects(client.execute({ operation: contract.OPERATIONS[0], tenantRef: 'clinic:999', connectionRef: 'connection:test', assetRef: site.assetRef,
     payload: { startDate: '2026-09-01', endDate: '2026-09-02' } }), { code: 'scope_denied' }); assert.equal(descriptions, before);
   const discovered = await consumer.read(mapping, context, 'discovery', {}, { beforeExecute: async () => ({ timeoutMs: 1000 }) });
-  assert.deepEqual(discovered.data, { siteUrl: site.siteUrl, permissionLevel: 'siteOwner' }); assert.equal(reads, 3); assert.equal(descriptions, 6);
+  assert.deepEqual(discovered.data, { siteUrl: site.siteUrl, permissionLevel: 'siteOwner' }); assert.equal(reads, 2); assert.equal(descriptions, 4);
   const control = createIntegrationsBrokerClient({ origin: `https://127.0.0.1:${port}`, audience: f.policy.audience, keyId: 'qa-control',
     privateKey: controlKey.privateKey.export({ type: 'pkcs8', format: 'pem' }), ca: fs.readFileSync(cert) });
   const revocation = f.command({ operation: contract.REVOKE_OPERATION, assetRef: site.assetRef });
@@ -70,7 +70,7 @@ test('actual SC TLS runtime and backend adapter preserve scoped revocation and c
   assert.deepEqual((await control.execute(revocation)).data, { revoked: true });
   assert.equal((await control.execute(revocation)).replayed, true);
   await assert.rejects(consumer.read(mapping, context, 'discovery', {}), { code: 'asset_revoked' });
-  assert.equal(descriptions, 6); assert.equal(refreshes, 1); assert.equal(reads, 3);
+  assert.equal(descriptions, 4); assert.equal(refreshes, 1); assert.equal(reads, 2);
   await drainAudit(app.store, sink); assert.equal(app.store.backlog().pending, 0);
   assert(delivered.some(e => e.version === 2 && e.operation === contract.OPERATIONS[1] && e.resourceRef === site.assetRef));
   assert.equal(delivered.filter(e => e.action === 'asset.revoked' && e.operation === contract.REVOKE_OPERATION && e.actorId === 'control:test').length, 1);
@@ -80,12 +80,12 @@ test('actual SC TLS runtime and backend adapter preserve scoped revocation and c
   assert.equal((await control.execute(revocation)).replayed, true);
   await assert.rejects(consumer.read(mapping, context, 'queries', { startDate: '2026-09-01', endDate: '2026-09-02' }), { code: 'asset_revoked' });
   await assert.rejects(consumer.read(mapping, context, 'discovery', {}), { code: 'asset_revoked' });
-  assert.equal(descriptions, 6); assert.equal(reads, 3);
+  assert.equal(descriptions, 4); assert.equal(reads, 2);
   app.broker.block('connection:test', eventFor({ ...f.command(), assetRef: site.assetRef, operation: contract.OPERATIONS[0] }, f.policy.principals[0], f.policy,
     'connection.blocked', 'success', 'operator_block'));
   await app.close(); app = null; assert.equal(closed, 2);
   app = await runtime.main(filename, dependencies);
   await assert.rejects(consumer.read(mapping, context, 'queries', { startDate: '2026-09-01', endDate: '2026-09-02' }), { code: 'connection_blocked' });
   await assert.rejects(consumer.read(mapping, context, 'discovery', {}), { code: 'connection_blocked' });
-  assert.equal(reads, 3); assert.equal(refreshes, 1); await app.close(); app = null; assert.equal(closed, 3);
+  assert.equal(reads, 2); assert.equal(refreshes, 1); await app.close(); app = null; assert.equal(closed, 3);
 });

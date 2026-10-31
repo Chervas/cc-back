@@ -290,7 +290,7 @@ async function main(filename, { awsFactory = connectAws, http } = {}) {
           : { ...createGoogleBusinessProfileOperations({ http, cursor, oauth }), ...businessProfileWrites?.operations }, timeoutMs: 25000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {
-      if (inFlight >= 8) fail('rate_limited'); inFlight++;
+      if (inFlight >= (searchConsole ? 1 : 8)) fail('rate_limited'); inFlight++;
       try { return await broker.execute(...args); } finally { inFlight--; }
     } }, { cert, key });
     server.maxConnections = 64; server.timeout = 35000;

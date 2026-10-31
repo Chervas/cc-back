@@ -4,7 +4,8 @@ const googleCutoverAdmission = require('../lib/googleCutoverAdmission').applicat
 const { Op, literal } = require('sequelize');
 
 const CODES = new Set(['google_oauth_legacy_closed', 'google_connection_missing',
-  'google_connection_changed', 'google_credentials_unavailable']);
+  'google_connection_changed', 'google_credentials_unavailable',
+  'rate_limited', 'provider_timeout', 'broker_response_invalid', 'provider_failed', 'broker_unavailable']);
 const fail = code => { throw Object.assign(Error(code), { code, httpStatus: 409 }); };
 const safe = error => CODES.has(error?.code) ? error.code : 'google_credentials_unavailable';
 function idOf(value) {

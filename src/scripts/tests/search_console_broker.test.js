@@ -48,23 +48,23 @@ test('a changed binding or a failed caller revalidation discards the provider re
     if (++checks === 2) throw Object.assign(Error('search_console_scope_forbidden'), { code: 'search_console_scope_forbidden' });
   } }), { code: 'search_console_scope_forbidden' }); assert.equal(g.state.calls.length, 1);
 });
-test('pages and queries preserve all requested rows across bounded pages with a check around every send', async () => {
+test('pages and queries preserve requested rows in one bounded SC fetch with checks around the send', async () => {
   const f = searchConsoleFixture(); const context = await f.service.prepare(f.mapping);
   f.state.response = ({ payload }) => ({ rows: Array.from({ length: payload.rowLimit }, (_, i) => ({ keys: ['https://example.invalid/p' + (payload.startRow + i)], clicks: 1 })) });
   const pages = await f.service.read(f.mapping, context, 'pages', { ...range, startRow: 42, rowLimit: 750 });
-  assert.equal(pages.data.rows.length, 750); assert.deepEqual(f.state.calls.map(c => c.payload.startRow), [42, 542]);
-  assert.deepEqual(f.state.calls.map(c => c.payload.rowLimit), [500, 250]);
+  assert.equal(pages.data.rows.length, 750); assert.deepEqual(f.state.calls.map(c => c.payload.startRow), [42]);
+  assert.deepEqual(f.state.calls.map(c => c.payload.rowLimit), [750]);
   const g = searchConsoleFixture(); const second = await g.service.prepare(g.mapping); let checks = 0;
-  g.state.response = ({ payload }) => ({ rows: Array.from({ length: payload.pageToken ? 2 : 500 }, (_, i) => ({ keys: [range.startDate, 'q' + (payload.pageToken ? 500 + i : i), 'https://example.invalid/'] })),
-    nextPageToken: payload.pageToken ? null : 'FICTITIOUS_CURSOR', rowLimitReached: false });
+  g.state.response = ({ payload }) => ({ rows: Array.from({ length: 502 }, (_, i) => ({ keys: [range.startDate, 'q' + i, 'https://example.invalid/'] })),
+    nextPageToken: null, rowLimitReached: false });
   const queries = await g.service.read(g.mapping, second, 'queries', range, { beforeExecute: async () => { checks++; } });
-  assert.equal(queries.data.rows.length, 502); assert.equal(queries.data.rowLimitReached, false); assert(checks >= 4);
+  assert.equal(queries.data.rows.length, 502); assert.equal(queries.data.rowLimitReached, false); assert(checks >= 2);
   assert(!JSON.stringify(queries).includes('FICTITIOUS_CURSOR'));
 });
-test('query replay/duplicate rows and an exceeded aggregate deadline fail without returning a partial dataset', async () => {
+test('intra-response duplicate rows and an exceeded aggregate deadline fail without returning a partial dataset', async () => {
   const f = searchConsoleFixture(); const context = await f.service.prepare(f.mapping);
-  f.state.response = () => ({ rows: Array.from({ length: 500 }, (_, i) => ({ keys: [range.startDate, 'q' + i, 'https://example.invalid/'] })), nextPageToken: 'FICTITIOUS_CURSOR', rowLimitReached: false });
-  await assert.rejects(f.service.read(f.mapping, context, 'queries', range), { code: 'broker_response_invalid' }); assert.equal(f.state.calls.length, 2);
+  f.state.response = () => ({ rows: Array.from({ length: 2 }, () => ({ keys: [range.startDate, 'SAME_QUERY', 'https://example.invalid/'] })), nextPageToken: null, rowLimitReached: false });
+  await assert.rejects(f.service.read(f.mapping, context, 'queries', range), { code: 'provider_failed' }); assert.equal(f.state.calls.length, 1);
   const g = searchConsoleFixture(); const second = await g.service.prepare(g.mapping); g.state.afterCall = () => { g.state.at += 450000; };
   await assert.rejects(g.service.read(g.mapping, second, 'pages', { ...range, rowLimit: 100, startRow: 0 }), { code: 'broker_timeout' });
 });

@@ -18,8 +18,9 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManag
           : /^\/v4\/accounts\/[1-9]\d{0,29}\/locations\/[1-9]\d{0,29}\/reviews\/[A-Za-z0-9_-]{1,256}\/reply$/).test(path)))) fail('invalid_request');
     const oauth = hostname === 'oauth2.googleapis.com' && path === '/token';
     const userinfo = hostname === 'www.googleapis.com' && path === '/oauth2/v2/userinfo';
-    const searchConsole = hostname === 'searchconsole.googleapis.com' && path === '/v1/urlInspection/index:inspect'
-      || hostname === 'www.googleapis.com' && /^\/webmasters\/v3\/sites\/[^/?#]+\/searchAnalytics\/query$/.test(path);
+    const searchAnalytics = hostname === 'www.googleapis.com' && /^\/webmasters\/v3\/sites\/[^/?#]+\/searchAnalytics\/query$/.test(path);
+    const searchConsole = hostname === 'searchconsole.googleapis.com' && path === '/v1/urlInspection/index:inspect' || searchAnalytics;
+    const requestTimeoutMs = searchAnalytics ? 20000 : timeoutMs;
     const analytics = hostname === 'analyticsdata.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}:runReport$/.test(path);
     const discovery = hostname === 'analyticsadmin.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}$/.test(path)
       || hostname === 'www.googleapis.com' && /^\/webmasters\/v3\/sites\/[^/?#]+$/.test(path);
@@ -80,7 +81,7 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManag
           ...(jsonBody ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}),
           ...(dm ? { 'x-goog-user-project': quotaProjectId } : {}),
           ...(ads ? { 'developer-token': developerToken.toString('utf8'), ...(loginCustomerId ? { 'login-customer-id': loginCustomerId } : {}) } : {}) } }, res => {
-        const chunks = []; let size = 0; const limit = oauth || userinfo ? 32768 : gbpWrite ? 196608 : dm || adsWrite ? 131072 : ads ? 16 * 1024 * 1024 : 2097152;
+        const chunks = []; let size = 0; const limit = oauth || userinfo ? 32768 : gbpWrite ? 196608 : dm || adsWrite ? 131072 : ads ? 16 * 1024 * 1024 : searchAnalytics ? 16 * 1024 * 1024 : 2097152;
         if (res.statusCode >= 300 && res.statusCode < 400 || res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity'
           || !/^application\/json(?:\s*;.*)?$/i.test(res.headers['content-type'] || '')) {
           res.destroy(); finish(new BrokerError('provider_failed')); return;
@@ -100,7 +101,7 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManag
         });
       });
       req.on('error', () => finish(new BrokerError('provider_failed')));
-      timer = setTimeout(abort, timeoutMs); timer.unref?.(); signal?.addEventListener('abort', abort, { once: true });
+      timer = setTimeout(abort, requestTimeoutMs); timer.unref?.(); signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) abort(); else req.end(body);
     });
   };

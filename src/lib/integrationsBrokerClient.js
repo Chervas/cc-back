@@ -55,7 +55,8 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
           minVersion: 'TLSv1.2', agent: false, headers: { 'content-type': 'application/json', 'content-length': body.length,
             'x-broker-key-id': keyId, 'x-broker-signature': sign(null, message, key).toString('base64url') } }, res => {
           const chunks = []; let size = 0;
-          const maxResponse=ai?aiLimits.MAX_RESPONSE_BYTES:email?emailLimits.MAX_RESPONSE_BYTES:publicMedia?publicMediaLimits.MAX_RESPONSE_BYTES:command.operation==='meta.whatsapp.authorized.media.read.v1'?Math.ceil(32*1024*1024/3)*4+4096:1048576;
+          const scRowsResponse = command.operation === 'google.search_console.queries.read.v1' || command.operation === 'google.search_console.pages.read.v1';
+          const maxResponse=ai?aiLimits.MAX_RESPONSE_BYTES:email?emailLimits.MAX_RESPONSE_BYTES:publicMedia?publicMediaLimits.MAX_RESPONSE_BYTES:command.operation==='meta.whatsapp.authorized.media.read.v1'?Math.ceil(32*1024*1024/3)*4+4096:scRowsResponse?16*1024*1024+16384:1048576;
           res.on('data', chunk => { size += chunk.length; if (size > maxResponse) req.destroy(error('broker_response_invalid')); else chunks.push(chunk); });
           res.on('error', () => finish(error('broker_unavailable')));
           res.on('aborted', () => finish(error('broker_unavailable')));

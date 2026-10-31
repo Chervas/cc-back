@@ -36,7 +36,9 @@ function createSearchConsoleOperations({ http, cursor, oauth }) {
       return result;
     },
     project(result) {
-      if (!result || typeof result !== 'object' || Array.isArray(result) || Buffer.byteLength(JSON.stringify(result)) > 790528) fail('provider_failed');
+      const rowsOperation = operation === contract.PREFIX + 'queries.read.v1' || operation === contract.PREFIX + 'pages.read.v1';
+      const maximum = rowsOperation ? contract.MAX_QUERY_RESPONSE_BYTES + 16384 : 790528;
+      if (!result || typeof result !== 'object' || Array.isArray(result) || Buffer.byteLength(JSON.stringify(result)) > maximum) fail('provider_failed');
       return structuredClone(result);
     },
   })]));
