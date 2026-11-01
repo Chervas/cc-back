@@ -84,6 +84,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal((await model.privateRatings({ clinicIds: [31, 32] }, { period: '30d', rating: 4 })).items[0].comment, 'Fictitious feedback');
   report.checks.push('native SQL private ratings scoped by clinic, with server pagination, filters, total count and feedback');
   const before = (await query('SELECT COUNT(*) total FROM MarketingPatientContactEvents'))[0].total;
+  let privateReads=0;const queryBefore=sql.query.bind(sql);sql.query=(statement,...args)=>{if(String(statement).includes('review_rating_received'))privateReads++;return queryBefore(statement,...args);};
   const overview = await model.overview({ scope: 'group', groupId: 5, clinicIds: [31, 32] }, { userId: 1, scopeRaw: 'group:5' });
   assert.equal(overview.potential_patients.excludes_queued, true);
   assert.equal(overview.google_profiles.length, 2);
@@ -96,6 +97,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(overview.private_ratings_summary.distribution.find(r=>r.rating===5).count,1);
   assert.equal(overview.private_ratings_summary.distribution.find(r=>r.rating===4).percent,50);
   assert.equal(overview.automation, null, 'group read does not activate or select a clinic automation');
+  const privateReadsAfterFirst=privateReads;await model.overview({ scope:'group',groupId:5,clinicIds:[31,32] },{userId:1,scopeRaw:'group:5'});assert.equal(privateReads,privateReadsAfterFirst,'cached overview reuses private distribution; standalone table retains fresh reader');
   assert.equal((await query('SELECT COUNT(*) total FROM MarketingPatientContactEvents'))[0].total, before);
   report.checks.push('group read model has per-clinic tiers, canonical review de-duplication and historical attribution; no weighted group rating or writes');
   await event('mass_campaign_message_sent',4,1,{});

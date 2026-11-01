@@ -147,9 +147,9 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
     }));
     const locationIds = positiveIds(profiles.map(r => r.business_location_id));
     const key=scopeKey(scope)+':'+locationIds.slice().sort((a,b)=>a-b).join(',')+':'+range.from+':'+range.to;
-    const [cached,queueRows,auto,ratings] = await Promise.all([
+    const [cached,queueRows,auto] = await Promise.all([
       aggregateCache.read(key,async()=>{
-        const [potentials,ratingRows,counts,attributed,optOuts] = await Promise.all([
+        const [potentials,ratingRows,counts,attributed,optOuts,ratings] = await Promise.all([
           potentialByClinic(clinicIds),
       locationIds.length ? query(`WITH ranked AS (SELECT r.*,ROW_NUMBER() OVER (
         PARTITION BY business_location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
@@ -164,14 +164,14 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
           require('./googleReviewHistory.service').countHistoricalMatches(db, clinicIds),
           query(`SELECT COUNT(DISTINCT CONCAT(clinica_id,':',phone_digits)) total FROM MarketingContactOptOuts
             WHERE clinica_id IN (:clinicIds) AND status='active' AND channel='whatsapp'`, {clinicIds}),
+          privateRatings(scope,{period,summaryOnly:true}),
         ]);
-        return {potentials,ratingRows,counts,attributed,optOuts};
+        return {potentials,ratingRows,counts,attributed,optOuts,ratings};
       }),
       readQueues(scope,{userId,scopeRaw}),
       scope.scope === 'clinic' ? automation(scope) : null,
-      privateRatings(scope,{period,summaryOnly:true}),
     ]);
-    const {potentials,ratingRows,counts,attributed,optOuts}=cached.value;
+    const {potentials,ratingRows,counts,attributed,optOuts,ratings}=cached.value;
     const googleProfiles = profiles.map(row => {
       const score = ratingRows.find(r => Number(r.business_location_id) === row.business_location_id);
       const shared = profiles.filter(p => p.business_location_id && p.business_location_id === row.business_location_id);
