@@ -10,6 +10,8 @@ const BACKGROUND_INTEGRATION_TYPES = new Set(BACKGROUND_INTEGRATION_JOB_TYPES);
 // mutando el mismo outbox si el timeout global lo diese por terminado.
 const NO_EXECUTION_TIMEOUT_TYPES = new Set([
   'web_intake_runtime_reconcile',
+  // Retention owns the SC lease and ends cooperatively. A timeout race cannot cancel SQL/S3.
+  'search_console_retention',
   // El rollout guarda un checkpoint tras cada plantilla/WABA. Interrumpir una
   // llamada a Meta con Promise.race no la cancela y podría duplicar el alta.
   'whatsapp_language_rollout',

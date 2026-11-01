@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private versioned storage for Search Console preservation and monthly archives.
+Parameters:
+  TrustAnchorArn:
+    Type: String
+    Default: arn:aws:rolesanywhere:eu-west-3:137819318729:trust-anchor/081b1d2c-78d1-4fd6-8dde-8a76add437a6
+    AllowedValues:
+      - arn:aws:rolesanywhere:eu-west-3:137819318729:trust-anchor/081b1d2c-78d1-4fd6-8dde-8a76add437a6
+    Description: Existing shared purpose CA; do not replace it or modify cost/alert roles.
+  EnableArchiveIdentity:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+    Description: Root enables only after reviewed retirement, rebuild and metadata binding.
+Conditions:
+  EnableArchiveIdentityCondition: !Equals [!Ref EnableArchiveIdentity, 'true']
+Resources:
+  ArchiveBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: clinicaclick-sc-archive-137819318729-eu-west-3
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: alias/aws/s3
+            BucketKeyEnabled: true
+      Tags:
+        - Key: application
+          Value: clinicaclick
+        - Key: component
+          Value: database
+        - Key: environment
+          Value: staging
+        - Key: Application
+          Value: Clinicaclick
+        - Key: Environment
+          Value: staging
+        - Key: Purpose
+          Value: search-console-preservation
+  RequireTls:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArchiveBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt ArchiveBucket.Arn
+              - !Sub '${ArchiveBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+  CanonicalArchiveRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: clinicaclick-sc-archive-staging-role
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: rolesanywhere.amazonaws.com}
+            Action: ['sts:AssumeRole', 'sts:SetSourceIdentity', 'sts:TagSession']
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref TrustAnchorArn
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:PrincipalTag/x509Subject/CN: cc-sc-archive-staging
+                aws:PrincipalTag/x509Issuer/CN: clinicaclick-platform-costs-root-20261024
+      Policies:
+        - PolicyName: canonical-search-console-archive-only
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteCanonicalWithExactKmsKey
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: arn:aws:s3:::clinicaclick-sc-archive-137819318729-eu-west-3/canonical/*
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: eu-west-3
+                    s3:x-amz-server-side-encryption: aws:kms
+                    s3:x-amz-server-side-encryption-aws-kms-key-id: arn:aws:kms:eu-west-3:137819318729:key/47ad7d88-6b3a-4491-a003-8efa1c6624b8
+              - Sid: ReadOnlyCanonicalObjectsAndPinnedVersions
+                Effect: Allow
+                Action: ['s3:GetObject', 's3:GetObjectVersion']
+                Resource: arn:aws:s3:::clinicaclick-sc-archive-137819318729-eu-west-3/canonical/*
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: eu-west-3
+              - Sid: S3BucketKeyUseOnly
+                Effect: Allow
+                Action: ['kms:GenerateDataKey', 'kms:Decrypt']
+                Resource: arn:aws:kms:eu-west-3:137819318729:key/47ad7d88-6b3a-4491-a003-8efa1c6624b8
+                Condition:
+                  StringEquals:
+                    kms:ViaService: s3.eu-west-3.amazonaws.com
+                    kms:CallerAccount: '137819318729'
+                    kms:EncryptionContext:aws:s3:arn: arn:aws:s3:::clinicaclick-sc-archive-137819318729-eu-west-3
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+        - {Key: purpose, Value: sc-canonical-archive}
+  CanonicalArchiveProfile:
+    Type: AWS::RolesAnywhere::Profile
+    Properties:
+      Name: clinicaclick-sc-archive-staging
+      Enabled: !If [EnableArchiveIdentityCondition, true, false]
+      DurationSeconds: 900
+      AcceptRoleSessionName: false
+      RequireInstanceProperties: false
+      RoleArns: [!GetAtt CanonicalArchiveRole.Arn]
+      Tags:
+        - {Key: application, Value: clinicaclick}
+        - {Key: component, Value: database}
+        - {Key: environment, Value: staging}
+Outputs:
+  BucketName:
+    Value: !Ref ArchiveBucket
+  CanonicalArchiveRoleArn:
+    Value: !GetAtt CanonicalArchiveRole.Arn
+  CanonicalArchiveProfileArn:
+    Value: !GetAtt CanonicalArchiveProfile.ProfileArn
+  CanonicalArchiveTrustAnchorArn:
+    Value: !Ref TrustAnchorArn

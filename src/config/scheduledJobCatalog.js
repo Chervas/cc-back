@@ -160,6 +160,11 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     // provocar reintentos agresivos ni autoreparaciones silenciosas.
     reportedFailureRetryable: false,
   }),
+  searchConsoleRetention: Object.freeze({
+    type: 'search_console_retention', priority: 'low', executorMethod: 'executeSearchConsoleRetention',
+    enabledEnv: 'SC_ANALYTICS_RETENTION_WORKER_ENABLED', runtimeNamespaces: Object.freeze(['staging']),
+    timezone: 'Europe/Madrid', usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1, attachJobRequestId: true,
+  }),
   webSync: Object.freeze({ type: 'web_recent', priority: 'normal', executorMethod: 'executeWebSync' }),
   webBackfill: Object.freeze({ type: 'web_backfill', priority: 'low', executorMethod: 'executeWebBackfill' }),
   analyticsSync: Object.freeze({ type: 'analytics_recent', priority: 'normal', executorMethod: 'executeAnalyticsSync' }),

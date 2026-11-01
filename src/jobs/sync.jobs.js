@@ -456,6 +456,7 @@ class MetaSyncJobs {
         platformAuditMonitor: '*/5 * * * *',
         awsInfrastructureCosts: '40 3 * * *',
         infrastructureNotifications: '* * * * *',
+        searchConsoleRetention: '10 3 1 * *',
         metricsSync: process.env.JOBS_METRICS_SCHEDULE || '0 2 * * *',
         tokenValidation: process.env.JOBS_TOKEN_VALIDATION_SCHEDULE || '0 */6 * * *',
         dataCleanup: process.env.JOBS_CLEANUP_SCHEDULE || '0 3 * * 0',
@@ -4521,6 +4522,10 @@ try {
 
   async executeSystemNotificationCheck(payload = {}) {
     return systemNotificationsService.runActiveChecks({ force: payload.force === true });
+  }
+
+  async executeSearchConsoleRetention(payload = {}) {
+    return require('../services/searchConsoleRetention.service').runJob(payload);
   }
 
   async executeAwsInfrastructureCosts() {

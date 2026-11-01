@@ -3,7 +3,7 @@
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const {AsyncLocalStorage}=require('node:async_hooks');
 const BASE='/etc/clinicaclick-search-console',FILE=BASE+'/staging.json';
-const TYPES=Object.freeze(['web_recent','web_backfill','web_backfill_for_sites']);
+const TYPES=Object.freeze(['web_recent','web_backfill','web_backfill_for_sites','search_console_retention']);
 const SHA=b=>crypto.createHash('sha256').update(b).digest('hex');
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const need=(ok,code)=>{if(!ok)throw Object.assign(Error(code),{code});};
@@ -96,7 +96,7 @@ const DRAIN_ADAPTER=Object.freeze({readControl,SQL,LOCK});
 const digest=x=>SHA(JSON.stringify(x));
 const DRAIN_TABLES=['WebScDaily','WebScDailyAgg','WebScQueryDaily','ScAnalyticsProperties','ScAnalyticsQueries','ScAnalyticsPages','ScAnalyticsIngestBatches','ScAnalyticsStagedRows','ScAnalyticsStagedTotals','ScAnalyticsDaily','ScAnalyticsPropertyDaily','ScAnalyticsRankingDaily','ScAnalyticsCoverageDaily','ScAnalyticsMonthly','ScAnalyticsArchiveBatches'];
 const DRAIN_SQL=Object.freeze({
- jobs:"SELECT /*+ MAX_EXECUTION_TIME(5000) */ COUNT(*) AS n FROM JobRequests WHERE type IN ('web_recent','web_backfill','web_backfill_for_sites') AND status='running'",
+ jobs:"SELECT /*+ MAX_EXECUTION_TIME(5000) */ COUNT(*) AS n FROM JobRequests WHERE type IN ('web_recent','web_backfill','web_backfill_for_sites','search_console_retention') AND status='running'",
  sync:"SELECT /*+ MAX_EXECUTION_TIME(5000) */ COUNT(*) AS n FROM SyncLogs WHERE job_type IN ('web_sync','web_backfill') AND status='running'",
  instrument:"SELECT NAME,ENABLED FROM performance_schema.setup_instruments WHERE NAME='wait/lock/metadata/sql/mdl'",
  mdl:"SELECT /*+ MAX_EXECUTION_TIME(5000) */ COUNT(*) AS n FROM performance_schema.metadata_locks WHERE OBJECT_TYPE='TABLE' AND OBJECT_SCHEMA='clinicaclick' AND OBJECT_NAME IN ("+DRAIN_TABLES.map(name=>"'"+name+"'").join(',')+")"

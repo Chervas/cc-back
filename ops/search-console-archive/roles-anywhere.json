@@ -1,0 +1,8 @@
+{
+  "schema": "clinicaclick-sc-archive-roles-anywhere/1",
+  "trustAnchorArn": "arn:aws:rolesanywhere:eu-west-3:137819318729:trust-anchor/081b1d2c-78d1-4fd6-8dde-8a76add437a6",
+  "profileArn": "arn:aws:rolesanywhere:eu-west-3:137819318729:profile/dac5edfc-8f2b-4e0e-b769-f02db62353e9",
+  "roleArn": "arn:aws:iam::137819318729:role/clinicaclick-sc-archive-staging-role",
+  "region": "eu-west-3",
+  "durationSeconds": 900
+}
