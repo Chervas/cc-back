@@ -46,3 +46,10 @@ test('empty scope never touches SQL or a provider', async () => {
   const result = await report.readReport({}, { clinicIds: [], locationIds: [11] });
   assert.equal(result.totals.requests_sent, 0);
 });
+
+test('activity reads coalesce across unordered owners and invalidate without creating provider calls',async()=>{
+ let calls=0;const db={Sequelize:{QueryTypes:{SELECT:'select'}},sequelize:{query:async()=>{calls++;return [];}}};
+ const options={clinicIds:[31,32],locationIds:[3],clinicNames:{31:'A',32:'B'},locationOwners:{3:[31,32]},period:'30d',now:new Date('2026-11-01T10:00:00Z')};
+ const [a,b]=await Promise.all([report.readReport(db,options),report.readReport(db,{...options,clinicIds:[32,31],locationOwners:{3:[32,31]}})]);assert.equal(calls,3);assert.equal(a.series.length,6);assert.equal(b.series.length,6);
+ await report.readReport(db,options);assert.equal(calls,3);report.invalidate();await report.readReport(db,options);assert.equal(calls,6);
+});

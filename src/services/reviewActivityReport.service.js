@@ -59,7 +59,20 @@ function aggregateReport(rows, range, quality = {}) {
   };
 }
 
-async function readReport(db, { clinicIds = [], locationIds = [], clinicNames = {}, locationOwners = {}, period = '30d', now = new Date() } = {}) {
+const reportCaches=new WeakMap();let reportGeneration=0;
+async function readReport(db,options={}) {
+  const identity=db.sequelize||db;
+  let entry=reportCaches.get(identity);
+  if(!entry){entry={generation:reportGeneration,cache:require('../lib/report-read-cache').createReportReadCache()};reportCaches.set(identity,entry);}
+  if(entry.generation!==reportGeneration){entry.cache.clear();entry.generation=reportGeneration;}
+  const range=reportRange(options.period||'30d',options.now||new Date());
+  const key=JSON.stringify([[...(options.clinicIds||[])].sort((a,b)=>a-b),[...(options.locationIds||[])].sort((a,b)=>a-b),Object.entries(options.clinicNames||{}).sort((a,b)=>Number(a[0])-Number(b[0])),Object.entries(options.locationOwners||{}).sort((a,b)=>Number(a[0])-Number(b[0])).map(([id,owners])=>[id,[...owners].map(Number).sort((a,b)=>a-b)]),range.from,range.to]);
+  const result=await entry.cache.read(key,()=>readUncachedReport(db,options));
+  return {...result.value,generated_at:result.generated_at,aggregate_cache:{status:result.status}};
+}
+function invalidate(){reportGeneration++;}
+
+async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinicNames = {}, locationOwners = {}, period = '30d', now = new Date() } = {}) {
   const range = reportRange(period, now);
   clinicIds = [...new Set(clinicIds.map(Number).filter(id => Number.isInteger(id) && id > 0))];
   locationIds = [...new Set(locationIds.map(Number).filter(id => Number.isInteger(id) && id > 0))];
@@ -78,7 +91,7 @@ async function readReport(db, { clinicIds = [], locationIds = [], clinicNames = 
       AND (JSON_UNQUOTE(JSON_EXTRACT(l.criteria,'$.review_request')) IN ('true','1')
         OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria,'$.template_usage'))='solicitud_resena') AND ${testExclusion}
   )`;
-  const requestRows = await db.sequelize.query(`${requestsCte}
+  const requestRowsPromise = db.sequelize.query(`${requestsCte}
     SELECT 'requests_sent' metric,DATE_FORMAT(sent_at,'%Y-%m-%dT%H:00:00Z') at_utc,COUNT(*) total,scoped_clinic_id clinic_id FROM requests
       WHERE sent_at >= :start AND sent_at < :end GROUP BY at_utc,scoped_clinic_id
     UNION ALL
@@ -126,7 +139,7 @@ async function readReport(db, { clinicIds = [], locationIds = [], clinicNames = 
       AND NOT EXISTS (SELECT 1 FROM BusinessProfileReviews r WHERE r.business_location_id=m.location_id
         AND BINARY SUBSTRING_INDEX(r.review_name,'/reviews/',-1)=BINARY SUBSTRING_INDEX(m.review_name,'/reviews/',-1))
   )`;
-  const reviewRows = await db.sequelize.query(`${inventoryCte}
+  const reviewRowsPromise = db.sequelize.query(`${inventoryCte}
     SELECT 'google_reviews_total' metric,DATE_FORMAT(published_at,'%Y-%m-%dT%H:00:00Z') at_utc,COUNT(*) total,clinic_id FROM inventory
       WHERE published_at >= :start AND published_at < :end GROUP BY at_utc,clinic_id
     UNION ALL SELECT 'google_reviews_attributed',DATE_FORMAT(published_at,'%Y-%m-%dT%H:00:00Z') at_utc,COUNT(*),attributed_clinic_id FROM inventory
@@ -135,10 +148,11 @@ async function readReport(db, { clinicIds = [], locationIds = [], clinicNames = 
       WHERE attributed=0 AND published_at >= :start AND published_at < :end GROUP BY at_utc,clinic_id
     UNION ALL SELECT 'google_reviews_missing',DATE_FORMAT(missing_at,'%Y-%m-%dT%H:00:00Z') at_utc,COUNT(*),clinic_id FROM inventory
       WHERE missing_at >= :start AND missing_at < :end GROUP BY at_utc,clinic_id`, options);
-  const [quality] = await db.sequelize.query(`${inventoryCte} SELECT COALESCE(SUM(missing_at IS NOT NULL OR missing_without_date=1),0) missing_total,
+  const qualityPromise = db.sequelize.query(`${inventoryCte} SELECT COALESCE(SUM(missing_at IS NOT NULL OR missing_without_date=1),0) missing_total,
     COALESCE(SUM(missing_without_date),0) missing_without_date,
     COALESCE(SUM(observation_date=1 AND published_at >= :start AND published_at < :end),0) reviews_with_observation_date FROM inventory`, options);
+  const [requestRows,reviewRows,[quality]]=await Promise.all([requestRowsPromise,reviewRowsPromise,qualityPromise]);
   return aggregateReport([...requestRows, ...reviewRows], range, { ...quality, clinicNames });
 }
 
-module.exports = { readReport, reportRange, aggregateReport, METRICS, PERIODS };
+module.exports = { invalidate, readReport, reportRange, aggregateReport, METRICS, PERIODS };

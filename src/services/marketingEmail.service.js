@@ -705,13 +705,14 @@ function whatsappProviderCostEstimate(recipientCount, rawCategory = 'marketing')
   const normalized = String(rawCategory || '').trim().toLowerCase();
   const category = normalized === 'authentication' ? 'authentication'
     : (normalized === 'utility' ? 'utility' : 'marketing');
-  const defaults = { marketing: 0.0509, utility: 0.0166, authentication: 0.0166 };
+  const defaults = { marketing: 0.0585, utility: 0.0166, authentication: 0.0166 };
   const envKeys = {
     marketing: 'WHATSAPP_META_MARKETING_EUR_PER_MESSAGE_ES',
     utility: 'WHATSAPP_META_UTILITY_EUR_PER_MESSAGE_ES',
     authentication: 'WHATSAPP_META_AUTHENTICATION_EUR_PER_MESSAGE_ES',
   };
-  const configured = Number(process.env[envKeys[category]]);
+  const rawRate = process.env[envKeys[category]];
+  const configured = typeof rawRate==='string' && rawRate.trim() ? Number(rawRate) : NaN;
   const unitCost = Number.isFinite(configured) && configured >= 0 ? configured : defaults[category];
   return {
     provider: 'meta_whatsapp',
@@ -719,6 +720,9 @@ function whatsappProviderCostEstimate(recipientCount, rawCategory = 'marketing')
     recipients: count,
     category,
     market: 'ES',
+    rate_card_effective_from:'2026-10-01',
+    pricing_category:category,
+    rate_source:Number.isFinite(configured)&&configured>=0?'configured':'meta_rate_card',
     unit: 'delivered_message',
     unit_cost: unitCost,
     estimated_cost: Number((count * unitCost).toFixed(4)),

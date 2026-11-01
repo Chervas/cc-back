@@ -33,27 +33,27 @@ function isQueueIssue(row, now = new Date()) {
 }
 function queueCompact(row) {
   const fields = ['id','source_id','title','clinic_name','clinic_ids','status','status_group','status_label','status_explanation',
-    'total','processed','pending','failed','next_at','cadence','can_pause','can_resume','error','action_scope','started','updated_at'];
+    'attention','delivery_plan','total','processed','pending','failed','next_at','cadence','can_pause','can_resume','error','action_scope','started','updated_at'];
   return { ...Object.fromEntries(fields.map(key => [key,row[key]])), progress_percent: queueSummary([row]).percent,
     sent_count: Math.max(0, Number(row.processed || 0) - Number(row.failed || 0)) };
 }
-function queuePage(rows, { group = false, view = 'active', limit = 5, offset = 0, now = new Date(), compact = true } = {}) {
+function queuePage(rows, { group = false, view = 'active', limit = 5, offset = 0, now = new Date(), compact = true, layout = 'legacy' } = {}) {
   if (!['active', 'inactive', 'issues'].includes(view)) throw Object.assign(Error('Vista de colas inválida'), { status: 400 });
-  if (group && view === 'inactive') view = 'active';
+  if (group && view === 'inactive' && layout !== 'lifecycle') view = 'active';
   limit = Math.min(25, Math.max(1, Number.parseInt(limit, 10) || 5));
   offset = Math.max(0, Number.parseInt(offset, 10) || 0);
   const unique = [...new Map(rows.map(row => [row.id, row])).values()];
-  const active = unique.filter(row => row.status_group === 'active' && (!group || row.started));
+  const active = unique.filter(row => layout==='lifecycle' ? require('../lib/review-queue-presentation').liveQueue(row,{group}) : row.status_group === 'active' && (!group || row.started));
   const issues = unique.filter(row => isQueueIssue(row,now));
-  const inactive = group ? [] : unique.filter(row => row.status_group !== 'active' && (!compact || !isQueueIssue(row,now)));
+  const inactive = layout==='lifecycle' ? unique.filter(row=>!require('../lib/review-queue-presentation').liveQueue(row,{group:false})) : group ? [] : unique.filter(row => row.status_group !== 'active' && (!compact || !isQueueIssue(row,now)));
   const selected = view === 'active' ? active : view === 'issues' ? issues : inactive;
   return { items: selected.slice(offset, offset + limit).map(row=>compact ? queueCompact(row) : {...row,...queueCompact(row),preview_body:reviewPreview(row)}), total: selected.length,
-    counts: { active: active.length, inactive: inactive.length, issues: issues.length },
+    counts: { active: active.length, inactive: inactive.length, issues: layout==='lifecycle' ? active.filter(row=>row.attention&&row.attention.source!=='user').length : issues.length },
     summary: queueSummary(selected), view, limit, offset };
 }
 function queueBundle(rows, options) {
   const page=queuePage(rows,options);
-  if(page.view==='active')page.issues=queuePage(rows,{...options,view:'issues',offset:0});
+  if(page.view==='active'&&options.layout!=='lifecycle')page.issues=queuePage(rows,{...options,view:'issues',offset:0});
   return page;
 }
 
@@ -88,12 +88,12 @@ function countPotential(patients, history, queued = [], optOuts = [], now = new 
 function createService({ db, resolveProfile, queues, ratingSummary, automation, now = () => new Date() }) {
   const query = (sql, replacements = {}) => db.sequelize.query(sql, { replacements, type: db.Sequelize.QueryTypes.SELECT });
   const aggregateCache = createReportReadCache({now:()=>+now()});
-  const queueCache = createReportReadCache({freshMs:1500,staleMs:1500,now:()=>+now()});
+  const queueCache = createReportReadCache({freshMs:15000,staleMs:45000,now:()=>+now()});
   const scopeKey = scope => [scope.scope,scope.groupId||0,...positiveIds(scope.clinicIds).sort((a,b)=>a-b)].join(':');
   async function readQueues(scope,{userId,scopeRaw}) {
     return (await queueCache.read(scopeKey(scope)+':'+userId,()=>queues({userId,scopeRaw,includeHistory:true}))).value;
   }
-  function invalidate(){aggregateCache.clear();queueCache.clear();}
+  function invalidate(){aggregateCache.clear();queueCache.clear();require('./reviewActivityReport.service').invalidate();}
 
   async function potentialByClinic(clinicIds) {
     const [patients, queued, optOuts, histories] = await Promise.all([
@@ -101,13 +101,18 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
         SELECT id_paciente,clinica_id FROM Pacientes WHERE clinica_id IN (:clinicIds) AND fecha_baja IS NULL
         UNION SELECT p.id_paciente,pc.clinica_id FROM PacienteClinicas pc JOIN Pacientes p ON p.id_paciente=pc.paciente_id
           WHERE pc.clinica_id IN (:clinicIds) AND p.fecha_baja IS NULL
-      ) SELECT p.id_paciente,m.clinica_id,p.telefono_movil,
-        EXISTS(SELECT 1 FROM CitasPacientes a WHERE a.paciente_id=p.id_paciente AND a.clinica_id=m.clinica_id
-          AND a.estado IN ('ha_acudido','en_atencion','completada') AND a.inicio<=UTC_TIMESTAMP()) has_care,
-        (SELECT JSON_OBJECTAGG(f.field_key,f.value) FROM PatientCustomFields f WHERE f.paciente_id=p.id_paciente AND f.clinica_id=m.clinica_id
-          AND f.field_key IN ('fecha_ultima_cita_asistida','ultima_cita_asistida','last_attended_appointment_date',
-            'last_attended_visit_date','fecha_ultima_cita','fecha_ultimo_tratamiento','fecha_tratamiento')) date_fields
-        FROM memberships m JOIN Pacientes p ON p.id_paciente=m.id_paciente`, { clinicIds }),
+      ), attended AS (
+        SELECT DISTINCT paciente_id,clinica_id FROM CitasPacientes WHERE clinica_id IN (:clinicIds)
+          AND estado IN ('ha_acudido','en_atencion','completada') AND inicio<=UTC_TIMESTAMP()
+      ), imported_dates AS (
+        SELECT paciente_id,clinica_id,JSON_OBJECTAGG(field_key,value) date_fields FROM PatientCustomFields
+        WHERE clinica_id IN (:clinicIds) AND field_key IN ('fecha_ultima_cita_asistida','ultima_cita_asistida',
+          'last_attended_appointment_date','last_attended_visit_date','fecha_ultima_cita','fecha_ultimo_tratamiento','fecha_tratamiento')
+        GROUP BY paciente_id,clinica_id
+      ) SELECT p.id_paciente,m.clinica_id,p.telefono_movil,(a.paciente_id IS NOT NULL) has_care,d.date_fields
+        FROM memberships m JOIN Pacientes p ON p.id_paciente=m.id_paciente
+        LEFT JOIN attended a ON a.paciente_id=m.id_paciente AND a.clinica_id=m.clinica_id
+        LEFT JOIN imported_dates d ON d.paciente_id=m.id_paciente AND d.clinica_id=m.clinica_id`, { clinicIds }),
       query(`SELECT DISTINCT COALESCE(i.clinica_id,l.clinica_id) clinica_id,i.paciente_id,i.phone
         FROM MarketingPatientListItems i JOIN MarketingPatientLists l ON l.id=i.list_id
         WHERE COALESCE(i.clinica_id,l.clinica_id) IN (:clinicIds) AND l.status IN ('ready','scheduled','sending','paused')
@@ -228,7 +233,13 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
     const rows=await queues({userId,scopeRaw,includeHistory:true,queueId});
     const row=rows.find(r=>r.id===queueId);
     if(!row)throw Object.assign(Error('Cola no encontrada'),{status:404});
-    return {success:true,summary:{...row,preview_body:reviewPreview(row)}};
+    const failureRows=await query(`SELECT COALESCE(NULLIF(i.last_error_code,''),'unknown') code,COUNT(*) count,MAX(i.failed_at) last_failed_at
+      FROM MarketingPatientListItems i JOIN MarketingPatientLists l ON l.id=i.list_id
+      WHERE i.list_id=:listId AND COALESCE(i.clinica_id,l.clinica_id) IN (:clinicIds)
+        AND (i.dispatch_status='failed' OR i.failed_at IS NOT NULL) GROUP BY code ORDER BY count DESC,code`,{listId:row.source_id,clinicIds:positiveIds(scope.clinicIds)});
+    const labels={'131026':'El destinatario no puede recibir este WhatsApp','131049':'Meta ha limitado el envío a este destinatario','131042':'Problema de pago del emisor','131047':'La ventana de atención está cerrada','131048':'Meta ha limitado los envíos por calidad','132001':'Plantilla no disponible','132015':'Plantilla pausada por Meta','132016':'Plantilla desactivada por Meta'};
+    const failure_groups=failureRows.map(r=>({code:/^[a-z0-9_.:-]{1,64}$/i.test(r.code)?r.code:'unknown',count:Number(r.count),last_failed_at:r.last_failed_at,label:labels[r.code]||'Error de entrega'}));
+    return {success:true,summary:{...row,preview_body:reviewPreview(row),failure_groups}};
   }
   return { overview, privateRatings, potentialByClinic, queueReport, queueDetail, invalidate };
 

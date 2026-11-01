@@ -190,7 +190,7 @@ exports.getReviewQueues = async (req, res) => {
     res.set('Cache-Control', 'no-store');
     return res.json(await require('../services/reviewOverview.service').current().queueReport(scope, {
       userId: req.userData?.userId, scopeRaw: scope.scope === 'group' ? `group:${scope.groupId}` : scope.clinicIds.join(','),
-      view: req.query.view || 'active', limit: req.query.limit, offset: req.query.offset, compact:req.query.compact === '1',
+      view: req.query.view || 'active', limit: req.query.limit, offset: req.query.offset, compact:req.query.compact === '1', layout:req.query.layout === 'lifecycle' ? 'lifecycle' : 'legacy',
     }));
   } catch (error) { return sendError(res, error, 'No se pudieron cargar las colas de reseñas'); }
 };

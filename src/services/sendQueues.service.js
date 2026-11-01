@@ -313,6 +313,8 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
     raw: true,
   });
   const rowIds = rows.map((row) => Number(row.id)).filter(Number.isInteger);
+  const needsEmailStats = !reviewOnly || rows.some(r=>Array.isArray(r.criteria?.channels)?r.criteria.channels.includes('email'):r.channel==='email');
+  const directScopeListIds=rows.filter(r=>clinicIds.includes(Number(r.clinica_id))).map(r=>Number(r.id));
   const itemStats = rowIds.length
     ? await db.sequelize.query(
         `
@@ -322,26 +324,28 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
             SUM(CASE WHEN dispatch_status IN ('sent','delivered','read','replied','failed') THEN 1 ELSE 0 END) AS processed,
             SUM(CASE WHEN selected = 1 AND status = 'ready' AND (dispatch_status IS NULL OR dispatch_status IN ('pending','queued','sending','accepted','held_quality')) THEN 1 ELSE 0 END) AS pending,
             SUM(CASE WHEN dispatch_status = 'failed' OR failed_at IS NOT NULL THEN 1 ELSE 0 END) AS failed,
+          ${needsEmailStats ? `
             SUM(CASE WHEN selected = 1 AND status = 'ready' AND email IS NOT NULL THEN 1 ELSE 0 END) AS email_eligible,
             SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.status')) IN ('sent','delivered','bounced','complained','suppressed','failed','rejected','cancelled') THEN 1 ELSE 0 END) AS email_processed,
             SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.status')) IN ('bounced','complained','suppressed','failed','rejected') THEN 1 ELSE 0 END) AS email_failed,
             SUM(CASE WHEN selected = 1 AND status = 'ready' AND email IS NOT NULL AND (channel_status IS NULL OR JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.status')) IS NULL OR JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.status')) IN ('pending','ready','queued','sending','accepted')) THEN 1 ELSE 0 END) AS email_pending,
             MAX(JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.sent_at'))) AS email_last_sent_at,
+          ` : '0 email_eligible,0 email_processed,0 email_failed,0 email_pending,NULL email_last_sent_at,'}
             MAX(sent_at) AS last_sent_at
           FROM MarketingPatientListItems
           WHERE list_id IN (:rowIds)
-          ${reviewOnly ? `AND COALESCE(clinica_id,(SELECT l.clinica_id FROM MarketingPatientLists l
-            WHERE l.id=MarketingPatientListItems.list_id)) IN (:clinicIds)` : ''}
+          ${reviewOnly ? `AND (clinica_id IN (:clinicIds) OR (clinica_id IS NULL AND list_id IN (:directScopeListIds)))` : ''}
           GROUP BY list_id
         `,
-        { replacements: { rowIds, clinicIds }, type: db.Sequelize.QueryTypes.SELECT },
+        { replacements: { rowIds, clinicIds, directScopeListIds:directScopeListIds.length?directScopeListIds:[0] }, type: db.Sequelize.QueryTypes.SELECT },
       )
     : [];
   const itemStatsByListId = new Map(itemStats.map((item) => [Number(item.list_id), item]));
 
   return rows.flatMap((row) => {
     const directClinicIds = listClinicIds(row).filter((id) => clinicIds.includes(id));
-    const groupClinicIds = clinicsByGroupId.get(toInt(row.grupo_clinica_id)) || [];
+    const directReviewOwner = reviewOnly && toInt(row.clinica_id) && (!Array.isArray(row.clinic_ids)||row.clinic_ids.every(id=>Number(id)===Number(row.clinica_id)));
+    const groupClinicIds = directReviewOwner ? [] : clinicsByGroupId.get(toInt(row.grupo_clinica_id)) || [];
     const scopedClinicIds = Array.from(new Set([...directClinicIds, ...groupClinicIds]));
     if (!scopedClinicIds.length) return [];
     const whatsappDispatch = row.criteria?.dispatch || {};
@@ -388,7 +392,7 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
     const presentation = marketingQueuePresentation(row, dispatch);
     const templateSnapshot = dispatch.template_snapshot || row.template_snapshot || {};
     const businessHours = dispatch.business_hours || {};
-    const actionScope = toInt(row.grupo_clinica_id)
+    const actionScope = directReviewOwner ? String(row.clinica_id) : toInt(row.grupo_clinica_id)
       ? `group:${toInt(row.grupo_clinica_id)}`
       : scopedClinicIds.join(',');
     const adminDecision = String(dispatch.admin_resolution?.decision || '').toLowerCase();
@@ -433,6 +437,8 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
       ...(reviewOnly ? {
         title: row.name || dispatch.label || 'Solicitud de reseñas',
         pause_reason: dispatch.paused_reason || dispatch.last_error || null,
+        attention: require('../lib/review-queue-presentation').queueAttention(dispatch,effectiveStatus),
+        delivery_plan: require('../lib/review-queue-presentation').deliveryPlan(dispatch,{pending,status:effectiveStatus}),
         processed: Math.min(total, processed),
         started: !!(latestDate(row.last_sent_at, stats.last_sent_at, stats.email_last_sent_at)
           || processed > 0 || effectiveStatus === 'sending' && dispatch.started_at),
@@ -787,7 +793,8 @@ async function mutateSendQueue({ userId, queueId, action }) {
     error.status = 404;
     throw error;
   }
-  const actionScopeRaw = toInt(list.grupo_clinica_id)
+  const directReviewOwner=toInt(list.clinica_id)&&list.objective_id==='mass_sends'&&(list.criteria?.review_request===true||list.criteria?.template_usage==='solicitud_resena')&&(!Array.isArray(list.clinic_ids)||list.clinic_ids.every(id=>Number(id)===Number(list.clinica_id)));
+  const actionScopeRaw = directReviewOwner ? String(list.clinica_id) : toInt(list.grupo_clinica_id)
     ? `group:${toInt(list.grupo_clinica_id)}`
     : [toInt(list.clinica_id), ...(Array.isArray(list.clinic_ids) ? list.clinic_ids.map(toInt) : [])]
         .filter(Boolean)

@@ -109,7 +109,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await sql.query(`ALTER TABLE MarketingPatientLists ADD grupo_clinica_id INT NULL, ADD name VARCHAR(80),
     ADD channel VARCHAR(32) DEFAULT 'whatsapp',ADD counters JSON,ADD email_dispatch JSON,ADD template_snapshot JSON,
     ADD safety_gates JSON,ADD created_at DATETIME,ADD updated_at DATETIME,ADD last_sent_at DATETIME`);
-  await sql.query('ALTER TABLE MarketingPatientListItems ADD channel_status JSON,ADD failed_at DATETIME');
+  await sql.query('ALTER TABLE MarketingPatientListItems ADD channel_status JSON,ADD failed_at DATETIME,ADD last_error_code VARCHAR(64)');
   db.MarketingPatientList = sql.define('MarketingPatientList', { id: {type:D.INTEGER,primaryKey:true},clinica_id:D.INTEGER,grupo_clinica_id:D.INTEGER,
     name:D.STRING,channel:D.STRING,objective_id:D.STRING,status:D.STRING,criteria:D.JSON,counters:D.JSON,email_dispatch:D.JSON,
     template_snapshot:D.JSON,safety_gates:D.JSON,created_at:D.DATE,updated_at:D.DATE,last_sent_at:D.DATE }, {tableName:'MarketingPatientLists',timestamps:false});
@@ -137,17 +137,20 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   ]);
   await insert('MarketingPatientListItems',[
     {...item(10,6,1),list_id:6,dispatch_status:'sent',sent_at:new Date()},
-    {...item(11,7,1),list_id:6,dispatch_status:'failed',failed_at:new Date()},
+    {...item(11,7,1),list_id:6,dispatch_status:'failed',failed_at:new Date(),last_error_code:'131026'},
     {...item(12,8,1),list_id:6},{...item(13,9,1),list_id:7},{...item(14,10,1),list_id:8}
   ]);
+  await db.MarketingPatientList.update({grupo_clinica_id:5},{where:{id:6}});
   const current=await nativeQueues({userId:1,scopeRaw:'31',includeHistory:true});
   const {queuePage}=require('../../services/reviewOverview.service');
   const cancelled=queuePage(current,{view:'inactive',limit:25}).items.find(r=>r.source_id===6);
+  assert.equal(cancelled.action_scope,'31','a direct clinic review queue keeps its own edit scope even when group metadata is present');
   assert.equal(cancelled.sent_count,1,'a cancelled queue must not present unsent recipients as sent');
   assert.equal(cancelled.schedule,undefined,'initial queue rows omit heavy configuration');
   const details=createService({db,queues:nativeQueues});
   const detail=await details.queueDetail({scope:'clinic',clinicIds:[31]},{userId:1,scopeRaw:'31',queueId:'marketing:6'});
   await assert.rejects(details.queueDetail({scope:'clinic',clinicIds:[31]},{userId:1,scopeRaw:'31',queueId:'marketing:3'}),e=>e.status===404);
+  assert.equal(detail.summary.failure_groups[0].code,'131026');assert.equal(detail.summary.failure_groups[0].count,1);
   assert.match(detail.summary.schedule,/L, M 09:00-13:00/);assert.match(detail.summary.schedule,/X 16:00-20:00/);
   assert.equal(current.find(r=>r.source_id===7).started,false,'a future schedule alone is not a send already started');
   assert.equal(current.find(r=>r.source_id===8).status_group,'history','archived list wins over stale dispatch metadata');

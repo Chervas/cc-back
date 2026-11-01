@@ -68,14 +68,17 @@ async function readReviewRequestHistory({ query, clinicIds = [], byClinic = fals
   const realEvents = "'mass_campaign_message_accepted','mass_campaign_message_held','mass_campaign_message_sent','mass_campaign_message_delivered','mass_campaign_message_read','mass_campaign_message_replied'";
   // Reporting can see hundreds of draft copies of the same recipients. Fold
   // event flags once before joining them, preserving the send path's rules.
-  const reportFlags = byClinic ? `, report_flags AS (SELECT e.list_id,e.item_id,
-      MAX(e.event_type LIKE 'mass_campaign_test_%') has_test_event,
-      MAX(e.event_type IN (${realEvents})) has_real_event
-    FROM MarketingPatientContactEvents e JOIN MarketingPatientListItems fi ON fi.id=e.item_id AND fi.list_id=e.list_id
-    JOIN MarketingPatientLists fl ON fl.id=fi.list_id
-    WHERE COALESCE(fi.clinica_id,fl.clinica_id) IN (:clinicIds)
-      AND (e.event_type LIKE 'mass_campaign_test_%' OR e.event_type IN (${realEvents}))
-    GROUP BY e.list_id,e.item_id)` : '';
+  const reportFlags = byClinic ? `, report_flags AS (
+    SELECT ti.list_id,ti.item_id,1 has_test_event,
+      EXISTS(SELECT 1 FROM MarketingPatientContactEvents re WHERE re.list_id=ti.list_id AND re.item_id=ti.item_id
+        AND re.event_type IN (${realEvents})) has_real_event
+    FROM (SELECT DISTINCT e.list_id,e.item_id FROM MarketingPatientContactEvents e
+      JOIN MarketingPatientListItems fi ON fi.id=e.item_id AND fi.list_id=e.list_id
+      JOIN MarketingPatientLists fl ON fl.id=fi.list_id
+      WHERE COALESCE(fi.clinica_id,fl.clinica_id) IN (:clinicIds) AND e.event_type LIKE 'mass_campaign_test_%'
+        AND fl.objective_id='mass_sends' AND (JSON_UNQUOTE(JSON_EXTRACT(fl.criteria,'$.review_request')) IN ('true','1')
+          OR JSON_UNQUOTE(JSON_EXTRACT(fl.criteria,'$.template_usage')) IN ('solicitud_resena','resena','review_request','reviews'))
+    ) ti)` : '';
   const items = await query(`WITH review_scope_items AS (
       SELECT id FROM MarketingPatientListItems WHERE clinica_id IN (:clinicIds)
       UNION ALL SELECT i.id FROM MarketingPatientLists l JOIN MarketingPatientListItems i ON i.list_id=l.id
