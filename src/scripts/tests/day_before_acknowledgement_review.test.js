@@ -63,6 +63,25 @@ test('waiting executions adopt only a published patch of their own family, with 
   assert.deepEqual(runtimeNodes(old, latest, old.nodes), latest.nodes);
 });
 
+test('runtime accepts real Sequelize template instances without losing their family or changing nodes', async () => {
+  const { Sequelize, DataTypes } = require('sequelize');
+  const sequelize = new Sequelize('offline', 'offline', 'fictitious', { dialect: 'mysql', logging: false });
+  try {
+    const Template = require('../../../models/automationflowtemplatev2')(sequelize, DataTypes);
+    const source = fixture(), latest = { ...source, version: 2, nodes: adapt(source) };
+    const persisted = Template.build(source), published = Template.build(latest);
+    const before = persisted.toJSON();
+    const { runtimeNodes } = require('../../lib/day-before-acknowledgement-review');
+    assert.equal(require('../../lib/day-before-acknowledgement-review').inScope(persisted), true);
+    assert.equal(({ ...persisted }).trigger_type, undefined);
+    assert.deepEqual(runtimeNodes(persisted, published, persisted.nodes), latest.nodes);
+    assert.deepEqual(runtimeNodes(published, published, published.nodes), latest.nodes);
+    assert.deepEqual(persisted.toJSON(), before);
+    assert.deepEqual(runtimeNodes(persisted, Template.build({ ...latest, clinic_id: 32 }), persisted.nodes), source.nodes);
+    assert.deepEqual(runtimeNodes(persisted, Template.build({ ...latest, public_id: 'other' }), persisted.nodes), source.nodes);
+  } finally { await sequelize.close(); }
+});
+
 test('native publication is idempotent, preserves activation and never schedules historical events', async () => {
   const source = fixture(), entry = planEntry(source), calls = [];
   const candidate = { ...source, ...entry.body, id: 102, version: 2, published_at: null };

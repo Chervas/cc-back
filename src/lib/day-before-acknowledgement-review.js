@@ -68,7 +68,10 @@ function runtimeNodes(template, latest, nodes) {
     || !latest.nodes?.some(n => n.id === NODE_ID && n.config?.[FLAG] === true)) return nodes;
   // Waiting executions retain their inference, correlation and timers. Only
   // their formerly silent exit adopts this family's newly published review.
-  try { return adapt({ ...template, nodes }); }
+  // Sequelize attributes are accessors, not enumerable own properties. Preserve
+  // the actual family/trigger when overlaying nodes on a persisted instance.
+  const source = typeof template.get === 'function' ? template.get({ plain: true }) : template;
+  try { return adapt({ ...source, nodes }); }
   catch (error) {
     if (['ack_review_graph_incompatible', 'ack_review_custom_branch_requires_review'].includes(error.message)) return nodes;
     throw error;
