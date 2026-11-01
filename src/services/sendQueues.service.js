@@ -255,6 +255,9 @@ function humanizeQueueReason(reason) {
   if (!normalized) return null;
   const labels = {
     outside_business_hours: 'Esperando al próximo horario de atención.',
+    meta_error_131042_payment_missing:'Pausada por un rechazo de pago de Meta. Revisa el método de pago del emisor.',
+    payment_recovery_pending:'Pausada hasta confirmar la recuperación del pago del emisor.',
+    whatsapp_sender_health_blocked:'Pausada porque el emisor no está operativo. Revisa su diagnóstico en Monitorización.',
     paused_by_user: 'Pausada manualmente.',
     cancelled_by_user: 'Cancelada manualmente.',
     legacy_messaging_limit_review: 'Detenida hasta revisar el límite de envío anterior.',

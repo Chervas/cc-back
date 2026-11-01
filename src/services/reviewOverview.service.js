@@ -184,7 +184,7 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
       name: scope.group?.nombre_grupo || scope.group?.nombre || (clinics.length === 1 ? clinics[0].nombre_clinica : 'Grupo de clínicas'), clinic_count: clinics.length },
       potential_patients: { total: potentials.reduce((s, r) => s + r.count, 0), by_clinic: potentials, excludes_queued: true },
       google_profiles: googleProfiles, queues: queueReport.items, queue_summary: queueReport.summary, queue_page: queueReport,
-      current: { queued: queueSummary(queueRows.filter(row => ['active','paused'].includes(row.status_group))).pending, opt_outs: Number(optOuts[0]?.total || 0) },
+      current: { google_reviews_total:ratingRows.reduce((total,r)=>total+Number(r.total_reviews||0),0), queued: queueSummary(queueRows.filter(row => ['active','paused'].includes(row.status_group))).pending, opt_outs: Number(optOuts[0]?.total || 0) },
       ratings_in_period: ratings.total, private_ratings_summary: ratings.summary, period: range.period,
       historical: { requests_sent: sent, attributed_reviews: attributed, conversion: sent ? attributed / sent * 100 : null },
       automation: auto, provider_requests: 0 };

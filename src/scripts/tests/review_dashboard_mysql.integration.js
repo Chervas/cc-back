@@ -88,6 +88,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const overview = await model.overview({ scope: 'group', groupId: 5, clinicIds: [31, 32] }, { userId: 1, scopeRaw: 'group:5' });
   assert.equal(overview.potential_patients.excludes_queued, true);
   assert.equal(overview.google_profiles.length, 2);
+  assert.equal(overview.current.google_reviews_total,1,'the current Google total counts a shared profile only once');
   assert.equal(overview.google_profiles[0].rating.total_reviews, 1, 'missing alias copy cannot duplicate the public review');
   assert.equal(overview.google_profiles[0].shared_with.length, 2);
   assert.equal(overview.historical.attributed_reviews, 1);

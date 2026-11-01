@@ -1465,11 +1465,15 @@ async function getAdminBulkSendSettings() {
     settings: normalizeBulkSendSettingsPayload(row?.settings || defaults),
     blocked_users: Array.isArray(row?.blocked_users) ? row.blocked_users : [],
     updated_at: row?.updated_at || null,
+    quality_policy:require('./whatsappQueueQuality.service').snapshot(row),
   };
 }
 
 async function upsertAdminBulkSendSettings(body = {}, userId = null) {
-  const settings = normalizeBulkSendSettingsPayload(body);
+  if(body.quality_only===true){await require('./whatsappQueueQuality.service').current().update({rate:body.max_opt_out_rate,revision:body.expected_revision,actorId:userId});return getAdminBulkSendSettings();}
+  const current=await getAdminBulkSendSettings();
+  if(body.max_opt_out_rate!==undefined&&Number(body.max_opt_out_rate)!==current.settings.max_opt_out_rate)throw Object.assign(Error('El límite global de calidad se configura en Monitorización → WhatsApp → Cuentas.'),{status:409});
+  const settings = normalizeBulkSendSettingsPayload({...current.settings,...body,max_opt_out_rate:current.settings.max_opt_out_rate});
   const blockedUsers = Array.isArray(body.blocked_users)
     ? body.blocked_users.map((item) => ({
       phone: normalizePhoneDigits(item?.phone || ''),
@@ -1492,10 +1496,10 @@ async function upsertAdminBulkSendSettings(body = {}, userId = null) {
       updated_by: userId || null,
     },
   });
-  await row.update({
-    settings,
-    ...(blockedUsers !== undefined ? { blocked_users: blockedUsers } : {}),
-    updated_by: userId || null,
+  await db.sequelize.transaction(async transaction=>{
+    const locked=await MarketingBulkSendSetting.findByPk(row.id,{transaction,lock:transaction.LOCK.UPDATE});
+    await locked.update({settings:{...(locked.settings||{}),...settings,max_opt_out_rate:require('./whatsappQueueQuality.service').snapshot(locked).max_opt_out_rate},
+      ...(blockedUsers!==undefined?{blocked_users:blockedUsers}:{}),updated_by:userId||null},{transaction});
   });
   return getAdminBulkSendSettings();
 }
@@ -10115,9 +10119,11 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   const optOutRate = sentBefore > 0 ? optOutCount / sentBefore : 0;
   const batchSize = Number(dispatch.batch_size || DISPATCH_BATCH_SIZE) || DISPATCH_BATCH_SIZE;
   const batchDelayMs = Number(dispatch.delay_ms || DISPATCH_BATCH_DELAY_MS) || DISPATCH_BATCH_DELAY_MS;
-  const maxOptOutRate = Number(dispatch.max_opt_out_rate || DISPATCH_MAX_OPT_OUT_RATE) || DISPATCH_MAX_OPT_OUT_RATE;
-  const earlyWarmupOptOut = sentBefore > 0 && sentBefore <= 5 && optOutCount > 0;
-  if (earlyWarmupOptOut || (sentBefore >= batchSize && optOutRate > maxOptOutRate)) {
+  const globalQuality=await require('./whatsappQueueQuality.service').current().read();
+  const maxOptOutRate=globalQuality.max_opt_out_rate;
+  const qualityDecision=require('../lib/marketing-quality-policy').evaluate({list,dispatch,sent:sentBefore,optOut:optOutCount,batchSize,maxOptOutRate});
+  const earlyWarmupOptOut=qualityDecision.reason==='early_warmup_opt_out';
+  if (qualityDecision.paused) {
     await list.update({
       status: 'paused',
       criteria: mergeCriteria(list, {
@@ -10129,6 +10135,8 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
           requires_admin_review: true,
           resume_automatically: false,
           quality_snapshot: { sent: sentBefore, read_rate: readRate, opt_out_rate: optOutRate },
+          max_opt_out_rate:maxOptOutRate,quality_policy_revision:globalQuality.revision,
+          quality_exception:null,admin_resolution:null,
         },
       }),
     });

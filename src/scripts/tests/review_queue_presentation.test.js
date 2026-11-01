@@ -34,3 +34,5 @@ test('forecast starts on the next allowed local day and respects remaining recip
  const next=deliveryPlan({...dispatch,next_allowed_at:'2026-11-02T18:00:00Z'},{now:new Date('2026-11-01T08:00:00Z'),pending:200,status:'waiting_next_batch'});assert.equal(next.planned_for_day,10);
  assert.equal(deliveryPlan(dispatch,{pending:200,status:'paused_quality'}).planned_for_day,0);
 });
+
+test('payment rejection is a configuration pause, independent of Meta quality holds',()=>{const p=queueAttention({paused_reason:'meta_error_131042_payment_missing'},'paused_config');assert.equal(p.source,'configuration');assert.equal(p.automatic,false);});

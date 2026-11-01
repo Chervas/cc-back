@@ -57,7 +57,7 @@ function queueAttention(dispatch={}, status='') {
   const reason=String(dispatch.paused_reason||dispatch.last_error||'');
   const paused=status==='paused'||status.startsWith('paused_')||['held_meta','waiting_template_approval','waiting_approval','pause_requested','blocked'].includes(status);
   if(TERMINAL.has(status)||!paused)return null;
-  const source=reason==='paused_by_user'?'user':/by_meta|meta_|template_quality_assessment/.test(reason)||status==='held_meta'?'meta'
+  const source=reason==='paused_by_user'?'user':/payment|billing|131042/.test(reason)?'configuration':/by_meta|meta_|template_quality_assessment/.test(reason)||status==='held_meta'?'meta'
     : /routing|config|template_not_approved|phone|connection|account|payment|billing/.test(reason)?'configuration':'platform';
   const admin=dispatch.requires_admin_review===true&&dispatch.admin_resolution?.decision!=='authorized';
   return {source,reason,requires_admin_review:admin,automatic:dispatch.resume_automatically===true||status==='held_meta',

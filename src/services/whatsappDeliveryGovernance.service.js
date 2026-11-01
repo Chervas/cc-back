@@ -1040,7 +1040,7 @@ async function getAdminOverview({ limit = 100 } = {}) {
   const pausedQueueRows = allPausedQueueRows
     .filter(({ dispatch }) => !clean(safeObject(dispatch.admin_resolution).decision) && (
       PROVIDER_PAUSE_STATUSES.has(clean(dispatch.status).toLowerCase())
-      || clean(dispatch.status).toLowerCase() === 'paused_review'
+      || ['paused_review','paused_config'].includes(clean(dispatch.status).toLowerCase())
       || dispatch.requires_admin_review === true
     ));
   const reviewedQueueRows = allPausedQueueRows
@@ -1069,6 +1069,7 @@ async function getAdminOverview({ limit = 100 } = {}) {
           ? 'Esperar la decisión de WhatsApp'
           : 'Revisar la causa antes de reanudar',
       counters: safeObject(list.counters),
+      quality:{...safeObject(dispatch.quality_snapshot),max_opt_out_rate:dispatch.max_opt_out_rate||null,exception:dispatch.quality_exception||null},
       template: safeObject(dispatch.template_snapshot),
       sender: await resolveQueueSender(list, dispatch, senderCache),
       audience: safeObject(safeObject(list.criteria).audience || safeObject(list.criteria).selection),
@@ -1159,13 +1160,15 @@ async function notifyQueueResolution(list, decision, note, adminUserId) {
 }
 
 async function resolvePausedQueue({ listId, decision, note = '', adminUserId = null } = {}) {
+  if(!Number.isSafeInteger(Number(adminUserId))||Number(adminUserId)<=0)throw Object.assign(Error('administrator_required'),{status:403});
   const normalizedDecision = clean(decision).toLowerCase();
   if (!['authorized', 'cancelled', 'changes_required'].includes(normalizedDecision)) {
     const error = new Error('invalid_delivery_queue_resolution');
     error.status = 400;
     throw error;
   }
-  const list = await MarketingPatientList.findByPk(Number(listId));
+  const {list}=await db.sequelize.transaction(async transaction=>{
+  const list = await MarketingPatientList.findByPk(Number(listId),{transaction,lock:transaction.LOCK.UPDATE});
   if (!list) {
     const error = new Error('delivery_queue_not_found');
     error.status = 404;
@@ -1173,6 +1176,7 @@ async function resolvePausedQueue({ listId, decision, note = '', adminUserId = n
   }
   const criteria = safeObject(list.criteria);
   const dispatch = safeObject(criteria.dispatch);
+  if(list.status!=='paused'||(normalizedDecision==='authorized'&&dispatch.requires_admin_review!==true))throw Object.assign(Error('delivery_queue_not_pending_review'),{status:409});
   if (clean(safeObject(dispatch.admin_resolution).decision)) {
     const error = new Error('delivery_queue_already_resolved');
     error.status = 409;
@@ -1193,17 +1197,20 @@ async function resolvePausedQueue({ listId, decision, note = '', adminUserId = n
     cancel_requested: normalizedDecision === 'cancelled',
     cancelled_at: normalizedDecision === 'cancelled' ? resolvedAt.toISOString() : dispatch.cancelled_at || null,
     admin_resolution: adminResolution,
+    quality_exception:normalizedDecision==='authorized'?require('../lib/marketing-quality-policy').approval(list,dispatch,adminUserId,resolvedAt):null,
   };
   await list.update({
     status: 'paused',
     criteria: { ...criteria, dispatch: nextDispatch },
-  });
+  },{transaction});
   await MarketingPatientContactEvent.create({
     list_id: list.id,
     event_type: 'mass_campaign_admin_resolution',
     channel: 'whatsapp',
-    payload: adminResolution,
+    payload: {...adminResolution,quality_exception:nextDispatch.quality_exception},
     occurred_at: resolvedAt,
+  },{transaction});
+  return {list,adminResolution};
   });
   const notified = await notifyQueueResolution(list, normalizedDecision, note, adminUserId);
   return { success: true, queue_id: list.id, decision: normalizedDecision, notified };

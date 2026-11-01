@@ -167,7 +167,7 @@ function clinicUsesReviewAlias(configuracion, review) {
   );
 }
 
-async function resolveCandidateClinicIdsForReview(review) {
+async function resolveCandidateClinicIdsForReview(review,transaction=null) {
   const ids = new Set();
   const reviewClinicId = Number(review.clinica_id || 0);
   if (Number.isInteger(reviewClinicId) && reviewClinicId > 0) {
@@ -181,7 +181,7 @@ async function resolveCandidateClinicIdsForReview(review) {
   try {
     const clinics = await Clinica.findAll({
       attributes: ['id_clinica', 'configuracion'],
-      raw: true,
+      transaction,raw: true,
     });
     for (const clinic of clinics || []) {
       if (clinicUsesReviewAlias(clinic.configuracion, review)) {
@@ -234,11 +234,11 @@ async function enqueueBusinessProfileReviewMatch(reviewId, options = {}) {
   return { queued: true, job_id: job.id };
 }
 
-async function findBestReviewCandidate(review) {
+async function findBestReviewCandidate(review, transaction = null) {
   const reviewTime = review.create_time || review.update_time || review.created_at || new Date();
-  const candidateClinicIds = await resolveCandidateClinicIdsForReview(review);
+  const candidateClinicIds = await resolveCandidateClinicIdsForReview(review,transaction);
   if (!candidateClinicIds.length) {
-    return null;
+    return {candidate:null,reason:'no_candidate',examined:0};
   }
   const rows = await sequelize.query(
     `
@@ -248,6 +248,7 @@ async function findBestReviewCandidate(review) {
       e.item_id,
       e.paciente_id AS event_paciente_id,
       e.occurred_at,
+      COALESCE(i.clinica_id,l.clinica_id) AS clinic_id,
       i.paciente_id AS item_paciente_id,
       i.name AS item_name,
       i.phone AS item_phone,
@@ -260,11 +261,15 @@ async function findBestReviewCandidate(review) {
     WHERE e.event_type = 'review_rating_followup_sent'
       AND e.channel = 'whatsapp'
       AND JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.kind')) = 'review_google_link_followup'
+      AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(e.payload,'$.test_send')),'false') NOT IN ('true','1')
+      AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(e.payload,'$.status')),'sent') NOT IN ('failed','error','rejected','cancelled')
+      AND NOT EXISTS(SELECT 1 FROM MarketingPatientContactEvents t WHERE t.list_id=e.list_id AND t.item_id=e.item_id
+        AND t.event_type IN ('mass_campaign_test_sent','mass_campaign_test_failed'))
       AND COALESCE(i.clinica_id, l.clinica_id) IN (:candidateClinicIds)
       AND e.occurred_at >= DATE_SUB(:reviewTime, INTERVAL :windowHours HOUR)
       AND e.occurred_at <= DATE_ADD(:reviewTime, INTERVAL 15 MINUTE)
     ORDER BY e.occurred_at DESC
-    LIMIT 100
+    LIMIT 1001
     `,
     {
       replacements: {
@@ -272,22 +277,24 @@ async function findBestReviewCandidate(review) {
         reviewTime,
         windowHours: MATCH_WINDOW_HOURS,
       },
+      transaction,
       type: QueryTypes.SELECT,
     }
   );
 
-  let best = null;
-  for (const row of rows) {
-    const patientName = [row.paciente_nombre, row.paciente_apellidos].filter(Boolean).join(' ').trim();
-    const itemScore = scoreNameMatch(review.reviewer_name, row.item_name);
-    const patientScore = scoreNameMatch(review.reviewer_name, patientName);
-    const score = Math.max(itemScore, patientScore);
-    if (!best || score > best.score) {
-      best = { ...row, score, patientName };
-    }
+  if(rows.length>1000)return {candidate:null,reason:'candidate_limit',examined:rows.length};
+  const identities=new Map();
+  for(const row of rows){
+    const patientName=[row.paciente_nombre,row.paciente_apellidos].filter(Boolean).join(' ').trim();
+    const score=Math.max(scoreNameMatch(review.reviewer_name,row.item_name),scoreNameMatch(review.reviewer_name,patientName));
+    const patientId=Number(row.event_paciente_id||row.item_paciente_id||0);
+    const identity=`${row.clinic_id}:${patientId?`patient:${patientId}`:`item:${row.list_id}:${row.item_id}`}`;
+    if(!identities.has(identity)||score>identities.get(identity).score)identities.set(identity,{...row,score,patientName});
   }
-
-  return best && best.score >= MIN_MATCH_SCORE ? best : null;
+  const ranked=[...identities.values()].sort((a,b)=>b.score-a.score),best=ranked[0];
+  if(!best||best.score<MIN_MATCH_SCORE)return {candidate:null,reason:'no_candidate',examined:rows.length};
+  if(ranked[1]&&ranked[1].score>=MIN_MATCH_SCORE&&best.score-ranked[1].score<.08)return {candidate:null,reason:'ambiguous_candidate',examined:rows.length};
+  return {candidate:best,reason:'unique_candidate',examined:rows.length};
 }
 
 async function matchBusinessProfileReview(reviewId) {
@@ -296,7 +303,8 @@ async function matchBusinessProfileReview(reviewId) {
     throw new Error('business_profile_review_match requires payload.review_id');
   }
 
-  const review = await BusinessProfileReview.findByPk(id);
+  return sequelize.transaction(async transaction=>{
+  const review = await BusinessProfileReview.findByPk(id,{transaction,lock:transaction.LOCK.UPDATE});
   if (!review) {
     return { skipped: true, reason: 'review_not_found', review_id: id };
   }
@@ -315,9 +323,9 @@ async function matchBusinessProfileReview(reviewId) {
     return { skipped: true, reason: 'missing_review_identity', review_id: id };
   }
 
-  const candidate = await findBestReviewCandidate(review);
+  const inspection=await findBestReviewCandidate(review,transaction),candidate=inspection.candidate;
   if (!candidate) {
-    return { matched: false, reason: 'no_candidate', review_id: id };
+    return { matched: false, reason: inspection.reason, review_id: id };
   }
 
   const pacienteId = Number(candidate.event_paciente_id || candidate.item_paciente_id || 0) || null;
@@ -340,7 +348,7 @@ async function matchBusinessProfileReview(reviewId) {
       review_create_time: review.create_time || null,
     },
     occurred_at: review.create_time || review.update_time || new Date(),
-  });
+  },{transaction});
 
   await review.update({
     matched_paciente_id: pacienteId,
@@ -348,7 +356,7 @@ async function matchBusinessProfileReview(reviewId) {
     match_confidence: Number(candidate.score.toFixed(3)),
     match_reason: `Nombre compatible tras enlace Google enviado en las ${MATCH_WINDOW_HOURS}h previas`,
     matched_at: new Date(),
-  });
+  },{transaction});
 
   return {
     matched: true,
@@ -357,6 +365,7 @@ async function matchBusinessProfileReview(reviewId) {
     paciente_id: pacienteId,
     confidence: Number(candidate.score.toFixed(3)),
   };
+  });
 }
 
 async function runBusinessProfileReviewMatchJob(payload = {}) {
