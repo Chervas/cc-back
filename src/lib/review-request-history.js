@@ -79,7 +79,25 @@ async function readReviewRequestHistory({ query, clinicIds = [], byClinic = fals
         AND fl.objective_id='mass_sends' AND (JSON_UNQUOTE(JSON_EXTRACT(fl.criteria,'$.review_request')) IN ('true','1')
           OR JSON_UNQUOTE(JSON_EXTRACT(fl.criteria,'$.template_usage')) IN ('solicitud_resena','resena','review_request','reviews'))
     ) ti)` : '';
-  const items = await query(`WITH review_scope_items AS (
+  // Deduplicate the scalar projection before fetching message JSON. Draft copies
+  // can repeat a recipient hundreds of times; sorting their metadata is expensive.
+  const reportSql = `WITH ${reportFlags.slice(2)}, report_items AS (
+    SELECT DISTINCT COALESCE(i.clinica_id,l.clinica_id) history_clinic_id,i.paciente_id,i.phone,i.status,i.selected,i.dispatch_status,i.sent_at,i.provider_message_id,i.app_message_id,
+      l.status AS list_status,COALESCE(rf.has_test_event,0) has_test_event,COALESCE(rf.has_real_event,0) has_real_event
+    FROM MarketingPatientLists l JOIN MarketingPatientListItems i ON i.list_id=l.id
+    LEFT JOIN report_flags rf ON rf.list_id=i.list_id AND rf.item_id=i.id
+    WHERE (i.clinica_id IN (:clinicIds) OR (i.clinica_id IS NULL AND l.clinica_id IN (:clinicIds)))
+      AND l.objective_id='mass_sends' AND (
+      JSON_UNQUOTE(JSON_EXTRACT(l.criteria,'$.review_request')) IN ('true','1')
+      OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria,'$.template_usage')) IN ('solicitud_resena','resena','review_request','reviews')
+    ) AND (i.sent_at IS NOT NULL OR i.provider_message_id IS NOT NULL
+      OR i.dispatch_status IN ('queued','sending','accepted','held_quality','sent','delivered','read','replied')
+      OR (l.status IN ('ready','sending','sent','completed','scheduled','paused') AND i.selected=TRUE AND i.status='ready'
+        AND (i.dispatch_status IS NULL OR i.dispatch_status='pending')))
+  ) SELECT i.history_clinic_id,i.paciente_id,i.phone,i.status,i.selected,i.dispatch_status,i.sent_at,i.provider_message_id,i.app_message_id,
+      i.list_status,m.metadata AS message_metadata,i.has_test_event,i.has_real_event
+    FROM report_items i LEFT JOIN Messages m ON m.id=i.app_message_id`;
+  const items = await query(byClinic ? reportSql : `WITH review_scope_items AS (
       SELECT id FROM MarketingPatientListItems WHERE clinica_id IN (:clinicIds)
       UNION ALL SELECT i.id FROM MarketingPatientLists l JOIN MarketingPatientListItems i ON i.list_id=l.id
         WHERE l.clinica_id IN (:clinicIds) AND i.clinica_id IS NULL
