@@ -104,3 +104,15 @@ test('GA stops a property when currency or timezone changes between report famil
     assert.equal(result.report.errors[0].message, 'broker_response_invalid'); assert.equal(f.state.calls.length, 2);
   }
 });
+
+test('stream metadata uses the typed broker operation and suppresses a revoked response', async () => {
+  const f = analyticsFixture(); const context = await f.service.prepare(f.mapping);
+  f.state.response = () => ({ dataStreams: [{ name: 'properties/123/dataStreams/456', type: 'WEB_DATA_STREAM',
+    webStreamData: { measurementId: 'G-FIXTURE', defaultUri: 'https://example.test/private?name=hidden', ignored: 'PRIVATE' } }] });
+  const output = await f.service.read(f.mapping, context, 'streams', {});
+  assert.equal(f.state.calls[0].operation, 'google.analytics.streams.read.v1');
+  assert.equal(output.data.dataStreams[0].webStreamData.defaultUri, 'https://example.test');
+  assert.doesNotMatch(JSON.stringify(output), /private|hidden|PRIVATE/);
+  f.state.response = () => { f.state.record.state = 'blocked'; return { dataStreams: [] }; };
+  await assert.rejects(f.service.read(f.mapping, context, 'streams', {}), { code: 'broker_binding_invalid' });
+});

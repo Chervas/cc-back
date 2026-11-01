@@ -2,14 +2,16 @@
 const { createHash } = require('node:crypto');
 const contract = require('./google-analytics-contract'); const { fail } = require('./errors');
 const discovery = require('./google-property-discovery-contract');
+const streams = require('./google-analytics-streams');
 const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function createAnalyticsOperations({ http, cursor, oauth }) {
   const reads = Object.fromEntries(contract.OPERATIONS.map(operation => [operation, Object.freeze({
     provider: contract.PROVIDER, effect: 'read', persistResult: false, validate: payload => contract.validate(operation, payload),
-    ...(operation === discovery.GA_OPERATION ? { requiredScopes: [discovery.GA_SCOPE] } : {}),
+    ...([discovery.GA_OPERATION, streams.OPERATION].includes(operation) ? { requiredScopes: [discovery.GA_SCOPE] } : {}),
     async execute(context) {
       const { payload, secret, signal, binding, assetRef } = context;
       const resource = contract.resource(binding, assetRef); const family = operation.slice(contract.PREFIX.length).split('.')[0];
+      if (family === 'streams') return streams.read({ http, propertyName: resource.propertyName, token: secret, signal });
       if (family === 'discovery') return discovery.projectGA(await http({ hostname: 'analyticsadmin.googleapis.com',
         path: `/v1beta/${resource.propertyName}`, token: secret, signal }), resource.propertyName);
       const scope = { ...context, operation }; let previous = null; let offset = 0;

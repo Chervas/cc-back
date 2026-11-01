@@ -42,7 +42,7 @@ function setup(t, kind) {
 }
 function readPayload(kind, operation) {
   const range = { startDate: '2026-09-01', endDate: '2026-09-02' };
-  if (operation.includes('.discovery.') || operation.includes('.inspection.')) return {};
+  if (operation.includes('.discovery.') || operation.includes('.inspection.') || operation.includes('.streams.')) return {};
   if (kind === 'analytics' || operation.includes('.queries.')) return { ...range, pageToken: null };
   return operation.includes('.pages.') ? { ...range, startRow: 0, rowLimit: 500 } : range;
 }

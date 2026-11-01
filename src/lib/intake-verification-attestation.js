@@ -145,6 +145,7 @@ function safeSignals(value) {
     };
   }
   return {
+    analytics_tags: source.analytics_tags ? require('./intake-analytics-preparation').safeTags(source.analytics_tags) : null,
     installed: source.installed === true,
     runtime_compatible: source.runtime_compatible === true,
     runtime_version: String(source.runtime_version || '').slice(0, 32) || null,

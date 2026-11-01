@@ -22,7 +22,8 @@ function createGoogleHttp({ request = https.request, timeoutMs = 8000, dataManag
     const searchConsole = hostname === 'searchconsole.googleapis.com' && path === '/v1/urlInspection/index:inspect' || searchAnalytics;
     const requestTimeoutMs = searchAnalytics ? 20000 : timeoutMs;
     const analytics = hostname === 'analyticsdata.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}:runReport$/.test(path);
-    const discovery = hostname === 'analyticsadmin.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}$/.test(path)
+    const streamRead = hostname === 'analyticsadmin.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}\/dataStreams\?pageSize=50(?:&pageToken=[A-Za-z0-9_.%~+*-]{1,12288})?$/.test(path);
+    const discovery = streamRead || hostname === 'analyticsadmin.googleapis.com' && /^\/v1beta\/properties\/[1-9]\d{0,19}$/.test(path)
       || hostname === 'www.googleapis.com' && /^\/webmasters\/v3\/sites\/[^/?#]+$/.test(path);
     const optimizationWrite = optimizationMutation !== undefined;
     if (optimizationWrite) {

@@ -174,3 +174,34 @@ test('GA transport and runtime configuration permit only the reviewed cohort and
   status = 302; await assert.rejects(http(request), { code: 'provider_failed' });
 });
 module.exports = { gaFixture };
+
+test('web streams pin property, paginate and project no secrets or clinical URL fields', async t => {
+  const f = gaFixture(t);
+  const stream = n => ({ name: `properties/123/dataStreams/${n}`, type: 'WEB_DATA_STREAM', displayName: 'private field',
+    webStreamData: { measurementId: `G-TEST${n}`, defaultUri: 'https://www.example.test/path?patient=private', apiSecret: ACCESS } });
+  f.state.response = request => {
+    assert.equal(request.hostname, 'analyticsadmin.googleapis.com'); assert.equal(request.json, undefined);
+    assert.match(request.path, /^\/v1beta\/properties\/123\/dataStreams\?pageSize=50/);
+    return request.path.includes('pageToken=') ? { dataStreams: [stream(2)] } : { dataStreams: [stream(1)], nextPageToken: 'fictitious-next' };
+  };
+  const result = (await f.execute('streams', {})).data;
+  assert.equal(result.dataStreams.length, 2);
+  assert.equal(result.dataStreams[0].webStreamData.defaultUri, 'https://www.example.test');
+  assert.doesNotMatch(JSON.stringify(result), /patient|private|apiSecret|FICTITIOUS/);
+  for (const payload of [{ propertyName: 'properties/999' }, { pageToken: 'foreign' }, { url: 'https://foreign.invalid' }]) {
+    await assert.rejects(f.execute('streams', payload), { code: 'invalid_request' });
+  }
+  assert.equal(f.state.calls.length, 2);
+});
+
+test('streams reject foreign resources, malformed destinations and cyclic pagination', async t => {
+  const f = gaFixture(t);
+  const row = { name: 'properties/123/dataStreams/1', type: 'WEB_DATA_STREAM', webStreamData: { measurementId: 'G-TEST123', defaultUri: 'https://example.test' } };
+  for (const bad of [{ ...row, name: 'properties/999/dataStreams/1' }, { ...row, type: 'UNKNOWN' },
+    { ...row, webStreamData: { ...row.webStreamData, defaultUri: 'https://user:password@example.test' } }]) {
+    f.state.response = () => ({ dataStreams: [bad] });
+    await assert.rejects(f.execute('streams', {}), { code: 'provider_failed' });
+  }
+  f.state.response = () => ({ dataStreams: [], nextPageToken: 'same' });
+  await assert.rejects(f.execute('streams', {}), { code: 'provider_failed' });
+});

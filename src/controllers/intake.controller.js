@@ -5362,6 +5362,65 @@ exports.getIntakeConfigSecretGroup = asyncHandler(async (req, res) => {
 // (UI autenticada)
 // ======================================
 
+// On-demand onboarding: typed broker reads and a narrow, consented local mutation.
+exports.prepareAnalytics = asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const apply = req.params.action === 'apply';
+  const allowed = ['clinic_id', 'group_id', 'domain', 'stream_name', 'verification_attestation',
+    ...(apply ? ['expected_revision', 'channels', 'channels_reviewed'] : [])];
+  const positiveId = v => Number.isSafeInteger(v) && v > 0 && v <= 2147483647;
+  const clinicId = body.clinic_id ?? null;
+  const groupId = body.group_id ?? null;
+  if (!['plan', 'apply'].includes(req.params.action) || Object.keys(body).some(k => !allowed.includes(k))
+    || (clinicId === null) === (groupId === null) || clinicId !== null && !positiveId(clinicId) || groupId !== null && !positiveId(groupId)
+    || typeof body.domain !== 'string' || body.domain.length > 253
+    || body.stream_name !== undefined && (typeof body.stream_name !== 'string' || !/^properties\/[1-9]\d{0,19}\/dataStreams\/[1-9]\d{0,19}$/.test(body.stream_name))
+    || body.verification_attestation !== undefined && (typeof body.verification_attestation !== 'string' || body.verification_attestation.length > 32768)) {
+    return res.status(400).json({ error: 'analytics_preparation_invalid' });
+  }
+  if (!await requireIntakeConfigScopeAccess(req, res, { clinicId, groupId, access: apply ? 'write' : 'read' })) return;
+  if (clinicId && (await resolveSharedWebGroupConfigForClinic(clinicId))?.record) {
+    return res.status(409).json({ error: 'analytics_shared_web', message: 'Selecciona el grupo para preparar su web compartida.' });
+  }
+  const record = await IntakeConfig.findOne({ where: groupId ? { assignment_scope: 'group', group_id: groupId } : { clinic_id: clinicId }, raw: true });
+  if (!record) return res.status(409).json({ error: 'analytics_web_setup_required' });
+  const clinicIds = groupId ? await resolveIntakeCandidateClinicIds({ groupId }) : [clinicId];
+  if (!clinicIds.length) return res.status(403).json({ error: 'scope_forbidden' });
+  try {
+    const sessions = require('../services/accessSession.service');
+    const session = await sessions.verify(sessions.bearer(req.headers.authorization));
+    if (!require('../lib/delegatedOperationPolicy').isManagedBusinessSession(session) || !session.jti
+      || Number(session.userId) !== Number(req.userData?.userId)) {
+      return res.status(401).json({ error: 'google_discovery_session_required' });
+    }
+    const scopeInput = { clinicIdRaw: clinicId, groupIdRaw: groupId, assignmentScopeRaw: groupId ? 'group' : 'clinic' };
+    const resolveEffectiveMappings = async transaction => {
+      const current = await sessions.verify(sessions.bearer(req.headers.authorization));
+      if (current.jti !== session.jti || current.userId !== session.userId) throw Object.assign(Error(), { code: 'google_discovery_session_required', status: 401 });
+      if (transaction) await sessions.verifyReference({ userId: session.userId, sessionRef: session.jti, expiresAt: new Date(session.exp * 1000) }, { transaction });
+      const members = groupId ? await resolveIntakeCandidateClinicIds({ groupId }) : [clinicId];
+      if (members.length !== clinicIds.length || members.some(id => !clinicIds.includes(id))
+        || !await hasMarketingClinicScopeAccess({ userId: session.userId, clinicIds, access: apply ? 'write' : 'read' })) {
+        throw Object.assign(Error(), { code: 'scope_forbidden', status: 403 });
+      }
+      const resolved = await require('../services/scopeConnectionResolver.service').resolveGoogleConnectionForScope({
+        userId: session.userId, ...scopeInput, allowLegacyUserFallback: false, metadataOnly: true });
+      if (!resolved.connection) return [];
+      return require('../services/googlePropertyInventoryScope.service').resolve({ kind: 'analytics', scopeInput, clinicIds, connectionId: Number(resolved.connection.id) });
+    };
+    const service = require('../services/analyticsPreparation.service').createAnalyticsPreparation({ db,
+      broker: require('../services/analyticsBroker.service'), resolveEffectiveMappings });
+    const result = apply ? await service.apply({ record, clinicIds, body }) : (await service.inspect({ record, clinicIds, body })).result;
+    if (!apply && !await hasMarketingClinicScopeAccess({ userId: session.userId, clinicIds, access: 'write' })) {
+      result.can_apply = false; result.pending.push('scope_forbidden');
+    }
+    return res.json(result);
+  } catch (error) {
+    const code = typeof error.code === 'string' && /^[a-z_]{1,80}$/.test(error.code) ? error.code : 'analytics_preparation_failed';
+    return res.status([400, 401, 403, 409].includes(error.status) ? error.status : 503).json({ error: code });
+  }
+});
+
 exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
   const domainRaw = String(req.query.domain || '').trim();
   const clinicId = parseInteger(req.query.clinic_id);
@@ -5851,6 +5910,7 @@ exports.verifySnippetInstalled = asyncHandler(async (req, res) => {
       signals: {
         ...primaryEvaluation,
         ...legalPageVerification,
+        analytics_tags: diagnostics.tags,
       },
     });
     return res.json({

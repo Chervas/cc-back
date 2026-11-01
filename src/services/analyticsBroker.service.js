@@ -54,12 +54,12 @@ function createAnalyticsBroker({ client, loadMapping, loadBindings, loadConnecti
       const captured = context && typeof context === 'object' && contexts.get(context);
       if (!captured || captured.id !== Number(mapping?.id)) fail();
       const operation = contract.PREFIX + family + '.read.v1';
-      if (family === 'discovery') {
+      if (family === 'discovery' || family === 'streams') {
         contract.validate(operation, payload); await inspect(mapping, captured); const budget = await beforeExecute?.();
         const response = await client.execute({ operation, connectionRef: captured.connectionRef, assetRef: captured.assetRef,
           tenantRef: captured.tenantRef, payload }, budget);
         await inspect(mapping, captured); await beforeExecute?.();
-        try { return { data: discovery.projectGA(response?.data, captured.propertyName) }; } catch { fail('broker_response_invalid'); }
+        try { return { data: (family === 'streams' ? require('../../services/integrations-broker/src/google-analytics-streams').project : discovery.projectGA)(response?.data, captured.propertyName) }; } catch { fail('broker_response_invalid'); }
       }
       contract.validate(operation, { ...payload, pageToken: null });
       if (Object.keys(payload).sort().join(',') !== 'endDate,startDate') fail('invalid_request');

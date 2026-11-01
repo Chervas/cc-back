@@ -20,6 +20,7 @@ router.post('/whatsapp-origin', intakeController.registerWhatsappOrigin);
 router.use(protect);
 router.get('/config/admin', intakeController.getIntakeConfigAdmin);
 router.get('/verify-snippet', intakeController.verifySnippetInstalled);
+router.post('/analytics-preparation/:action', intakeController.prepareAnalytics);
 router.get('/config/:clinicId/secret', intakeController.getIntakeConfigSecretClinic);
 router.get('/config/group/:groupId/secret', intakeController.getIntakeConfigSecretGroup);
 router.get('/leads/search', intakeController.searchLeads);
