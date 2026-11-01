@@ -2,7 +2,7 @@
 const model = require('../lib/intake-analytics-preparation');
 const attestation = require('../lib/intake-verification-attestation');
 
-function createAnalyticsPreparation({ db, broker, resolveEffectiveMappings }) {
+function createAnalyticsPreparation({ db, broker, resolveEffectiveMappings, now = Date.now }) {
   const { Op } = db.Sequelize;
   async function mappingsFor(clinicIds, transaction) {
     const effective = resolveEffectiveMappings ? await resolveEffectiveMappings(transaction) : null;
@@ -17,6 +17,14 @@ function createAnalyticsPreparation({ db, broker, resolveEffectiveMappings }) {
     return rows;
   }
   async function inspect({ record, clinicIds, body }) {
+    // Bound the entire group inspection, not 30 seconds for each property.
+    // The adapter consumes the remaining budget and rechecks it after I/O.
+    const deadline = now() + 25000;
+    const budget = () => {
+      const remaining = deadline - now();
+      if (remaining <= 0) throw model.error('broker_discovery_timeout', 503);
+      return { timeoutMs: Math.min(25000, remaining) };
+    };
     const domain = model.host(body.domain || '');
     if (!domain || !(record.domains || []).some(d => model.host(d) === domain)) throw model.error('analytics_domain_forbidden', 403);
     const mappings = await mappingsFor(clinicIds);
@@ -24,15 +32,19 @@ function createAnalyticsPreparation({ db, broker, resolveEffectiveMappings }) {
     if (resources.length > 8) throw model.error('analytics_property_selection_required');
     const streams = [];
     for (const mapping of resources) {
+      budget();
       // No legacy-token fallback, no browser-supplied provider identifier.
       const context = await broker.prepare(mapping);
       if (!context) throw model.error('analytics_broker_required');
       const response = await broker.read(mapping, context, 'streams', {}, { beforeExecute: async () => {
         const fresh = await mappingsFor(clinicIds);
         if (model.revision(record, fresh) !== model.revision(record, mappings)) throw model.error('analytics_scope_changed', 403);
+        return budget();
       } });
+      budget();
       streams.push(...response.data.dataStreams);
     }
+    budget();
     let signals = null;
     if (body.verification_attestation) {
       const proof = attestation.verifyVerificationAttestation(body.verification_attestation, {

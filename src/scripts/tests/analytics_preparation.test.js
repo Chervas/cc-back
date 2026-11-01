@@ -109,3 +109,20 @@ test('adding a channel to an existing bridge still requires reviewing its previo
   await assert.rejects(f.service.apply({ ...f.args, body: { ...f.body, expected_revision: result.revision, channels: ['phone', 'form'] } }), { code: 'analytics_channels_review_required' });
   assert.equal(f.state.writes.length, 0);
 });
+
+test('a group shares one read deadline and never writes or starts another property after expiry', async () => {
+  const f = fixture(); let clock = 0; const budgets = [];
+  f.state.mappings.push(...[124, 125].map((id, i) => ({ ...f.mapping, id: 18 + i,
+    propertyName: `properties/${id}`, broker_read_asset_ref: `ga4:${id}` })));
+  f.broker.read = async (mapping, context, family, payload, { beforeExecute }) => {
+    budgets.push((await beforeExecute()).timeoutMs);
+    clock += 13000;
+    await beforeExecute();
+    return { data: { dataStreams: f.state.streams } };
+  };
+  const service = createAnalyticsPreparation({ db: f.db, broker: f.broker, now: () => clock });
+  await assert.rejects(service.apply({ ...f.args, body: { ...f.body, channels: ['phone'], channels_reviewed: true } }),
+    { code: 'broker_discovery_timeout' });
+  assert.deepEqual(budgets, [25000, 12000]);
+  assert.equal(f.state.writes.length, 0);
+});
