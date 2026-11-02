@@ -929,10 +929,10 @@ async function resolveQueueSender(list, dispatch, cache = {}) {
   const senderSnapshot = safeObject(dispatch.sender_snapshot);
   if (clean(senderSnapshot.phone_number_id || senderSnapshot.phoneNumberId || senderSnapshot.phone)) {
     return {
-      asset_id: Number(senderSnapshot.asset_id || senderSnapshot.assetId || 0) || null,
+      asset_id: Number(senderSnapshot.asset_id || senderSnapshot.assetId || senderSnapshot.origin_id || 0) || null,
       phone_number_id: clean(senderSnapshot.phone_number_id || senderSnapshot.phoneNumberId) || null,
-      phone: clean(senderSnapshot.phone || senderSnapshot.display_phone_number) || null,
-      name: clean(senderSnapshot.name || senderSnapshot.verified_name) || null,
+      phone: clean(senderSnapshot.phone || senderSnapshot.display_phone_number || senderSnapshot.label) || null,
+      name: clean(senderSnapshot.name || senderSnapshot.verified_name || senderSnapshot.label) || null,
       source: 'dispatch_snapshot',
     };
   }

@@ -22,7 +22,10 @@ router.use((req, res, next) => {
   const authorizedProfileRefresh = req.method === 'POST' && /^\/phones\/[1-9][0-9]*\/refresh$/.test(path);
   const authorizedPaymentTest = req.method === 'POST' && /^\/phones\/[1-9][0-9]*\/payment-recovery-test$/.test(path);
   const authorizedDisconnect = req.method === 'POST' && ['/phones/disconnect', '/phones/archive'].includes(path);
-  if (templateRoute || authorizedProfileRefresh || authorizedPaymentTest || authorizedDisconnect || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
+  // Local, audited administrative decision only. It never enqueues or sends;
+  // resume still performs the existing sender/template/quality preflight.
+  const queueReview = req.method === 'POST' && /^\/compliance\/admin\/queues\/[1-9][0-9]*\/resolve$/.test(path);
+  if (queueReview || templateRoute || authorizedProfileRefresh || authorizedPaymentTest || authorizedDisconnect || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
   return authMiddleware(req, res, () => metaQuarantine.middleware(req, res));
 });
 

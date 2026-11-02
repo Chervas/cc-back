@@ -149,8 +149,8 @@ function computeWorkedMinutes(events, now = new Date()) {
     const occurredAt = event.occurred_at instanceof Date ? event.occurred_at : new Date(event.occurred_at);
     if (Number.isNaN(occurredAt.getTime())) continue;
 
-    if (event.event_type === 'clock_in') {
-      openedAt = openedAt || occurredAt;
+    if (event.event_type === 'clock_in' && !openedAt) {
+      openedAt = occurredAt;
       pauseStartedAt = null;
       pausedMs = 0;
     } else if (event.event_type === 'break_start' && openedAt && !pauseStartedAt) {
@@ -176,11 +176,14 @@ function computeWorkedMinutes(events, now = new Date()) {
 }
 
 function lastEvent(events) {
-  return [...(events || [])].sort((a, b) => {
+  const ordered = [...(events || [])].sort((a, b) => {
     const left = new Date(a.occurred_at).getTime();
     const right = new Date(b.occurred_at).getTime();
     return left - right || Number(a.id || 0) - Number(b.id || 0);
-  }).at(-1) || null;
+  });
+  // Linking historical ledgers can expose a second clock-in for the same
+  // shift. Preserve the evidence but do not reopen it or end an active pause.
+  return ordered.reduce((last, event) => isValidTransition(last?.event_type, event.event_type) ? event : last, null);
 }
 
 function rowStatus(events) {
@@ -198,6 +201,7 @@ function serializeEvents(events, timeZone) {
     type: eventTypeLabel(event.event_type),
     time: timeLabel(event.occurred_at, timeZone),
     occurred_at: event.occurred_at instanceof Date ? event.occurred_at.toISOString() : new Date(event.occurred_at).toISOString(),
+    clinic_id: Number(event.clinic_id),
     source: event.source || 'web',
     note: event.note || null,
   }));
@@ -255,6 +259,14 @@ async function resolveClinicId(actorId, query = {}) {
   throw domainError('clinica_id_required', 400);
 }
 
+function presenceScope(link, clinicId, userId) {
+  const shared = link?.shared_schedule;
+  if (!shared) return { key: `${userId}:clinic:${clinicId}`, clinic_ids: [Number(clinicId)], names: [] };
+  if (!shared.clinic_ids?.includes(Number(clinicId))) throw domainError('presence_scope_invalid', 409);
+  return { key: `${userId}:shared:${shared.source_doctor_clinica_id}`, clinic_ids: shared.clinic_ids,
+    names: shared.clinic_names || [] };
+}
+
 async function buildPresenceRowsForClinic({ clinicId, clinic: clinicInput = null, businessDate = null, now = new Date() }) {
   if (!PersonalPresenceEvent) throw domainError('presence_model_unavailable', 503);
 
@@ -293,24 +305,6 @@ async function buildPresenceRowsForClinic({ clinicId, clinic: clinicInput = null
   ));
 
   const userIds = staff.map((item) => item.userId);
-  const events = userIds.length
-    ? await PersonalPresenceEvent.findAll({
-        where: {
-          clinic_id: Number(clinicId),
-          business_date: dateValue,
-          user_id: { [Op.in]: userIds },
-        },
-        order: [['occurred_at', 'ASC'], ['id', 'ASC']],
-        raw: true,
-      })
-    : [];
-  const eventsByUser = new Map();
-  for (const event of events) {
-    const list = eventsByUser.get(Number(event.user_id)) || [];
-    list.push(event);
-    eventsByUser.set(Number(event.user_id), list);
-  }
-
   const doctorClinicas = userIds.length
     ? await DoctorClinica.findAll({
         where: {
@@ -352,6 +346,17 @@ async function buildPresenceRowsForClinic({ clinicId, clinic: clinicInput = null
     list.push(link);
     linksByUser.set(Number(link.doctor_id), list);
   }
+  // The explicit same-site schedule link is also the presence boundary.
+  // Query each worker's own linked clinics, never the Cartesian product of staff and clinics.
+  const presenceScopes = new Map(staff.map(({ userId }) => [userId,
+    presenceScope((linksByUser.get(userId) || [])[0], clinicId, userId)]));
+  const events = userIds.length ? await PersonalPresenceEvent.findAll({
+    where: { business_date: dateValue, [Op.or]: userIds.map(userId => ({
+      user_id: userId, clinic_id: { [Op.in]: presenceScopes.get(userId).clinic_ids },
+    })) }, order: [['occurred_at', 'ASC'], ['id', 'ASC']], raw: true,
+  }) : [];
+  const eventsByUser = new Map(userIds.map(id => [id, []]));
+  for (const event of events) eventsByUser.get(Number(event.user_id))?.push(event);
   const rows = staff.map(({ pivot, user, userId }) => {
     const links = linksByUser.get(Number(userId)) || [];
     const intervals = links.flatMap((link) =>
@@ -380,6 +385,8 @@ async function buildPresenceRowsForClinic({ clinicId, clinic: clinicInput = null
       userId,
       clinicId: Number(clinicId),
       clinicName: clinic.nombre_clinica || 'Clínica',
+      presence_key: presenceScopes.get(userId).key,
+      shared_clinic_names: presenceScopes.get(userId).names,
       name: fullName(user, `Usuario ${userId}`),
       avatar: user.avatar || null,
       role: roleLabel(pivot),
@@ -482,37 +489,36 @@ async function createPresenceEvent({ actorId, payload = {} }) {
     throw domainError('presence_event_type_invalid', 400);
   }
 
-  await assertFeatureAccess(safeActorId, clinicId, 'team.schedule.self.manage');
-  const clinic = await loadClinic(clinicId);
-  const { businessDate } = normalizeClinicDate(payload.business_date || payload.date || payload.fecha, clinic);
-
-  const previousEvents = await PersonalPresenceEvent.findAll({
-    where: {
-      clinic_id: clinicId,
-      user_id: safeActorId,
-      business_date: businessDate,
-    },
-    order: [['occurred_at', 'ASC'], ['id', 'ASC']],
-    raw: true,
-  });
-  const previousLastType = lastEvent(previousEvents)?.event_type || null;
-  if (!isValidTransition(previousLastType, eventType)) {
-    throw domainError('presence_event_transition_invalid', 409, {
-      last_event_type: previousLastType,
-      requested_event_type: eventType,
+  const businessDate = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+    // Same durable mutex as link/unlink, so two clinics cannot both open a shift.
+    if (!db.PersonalCalendarRevision) throw domainError('presence_lock_unavailable', 503);
+    await require('./personalCalendarUndo.service').lockRevisions({ db, doctorIds: [safeActorId], transaction });
+    await assertFeatureAccess(safeActorId, clinicId, 'team.schedule.self.manage');
+    const membership = await UsuarioClinica.findOne({ where: { id_usuario: safeActorId, id_clinica: clinicId,
+      rol_clinica: { [Op.in]: ['propietario', 'personaldeclinica'] }, ...ACTIVE_STAFF_INVITATION_WHERE }, transaction });
+    if (!membership) throw domainError('presence_scope_forbidden', 403);
+    const clinic = await loadClinic(clinicId);
+    const { businessDate: date } = normalizeClinicDate(null, clinic);
+    // A clock action always belongs to the server's current business day.
+    if ([payload.business_date, payload.date, payload.fecha].some(value => value && value !== date)) {
+      throw domainError('presence_date_invalid', 400);
+    }
+    const links = await DoctorClinica.findAll({ where: { doctor_id: safeActorId, clinica_id: clinicId, activo: true },
+      attributes: ['id', 'doctor_id', 'clinica_id', 'shared_schedule_source_id'], raw: true, transaction });
+    const projected = await projectDoctorClinicas({ db, rows: links, transaction });
+    const scope = presenceScope(projected[0], clinicId, safeActorId);
+    const previousEvents = await PersonalPresenceEvent.findAll({
+      where: { clinic_id: { [Op.in]: scope.clinic_ids }, user_id: safeActorId, business_date: date },
+      order: [['occurred_at', 'ASC'], ['id', 'ASC']], raw: true, transaction,
     });
-  }
-
-  await PersonalPresenceEvent.create({
-    public_id: randomUUID(),
-    clinic_id: clinicId,
-    user_id: safeActorId,
-    business_date: businessDate,
-    event_type: eventType,
-    occurred_at: new Date(),
-    source: 'web',
-    note: cleanString(payload.note) || null,
-    created_by: safeActorId,
+    const previousLastType = lastEvent(previousEvents)?.event_type || null;
+    if (!isValidTransition(previousLastType, eventType)) throw domainError('presence_event_transition_invalid', 409, {
+      last_event_type: previousLastType, requested_event_type: eventType,
+    });
+    await PersonalPresenceEvent.create({ public_id: randomUUID(), clinic_id: clinicId, user_id: safeActorId,
+      business_date: date, event_type: eventType, occurred_at: new Date(), source: 'web',
+      note: cleanString(payload.note) || null, created_by: safeActorId }, { transaction });
+    return date;
   });
 
   return getPresenceWorkspace({
@@ -535,7 +541,8 @@ async function getDashboardPresenceSummary({
     const clinic = clinicMap instanceof Map ? clinicMap.get(Number(clinicId)) : null;
     perClinic.push(await buildPresenceRowsForClinic({ clinicId, clinic, businessDate }));
   }
-  const rows = perClinic.flatMap((item) => item.rows);
+  const rows = [...new Map(perClinic.flatMap(item => item.rows)
+    .map(row => [row.presence_key, row])).values()];
   const summary = summarizeRows(rows);
   const safeActorId = toInt(actorId);
   const me = safeActorId
@@ -546,6 +553,8 @@ async function getDashboardPresenceSummary({
     userId: row.userId,
     clinicId: row.clinicId,
     clinicName: row.clinicName,
+    presence_key: row.presence_key,
+    shared_clinic_names: row.shared_clinic_names,
     name: row.name,
     avatar: row.avatar || null,
     role: row.role,
@@ -579,6 +588,7 @@ module.exports = {
   getPresenceWorkspace,
   __testing: {
     buildPresenceRowsForClinic,
+    presenceScope,
     computeWorkedMinutes,
     isValidTransition,
     rowStatus,

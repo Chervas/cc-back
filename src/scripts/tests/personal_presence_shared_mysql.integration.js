@@ -1,0 +1,56 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),S=require('sequelize');
+const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fixture');
+withIsolatedCampaignMysql(async({sql,models:db,report})=>{
+ db.Sequelize=S;
+ const model=(name,fields)=>sql.define(name,fields,{timestamps:false});
+ db.Clinica=model('Clinica',{id_clinica:{type:S.INTEGER,primaryKey:true},nombre_clinica:S.STRING,url_avatar:S.STRING,configuracion:S.JSON,grupoClinicaId:S.INTEGER});
+ db.Usuario=model('Usuario',{id_usuario:{type:S.INTEGER,primaryKey:true},nombre:S.STRING,apellidos:S.STRING,email_usuario:S.STRING,avatar:S.STRING,cargo_usuario:S.STRING});
+ db.UsuarioClinica=model('UsuarioClinica',{id_usuario:{type:S.INTEGER,primaryKey:true},id_clinica:{type:S.INTEGER,primaryKey:true},rol_clinica:S.STRING,subrol_clinica:S.STRING,estado_invitacion:S.STRING});
+ db.UsuarioClinica.belongsTo(db.Usuario,{as:'Usuario',foreignKey:'id_usuario'});
+ db.DoctorClinica=model('DoctorClinica',{id:{type:S.INTEGER,primaryKey:true},doctor_id:S.INTEGER,clinica_id:S.INTEGER,activo:S.BOOLEAN,recibe_citas:S.BOOLEAN,rol_en_clinica:S.STRING,shared_schedule_source_id:S.INTEGER});
+ db.DoctorClinica.belongsTo(db.Clinica,{as:'clinica',foreignKey:'clinica_id'});
+ db.DoctorHorario=model('DoctorHorario',{id:{type:S.INTEGER,primaryKey:true},doctor_clinica_id:S.INTEGER,activo:S.BOOLEAN});
+ db.DoctorHorarioExcepcion=model('DoctorHorarioExcepcion',{id:{type:S.INTEGER,primaryKey:true},doctor_horario_id:S.INTEGER,fecha:S.DATEONLY});
+ db.DoctorClinica.hasMany(db.DoctorHorario,{as:'horarios',foreignKey:'doctor_clinica_id'});
+ db.DoctorHorario.hasMany(db.DoctorHorarioExcepcion,{as:'excepciones',foreignKey:'doctor_horario_id'});
+ db.PersonalPresenceEvent=require('../../../models/personalpresenceevent')(sql,S.DataTypes);
+ db.PersonalCalendarRevision=require('../../../models/personalcalendarrevision')(sql,S.DataTypes);
+ await sql.sync();
+ await db.Clinica.bulkCreate([10,20,30].map(id=>({id_clinica:id,nombre_clinica:'FICTITIOUS '+id,grupoClinicaId:70,configuracion:{timezone:'Europe/Madrid'}})));
+ await db.Usuario.bulkCreate([700,701,702].map(id=>({id_usuario:id,nombre:'FICTITIOUS '+id})));
+ await db.UsuarioClinica.bulkCreate([700,701,702].flatMap(id=>[10,20,30].map(clinic=>({id_usuario:id,id_clinica:clinic,rol_clinica:'personaldeclinica',estado_invitacion:'aceptada'}))));
+ await db.DoctorClinica.bulkCreate([700,701,702].flatMap((user,i)=>[10,20,30].map((clinic,j)=>({id:100+i*10+j,doctor_id:user,clinica_id:clinic,activo:true,recibe_citas:false,shared_schedule_source_id:j<2?100+i*10:null}))));
+ await db.PersonalCalendarRevision.bulkCreate([700,701,702].map(doctor_id=>({doctor_id,revision:0})));
+ const module={exports:{}},actualRequire=require;
+ vm.runInNewContext(fs.readFileSync(require.resolve('../../services/personalPresence.service'),'utf8'),{module,Date,Intl,Map,Set,require:name=>{
+  if(name==='../../models')return db;
+  if(name==='../lib/access-policy')return {getAccessibleClinicIdsForFeature:async({actorId,clinicIds})=>actorId===999?[]:clinicIds};
+  if(name==='../lib/role-helpers')return {isGlobalAdmin:()=>false};
+  if(name.startsWith('./'))return actualRequire('../../services/'+name.slice(2));
+  if(name.startsWith('../lib/'))return actualRequire('../../lib/'+name.slice(7));
+  return actualRequire(name);
+ }});
+ const service=module.exports;
+ const date=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+ const event=(clinic,user,type,at)=>db.PersonalPresenceEvent.create({public_id:require('crypto').randomUUID(),clinic_id:clinic,user_id:user,business_date:date,event_type:type,occurred_at:at,created_by:user});
+ const now=Date.now();await event(10,700,'clock_in',new Date(now-3*3600000));await event(20,700,'clock_in',new Date(now-2*3600000));await event(20,700,'clock_out',new Date(now-3600000));await event(30,700,'clock_in',new Date(now-600000));
+ for(const clinic of [10,20]){const w=await service.getPresenceWorkspace({actorId:700,query:{clinica_id:clinic,date}});assert.equal(w.me.status,'closed');assert.equal(w.me.events.length,3);assert.equal(w.me.worked_minutes,120);assert.equal(w.me.shared_clinic_names.length,2);}
+ const group=await service.getDashboardPresenceSummary({actorId:700,clinicIds:[10,20]});assert.equal(group.total,3);assert.equal(group.rows.filter(r=>r.userId===700).length,1);
+ assert.equal((await service.getPresenceWorkspace({actorId:700,query:{clinica_id:30,date}})).me.events.length,1);
+ const results=await Promise.allSettled([10,20].map(clinic_id=>service.createPresenceEvent({actorId:701,payload:{clinic_id,event_type:'clock_in'}})));
+ assert.equal(results.filter(x=>x.status==='fulfilled').length,1);assert.equal(results.find(x=>x.status==='rejected').reason.status,409);
+ await service.createPresenceEvent({actorId:701,payload:{clinic_id:20,event_type:'break_start'}});
+ await service.createPresenceEvent({actorId:701,payload:{clinic_id:10,event_type:'break_end'}});
+ await service.createPresenceEvent({actorId:701,payload:{clinic_id:20,event_type:'clock_out'}});
+ assert.equal((await service.getPresenceWorkspace({actorId:701,query:{clinica_id:10}})).me.status,'closed');
+ const count=await db.PersonalPresenceEvent.count();
+ await assert.rejects(service.createPresenceEvent({actorId:999,payload:{clinic_id:10,event_type:'clock_in'}}),{status:403});
+ await assert.rejects(service.createPresenceEvent({actorId:702,payload:{clinic_id:10,event_type:'clock_in',date:'2000-01-01'}}),{status:400});
+ assert.equal(await db.PersonalPresenceEvent.count(),count);
+ // Existing historical double-entry while on break must not erase the pause.
+ const times=['clock_in','break_start','clock_in','break_end','clock_out'].map((event_type,i)=>({event_type,occurred_at:new Date(i*3600000)}));
+ assert.equal(service.__testing.computeWorkedMinutes(times),120);
+ assert.equal(await db.DoctorClinica.count({where:{recibe_citas:true}}),0);
+ report.checks.push('retroactive projection preserves raw records and origin; duplicate clock-ins do not double hours or erase pauses','shared group totals deduplicated; unrelated clinic isolated','concurrent clock-ins serialize across clinics; pause/resume/out work from either clinic','denied access and backdated writes rejected; non-bookable employees remain non-bookable');
+}).catch(e=>{console.error(e.stack);process.exitCode=1;});

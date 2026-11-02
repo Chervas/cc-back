@@ -13,10 +13,10 @@ test('template routes reach existing ACL handlers; legacy writes remain quaranti
   assert.equal((await fetch(origin+url)).status,401);
   assert.equal((await fetch(origin+url,{headers:{'x-synthetic-user':'admin'}})).status,200,url);
  }
- for(const [method,url] of [['POST','/templates/custom'],['POST','/templates/sync'],['POST','/templates/create-from-catalog'],['DELETE','/templates/123'],['POST','/template-catalog'],['PUT','/template-catalog/123'],['POST','/template-catalog/123/propagate']]){
+ for(const [method,url] of [['POST','/compliance/admin/queues/855/resolve'],['POST','/templates/custom'],['POST','/templates/sync'],['POST','/templates/create-from-catalog'],['DELETE','/templates/123'],['POST','/template-catalog'],['PUT','/template-catalog/123'],['POST','/template-catalog/123/propagate']]){
   assert.equal((await fetch(origin+url,{method})).status,401);
   assert.equal((await fetch(origin+url,{method,headers:{'x-synthetic-user':'admin'}})).status,200,url);
  }
  for(const url of ['/messages','/phones/123/register','/preverified/start','/template-catalog/language-rollout'])assert.equal((await fetch(origin+url,{method:'POST',headers:{'x-synthetic-user':'admin'}})).status,503,url);
- assert.equal(calls.length,8);
+ assert.equal(calls.length,9);
 });
