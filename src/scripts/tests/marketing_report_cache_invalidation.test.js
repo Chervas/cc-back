@@ -48,7 +48,7 @@ function matches(row, clause) {
     return compare(row[key], clause[key]);
   });
 }
-function fixture() {
+function fixture(clinics = []) {
   const rows = new Map(), writes = [], jobs = [];
   const state = { beforeUpdate: null, afterUpdate: null };
   const model = {
@@ -73,7 +73,8 @@ function fixture() {
   const mod = new Module(filename, module);
   mod.filename = filename; mod.paths = Module._nodeModulePaths(path.dirname(filename));
   const original = mod.require.bind(mod);
-  mod.require = name => name === '../../models' ? { MarketingReportOverviewCache: model }
+  mod.require = name => name === '../../models' ? { MarketingReportOverviewCache: model,
+    Clinica: { rawAttributes: {}, findAll: async () => clone(clinics) } }
     : name === './jobRequests.service' ? { enqueueUniqueJobRequest: async job => { jobs.push(job); } } : original(name);
   mod._compile(fs.readFileSync(filename, 'utf8'), filename);
   const api = mod.exports;
@@ -89,6 +90,38 @@ function fixture() {
   return { api, model, coordinator, rows, writes, state, jobs, identity, seed,
     invalidate: input => api.invalidateOverviewCacheForScope(input) };
 }
+
+test('nightly refresh and interactive reads share validated identities; queued work cannot repopulate a changed binding', async () => {
+  const oldGate = process.env.SC_ANALYTICS_READ_ENABLED;
+  process.env.SC_ANALYTICS_READ_ENABLED = 'true';
+  try {
+    const { prepareValidatedReportSnapshot } = require('../../lib/validated-report-snapshot');
+    const f = fixture([{ id_clinica: 71, grupoClinicaId: 9 }]);
+    const range = { startLabel: '2026-10-01', endLabel: '2026-10-30', previous: { startLabel: '2026-09-01', endLabel: '2026-09-30' } };
+    let context = 'binding-1', generated = 0;
+    const prepare = ({ scope, range, section }) => prepareValidatedReportSnapshot({
+      capture: async () => context,
+      buildIdentity: contextKey => f.api.buildOverviewCacheIdentity({ scope, range, section, contextKey }),
+      cache: f.api.overviewCache,
+      generate: async () => ({ success: true, generation: ++generated }),
+    });
+    const inputs = { buildRange: () => range, buildOverviewPayload: () => assert.fail('SC workers must use guarded generation'),
+      prepareOverviewSnapshot: prepare, prune: false };
+    const night = await f.api.refreshOverviewSnapshots(inputs);
+    assert.equal(night.processed, 1); assert.equal(generated, 1);
+    const interactive = await prepare({ scope: { scope: 'clinic', clinicIds: [71] }, range });
+    assert.equal(interactive.identity.cache_key, night.refreshed[0].cacheKey);
+    assert.equal((await interactive.read()).generation, 1); assert.equal(generated, 1);
+    const lease = await f.api.overviewCache.acquire(interactive.identity);
+    context = 'binding-2';
+    const queued = await f.api.refreshOverviewSnapshots({ ...inputs, cacheKey: interactive.identity.cache_key,
+      identity: interactive.identity, refreshToken: lease.token });
+    assert.equal(queued.reason, 'cache_context_changed'); assert.equal(generated, 1);
+  } finally {
+    if (oldGate === undefined) delete process.env.SC_ANALYTICS_READ_ENABLED;
+    else process.env.SC_ANALYTICS_READ_ENABLED = oldGate;
+  }
+});
 
 test('scope invalidation matches clinic/group/all and exact IDs in normalized, legacy and direct arrays across periods and versions', async () => {
   const f = fixture();

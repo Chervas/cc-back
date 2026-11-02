@@ -286,6 +286,22 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
     }) };
   }
 
+  async function readRevisions({ siteUrls } = {}) {
+    if (!isReadEnabled(env)) C.fail('sc_analytics_read_disabled');
+    if (!Array.isArray(siteUrls) || siteUrls.length > 200) C.fail('sc_analytics_invalid_scope');
+    const sites = [...new Map(siteUrls.map(C.property).map(p => [p.siteHash, p])).values()];
+    if (!sites.length) return [];
+    const params = {}, hashes = sites.map((site, index) => { params['site' + index] = site.siteHash; return `UNHEX(:site${index})`; });
+    const rows = await query(`SELECT id,site_url,HEX(site_hash) AS site_hash,revision FROM ScAnalyticsProperties WHERE site_hash IN (${hashes.join(',')})`, params);
+    return sites.map(site => {
+      const row = rows.find(row => String(row.site_hash).toLowerCase() === site.siteHash);
+      if (row && row.site_url !== site.siteUrl) C.fail('sc_analytics_hash_collision');
+      // Ingestion (including new coverage) and monthly publication increment
+      // revision in their transaction. Purge preserves the published read model.
+      return { siteUrl: site.siteUrl, id: row ? String(row.id) : null, revision: row ? String(row.revision) : null };
+    });
+  }
+
   async function rawSource({ siteUrls, startDate, endDate, replacements, prefix = 'sca', totals = false, ranking = false } = {}) {
     if (!isReadEnabled(env)) C.fail('sc_analytics_read_disabled');
     C.range(startDate, endDate);
@@ -408,7 +424,7 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
     });
     return { removed, done };
   }
-  return { beginInterval, inspectInterval, confirmPublication, stageRows, commitInterval, abortInterval, writeInterval, writeTotalsInterval, availability, rawSource, archiveMonth, purgeArchivedMonth,
+  return { beginInterval, inspectInterval, confirmPublication, stageRows, commitInterval, abortInterval, writeInterval, writeTotalsInterval, availability, readRevisions, rawSource, archiveMonth, purgeArchivedMonth,
     isWriteEnabled: () => isWriteEnabled(env), isReadEnabled: () => isReadEnabled(env), retentionCutoff: () => C.cutoff(now()) };
 }
 
@@ -418,9 +434,9 @@ const runtimeRepo = () => {
   return runtime;
 };
 const exported = { createSearchConsoleAnalytics, storageEnabled: isWriteEnabled, isWriteEnabled, isReadEnabled };
-for (const method of ['beginInterval', 'inspectInterval', 'confirmPublication', 'stageRows', 'commitInterval', 'abortInterval', 'writeInterval', 'writeTotalsInterval', 'availability', 'rawSource', 'archiveMonth', 'purgeArchivedMonth']) {
+for (const method of ['beginInterval', 'inspectInterval', 'confirmPublication', 'stageRows', 'commitInterval', 'abortInterval', 'writeInterval', 'writeTotalsInterval', 'availability', 'readRevisions', 'rawSource', 'archiveMonth', 'purgeArchivedMonth']) {
   exported[method] = (...args) => {
-    const enabled = ['rawSource', 'availability'].includes(method) ? isReadEnabled() : isWriteEnabled();
+    const enabled = ['rawSource', 'availability', 'readRevisions'].includes(method) ? isReadEnabled() : isWriteEnabled();
     if (!enabled) return method.startsWith('write') ? Promise.resolve({ skipped: true, reason: 'sc_analytics_write_disabled' }) : Promise.reject(Object.assign(Error('sc_analytics_disabled'), { code: 'sc_analytics_disabled' }));
     return runtimeRepo()[method](...args);
   };

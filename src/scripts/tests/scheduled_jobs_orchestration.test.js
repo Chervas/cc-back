@@ -34,7 +34,9 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 54, 'the canonical scheduler retains existing jobs and the staging-only infrastructure notification ingest');
+  assert.equal(definitions.length, 55, 'the canonical scheduler retains existing jobs, infrastructure notification ingest and monthly SC retention');
+  assert.equal(SCHEDULED_JOB_DEFINITIONS.searchConsoleRetention.type, 'search_console_retention');
+  assert.deepEqual(SCHEDULED_JOB_DEFINITIONS.searchConsoleRetention.runtimeNamespaces, ['staging']);
   assert.deepEqual(SCHEDULED_JOB_DEFINITIONS.infrastructureNotifications.runtimeNamespaces, ['staging']);
   assert.equal(SCHEDULED_JOB_DEFINITIONS.infrastructureNotifications.maxAttempts, 1);
   assert.equal(metaSyncJobs.config.schedules.infrastructureNotifications, '* * * * *');

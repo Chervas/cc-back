@@ -3969,6 +3969,7 @@ async syncFacebookPageMetrics(asset) {
       ...payload,
       buildOverviewPayload: reportsTesting.buildOverviewPayload,
       buildRange: reportsTesting.buildRange,
+      prepareOverviewSnapshot: reportsTesting.prepareOverviewSnapshot,
     });
   }
 

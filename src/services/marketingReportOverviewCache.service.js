@@ -112,7 +112,7 @@ function payloadFromRow(row) {
 }
 
 function currentReportVersion() {
-  return OVERVIEW_CACHE_VERSION + (process.env.SC_ANALYTICS_READ_ENABLED === 'true' ? '-sc-property-v1' : '');
+  return OVERVIEW_CACHE_VERSION + (process.env.SC_ANALYTICS_READ_ENABLED === 'true' ? '-sc-property-v2' : '');
 }
 
 function buildOverviewCacheIdentity({
@@ -120,6 +120,7 @@ function buildOverviewCacheIdentity({
   range,
   section = 'overview',
   reportVersion = currentReportVersion(),
+  contextKey = null,
 }) {
   const normalizedScope = normalizeScope(scope);
   const normalized = {
@@ -130,6 +131,7 @@ function buildOverviewCacheIdentity({
     period_end: dateLabel(range?.end || range?.endLabel),
     comparison_start: dateLabel(range?.previous?.start || range?.previous?.startLabel),
     comparison_end: dateLabel(range?.previous?.end || range?.previous?.endLabel),
+    ...(contextKey ? { context_key: contextKey } : {}),
   };
   if (!normalized.report_version || !normalized.period_start || !normalized.period_end) {
     throw new Error('La identidad persistente del informe está incompleta');
@@ -144,7 +146,7 @@ function buildOverviewCacheIdentity({
     section: limitedString(normalized.section, 32) || 'overview',
     scope_key: sha256(stableStringify(normalizedScope)),
     scope_type: limitedString(normalizedScope.type, 32),
-    scope_payload: normalizedScope,
+    scope_payload: { ...normalizedScope, ...(contextKey ? { cache_context: contextKey } : {}) },
     primary_clinic_id: normalizedScope.clinic_ids.length === 1 ? normalizedScope.clinic_ids[0] : null,
     group_id: normalizedScope.group_id,
     period_start: normalized.period_start,
@@ -549,6 +551,7 @@ async function activeClinicRows({ clinicIds = null, limit = null } = {}) {
 async function refreshOverviewSnapshots({
   buildOverviewPayload,
   buildRange,
+  prepareOverviewSnapshot,
   cacheKey = null,
   identity = null,
   refreshToken = null,
@@ -585,7 +588,13 @@ async function refreshOverviewSnapshots({
         return { status: 'completed', processed: 0, skipped: true, reason: 'cache_source_version_changed' };
       }
       const range = buildRange(requestedIdentity.period_start, requestedIdentity.period_end, 30);
-      const scope = requestedIdentity.scope_payload || rowValue(requestedIdentity, 'scope_payload') || {};
+      const scope = scopeFromCacheIdentity(requestedIdentity);
+      const prepared = process.env.SC_ANALYTICS_READ_ENABLED === 'true'
+        ? await prepareCurrentSnapshot(prepareOverviewSnapshot, { scope, range, section: requestedIdentity.section }) : null;
+      if (prepared && prepared.identity.cache_key !== cacheKey) {
+        if (refreshToken) await overviewCache.release(requestedIdentity, refreshToken);
+        return { status: 'completed', processed: 0, deleted, skipped: true, reason: 'cache_context_changed' };
+      }
       const claim = await overviewCache.claimForRefresh(requestedIdentity, refreshToken);
       if (claim.obsolete) return { status: 'completed', processed: 0, deleted, skipped: true, reason: 'cache_refresh_superseded' };
       if (!claim.acquired || !claim.token) {
@@ -595,7 +604,8 @@ async function refreshOverviewSnapshots({
           error: new Error('Otro worker está refrescando este informe'),
         };
       }
-      await overviewCache.generateAndPersist(requestedIdentity, claim.token, () => buildOverviewPayload({ scope, range }));
+      await overviewCache.generateAndPersist(requestedIdentity, claim.token, prepared?.generate || (() => buildOverviewPayload({ scope, range })));
+      await prepared?.validate();
       return {
         status: 'completed',
         processed: 1,
@@ -613,14 +623,13 @@ async function refreshOverviewSnapshots({
 
     for (const clinic of clinics) {
       const scope = defaultClinicScope(clinic.id_clinica, clinic.grupoClinicaId);
-      const snapshotIdentity = buildOverviewCacheIdentity({ scope, range, section });
       try {
-        await overviewCache.readOrGenerate({
-          identity: snapshotIdentity,
-          forceRefresh: true,
-          staleWhileRefresh: false,
-          generate: () => buildOverviewPayload({ scope, range }),
-        });
+        const prepared = process.env.SC_ANALYTICS_READ_ENABLED === 'true'
+          ? await prepareCurrentSnapshot(prepareOverviewSnapshot, { scope, range, section }) : null;
+        const snapshotIdentity = prepared?.identity || buildOverviewCacheIdentity({ scope, range, section });
+        if (prepared) await prepared.read({ forceRefresh: true, staleWhileRefresh: false });
+        else await overviewCache.readOrGenerate({ identity: snapshotIdentity, forceRefresh: true, staleWhileRefresh: false,
+          generate: () => buildOverviewPayload({ scope, range }) });
         refreshed.push({
           clinicId: Number(clinic.id_clinica),
           cacheKey: snapshotIdentity.cache_key,
@@ -646,6 +655,25 @@ async function refreshOverviewSnapshots({
     }
     throw error;
   }
+}
+
+function scopeFromCacheIdentity(identity) {
+  const value = identity.scope_payload || {};
+  const type = value.type || value.scope || identity.scope_type;
+  const groupId = value.group_id || value.groupId || null;
+  const clinicIds = uniqueSortedIds(value.clinic_ids || value.clinicIds);
+  return {
+    scope: type,
+    isAll: value.all === true || value.isAll === true,
+    groupId,
+    clinicIds,
+    original: { clinicId: type === 'group' ? `group:${groupId}` : type === 'all' ? 'all' : clinicIds.join(',') },
+  };
+}
+
+async function prepareCurrentSnapshot(prepare, input) {
+  if (typeof prepare !== 'function') throw Object.assign(Error('overview_cache_context_required'), { status: 503 });
+  return prepare(input);
 }
 
 async function cleanupOverviewCache({ retentionDays = 7, now = new Date() } = {}) {
@@ -695,5 +723,6 @@ module.exports = {
     cacheDefaults,
     activeClinicRows,
     defaultClinicScope,
+    scopeFromCacheIdentity,
   },
 };

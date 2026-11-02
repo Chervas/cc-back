@@ -4137,6 +4137,32 @@ function forceRefreshRequested(req) {
   return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
 }
 
+async function prepareOverviewSnapshot({ scope, range, section = 'overview' }) {
+  const { prepareValidatedReportSnapshot } = require('../lib/validated-report-snapshot');
+  return prepareValidatedReportSnapshot({
+    capture: async () => {
+      if (process.env.SC_ANALYTICS_READ_ENABLED !== 'true') {
+        throw Object.assign(Error('sc_analytics_configuration_changed'), { code: 'sc_analytics_configuration_changed' });
+      }
+      const state = await resolveReportMarketingState(scope);
+      const siteUrls = await currentSearchConsoleSiteUrls(scope, state);
+      const revisions = await require('../services/searchConsoleAnalytics.service').readRevisions({ siteUrls });
+      // Explicit safe metadata only: no tracking secrets, raw records or tokens.
+      return { scope: state?.scope || { clinicIds: scope.clinicIds, isAll: scope.isAll }, revisions,
+        google: { accounts: effectiveGoogleAccounts(state), properties: effectiveGoogleProperties(state) },
+        meta: effectiveMetaAssets(state) };
+    },
+    buildIdentity: contextKey => buildOverviewCacheIdentity({ scope, range, section, contextKey }),
+    cache: scope.isAll ? null : overviewCache,
+    generate: async () => {
+      const sourceChecks = [];
+      const payload = await buildOverviewPayload({ scope, range, sourceChecks });
+      for (const validate of sourceChecks) await validate();
+      return payload;
+    },
+  });
+}
+
 exports.getOverview = async (req, res) => {
   try {
     const scope = await resolveReportScope(req);
@@ -4157,7 +4183,6 @@ exports.getOverview = async (req, res) => {
     const sourceMode = process.env.SC_ANALYTICS_READ_ENABLED === 'true';
     if (sourceMode) {
       const reads = require('../lib/searchConsoleReadSource');
-      const sourceChecks = [];
       const response = await reads.readWithCurrentScope({
         readEnabled: () => process.env.SC_ANALYTICS_READ_ENABLED === 'true',
         allowed: async () => {
@@ -4173,8 +4198,10 @@ exports.getOverview = async (req, res) => {
             : hasMarketingClinicScopeAccess({ userId, clinicIds: scope.clinicIds || [], access: 'read' });
         },
         capture: async () => currentSearchConsoleSiteUrls(scope, await resolveReportMarketingState(scope)),
-        generate: () => buildOverviewPayload({ scope, range, sourceChecks }),
-        validate: async () => { for (const validate of sourceChecks) await validate(); }
+        generate: async () => {
+          const prepared = await prepareOverviewSnapshot({ scope, range });
+          return prepared.read({ forceRefresh: forceRefreshRequested(req), staleWhileRefresh: true });
+        },
       });
       return res.json(response);
     }
@@ -4214,6 +4241,7 @@ exports.__testing = {
   normalizeDateOnly,
   buildRange,
   buildOverviewPayload,
+  prepareOverviewSnapshot,
   comparablePaidRangeStart,
   buildComparablePaidDateWhere,
   resolvePaidAttributionCoverage,
