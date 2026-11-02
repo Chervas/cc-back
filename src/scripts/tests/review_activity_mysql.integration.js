@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const S = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
-const { readReport } = require('../../services/reviewActivityReport.service');
+const { readReport, invalidate } = require('../../services/reviewActivityReport.service');
 
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.Sequelize = S;
@@ -17,6 +17,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await sql.query(`INSERT INTO MarketingPatientListItems VALUES
     (1,1,59,'2026-10-14 22:30:00'),(2,1,NULL,'2026-10-15 22:30:00'),(3,1,59,'2026-10-16 10:00:00'),
     (4,2,66,'2026-10-16 10:00:00'),(5,3,59,'2026-10-16 10:00:00'),(6,1,66,'2026-10-16 10:00:00'),(7,2,59,NULL)`);
+  await sql.query('ALTER TABLE MarketingPatientListItems ADD paciente_id INT NULL, ADD phone VARCHAR(32) NULL');
+  await sql.query('CREATE TABLE MarketingContactOptOuts (clinica_id INT,channel VARCHAR(32),opted_out_at DATETIME)');
   const event = (type, item, list, at, payload) => sql.query(`INSERT INTO MarketingPatientContactEvents
     (event_type,item_id,list_id,occurred_at,created_at,payload) VALUES (:type,:item,:list,:at,:at,:payload)`,
     { replacements: { type, item, list, at, payload: JSON.stringify(payload) } });
@@ -39,10 +41,16 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   ]) await sql.query(`INSERT INTO BusinessProfileReviews (clinica_id,business_location_id,review_name,create_time,first_seen_at,created_at,last_seen_at,google_missing_at)
     VALUES (:clinic,:location,:name,:create,'2026-10-16 10:00:00','2026-10-16 10:00:00','2026-10-16 10:00:00',:missing)`,
     {replacements:{clinic,location,name,create,missing}});
+  await sql.query("INSERT INTO MarketingContactOptOuts VALUES (59,'whatsapp','2026-10-16 09:00:00'),(66,'whatsapp','2026-10-16 09:00:00'),(59,'whatsapp','2026-10-13 09:00:00')");
+  await event('review_rating_received',1,1,'2026-10-13 10:00:00',{rating:3});
   const options = {clinicIds:[59],locationIds:[11],period:'2d',now:new Date('2026-10-16T12:00:00Z')};
   const result = await readReport(models,options);
   assert.deepEqual(result.totals,{requests_sent:2,google_links_sent:1,google_reviews_total:6,
     google_reviews_attributed:3,google_reviews_unattributed:3,google_reviews_missing:1});
+  assert.equal(result.comparison.metrics.converted_requests.current,1);assert.equal(result.comparison.metrics.conversion.current,50);
+  assert.equal(result.comparison.metrics.opt_outs.current,1);assert.equal(result.comparison.metrics.opt_outs.previous,1);
+  assert.equal(result.comparison.metrics.ratings.current,1);assert.equal(result.comparison.metrics.ratings.previous,1);
+  assert.equal(result.comparison.metrics.requests_sent.previous,0);assert.equal(result.comparison.metrics.requests_sent.change_percent,null);
   assert.equal(result.quality.missing_without_date,1); assert.equal(result.quality.reviews_with_observation_date,1);
   assert.deepEqual(result.missing,{total:2,detected_in_period:1,without_date:1});
   assert.equal(result.heatmaps.responses.all.total,1);
@@ -53,7 +61,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(group.totals.requests_sent,4); assert.equal(group.totals.google_reviews_total,7);
   assert.equal(group.totals.google_reviews_attributed,4);
   const reappeared = await sql.query("UPDATE BusinessProfileReviews SET google_missing_at=NULL WHERE review_name='organic'");
-  assert(reappeared); assert.equal((await readReport(models,options)).totals.google_reviews_missing,0);
+  assert(reappeared); invalidate(); assert.equal((await readReport(models,options)).totals.google_reviews_missing,0);
   await assert.rejects(readReport(models,{...options,period:'all'}),{status:400});
   report.checks.push('group is the union of allowed clinics; reappearance clears current absence without fabricating historical events; bounded periods');
 }).catch(error => {console.error(error);process.exitCode=1;});

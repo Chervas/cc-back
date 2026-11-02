@@ -4163,7 +4163,24 @@ async function prepareOverviewSnapshot({ scope, range, section = 'overview' }) {
   });
 }
 
+// Opt-in wire optimization only: called AFTER the normal live authority checks.
+// The persistent snapshot, its key and all source/freshness checks stay intact.
+function overviewNavigationResponse(req, payload, identityKey) {
+  if (req.query.snapshotProtocol !== '1' || forceRefreshRequested(req) || !identityKey
+      || !payload?.success || payload.cache?.status !== 'fresh' || payload.cache?.refresh_in_progress
+      || !(Date.parse(payload.cache?.fresh_until) > Date.now())) return payload;
+  // Cache status/lease/expiry are a live response envelope, not report content.
+  // Re-send that envelope even on a match; a renewed generation is a new snapshot.
+  const { cache, ...content } = payload;
+  const snapshotId = require('node:crypto').createHash('sha256')
+    .update(JSON.stringify(['overview-navigation-v1', identityKey, cache.generated_at, cache.report_version, content])).digest('hex');
+  return req.query.knownSnapshot === snapshotId
+    ? { success: true, notModified: true, snapshotId, cache }
+    : { ...payload, snapshotId };
+}
+
 exports.getOverview = async (req, res) => {
+  if (req.query.snapshotProtocol === '1') res.set?.('Cache-Control', 'no-store');
   try {
     const scope = await resolveReportScope(req);
     const userId = Number(req.userData?.userId || 0);
@@ -4183,6 +4200,7 @@ exports.getOverview = async (req, res) => {
     const sourceMode = process.env.SC_ANALYTICS_READ_ENABLED === 'true';
     if (sourceMode) {
       const reads = require('../lib/searchConsoleReadSource');
+      let snapshotIdentity = null;
       const response = await reads.readWithCurrentScope({
         readEnabled: () => process.env.SC_ANALYTICS_READ_ENABLED === 'true',
         allowed: async () => {
@@ -4200,10 +4218,11 @@ exports.getOverview = async (req, res) => {
         capture: async () => currentSearchConsoleSiteUrls(scope, await resolveReportMarketingState(scope)),
         generate: async () => {
           const prepared = await prepareOverviewSnapshot({ scope, range });
+          snapshotIdentity = prepared.identity.cache_key;
           return prepared.read({ forceRefresh: forceRefreshRequested(req), staleWhileRefresh: true });
         },
       });
-      return res.json(response);
+      return res.json(overviewNavigationResponse(req, response, scope.isAll ? null : snapshotIdentity));
     }
     if (!overviewCache) {
       const response = await buildOverviewPayload({ scope, range });

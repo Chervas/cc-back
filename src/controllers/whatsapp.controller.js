@@ -2677,12 +2677,13 @@ exports.getComplianceAdminOverview = async (req, res) => {
 exports.resolveCompliancePausedQueue = async (req, res) => {
   if (!assertAdmin(req, res)) return;
   try {
-    const result = await whatsappDeliveryGovernanceService.resolvePausedQueue({
+    const result = await require('../services/whatsappQueueResolution.service').resolve({
       listId: req.params.listId,
       decision: req.body?.decision,
       note: req.body?.note,
       adminUserId: req.userData?.userId || null,
     });
+    require('../services/reviewOverview.service').invalidate();
     return res.json(result);
   } catch (error) {
     console.error('Error resolveCompliancePausedQueue', error);

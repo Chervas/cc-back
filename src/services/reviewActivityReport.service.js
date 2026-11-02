@@ -4,6 +4,7 @@ const calendar = require('../lib/availability-calendar');
 const { buildReviewResponseHeatmaps } = require('../lib/review-response-heatmaps');
 const TIMEZONE = 'Europe/Madrid';
 const PERIODS = ['2d', '7d', '30d', '90d', 'month', 'year'];
+const PERIOD_METRICS = ['requests_sent', 'ratings', 'google_reviews_total', 'google_reviews_attributed', 'converted_requests', 'opt_outs', 'google_reviews_missing'];
 const METRICS = ['requests_sent', 'google_links_sent', 'google_reviews_total', 'google_reviews_attributed', 'google_reviews_unattributed', 'google_reviews_missing'];
 const addDays = (day, count) => { const d = new Date(day + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + count); return d.toISOString().slice(0, 10); };
 
@@ -14,6 +15,30 @@ function reportRange(period = '30d', now = new Date()) {
     : addDays(today, 1 - Number.parseInt(period, 10));
   return { period, from, to: today, start: calendar.localDateTimeToUtc(from, '00:00:00', TIMEZONE),
     end: calendar.localDateTimeToUtc(addDays(today, 1), '00:00:00', TIMEZONE) };
+}
+
+function previousReportRange(range) {
+  const days = Math.round((Date.parse(range.to + 'T12:00:00Z') - Date.parse(range.from + 'T12:00:00Z')) / 86400000) + 1;
+  const from = addDays(range.from, -days), to = addDays(range.from, -1);
+  return { period: range.period, from, to, start: calendar.localDateTimeToUtc(from, '00:00:00', TIMEZONE), end: range.start };
+}
+function compareReviewPeriods(rows, range) {
+  const previous = previousReportRange(range);
+  const totals = r => {
+    const result = Object.fromEntries(PERIOD_METRICS.map(key => [key, 0]));
+    for (const row of rows) {
+      const at = row.at_utc && new Date(row.at_utc);
+      const day = at && Number.isFinite(+at) ? calendar.formatDateLocal(at, TIMEZONE) : null;
+      if (day && day >= r.from && day <= r.to && Object.hasOwn(result, row.metric)) result[row.metric] += Number(row.total) || 0;
+    }
+    // Conversion uses the sent cohort and its stored matches, never unrelated reviews published in that window.
+    result.conversion = result.requests_sent ? result.converted_requests / result.requests_sent * 100 : null;
+    return result;
+  };
+  const current = totals(range), before = totals(previous);
+  return { range: { from: previous.from, to: previous.to }, metrics: Object.fromEntries(Object.entries(current).map(([key, value]) => [key,
+    { current: value, previous: before[key], change_percent: value == null || before[key] == null || (before[key] === 0 && value !== 0)
+      ? null : before[key] === 0 ? 0 : (value - before[key]) / before[key] * 100 }])) };
 }
 
 function aggregateReport(rows, range, quality = {}) {
@@ -77,7 +102,8 @@ async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinic
   clinicIds = [...new Set(clinicIds.map(Number).filter(id => Number.isInteger(id) && id > 0))];
   locationIds = [...new Set(locationIds.map(Number).filter(id => Number.isInteger(id) && id > 0))];
   if (!clinicIds.length) return aggregateReport([], range);
-  const replacements = { clinicIds, locationIds, start: range.start, end: range.end };
+  const previous = previousReportRange(range);
+  const replacements = { clinicIds, locationIds, start: previous.start, split: range.start, end: range.end };
   const options = { replacements, type: db.Sequelize.QueryTypes.SELECT };
   const testExclusion = `NOT EXISTS (SELECT 1 FROM MarketingPatientContactEvents t
     WHERE t.list_id=i.list_id AND t.item_id=i.id AND t.event_type IN ('mass_campaign_test_sent','mass_campaign_test_failed'))`;
@@ -103,11 +129,32 @@ async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinic
       GROUP BY at_utc,i.scoped_clinic_id
     UNION ALL
     SELECT 'responses',DATE_FORMAT(e.occurred_at,'%Y-%m-%dT%H:00:00Z') at_utc,COUNT(*),e.scoped_clinic_id FROM (
-      SELECT e.occurred_at,i.scoped_clinic_id,ROW_NUMBER() OVER (PARTITION BY e.list_id,e.item_id ORDER BY e.occurred_at DESC,e.id DESC) reply_rank
+      SELECT e.occurred_at,i.scoped_clinic_id,ROW_NUMBER() OVER (PARTITION BY e.list_id,e.item_id,e.occurred_at >= :split ORDER BY e.occurred_at DESC,e.id DESC) reply_rank
       FROM MarketingPatientContactEvents e JOIN requests i ON i.id=e.item_id AND i.list_id=e.list_id
       WHERE e.event_type IN ('review_rating_received','review_request_rating') AND e.occurred_at >= :start AND e.occurred_at < :end
         AND CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload,'$.rating')) AS UNSIGNED) BETWEEN 1 AND 5
     ) e WHERE reply_rank=1 GROUP BY at_utc,e.scoped_clinic_id`, options);
+
+  const periodRowsPromise = db.sequelize.query(`${requestsCte}
+    SELECT 'ratings' metric,DATE_FORMAT(occurred_at,'%Y-%m-%dT%H:00:00Z') at_utc,COUNT(*) total FROM (
+      SELECT e.occurred_at,ROW_NUMBER() OVER (PARTITION BY i.scoped_clinic_id,
+        COALESCE(CONCAT('p:',i.paciente_id),CONCAT('ph:',i.phone),CONCAT('i:',i.id)),e.occurred_at>= :split
+        ORDER BY e.occurred_at DESC,e.id DESC) rn
+      FROM MarketingPatientContactEvents e JOIN requests i ON i.id=e.item_id AND i.list_id=e.list_id
+      WHERE e.event_type IN ('review_rating_received','review_request_rating')
+        AND e.occurred_at>= :start AND e.occurred_at< :end
+        AND CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload,'$.rating')) AS UNSIGNED) BETWEEN 1 AND 5
+    ) ratings WHERE rn=1 GROUP BY at_utc
+    UNION ALL SELECT 'converted_requests',DATE_FORMAT(i.sent_at,'%Y-%m-%dT%H:00:00Z'),COUNT(*) FROM requests i
+      WHERE i.sent_at >= :start AND i.sent_at < :end AND EXISTS (
+        SELECT 1 FROM MarketingPatientContactEvents m WHERE m.list_id=i.list_id AND m.item_id=i.id
+          AND m.event_type='google_review_matched'
+          AND JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.review_name')) IS NOT NULL
+          AND JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.review_name')) NOT IN ('','null'))
+      GROUP BY DATE_FORMAT(i.sent_at,'%Y-%m-%dT%H:00:00Z')
+    UNION ALL SELECT 'opt_outs',DATE_FORMAT(opted_out_at,'%Y-%m-%dT%H:00:00Z'),COUNT(*)
+      FROM MarketingContactOptOuts WHERE clinica_id IN (:clinicIds) AND channel='whatsapp'
+        AND opted_out_at>= :start AND opted_out_at< :end GROUP BY DATE_FORMAT(opted_out_at,'%Y-%m-%dT%H:00:00Z')`, options);
 
   const locationScope = locationIds.length ? 'r.business_location_id IN (:locationIds)' : 'r.clinica_id IN (:clinicIds)';
   const matchScope = locationIds.length ? 'm.location_id IN (:locationIds)' : 'm.clinic_id IN (:clinicIds)';
@@ -150,9 +197,10 @@ async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinic
       WHERE missing_at >= :start AND missing_at < :end GROUP BY at_utc,clinic_id`, options);
   const qualityPromise = db.sequelize.query(`${inventoryCte} SELECT COALESCE(SUM(missing_at IS NOT NULL OR missing_without_date=1),0) missing_total,
     COALESCE(SUM(missing_without_date),0) missing_without_date,
-    COALESCE(SUM(observation_date=1 AND published_at >= :start AND published_at < :end),0) reviews_with_observation_date FROM inventory`, options);
-  const [requestRows,reviewRows,[quality]]=await Promise.all([requestRowsPromise,reviewRowsPromise,qualityPromise]);
-  return aggregateReport([...requestRows, ...reviewRows], range, { ...quality, clinicNames });
+    COALESCE(SUM(observation_date=1 AND published_at >= :split AND published_at < :end),0) reviews_with_observation_date FROM inventory`, options);
+  const [requestRows,reviewRows,[quality],periodRows]=await Promise.all([requestRowsPromise,reviewRowsPromise,qualityPromise,periodRowsPromise]);
+  const rows = [...requestRows, ...reviewRows, ...periodRows];
+  return { ...aggregateReport(rows, range, { ...quality, clinicNames }), comparison: compareReviewPeriods(rows, range) };
 }
 
-module.exports = { invalidate, readReport, reportRange, aggregateReport, METRICS, PERIODS };
+module.exports = { invalidate, readReport, reportRange, previousReportRange, compareReviewPeriods, aggregateReport, METRICS, PERIODS };

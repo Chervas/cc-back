@@ -9177,7 +9177,7 @@ async function reconcileBulkSendTemplateCategory(templateRow, logger = console) 
   return { updated };
 }
 
-async function enqueueDispatchJob({ list, scope, nextRunAt = null, userId = null, context = null, filter = null }) {
+async function enqueueDispatchJob({ list, scope, nextRunAt = null, userId = null, context = null, filter = null, transaction = null }) {
   const job = await jobRequestsService.enqueueJobRequest({
     type: DISPATCH_JOB_TYPE,
     payload: {
@@ -9192,7 +9192,7 @@ async function enqueueDispatchJob({ list, scope, nextRunAt = null, userId = null
     requestedBy: userId || null,
     maxAttempts: 1,
     nextRunAt,
-  });
+  }, transaction ? { transaction } : {});
   return job;
 }
 
@@ -9692,30 +9692,38 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     next_allowed_at: nextRunAt ? nextRunAt.toISOString() : null,
     delivery_governance: deliveryGate,
   };
-  await list.update({
-    status: nextRunAt ? 'scheduled' : 'sending',
-    criteria: mergeCriteria(list, { dispatch: baseDispatch }),
+  // Persist the job, queue transition and audit together. A second resume
+  // must observe the first job, not create another worker for this queue.
+  const committed = await db.sequelize.transaction(async transaction => {
+    const fresh = await MarketingPatientList.findByPk(list.id, { transaction, lock: transaction.LOCK.UPDATE });
+    ensureScopeAccess(fresh, scope);
+    const current = getDispatchConfig(fresh);
+    if (['queued', 'sending', 'waiting_next_batch', 'scheduled'].includes(current.status) && !current.cancel_requested) {
+      return { alreadyRunning: true, list: fresh };
+    }
+    if (fresh.status !== list.status || JSON.stringify(fresh.criteria) !== JSON.stringify(list.criteria)) {
+      throw Object.assign(new Error('La cola ha cambiado durante la comprobación. Actualiza su estado antes de continuar.'), { status: 409 });
+    }
+    const job = await enqueueDispatchJob({ list: fresh, scope, nextRunAt, userId, context, filter, transaction });
+    await fresh.update({ status: nextRunAt ? 'scheduled' : 'sending',
+      criteria: mergeCriteria(fresh, { dispatch: { ...baseDispatch, job_id: job.id } }),
+    }, { transaction });
+    await MarketingPatientContactEvent.create({ list_id: list.id, event_type: 'mass_campaign_dispatch_resumed',
+      channel: 'whatsapp', payload: { user_id: userId || null, job_id: job.id, remaining }, occurred_at: new Date(),
+    }, { transaction });
+    return { job, list: fresh };
   });
-  const primedList = await MarketingPatientList.findByPk(list.id);
-  const job = await enqueueDispatchJob({ list: primedList || list, scope, nextRunAt, userId, context, filter });
-  const nextDispatch = {
-    ...baseDispatch,
-    job_id: job.id,
-  };
-  await (primedList || list).update({
-    criteria: mergeCriteria(primedList || list, { dispatch: nextDispatch }),
-  });
+  const primedList = committed.list;
+  if (committed.alreadyRunning) {
+    const counters = await getDispatchScopedCounters(primedList, filter);
+    return { success: true, already_running: true, campaign: serializeCampaign(primedList),
+      dispatch: getDispatchProgress(primedList, counters, await getWhatsappAccountQualityForList(primedList, scope)) };
+  }
+  const job = committed.job;
   let emailDispatch = (primedList || list).email_dispatch || null;
   if (channels.includes('email') && ['paused', 'cancelled', 'failed'].includes(String(emailDispatch?.status || ''))) {
     emailDispatch = await marketingEmailDispatchService.resumeDispatch(primedList || list, { userId });
   }
-  await MarketingPatientContactEvent.create({
-    list_id: list.id,
-    event_type: 'mass_campaign_dispatch_resumed',
-    channel: 'whatsapp',
-    payload: { user_id: userId || null, job_id: job.id, remaining },
-    occurred_at: new Date(),
-  });
   await triggerDispatchJobIfReady(job, nextRunAt);
   const counters = await refreshListCounters(list.id);
   const reloaded = await MarketingPatientList.findByPk(list.id);

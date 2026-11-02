@@ -1297,10 +1297,15 @@ async function resolvePlacePhotoUrl(photoName, { maxWidthPx = 640 } = {}) {
   });
 }
 
-async function attachPlacePhotoUrl(item, { maxWidthPx = 640 } = {}) {
+async function attachPlacePhotoUrl(item, { maxWidthPx = 640, cachedOnly = false } = {}) {
   const photoName = cleanString(item?.photo_name) || (Array.isArray(item?.photo_names) ? item.photo_names[0] : null);
   if (!photoName) return item;
-  const photoUrl = await resolvePlacePhotoUrl(photoName, { maxWidthPx });
+  const cached = cachedOnly
+    ? competitionRuntimeCache.get(cacheKey(['places-photo', photoName, maxWidthPx]))
+    : null;
+  const photoUrl = cachedOnly
+    ? (cached && cached.expiresAt > Date.now() ? cached.value : null)
+    : await resolvePlacePhotoUrl(photoName, { maxWidthPx });
   return {
     ...item,
     photo_url: photoUrl || null
@@ -4596,13 +4601,15 @@ async function hydrateCompetitors(rows) {
         order: [['snapshot_date', 'DESC'], ['id', 'DESC']],
       }) || latestGoogleAdAttemptSnapshot;
     }
+    // Secondary card photos must not hold up navigation. This read never warms
+    // the process-local photo cache; after a restart/miss the UI uses initials.
     hydrated.push(await attachPlacePhotoUrl(mapCompetitorRow(
       row,
       snapshot,
       adSnapshot,
       googleAdSnapshot,
       latestGoogleAdAttemptSnapshot,
-    ), { maxWidthPx: 640 }));
+    ), { maxWidthPx: 640, cachedOnly: true }));
   }
   return hydrated;
 }

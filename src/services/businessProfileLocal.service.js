@@ -732,7 +732,7 @@ async function listReviews(resolved, query = {}) {
   return { success: true, items: rows, total, limit, offset };
 }
 
-async function findReviewForMutation(resolved, reviewIdRaw) {
+async function findReviewForMutation(resolved, reviewIdRaw, attributes) {
   const locationIds = (resolved.locations || []).map((location) => Number(location.id)).filter(Boolean);
   if (!locationIds.length) {
     const error = new Error('business_profile_location_not_configured');
@@ -749,7 +749,7 @@ async function findReviewForMutation(resolved, reviewIdRaw) {
     error.status = 400;
     throw error;
   }
-  const review = await BusinessProfileReview.findOne({ where });
+  const review = await BusinessProfileReview.findOne({ where, ...(attributes ? { attributes } : {}) });
   if (!review) {
     const error = new Error('business_profile_review_not_found');
     error.status = 404;
@@ -1876,6 +1876,8 @@ module.exports = {
   buildSeasonality,
   listReviews,
   resolveReviewMutationLocation: async (resolved, reviewId) => (await findReviewForMutation(resolved, reviewId)).location,
+  resolveReviewDraftSource: (resolved, reviewId) => findReviewForMutation(resolved, reviewId,
+    ['id', 'business_location_id', 'comment', 'star_rating', 'update_time', 'has_reply', 'reply_comment', 'google_missing_at']),
   updateReviewReply,
   deleteReviewReply,
   listPosts,

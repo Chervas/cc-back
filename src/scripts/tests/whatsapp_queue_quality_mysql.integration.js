@@ -7,6 +7,7 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
  const Audit=require('../../../models/whatsappdeliveryevent')(sql,S.DataTypes);
  const List=sql.define('MarketingPatientList',{id:{type:S.INTEGER,primaryKey:true},clinica_id:S.INTEGER,status:S.STRING,criteria:S.JSON},{tableName:'MarketingPatientLists',timestamps:false});
  const Contact=sql.define('MarketingPatientContactEvent',{id:{type:S.INTEGER,primaryKey:true,autoIncrement:true},list_id:S.INTEGER,event_type:S.STRING,channel:S.STRING,payload:S.JSON,occurred_at:S.DATE},{tableName:'MarketingPatientContactEvents',timestamps:false});
+ const Jobs=sql.define('TestJob',{id:{type:S.INTEGER,autoIncrement:true,primaryKey:true}},{timestamps:false});
  await sql.sync();await sql.getQueryInterface().addIndex('MarketingBulkSendSettings',['scope_key'],{unique:true,name:'qa_unique_global_scope'});
  let auditFail=false;
  const db={sequelize:sql,MarketingBulkSendSetting:Settings,WhatsappDeliveryEvent:{create:(...args)=>auditFail?Promise.reject(Error('TESTONLY_AUDIT_FAILURE')):Audit.create(...args)}};
@@ -39,7 +40,7 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
  // sender-health and Meta gates before scheduling, including with an exception.
  const bulkSource=fs.readFileSync(require.resolve('../../services/marketingBulkSends.service'),'utf8'),begin=bulkSource.indexOf('async function resumeCampaignDispatch('),end=bulkSource.indexOf('\nasync function enqueueAutoDispatchForApprovedTemplate',begin),resumed={exports:{}};
  let blockedPayment=false,heldMeta=false,enqueued=0;
- const sandbox={module:resumed,Date,DISPATCH_BATCH_SIZE:100,DISPATCH_BATCH_DELAY_MS:600000,MarketingPatientList:List,MarketingPatientContactEvent:Contact,
+ const sandbox={module:resumed,Date,db:{sequelize:sql},getDispatchScopedCounters:async()=>({sent:77}),DISPATCH_BATCH_SIZE:100,DISPATCH_BATCH_DELAY_MS:600000,MarketingPatientList:List,MarketingPatientContactEvent:Contact,
   getActorUserId:()=>91,ensureScopeAccess:(l,scope)=>{assert(l&&scope.clinicIds.includes(l.clinica_id));},ensureDispatchableCampaignRecord:()=>{},
   normalizeChannels:()=>['whatsapp'],getDispatchConfig:l=>l.criteria.dispatch,normalizeDispatchContext:()=>null,getDispatchItemFilter:()=>null,
   isBlockingQualityPause:()=>false,isActorGlobalAdmin:()=>true,countDispatchRemainingItems:async()=>10,
@@ -47,13 +48,16 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   whatsappAccountHealthService:{assertCanSend:async()=>{if(blockedPayment)throw Object.assign(Error('TESTONLY_PAYMENT_BLOCKED'),{status:409});}},
   resolveWhatsappTemplateForClinic:async t=>t,whatsappDeliveryGovernanceService:{getDispatchGate:async()=>({allowed:!heldMeta,reason:'template_quality_assessment'})},
   getDeliveryGateBlockedMessage:()=> 'TESTONLY_META_HOLD',resolveDispatchBusinessHoursForList:async()=>({}),getNextBusinessAllowedAt:()=>new Date(),
-  mergeCriteria:(l,p)=>({...l.criteria,...p}),enqueueDispatchJob:async()=>({id:100+(++enqueued)}),triggerDispatchJobIfReady:async()=>{},
+  mergeCriteria:(l,p)=>({...l.criteria,...p}),enqueueDispatchJob:async({transaction})=>{assert(transaction,'enqueue shares the list transaction');enqueued++;return Jobs.create({id:100+enqueued},{transaction});},triggerDispatchJobIfReady:async()=>{},
   refreshListCounters:async()=>({sent:77}),serializeCampaign:l=>l.toJSON(),getDispatchProgress:l=>l.criteria.dispatch,getWhatsappAccountQualityForList:async()=>({})};
  vm.runInNewContext(bulkSource.slice(begin,end)+'\nmodule.exports=resumeCampaignDispatch;',sandbox);const resume=resumed.exports;
- await resume({clinicIds:[31]},1,{},91);const afterResume=await List.findByPk(1);assert.equal(afterResume.criteria.dispatch.job_id,101);assert(afterResume.criteria.dispatch.quality_exception);
+ await Promise.all([resume({clinicIds:[31]},1,{},91),resume({clinicIds:[31]},1,{},91)]);assert.equal(enqueued,1,'concurrent resume creates only one job');const afterResume=await List.findByPk(1);assert.equal(afterResume.criteria.dispatch.job_id,101);assert(afterResume.criteria.dispatch.quality_exception);
  assert(!policy.evaluate({list:afterResume,dispatch:afterResume.criteria.dispatch,sent:77,optOut:3,batchSize:1,maxOptOutRate:.03}).paused);
  blockedPayment=true;await assert.rejects(resume({clinicIds:[31]},3,{},91),/TESTONLY_PAYMENT_BLOCKED/);assert.equal(enqueued,1);assert.equal((await List.findByPk(3)).status,'paused');
  blockedPayment=false;heldMeta=true;await assert.rejects(resume({clinicIds:[31]},3,{},91),/TESTONLY_META_HOLD/);assert.equal(enqueued,1);
+ heldMeta=false;const contactCreate=sandbox.MarketingPatientContactEvent;sandbox.MarketingPatientContactEvent={create:async()=>{throw Error('TESTONLY_AUDIT_FAILURE')}};
+ await assert.rejects(resume({clinicIds:[31]},3,{},91),/TESTONLY_AUDIT_FAILURE/);assert.equal(await Jobs.count(),1);assert.equal((await List.findByPk(3)).status,'paused');sandbox.MarketingPatientContactEvent=contactCreate;
+ report.checks.push('native concurrent resumes create exactly one job; audit failure rolls back job and queue together');
  report.checks.push('the actual native resume replaces its job while retaining the reviewed baseline; payment and Meta hold still reject before enqueue');
  report.coverage={providerRequests:0,realPatients:0,dataWrittenOnlyToOwnedFixture:true};
 }).catch(e=>{console.error(e.stack);process.exitCode=1;});

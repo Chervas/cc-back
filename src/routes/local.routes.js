@@ -12,6 +12,7 @@ const businessProfileLocal = require('../services/businessProfileLocal.service')
 const businessProfileMutations = require('../services/businessProfileMutations.service');
 const { mutationScope } = require('../services/businessProfileMutationScope.service');
 const googleSpecialHoursAutomation = require('../services/googleSpecialHoursAutomation.service');
+const googleReviewAiDraft = require('../controllers/googleReviewAiDraft.controller');
 
 const router = express.Router();
 
@@ -175,6 +176,10 @@ router.get('/clinica/:clinicaId/reviews', async (req, res) => {
     return sendError(res, error, 'local_reviews_failed');
   }
 });
+
+router.get('/clinica/:clinicaId/reviews/ai-draft/status', googleReviewAiDraft.status);
+router.post('/clinica/:clinicaId/reviews/:reviewId/ai-draft',
+  requireClinicBusinessProfileWriteAccess, googleReviewAiDraft.generate);
 
 router.put(
   '/clinica/:clinicaId/reviews/:reviewId/reply',

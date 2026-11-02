@@ -72,7 +72,10 @@ async function runCandidate({ candidate, fallbackUsed, route, request, tenant })
   const startedAt = Date.now();
   try {
     const result = await bedrock.analyzeStructured({ ...request, model: candidate, useCase: route.use_case,
-      beforeDispatch: () => require('./securityMonitoring.service').assertAiAllowed(route.use_case) });
+      beforeDispatch: async () => {
+        await require('./securityMonitoring.service').assertAiAllowed(route.use_case);
+        if (request.beforeDispatch) await request.beforeDispatch();
+      } });
     await aiUsageTelemetry.recordAiUsage({
       provider: 'bedrock',
       model: result.model,
@@ -84,7 +87,7 @@ async function runCandidate({ candidate, fallbackUsed, route, request, tenant })
       fallbackUsed,
       clinicId: tenant.clinicId,
       groupId: tenant.groupId,
-      metadata: { region: bedrock.getConfig().region, tier: route.tier },
+      metadata: { region: clean(process.env.BEDROCK_REGION, 80) || 'eu-south-2', tier: route.tier },
     });
     return result;
   } catch (error) {
@@ -101,7 +104,7 @@ async function runCandidate({ candidate, fallbackUsed, route, request, tenant })
       clinicId: tenant.clinicId,
       groupId: tenant.groupId,
       error,
-      metadata: { region: bedrock.getConfig().region, tier: route.tier },
+      metadata: { region: clean(process.env.BEDROCK_REGION, 80) || 'eu-south-2', tier: route.tier },
     });
     throw error;
   }
@@ -117,15 +120,18 @@ async function analyzeStructured({
   maxTokens,
   clinicId = null,
   groupId = null,
+  beforeDispatch,
+  coerceOutput = true,
+  requireBroker = false,
 } = {}) {
   const route = routeFor({ useCase, analysisMode, prompt, inputText, outputFormat });
   await require('./securityMonitoring.service').assertAiAllowed(route.use_case);
-  const request = { systemPrompt, prompt, inputText, outputFormat, maxTokens, temperature: 0 };
+  const request = { systemPrompt, prompt, inputText, outputFormat, maxTokens, temperature: 0, beforeDispatch, requireBroker };
   const tenant = { clinicId, groupId };
   try {
     const result = await runCandidate({ candidate: route.primary, fallbackUsed: false, route, request, tenant });
     return {
-      ...coerceByFormat(result.value, outputFormat),
+      ...(coerceOutput ? coerceByFormat(result.value, outputFormat) : result.value),
       _ai_provider: 'bedrock',
       _ai_model: result.model,
       _ai_analysis_mode: route.mode,
@@ -138,7 +144,7 @@ async function analyzeStructured({
     if (!route.fallback || !bedrock.isRetryableError(primaryError)) throw primaryError;
     const result = await runCandidate({ candidate: route.fallback, fallbackUsed: true, route, request, tenant });
     return {
-      ...coerceByFormat(result.value, outputFormat),
+      ...(coerceOutput ? coerceByFormat(result.value, outputFormat) : result.value),
       _ai_provider: 'bedrock',
       _ai_model: result.model,
       _ai_analysis_mode: route.mode,

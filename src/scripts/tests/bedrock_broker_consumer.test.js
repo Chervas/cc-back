@@ -11,6 +11,7 @@ const contract = require('../../../services/integrations-broker/src/bedrock-cont
 const { PROVIDER_ERRORS } = require('../../../services/integrations-broker/src/bedrock-errors');
 const { response } = require('../../../services/integrations-broker/test/bedrock-fixture.cjs');
 const plain = value => JSON.parse(JSON.stringify(value));
+const { createGoogleReviewAiDraft, USE_CASE } = require('../../services/googleReviewAiDraft.service');
 const input = { useCase: 'confirm_appointment', model: 'eu.amazon.nova-micro-v1:0', systemPrompt: 'Ficticio.',
   prompt: 'Confirma la cita.', inputText: 'Sí, allí estaré. 日本語 👍', outputFormat: { confirmado: 'boolean', motivo: 'string' } };
 function load(name, env, dependencies) {
@@ -41,6 +42,68 @@ function setup(work = async () => response(), admission = createBedrockAdmission
     './securityMonitoring.service': { async assertAiAllowed(useCase) { pauses.push(useCase); if (paused) throw Object.assign(Error('ai_paused'), { code: 'ai_paused' }); } } });
   return { env, broker, bedrock, orchestrator, calls, usage, pauses, pause() { paused = true; } };
 }
+
+test('review drafts use the exact broker case/schema and tenant cost telemetry; invalid safety output is counted but withheld', async () => {
+  for (const malformed of [false, true]) {
+    const f = setup(async () => {
+      const result = response();
+      result.output.message.content[0].toolUse.input = { disposition: 'draft', professionalName: 'absent',
+        offensiveOrHurtful: 'absent', confidence: 0.99, draft: malformed ? { unsafe: 'object' } : 'Gracias por compartir tu opinión.' };
+      return result;
+    });
+    const service = createGoogleReviewAiDraft({
+      loadSource: async () => ({ clinicName: 'Clinic', groupId: 2, authority: { clinicIds: [7] },
+        review: { id: 11, comment: 'Buen servicio', star_rating: 5 } }),
+      settings: { read: async () => ({ configured: true, prompt: 'FICTITIOUS_EDITORIAL_PROMPT', version: 1 }) },
+      assertRuntime() {}, assertAllowed: async () => {}, verifySession: async () => {},
+      analyze: input => f.orchestrator.analyzeStructured(input),
+    });
+    const input = { clinicId: 7, reviewId: 11, userId: 21, input: { requestId: require('node:crypto').randomUUID() } };
+    const result = await service.generate(input);
+    assert.equal(result.disposition, malformed ? 'manual_review' : 'draft');
+    assert.equal(result.draft, malformed ? null : 'Gracias por compartir tu opinión.');
+    assert.equal(f.calls.length, 1); assert.equal(f.calls[0].assetRef, 'ai:google_review_reply_draft');
+    assert.equal(f.calls[0].payload.useCase, USE_CASE);
+    assert.equal(f.calls[0].payload.body.modelId, 'eu.amazon.nova-lite-v1:0');
+    assert.equal(f.usage.length, 1); assert.equal(f.usage[0].clinicId, 7); assert.equal(f.usage[0].groupId, 2);
+    assert.equal(f.usage[0].inputTokens, 42); assert.equal(f.usage[0].outputTokens, 12); assert.equal(f.usage[0].useCase, USE_CASE);
+    assert.doesNotMatch(JSON.stringify(f.usage), /Buen servicio|FICTITIOUS_EDITORIAL_PROMPT|Gracias por/);
+    assert.equal((await service.generate(input)).reused, true); assert.equal(f.usage.length, 1);
+  }
+});
+
+test('consumer dispatch guard is honored before each broker send, including fallback, and broker disable never reads credentials', async () => {
+  let checks = 0;
+  const f = setup(async () => { throw Object.assign(Error('bedrock_throttled'), { code: 'bedrock_throttled' }); });
+  await assert.rejects(f.orchestrator.analyzeStructured({ ...input, analysisMode: 'quick_qa', beforeDispatch: async () => {
+    if (++checks === 2) throw Object.assign(Error('scope_write_forbidden'), { code: 'scope_write_forbidden' });
+  } }), { code: 'scope_write_forbidden' });
+  assert.equal(checks, 2); assert.equal(f.calls.length, 1);
+  const g = setup();
+  await assert.rejects(g.orchestrator.analyzeStructured({ ...input, beforeDispatch: async () => {
+    g.env.BEDROCK_BROKER_ENABLED = 'false'; throw Object.assign(Error('review_ai_broker_required'), { code: 'review_ai_broker_required' });
+  } }), { code: 'review_ai_broker_required' });
+  assert.equal(g.calls.length, 0); assert.equal(g.usage.length, 1);
+  const h = setup();
+  const pending = h.orchestrator.analyzeStructured({ ...input, requireBroker: true });
+  h.env.BEDROCK_BROKER_ENABLED = 'false';
+  await assert.rejects(pending, { code: 'bedrock_broker_required' });
+  assert.equal(h.calls.length, 0); assert.equal(h.usage.length, 1);
+});
+
+test('allowlisted review case still requires a grant for the exact principal, environment, connection, asset and operation', () => {
+  const { authorize } = require('../../../services/integrations-broker/src/auth');
+  const principal = { id: 'api:test' };
+  const request = { tenantRef: 'platform:dev', connectionRef: 'bedrock:dev', assetRef: 'ai:' + USE_CASE,
+    operation: 'ai.bedrock.converse.v1' };
+  const grant = { principalId: principal.id, ...request, operations: [request.operation] }; delete grant.operation;
+  assert.throws(() => authorize(principal, request, { grants: [] }), { code: 'scope_denied' });
+  authorize(principal, request, { grants: [grant] });
+  for (const patch of [{ principalId: 'other' }, { tenantRef: 'platform:staging' }, { connectionRef: 'other' },
+    { assetRef: 'ai:review_response_classification' }, { operations: ['other.operation'] }]) {
+    assert.throws(() => authorize(principal, request, { grants: [{ ...grant, ...patch }] }));
+  }
+});
 
 test('broker uses exactly the direct adapter native request, without reading a provider credential', async () => {
   const directEnv = { BEDROCK_ENABLED: 'true', BEDROCK_AWS_ACCESS_KEY_ID: 'FICTITIOUS', BEDROCK_AWS_SECRET_ACCESS_KEY: 'FICTITIOUS' };

@@ -1134,7 +1134,7 @@ async function notifyQueueResolution(list, decision, note, adminUserId) {
           ? 'Envío cancelado tras la revisión'
           : 'El envío necesita cambios',
       message: note || (decision === 'authorized'
-        ? 'Clinicaclick ha revisado la cola. Ya puede retomarse desde la campaña.'
+        ? 'Clinicaclick ha autorizado la cola y comprobará el emisor para continuar con el ritmo y horario guardados. Consulta su estado en la campaña.'
         : decision === 'cancelled'
           ? 'Clinicaclick ha cancelado la cola y no se enviarán los mensajes pendientes.'
           : 'Clinicaclick ha revisado la cola y debe corregirse antes de continuar.'),
@@ -1212,7 +1212,9 @@ async function resolvePausedQueue({ listId, decision, note = '', adminUserId = n
   },{transaction});
   return {list,adminResolution};
   });
-  const notified = await notifyQueueResolution(list, normalizedDecision, note, adminUserId);
+  let notified = 0;
+  try { notified = await notifyQueueResolution(list, normalizedDecision, note, adminUserId); }
+  catch (_) { console.warn('[whatsapp-queue] Approval committed; notification delivery failed', { listId: list.id }); }
   return { success: true, queue_id: list.id, decision: normalizedDecision, notified };
 }
 

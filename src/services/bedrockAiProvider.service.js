@@ -139,7 +139,13 @@ async function analyzeStructured({
   maxTokens = 700,
   temperature = 0,
   beforeDispatch,
+  requireBroker = false,
 } = {}) {
+  // Broker-only consumers cannot fall back to local credentials if the broker
+  // switch changes during the orchestrator's asynchronous admission checks.
+  if (requireBroker && !bedrockBroker.enabled()) {
+    throw Object.assign(Error('bedrock_broker_required'), { code: 'bedrock_broker_required' });
+  }
   const modelId = clean(model, 160);
   if (!modelId) {
     const error = new Error('bedrock_model_required');
