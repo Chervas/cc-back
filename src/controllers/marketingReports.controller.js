@@ -2842,6 +2842,9 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
   const locations = await ClinicBusinessLocation.count({ where: locationWhere });
 
   const metricWhere = {
+    // Rating snapshots share the daily cache, but are not traffic/performance.
+    metric_type: { [Op.in]: [...new Set(Object.values(BUSINESS_PROFILE_LOCAL_METRIC_DEFINITIONS)
+      .flatMap(definition => [...definition.preferred, ...definition.fallback]))] },
     ...buildHistoricalOrEffectiveWhere(
       scope,
       'clinica_id',
@@ -4274,6 +4277,7 @@ exports.__testing = {
   aggregateAppointmentSeries,
   aggregateWebPages,
   aggregateGoogleAds,
+  aggregateBusinessProfile,
   aggregateSpendSeries,
   channelLabel,
   buildChannels,

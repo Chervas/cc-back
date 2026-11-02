@@ -22,6 +22,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await models.ClinicBusinessLocation.sync();
   models.BusinessProfileReview = require('../../../models/businessprofilereview')(sql, S.DataTypes);
   await models.BusinessProfileReview.sync();
+  models.BusinessProfileDailyMetric = require('../../../models/businessprofiledailymetric')(sql, S.DataTypes);
+  await models.BusinessProfileDailyMetric.sync();
+  await qi.addIndex('BusinessProfileDailyMetrics',['business_location_id','date','metric_type','metric_subtype'],{unique:true,name:'qa_daily_metric_unique'});
   for (const field of ['first_seen_at', 'last_seen_at', 'google_missing_at']) await qi.removeColumn('BusinessProfileReviews', field);
   await sql.query('CREATE TABLE SequelizeMeta (name VARCHAR(255) PRIMARY KEY)');
   const operator = require('../google-review-observations-schema-release');
@@ -81,8 +84,13 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert(missing.items[0].google_missing_at); assert(missing.items[0].last_seen_at);
   const firstMissing = review.google_missing_at.getTime(); await sync(); await review.reload();
   assert.equal(review.google_missing_at.getTime(), firstMissing);
-  response = { reviews: [{ name: review.review_name, reviewer: { displayName: review.reviewer_name }, starRating: 'FIVE' }], totalReviewCount: 1 };
+  response = { reviews: [{ name: review.review_name, reviewer: { displayName: review.reviewer_name }, starRating: 'FIVE' }], averageRating:4.8,totalReviewCount: 1 };
   await sync(); await review.reload(); assert.equal(review.google_missing_at, null);
+  assert.equal((await models.BusinessProfileDailyMetric.findOne({where:{business_location_id:11,metric_type:'GOOGLE_REVIEW_RATING'}})).value,4800000);
+  response.averageRating=4.9;await sync({enqueueOnlyNewReviews:true});
+  assert.equal(await models.BusinessProfileDailyMetric.count(),1,'incremental sync updates the same daily provider snapshot');
+  assert.equal((await models.BusinessProfileDailyMetric.findOne()).value,4900000);
+  response.averageRating=null;await sync();assert.equal((await models.BusinessProfileDailyMetric.findOne()).value,4900000,'missing provider score cannot overwrite the snapshot');
   assert.equal(review.first_seen_at.toISOString(), '2026-10-01T10:00:00.000Z');
   assert(review.last_seen_at > new Date('2026-10-02')); assert.equal(review.matched_contact_event_id, 1);
   assert.equal((await history.listMissingReviews(models, { clinicIds: [59], locationIds: [11] })).total, 0);

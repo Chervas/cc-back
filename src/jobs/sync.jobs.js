@@ -2843,6 +2843,10 @@ class MetaSyncJobs {
         .filter(Boolean);
       reviewNames.forEach((name) => seenReviewNames.add(String(name)));
       const { payloads, newReviewNames, pageHasChanges } = await businessProfileCache.commit(observation, async transaction => {
+        if (page === 1) {
+          const snapshot = require('../services/reviewScoreTrend.service').providerScoreSnapshot(location, response.data, observedAt);
+          if (snapshot) await BusinessProfileDailyMetric.upsert(snapshot, { transaction });
+        }
         const existingRows = reviewNames.length
           ? await BusinessProfileReview.findAll({ where: { review_name: { [Op.in]: reviewNames } }, transaction, lock: transaction.LOCK.UPDATE })
           : [];

@@ -10,6 +10,34 @@ const { createSearchConsoleAnalytics } = require('../../services/searchConsoleAn
 const C = require('../../lib/searchConsoleAnalyticsContract');
 
 const site = 'https://example.invalid/';
+
+test('Google global-rating observations never count as profile traffic or make provisional performance available', async () => {
+  const definitions = { views: { preferred: ['BUSINESS_IMPRESSIONS_TOTAL'], fallback: [] } };
+  const rating = { business_location_id: 71, date: '2026-11-02', metric_type: 'GOOGLE_REVIEW_RATING', value: 4900000 };
+  let reads = 0;
+  const controller = loadDiscoverySource('controllers/marketingReports.controller.js', {
+    sequelize,
+    '../../models': {
+      Sequelize: sequelize,
+      ClinicBusinessLocation: { findOne: async () => ({ id: 71 }), count: async () => 1 },
+      BusinessProfileReview: { findOne: async () => ({}), count: async () => 0 },
+      BusinessProfileDailyMetric: { findAll: async ({ where }) => {
+        reads++;
+        assert.ok(where.metric_type[sequelize.Op.in].includes('BUSINESS_IMPRESSIONS_TOTAL'));
+        return where.metric_type[sequelize.Op.in].includes(rating.metric_type) ? [rating] : [];
+      } },
+    },
+    '../services/businessProfileLocal.service': { METRIC_DEFINITIONS: definitions,
+      collapseMetricRows: rows => rows, metricValueByDate: () => [] },
+  });
+  const result = await controller.__testing.aggregateBusinessProfile({ scope: 'clinic', clinicIds: [71] },
+    { startLabel: '2026-11-01', endLabel: '2026-11-02', start: new Date('2026-11-01'), endExclusive: new Date('2026-11-03') });
+  assert.equal(reads, 1);
+  assert.equal(result.metrics.performanceStatus, 'empty');
+  assert.equal(result.metrics.latestPerformanceDate, null);
+  assert.equal(result.metrics.views, 0);
+});
+
 const range = { startLabel: '2026-10-01', endLabel: '2026-10-30', previous: { startLabel: '2026-09-01', endLabel: '2026-09-30' } };
 const cacheModule = () => loadDiscoverySource('services/marketingReportOverviewCache.service.js', {
   crypto: require('node:crypto'), sequelize, '../../models': {}, './jobRequests.service': {},

@@ -19,6 +19,7 @@ function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credent
     '../services/searchConsoleBroker.service': searchConsole || new Proxy({}, { get: () => fail }),
     '../services/analyticsBroker.service': analytics || new Proxy({}, { get: () => fail }),
     '../services/googleReviewMatch.service': { enqueueBusinessProfileReviewMatch: matching || fail },
+    '../services/reviewScoreTrend.service': require('../../../services/reviewScoreTrend.service'),
     ...overrides,
   };
   const module = { exports: {} };
