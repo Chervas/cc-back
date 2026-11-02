@@ -11,7 +11,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await sql.query(`CREATE TABLE MarketingPatientContactEvents (id INT AUTO_INCREMENT PRIMARY KEY,list_id INT,item_id INT,
     event_type VARCHAR(64),occurred_at DATETIME,created_at DATETIME,payload JSON)`);
   await sql.query(`CREATE TABLE BusinessProfileReviews (id INT AUTO_INCREMENT PRIMARY KEY,clinica_id INT,business_location_id INT,
-    review_name VARCHAR(255) COLLATE utf8mb4_bin,create_time DATETIME,first_seen_at DATETIME,created_at DATETIME,last_seen_at DATETIME,google_missing_at DATETIME)`);
+    review_name VARCHAR(255) COLLATE utf8mb4_bin,star_rating INT DEFAULT 5,create_time DATETIME,first_seen_at DATETIME,created_at DATETIME,last_seen_at DATETIME,google_missing_at DATETIME)`);
   await sql.query(`INSERT INTO MarketingPatientLists VALUES (1,59,'mass_sends',JSON_OBJECT('review_request',true)),
     (2,66,'mass_sends',JSON_OBJECT('template_usage','solicitud_resena')),(3,59,'other',JSON_OBJECT())`);
   await sql.query(`INSERT INTO MarketingPatientListItems VALUES

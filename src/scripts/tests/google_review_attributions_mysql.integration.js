@@ -9,8 +9,10 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   ['MarketingPatientContactEvent','marketingpatientcontactevent'],['BusinessProfileReview','businessprofilereview']]){
   models[name]=require('../../../models/'+file)(sql,S.DataTypes);await models[name].sync();
  }
- await sql.query('CREATE TABLE Pacientes (id_paciente INT PRIMARY KEY,nombre VARCHAR(100),apellidos VARCHAR(100))');
- await sql.query("INSERT INTO Pacientes VALUES (1,'TESTONLY Ana','Prueba Compuesta'),(2,'TESTONLY Other','Clinic')");
+ await sql.query('CREATE TABLE Pacientes (id_paciente INT PRIMARY KEY,clinica_id INT,nombre VARCHAR(100),apellidos VARCHAR(100))');
+ await sql.query('CREATE TABLE PacienteClinicas (paciente_id INT,clinica_id INT)');
+ await sql.query("INSERT INTO Pacientes VALUES (1,59,'TESTONLY Ana','Prueba Compuesta'),(2,66,'TESTONLY Other','Clinic'),(3,66,'TESTONLY Shared','Clinic')");
+ await sql.query('INSERT INTO PacienteClinicas VALUES (3,59),(3,59)');
  await models.MarketingPatientList.bulkCreate([
   {id:1,name:'TESTONLY own',clinica_id:59,objective_id:'mass_sends',criteria:{review_request:true}},
   {id:2,name:'TESTONLY other',clinica_id:66,objective_id:'mass_sends',criteria:{review_request:true}},
@@ -59,6 +61,8 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
  assert.equal(page.items.find(r=>r.reviewer_name==='TESTONLY not-in-cache').match_confidence,null);
  assert.equal(page.items.find(r=>r.reviewer_name==='TESTONLY not-in-cache').published_at,null);
  assert(page.items.some(r=>r.patient_name==='TESTONLY Ana Prueba Compuesta'));
+ assert(page.items.every(r=>r.patient_id===1));
+ assert(page.items.every(r=>r.patient_clinic_id===59));
  assert(page.items.every(r=>r.link_sent_at));
  for(const [state,total] of [['visible',2],['missing',1],['unobserved',2]])assert.equal((await history.listAttributedReviews(models,{...args,state})).total,total);
  const finite=await history.listAttributedReviews(models,{...args,period:'7d',now:new Date('2026-10-22T10:00:00Z')});
@@ -70,5 +74,23 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   assert.deepEqual(slice.items,full.items.slice(2,4));
  }
  assert.equal(JSON.stringify(await models.MarketingPatientContactEvent.findAll({raw:true,order:[['id','ASC']]})),baseline);
+ const patientLinkReceipts=[];
+ for(const [id,patient] of [[10,2],[11,3],[12,999]]){
+  await models.MarketingPatientListItem.create({id,list_id:1,clinica_id:59,paciente_id:patient,name:'TESTONLY local item'});
+  const receipt=await models.MarketingPatientContactEvent.create({list_id:1,item_id:id,paciente_id:patient,event_type:'google_review_matched',channel:'google',
+   occurred_at:new Date('2026-10-20T10:00:00Z'),payload:{review_name:'patient-link-'+id,business_location_id:11,star_rating:5}});
+  patientLinkReceipts.push({id:receipt.id,patient});
+ }
+ const links=await history.listAttributedReviews(models,{clinicIds:[59,66],limit:50});
+ for(const {id,patient}of patientLinkReceipts){
+  const expected=patient===3?3:null,item=links.items.find(r=>r.attribution_id===id);
+  assert(item,'missing or foreign patients must not remove the attribution');
+  assert.equal(item.clinic_id,59);
+  assert.equal(item.patient_id,expected,'only a verified row-clinic membership may produce a link, including inside a group');
+  assert.equal(item.patient_clinic_id,expected?59:null);
+  assert.equal(item.patient_name,expected?'TESTONLY Shared Clinic':'TESTONLY local item');
+ }
+ assert.equal(links.total,9,'duplicate membership rows must not multiply receipts');
+ report.checks.push('patient_id is nullable; owning/secondary clinic membership required, absent/foreign patients unlinked, duplicate memberships do not multiply rows');
  report.checks.push('Receipt-only count equals conversion; duplicate resource names, visible reappearance, missing cache, unknown confidence/date, period/state filters, every sort/page, foreign clinic, tests and unrelated flows; no read-side writes or provider access.');
 }).catch(error=>{console.error(error);process.exitCode=1;});

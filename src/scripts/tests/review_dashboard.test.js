@@ -99,3 +99,22 @@ test('legacy readers retain previews and the complete inactive tab during rollin
  const legacy=queuePage(rows,{view:'inactive',compact:false});assert.equal(legacy.total,1);assert.equal(legacy.items[0].preview_body,'Hola [nombre]');assert.equal(legacy.items[0].schedule,'L-V');
  assert.equal(queuePage(rows,{view:'inactive',compact:true}).total,0);assert.equal(queuePage(rows,{view:'issues',compact:true}).items[0].schedule,undefined);
 });
+
+test('changing the chart period reuses invariant aggregates but refreshes period ratings, with scope isolation and invalidation',async()=>{
+ const queries=[];
+ const db={Sequelize:{QueryTypes:{SELECT:'SELECT'}},Clinica:{findAll:async({where})=>where.id_clinica.map(id=>({id_clinica:id,nombre_clinica:'Fixture '+id}))},
+  sequelize:{query:async(sql)=>{queries.push(sql);return [];}}};
+ const service=require('../../services/reviewOverview.service').createService({db,now:()=>new Date('2026-11-02T12:00:00Z'),
+  resolveProfile:async c=>({links:{business_location_id:c.id_clinica}}),queues:async()=>[],ratingSummary:()=>({})});
+ const scope={scope:'group',groupId:5,clinicIds:[31,32]},options={userId:1,scopeRaw:'group:5'};
+ const potentialReads=()=>queries.filter(q=>q.includes('WITH memberships')).length;
+ const ratingReads=()=>queries.filter(q=>q.includes('review_request_rating')).length;
+ const initial=await service.overview(scope,{...options,period:'30d'});
+ assert.equal(initial.aggregate_cache.status,'miss');assert.equal(potentialReads(),1);const firstRatings=ratingReads();
+ const changed=await service.overview({...scope,clinicIds:[32,31]},{...options,period:'7d'});
+ assert.equal(changed.period,'7d');assert.equal(changed.aggregate_cache.status,'hit');assert.equal(potentialReads(),1);
+ assert.equal(ratingReads(),firstRatings+1);
+ await service.overview(scope,{...options,period:'30d'});assert.equal(potentialReads(),1);assert.equal(ratingReads(),firstRatings+1);
+ await service.overview({scope:'group',groupId:6,clinicIds:[99]},options);assert.equal(potentialReads(),2);
+ service.invalidate();await service.overview(scope,{...options,period:'7d'});assert.equal(potentialReads(),3);
+});

@@ -88,12 +88,13 @@ function countPotential(patients, history, queued = [], optOuts = [], now = new 
 function createService({ db, resolveProfile, queues, ratingSummary, automation, now = () => new Date() }) {
   const query = (sql, replacements = {}) => db.sequelize.query(sql, { replacements, type: db.Sequelize.QueryTypes.SELECT });
   const aggregateCache = createReportReadCache({now:()=>+now()});
+  const periodCache = createReportReadCache({now:()=>+now()});
   const queueCache = createReportReadCache({freshMs:15000,staleMs:45000,now:()=>+now()});
   const scopeKey = scope => [scope.scope,scope.groupId||0,...positiveIds(scope.clinicIds).sort((a,b)=>a-b)].join(':');
   async function readQueues(scope,{userId,scopeRaw}) {
     return (await queueCache.read(scopeKey(scope)+':'+userId,()=>queues({userId,scopeRaw,includeHistory:true}))).value;
   }
-  function invalidate(){aggregateCache.clear();queueCache.clear();require('./reviewActivityReport.service').invalidate();}
+  function invalidate(){aggregateCache.clear();periodCache.clear();queueCache.clear();require('./reviewActivityReport.service').invalidate();}
 
   async function potentialByClinic(clinicIds) {
     const [patients, queued, optOuts, histories] = await Promise.all([
@@ -146,12 +147,14 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
         profile_url: profile?.links?.url_perfil_google || null, review_url: profile?.links?.url_dejar_resena || null };
     }));
     const locationIds = positiveIds(profiles.map(r => r.business_location_id));
-    const key=scopeKey(scope)+':'+locationIds.slice().sort((a,b)=>a-b).join(',')+':'+range.from+':'+range.to;
-    const [cached,queueRows,auto] = await Promise.all([
+    // Eligibility, current Google reputation and historical conversion do not
+    // depend on the chart window. Changing period must not re-plan all patients.
+    const key=scopeKey(scope)+':'+locationIds.slice().sort((a,b)=>a-b).join(',');
+    const [cached,queueRows,auto,periodSnapshot] = await Promise.all([
       aggregateCache.read(key,async()=>{
-        const [potentials,ratingRows,counts,attributed,optOuts,ratings] = await Promise.all([
+        const [potentials,ratingRows,counts,attributed,optOuts] = await Promise.all([
           potentialByClinic(clinicIds),
-      locationIds.length ? query(`WITH ranked AS (SELECT r.*,ROW_NUMBER() OVER (
+      locationIds.length ? query(`WITH ranked AS (SELECT business_location_id,star_rating,last_seen_at,google_missing_at,ROW_NUMBER() OVER (
         PARTITION BY business_location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
         ORDER BY google_missing_at IS NULL DESC,last_seen_at DESC,id DESC) rank_id
         FROM BusinessProfileReviews r WHERE business_location_id IN (:locationIds))
@@ -164,14 +167,15 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
           require('./googleReviewHistory.service').countHistoricalMatches(db, clinicIds),
           query(`SELECT COUNT(DISTINCT CONCAT(clinica_id,':',phone_digits)) total FROM MarketingContactOptOuts
             WHERE clinica_id IN (:clinicIds) AND status='active' AND channel='whatsapp'`, {clinicIds}),
-          privateRatings(scope,{period,summaryOnly:true}),
         ]);
-        return {potentials,ratingRows,counts,attributed,optOuts,ratings};
+        return {potentials,ratingRows,counts,attributed,optOuts};
       }),
       readQueues(scope,{userId,scopeRaw}),
       scope.scope === 'clinic' ? automation(scope) : null,
+      periodCache.read(scopeKey(scope)+':'+range.from+':'+range.to,()=>privateRatings(scope,{period,summaryOnly:true})),
     ]);
-    const {potentials,ratingRows,counts,attributed,optOuts,ratings}=cached.value;
+    const {potentials,ratingRows,counts,attributed,optOuts}=cached.value;
+    const ratings=periodSnapshot.value;
     const googleProfiles = profiles.map(row => {
       const score = ratingRows.find(r => Number(r.business_location_id) === row.business_location_id);
       const shared = profiles.filter(p => p.business_location_id && p.business_location_id === row.business_location_id);
@@ -196,15 +200,17 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
     const limit = Math.min(50, Math.max(1, Number.parseInt(options.limit, 10) || 10)), offset = Math.max(0, Number.parseInt(options.offset, 10) || 0);
     const rating = Number(options.rating), sortColumns = { clinic: 'clinic_name', patient: 'patient_name', rating: 'rating', date: 'occurred_at' };
     const sort = sortColumns[options.sort_by] || 'occurred_at', direction = options.sort_direction === 'asc' ? 'ASC' : 'DESC';
-    const cte = `WITH ranked AS (SELECT e.id,e.list_id,e.item_id,e.occurred_at,e.payload,
+    const cte = `WITH ranked AS (SELECT e.id,e.list_id,e.item_id,e.occurred_at,
       COALESCE(i.clinica_id,l.clinica_id) clinic_id,cl.nombre_clinica clinic_name,
+      p.id_paciente patient_id,
       COALESCE(NULLIF(i.name,''),CONCAT_WS(' ',p.nombre,p.apellidos),'Paciente') patient_name,
       CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload,'$.rating')) AS UNSIGNED) rating,
       ROW_NUMBER() OVER(PARTITION BY COALESCE(i.clinica_id,l.clinica_id),COALESCE(CONCAT('p:',i.paciente_id),CONCAT('ph:',i.phone),CONCAT('i:',i.id))
         ORDER BY e.occurred_at DESC,e.id DESC) rn
       FROM MarketingPatientContactEvents e JOIN MarketingPatientListItems i ON i.id=e.item_id AND i.list_id=e.list_id
       JOIN MarketingPatientLists l ON l.id=e.list_id JOIN Clinicas cl ON cl.id_clinica=COALESCE(i.clinica_id,l.clinica_id)
-      LEFT JOIN Pacientes p ON p.id_paciente=i.paciente_id
+      LEFT JOIN Pacientes p ON p.id_paciente=i.paciente_id AND (p.clinica_id=COALESCE(i.clinica_id,l.clinica_id)
+        OR EXISTS (SELECT 1 FROM PacienteClinicas pc WHERE pc.paciente_id=p.id_paciente AND pc.clinica_id=COALESCE(i.clinica_id,l.clinica_id)))
       WHERE COALESCE(i.clinica_id,l.clinica_id) IN (:clinicIds) AND ${isReview} AND ${testExclusion}
         AND e.event_type IN ('review_rating_received','review_request_rating')
         ${range ? 'AND e.occurred_at >= :start AND e.occurred_at < :end' : ''}
@@ -220,7 +226,8 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
         ORDER BY ${sort} ${direction},id DESC LIMIT :limit OFFSET :offset`, values),
     ]);
     const total = Number(totals[0]?.total || 0);
-    return { success: true, items: rows.map(({ payload, rn, ...r }) => ({ ...r, rating: Number(r.rating) })), total, limit, offset,
+    return { success: true, items: rows.map(({ payload, rn, ...r }) => ({ ...r, patient_id: Number(r.patient_id) || null,
+      patient_clinic_id: Number(r.patient_id) ? Number(r.clinic_id) : null, rating: Number(r.rating) })), total, limit, offset,
       summary: { total, average: total ? Number(totals[0]?.rating_sum || 0) / total : null,
         distribution: [5,4,3,2,1].map(rating => ({ rating, count: Number(totals[0]?.['r'+rating] || 0),
           percent: total ? Number(totals[0]?.['r'+rating] || 0) / total * 100 : 0 })) } };

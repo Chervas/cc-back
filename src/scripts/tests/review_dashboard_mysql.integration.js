@@ -78,6 +78,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await insert('MarketingPatientListItems', [item(5, 20001, 3, { dispatch_status: 'sent', sent_at: new Date('2026-10-29T10:00:00Z') })]);
   const ratings = await model.privateRatings({ clinicIds: [31, 32] }, { period: '30d', limit: 1 });
   assert.equal(ratings.total, 2); assert.equal(ratings.items.length, 1);
+  assert([3,20001].includes(ratings.items[0].patient_id));
   const page2 = await model.privateRatings({ clinicIds: [31, 32] }, { period: '30d', limit: 1, offset: 1 });
   assert.notEqual(ratings.items[0].id, page2.items[0].id);
   const outside = await model.privateRatings({ clinicIds: [99] }, { period: '30d' }); assert.equal(outside.total, 0);
@@ -99,6 +100,10 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(overview.private_ratings_summary.distribution.find(r=>r.rating===4).percent,50);
   assert.equal(overview.automation, null, 'group read does not activate or select a clinic automation');
   const privateReadsAfterFirst=privateReads;await model.overview({ scope:'group',groupId:5,clinicIds:[31,32] },{userId:1,scopeRaw:'group:5'});assert.equal(privateReads,privateReadsAfterFirst,'cached overview reuses private distribution; standalone table retains fresh reader');
+  let potentialReads=0;sql.query=(statement,...args)=>{if(String(statement).includes('WITH memberships'))potentialReads++;return queryBefore(statement,...args);};
+  const changedPeriod=await model.overview({scope:'group',groupId:5,clinicIds:[31,32]},{userId:1,scopeRaw:'group:5',period:'7d'});
+  assert.equal(changedPeriod.aggregate_cache.status,'hit');assert.equal(potentialReads,0);
+  assert.equal(changedPeriod.ratings_in_period,2);sql.query=queryBefore;
   assert.equal((await query('SELECT COUNT(*) total FROM MarketingPatientContactEvents'))[0].total, before);
   report.checks.push('group read model has per-clinic tiers, canonical review de-duplication and historical attribution; no weighted group rating or writes');
   await event('mass_campaign_message_sent',4,1,{});
@@ -160,5 +165,16 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert(!queuePage(current,{group:true,limit:25}).items.some(r=>[7,8].includes(r.source_id)));
   report.checks.push('cancelled preview keeps actual sends; weekday schedules retained; group excludes future unstarted and archived stale dispatch');
   report.checks.push('native queue SQL: group and clinic scope, no sibling leakage or unrelated items, paused review included and ordinary mass send excluded');
+  await insert('MarketingPatientListItems',[item(50,20001,1),item(51,20002,1)]);
+  await event('review_rating_received',50,1,{rating:2});await event('review_rating_received',51,1,{rating:3});
+  const unlinked=await model.privateRatings({clinicIds:[31,32]},{period:'30d',limit:50});
+  assert.equal(unlinked.items.find(r=>r.item_id===50).patient_id,null,'a sibling clinic in the same scope does not authorize this patient link');
+  assert.equal(unlinked.items.find(r=>r.item_id===50).patient_clinic_id,null);
+  assert.equal(unlinked.items.find(r=>r.item_id===51).patient_id,null);
+  await sql.query('INSERT INTO PacienteClinicas VALUES (20001,31),(20001,31)');
+  const linked=await model.privateRatings({clinicIds:[31,32]},{period:'30d',limit:50});
+  assert.equal(linked.items.find(r=>r.item_id===50).patient_id,20001);assert.equal(linked.total,unlinked.total);
+  assert.equal(linked.items.find(r=>r.item_id===50).patient_clinic_id,31,'link uses the validated secondary membership, not the primary clinic');
+  report.checks.push('period changes reuse invariant aggregates; private patient links require live row-clinic membership, with no duplicate rows from secondary memberships');
   report.coverage = { providerRequests: 0, realPatients: 0, dataWrittenOnlyToOwnedFixture: true };
 }).catch(error => { console.error(error.stack); process.exitCode = 1; });

@@ -101,19 +101,19 @@ async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinic
   const range = reportRange(period, now);
   clinicIds = [...new Set(clinicIds.map(Number).filter(id => Number.isInteger(id) && id > 0))];
   locationIds = [...new Set(locationIds.map(Number).filter(id => Number.isInteger(id) && id > 0))];
-  if (!clinicIds.length) return aggregateReport([], range);
+  if (!clinicIds.length) return { ...aggregateReport([], range), score_trends: [] };
   const previous = previousReportRange(range);
   const replacements = { clinicIds, locationIds, start: previous.start, split: range.start, end: range.end };
   const options = { replacements, type: db.Sequelize.QueryTypes.SELECT };
   const testExclusion = `NOT EXISTS (SELECT 1 FROM MarketingPatientContactEvents t
     WHERE t.list_id=i.list_id AND t.item_id=i.id AND t.event_type IN ('mass_campaign_test_sent','mass_campaign_test_failed'))`;
-  const requestsCte = `WITH scope_items AS (
-    SELECT id FROM MarketingPatientListItems WHERE clinica_id IN (:clinicIds)
-    UNION ALL SELECT i.id FROM MarketingPatientLists l JOIN MarketingPatientListItems i ON i.list_id=l.id
-      WHERE l.clinica_id IN (:clinicIds) AND i.clinica_id IS NULL
-  ), requests AS (
-    SELECT i.*,COALESCE(i.clinica_id,l.clinica_id) scoped_clinic_id FROM scope_items s JOIN MarketingPatientListItems i ON i.id=s.id
-    JOIN MarketingPatientLists l ON l.id=i.list_id WHERE l.objective_id='mass_sends'
+  // Let each branch start from its selective events/list predicate. Materializing
+  // all scoped item IDs first scanned the entire recipient inventory twice.
+  const requestsCte = `WITH requests AS (
+    SELECT i.id,i.list_id,i.sent_at,i.paciente_id,i.phone,COALESCE(i.clinica_id,l.clinica_id) scoped_clinic_id
+    FROM MarketingPatientLists l JOIN MarketingPatientListItems i ON i.list_id=l.id
+    WHERE (i.clinica_id IN (:clinicIds) OR (i.clinica_id IS NULL AND l.clinica_id IN (:clinicIds)))
+      AND l.objective_id='mass_sends'
       AND (JSON_UNQUOTE(JSON_EXTRACT(l.criteria,'$.review_request')) IN ('true','1')
         OR JSON_UNQUOTE(JSON_EXTRACT(l.criteria,'$.template_usage'))='solicitud_resena') AND ${testExclusion}
   )`;
@@ -173,7 +173,8 @@ async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinic
   ), ranked_matches AS (
     SELECT matches.*,ROW_NUMBER() OVER (PARTITION BY location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1) ORDER BY created_at,id) rank_id FROM matches
   ), ranked_reviews AS (
-    SELECT r.*,ROW_NUMBER() OVER (PARTITION BY business_location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
+    SELECT r.id,r.business_location_id,r.clinica_id,r.review_name,r.create_time,r.first_seen_at,r.created_at,r.google_missing_at,
+      ROW_NUMBER() OVER (PARTITION BY business_location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
       ORDER BY google_missing_at IS NULL DESC,last_seen_at DESC,id DESC) rank_id FROM BusinessProfileReviews r WHERE ${locationScope}
   ), inventory AS (
     SELECT COALESCE(r.create_time,r.first_seen_at,r.created_at) published_at,r.google_missing_at missing_at,
@@ -198,9 +199,11 @@ async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinic
   const qualityPromise = db.sequelize.query(`${inventoryCte} SELECT COALESCE(SUM(missing_at IS NOT NULL OR missing_without_date=1),0) missing_total,
     COALESCE(SUM(missing_without_date),0) missing_without_date,
     COALESCE(SUM(observation_date=1 AND published_at >= :split AND published_at < :end),0) reviews_with_observation_date FROM inventory`, options);
-  const [requestRows,reviewRows,[quality],periodRows]=await Promise.all([requestRowsPromise,reviewRowsPromise,qualityPromise,periodRowsPromise]);
+  const scoreTrendsPromise = require('./reviewScoreTrend.service').readScoreTrends(db, { locationIds, range, previous });
+  const [requestRows,reviewRows,[quality],periodRows,scoreTrends]=await Promise.all([
+    requestRowsPromise,reviewRowsPromise,qualityPromise,periodRowsPromise,scoreTrendsPromise]);
   const rows = [...requestRows, ...reviewRows, ...periodRows];
-  return { ...aggregateReport(rows, range, { ...quality, clinicNames }), comparison: compareReviewPeriods(rows, range) };
+  return { ...aggregateReport(rows, range, { ...quality, clinicNames }), comparison: compareReviewPeriods(rows, range), score_trends: scoreTrends };
 }
 
 module.exports = { invalidate, readReport, reportRange, previousReportRange, compareReviewPeriods, aggregateReport, METRICS, PERIODS };

@@ -125,11 +125,13 @@ async function listAttributedReviews(db, { clinicIds = [], limit = 10, offset = 
     SELECT matches.*,ROW_NUMBER() OVER (PARTITION BY location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
       ORDER BY created_at,id) review_rank FROM matches
   ), ranked_reviews AS (
-    SELECT r.*,ROW_NUMBER() OVER (PARTITION BY business_location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
+    SELECT r.id,r.business_location_id,r.review_name,r.reviewer_name,r.star_rating,r.create_time,r.google_missing_at,
+      ROW_NUMBER() OVER (PARTITION BY business_location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
       ORDER BY google_missing_at IS NULL DESC,last_seen_at DESC,id DESC) review_rank
     FROM BusinessProfileReviews r WHERE r.business_location_id IN (SELECT location_id FROM matches)
   ), attributions AS (
     SELECT m.id attribution_id,m.clinic_id,
+      p.id_paciente patient_id,
       COALESCE(r.reviewer_name,NULLIF(JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.reviewer_name')),'null')) reviewer_name,
       COALESCE(NULLIF(TRIM(CONCAT_WS(' ',p.nombre,p.apellidos)),''),i.name) patient_name,
       COALESCE(r.star_rating,CAST(JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.star_rating')) AS UNSIGNED)) star_rating,
@@ -145,6 +147,8 @@ async function listAttributedReviews(db, { clinicIds = [], limit = 10, offset = 
     FROM ranked_matches m JOIN MarketingPatientContactEvents e ON e.id=m.id
     JOIN MarketingPatientListItems i ON i.id=e.item_id AND i.list_id=e.list_id
     LEFT JOIN Pacientes p ON p.id_paciente=COALESCE(e.paciente_id,i.paciente_id)
+      AND (p.clinica_id=m.clinic_id OR EXISTS (SELECT 1 FROM PacienteClinicas pc
+        WHERE pc.paciente_id=p.id_paciente AND pc.clinica_id=m.clinic_id))
     LEFT JOIN ranked_reviews r ON r.review_rank=1 AND r.business_location_id=m.location_id
       AND BINARY SUBSTRING_INDEX(r.review_name,'/reviews/',-1)=BINARY SUBSTRING_INDEX(m.review_name,'/reviews/',-1)
     LEFT JOIN MarketingPatientContactEvents f ON f.id=CAST(JSON_UNQUOTE(JSON_EXTRACT(m.payload,'$.followup_event_id')) AS UNSIGNED)
@@ -162,7 +166,8 @@ async function listAttributedReviews(db, { clinicIds = [], limit = 10, offset = 
     WHERE (${ATTRIBUTION_STATES[state]}) AND (${dateFilter})
     ORDER BY ${ATTRIBUTION_SORTS[sort_by]} IS NULL,${ATTRIBUTION_SORTS[sort_by]} ${sort_direction.toUpperCase()},attribution_id DESC
     LIMIT :limit OFFSET :offset`, options);
-  return { items: rows.map(row => ({ ...row, attribution_id: Number(row.attribution_id), clinic_id: Number(row.clinic_id),
+  return { items: rows.map(row => ({ ...row, attribution_id: Number(row.attribution_id), clinic_id: Number(row.clinic_id), patient_id: Number(row.patient_id) || null,
+    patient_clinic_id: Number(row.patient_id) ? Number(row.clinic_id) : null,
     star_rating: Number(row.star_rating) >= 1 && Number(row.star_rating) <= 5 ? Number(row.star_rating) : null,
     match_confidence: row.match_confidence == null ? null : Number(row.match_confidence),
   })), total: Number(counts?.total || 0), undated_total: Number(counts?.undated_total || 0), limit, offset, state, range: rangeInfo };
