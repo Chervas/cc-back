@@ -23,7 +23,10 @@ const definitions = definitionsFile ? JSON.parse(fs.readFileSync(definitionsFile
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   // The MySQL fixture must capture the original socket connector first. Its
   // offline preload is already cached; this adds inert env/dotenv only.
+  const net = require('node:net'), ownedConnect = net.connect, ownedCreateConnection = net.createConnection;
   require('./fixtures/security_offline_runtime.cjs');
+  // The fixture's Socket guard still rejects every socket except its own.
+  net.connect = ownedConnect; net.createConnection = ownedCreateConnection;
   models.Sequelize = D;
   // Real state/appointment/message models; only the conversation ID FK parent
   // is a minimal fixture. No user accounts, recipients or providers are loaded.
@@ -109,6 +112,37 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.deepEqual((await models.ConversationAutomationState.findOne({ where: { conversation_id: 501 } })).get({ plain: true }), protectedState);
   assert.equal(events.length, 0);
   report.checks.push('stale execution and foreign clinic cannot overwrite the persisted owner or emit a review event');
+
+  // Stored JSON may place a programme condition after its confirmation router.
+  // The owning graph must drive durable state, reload DTO and realtime equally.
+  const graph = [
+    { id: 'ai', type: 'condition/ai_analysis', outputs: { on_success: 'router' } },
+    { id: 'router', type: 'condition/field_check', config: cloneConfirmAppointmentDecisionConfig('ai') },
+    { id: 'programme', type: 'condition/field_check', config: { mode: 'multi_branch' } },
+  ];
+  for (const [branch, needsResponse, expectedManual] of [
+    ['branch_confirm_without_reply', false, false], ['on_else', false, true],
+    ['branch_not_confirmed', false, true], ['branch_confirm_needs_reply', true, true],
+  ]) {
+    executionId++;
+    const confirms = branch.startsWith('branch_confirm_');
+    const context = { conversation: { id: 501 }, appointment: { id: 901, estado: 'recordatorio_enviado' },
+      outputs: { ai: { confirma_asistencia: confirms, requiere_respuesta: needsResponse },
+        router: { next_output_key: branch }, programme: { next_output_key: 'on_else' },
+        applied: { status: 'success', target_type: 'appointment', new_status: 'recordatorio_confirmado' } } };
+    await stateService.setState({ clinicId: 31, conversationId: 501, stage: 'applying', executionId,
+      appointmentId: 901, sourceMessageId: 101, needsResponse: false, manualActionRequired: false }, { emit: false });
+    events.length = 0;
+    await flow._syncConversationAutomationStateAfterExecution({ id: executionId, clinic_id: 31, status: 'completed', context }, { nodes: graph });
+    const state = await models.ConversationAutomationState.findOne({ where: { conversation_id: 501 } });
+    const dto = (await pending.getPendingReplyStatesByConversationIds([501])).get(501);
+    assert.equal(state.manual_action_required, expectedManual, branch);
+    assert.equal(dto.automationManualActionRequired, expectedManual, branch);
+    assert.equal(events.at(-1).payload.automation_manual_action_required, expectedManual, branch);
+  }
+  assert.deepEqual((await models.CitaPaciente.findByPk(901)).get({ plain: true }), appointmentBefore);
+  assert.equal(await models.Message.count(), 1);
+  report.checks.push('owning confirmation comparator controls stored MySQL state, reload DTO and realtime despite programme fallback; negative, uncertain and mixed replies remain review without messages or appointment writes');
   report.coverage = { activeConfirmNodes: rows.length, cases: cases.length, providerCalled: false, clinicalActionsExecuted: false,
     notificationsDelivered: false, uiRendered: false, semanticDiscrepancyResolved: false,
     ...(definitionsFile ? { definitionsSha256: createHash('sha256').update(fs.readFileSync(definitionsFile)).digest('hex') } : {}) };

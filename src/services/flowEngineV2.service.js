@@ -8159,23 +8159,56 @@ const CONFIRM_APPOINTMENT_BRANCHES = new Set([
   'on_else',
 ]);
 
-function resolveConfirmAppointmentConversationOutcome(context = {}) {
-  const outputs = context?.outputs && typeof context.outputs === 'object'
-    ? Object.values(context.outputs)
-    : [];
-  const confirmation = [...outputs].reverse().find((output) => (
+function resolveConfirmAppointmentConversationOutcome(context = {}, nodes = null) {
+  const outputs = Object.entries(context?.outputs && typeof context.outputs === 'object'
+    ? context.outputs : {});
+  const latest = (entries) => {
+    if (entries.length < 2) return entries[0] || null;
+    // Persisted JSON object order is not execution order. Ambiguous historical
+    // snapshots retain review instead of borrowing another analysis's result.
+    const dated = entries.map(entry => ({ entry, at: Date.parse(entry[1]?.at) }));
+    if (dated.some(row => !Number.isFinite(row.at))) return null;
+    dated.sort((a, b) => b.at - a.at);
+    return dated[0].at === dated[1].at ? null : dated[0].entry;
+  };
+  const confirmations = outputs.filter(([, output]) => (
     output
     && typeof output === 'object'
     && Object.prototype.hasOwnProperty.call(output, 'confirma_asistencia')
     && Object.prototype.hasOwnProperty.call(output, 'requiere_respuesta')
   ));
-  const decision = [...outputs].reverse().find((output) => {
+  if (!confirmations.length) return null;
+  const confirmationEntry = latest(confirmations);
+  const confirmation = confirmationEntry?.[1];
+  if (!confirmation) return { branch: 'on_else', intent: 'otra', needsResponse: false, manualActionRequired: true };
+  const decisions = outputs.filter(([, output]) => {
     if (!output || typeof output !== 'object') return false;
     const branch = cleanString(output.next_output_key || output.matched_rule_id);
     return CONFIRM_APPOINTMENT_BRANCHES.has(branch);
   });
-  const branch = cleanString(decision?.next_output_key || decision?.matched_rule_id);
-  if (!confirmation || !branch) return null;
+  let eligible;
+  if (Array.isArray(nodes)) {
+    const ai = nodes.find(node => node.id === confirmationEntry[0]);
+    eligible = decisions.filter(([id]) => {
+      const node = nodes.find(candidate => candidate.id === id);
+      if (node?.type !== 'condition/field_check' || ai?.type !== 'condition/ai_analysis') return false;
+      const source = cleanString(node.config?.source_ai_node_id);
+      return source ? source === ai.id : cleanString(ai.outputs?.on_success) === node.id;
+    });
+  } else {
+    // Compatibility for older snapshots without the pinned graph: named
+    // confirmation branches or their rule results identify the comparator.
+    // A generic on_else from a programme/other condition cannot override them.
+    eligible = decisions.filter(([, output]) => {
+      const branch = cleanString(output.next_output_key || output.matched_rule_id);
+      return branch !== 'on_else' || (Array.isArray(output.rule_results) && output.rule_results.some(rule => (
+        rule.id !== 'on_else' && CONFIRM_APPOINTMENT_BRANCHES.has(rule.id)
+      )));
+    });
+    if (!eligible.length && decisions.length === 1) eligible = decisions;
+  }
+  const decision = latest(eligible)?.[1];
+  const branch = cleanString(decision?.next_output_key || decision?.matched_rule_id) || 'on_else';
 
   const confirmsAttendance = coerceAiBoolean(confirmation.confirma_asistencia);
   const needsResponse = coerceAiBoolean(confirmation.requiere_respuesta);
@@ -8238,7 +8271,7 @@ function hasExternallyResolvedAppointmentIntent(context = {}, normalizedIntent =
   ));
 }
 
-async function syncConversationAutomationStateAfterExecution(execution) {
+async function syncConversationAutomationStateAfterExecution(execution, { nodes = execution?.templateVersion?.nodes } = {}) {
   if (!execution || !db.ConversationAutomationState) return;
   const context = execution.context && typeof execution.context === 'object' ? execution.context : {};
   const conversationId = toIntOrNull(
@@ -8318,7 +8351,7 @@ async function syncConversationAutomationStateAfterExecution(execution) {
   const normalized = classification
     ? normalizeClassifyIntentOutput(classification, context)
     : null;
-  const confirmationOutcome = resolveConfirmAppointmentConversationOutcome(context);
+  const confirmationOutcome = resolveConfirmAppointmentConversationOutcome(context, nodes);
   const rebookingOutcome = findRebookingDecisionOutput(context);
   const conversationAction = cleanString(findConversationActionOutput(context)?.conversation_action);
   const effectiveIntent = normalized || (confirmationOutcome
@@ -8911,7 +8944,7 @@ async function runExecution(executionId, options = {}) {
     clearResponseProcessingState();
     const freshExecution = await FlowExecutionV2.findByPk(execution.id).catch(() => execution);
     try {
-      await syncConversationAutomationStateAfterExecution(freshExecution || execution);
+      await syncConversationAutomationStateAfterExecution(freshExecution || execution, { nodes: execution.templateVersion?.nodes });
     } catch (error) {
       console.warn('[automations-v2] No se pudo sincronizar el estado conversacional', {
         executionId: execution.id,
