@@ -19,6 +19,7 @@ try{
   db=require('../../../models');
   db.WhatsappTemplate.findAll=async()=>lookup.templates;
   db.WhatsappTemplateCatalog.findAll=async()=>lookup.catalogs;
+  db.AutomationFlowTemplateV2.findByPk=async id=>(lookup.flow_sources||[]).find(row=>Number(row.id)===Number(id))||null;
   db.sequelize.query=async()=>{throw Error('CONFIG_VALIDATION_SQL_FORBIDDEN');};
   for(const model of Object.values(db))if(model?.rawAttributes){
     for(const hook of ['beforeCreate','beforeUpdate','beforeDestroy','beforeBulkCreate','beforeBulkUpdate','beforeBulkDestroy']){

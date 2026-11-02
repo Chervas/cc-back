@@ -12,7 +12,7 @@ function planEntry(source) {
     body: { message_copy_source_id: source.id, name: source.name, description: source.description ?? null,
       template_key: source.template_key, clinic_id: source.clinic_id, group_id: source.group_id,
       is_system: source.is_system === true, is_active: false, engine_version: 'v2',
-      ...graph(next), trigger_config: structuredClone(source.trigger_config) } };
+      ...graph(next), trigger_config: structuredClone(next.trigger_config) } };
 }
 
 module.exports = {

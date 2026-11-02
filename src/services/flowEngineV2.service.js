@@ -4359,7 +4359,9 @@ async function handleSendWhatsapp(node, context, runtime) {
       });
     }
   } else {
-    const manualText = cleanString(resolveTemplateValue(contentConfig?.manual_message_text, templateContext));
+    const acknowledgement = require('../lib/appointment-message-copy').acknowledgementForExecution(
+      contentConfig?.manual_message_text, execution?.trigger_type);
+    const manualText = cleanString(resolveTemplateValue(acknowledgement, templateContext));
     if (!manualText) {
       throw new Error('whatsapp_manual_message_text_missing');
     }
@@ -6891,7 +6893,9 @@ async function processNode(node, context, runtime = {}) {
         const recipientMode = normalizeRecipientMode(resolveTemplateValue(config?.recipient_mode, context));
         const senderMode = toLowerSafe(resolveTemplateValue(config?.sender_mode, context)) || 'clinic_default';
         const messageMode = normalizeWhatsappMessageMode(resolveTemplateValue(config?.message_mode, context));
-        const manualText = cleanString(resolveTemplateValue(config?.manual_message_text, context));
+        const acknowledgement = require('../lib/appointment-message-copy').acknowledgementForExecution(
+          config?.manual_message_text, runtime.execution?.trigger_type || context?.trigger?.type);
+        const manualText = cleanString(resolveTemplateValue(acknowledgement, context));
         return {
           kind: 'success',
           output: {

@@ -23,7 +23,8 @@ async function main() {
     const entries = [...latest.values()].map(planEntry).filter(Boolean);
     const [catalogs] = await c.query('SELECT * FROM WhatsappTemplateCatalog ORDER BY locale="es" DESC,id');
     const [templates] = await c.query('SELECT id,name,language,status,components,variables,catalog_template_id,clinic_id,waba_id,is_active,last_synced_at FROM WhatsappTemplates');
-    const lookup = { templates, catalogs };
+    const programSources = new Set(entries.map(entry => Number(entry.source.trigger_config?.program_booking_v1?.source_id)).filter(Boolean));
+    const lookup = { templates, catalogs, flow_sources: flows.filter(row => programSources.has(Number(row.id))) };
     for (const row of [...templates, ...catalogs]) for (const key of ['components', 'variables']) if (typeof row[key] === 'string') row[key] = JSON.parse(row[key]);
     for (const template of templates) template.catalog = catalogs.find(catalog => Number(catalog.id) === Number(template.catalog_template_id)) || null;
     const [clinics] = await c.query('SELECT id_clinica,nombre_clinica,direccion,url_ficha_local,configuracion FROM Clinicas');

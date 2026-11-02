@@ -2948,7 +2948,14 @@ function mapTemplate(row, { includeNodes = true, access = null, clinicNameMap = 
       entry_node_id: item.entry_node_id, trigger_type: item.trigger_type, nodes: item.nodes,
     });
     const rawNodes = normalizeNodesInput(Array.isArray(item.nodes) ? item.nodes : []);
-    base.nodes = applyTriggerConfigToNodes({
+    const staleProgramProjection = triggerConfig?.program_booking_v1
+      && !triggerConfigResolution.ok && triggerConfigResolution.error === 'program_details_native_graph_changed';
+    if (staleProgramProjection) {
+      // A read of a historical/stale version must not fail the whole family.
+      // Draft/publish validation remains strict and receives the stored graph.
+      base.configuration_review_required = true;
+      base.nodes = structuredClone(item.nodes);
+    } else base.nodes = applyTriggerConfigToNodes({
       triggerType: item.trigger_type,
       entryNodeId: item.entry_node_id,
       nodes: rawNodes,
@@ -5092,11 +5099,17 @@ async function validateNodeConfigs(nodes) {
   const program = require('../lib/patient-program-appointment-flow');
   if (root && program.branchValid({ nodes, entry_node_id: root.id })) {
     const source = await AutomationFlowTemplateV2.findByPk(root.config.program_booking_v1.source_id);
-    const normal = program.normalProjection({ nodes, entry_node_id: root.id,
-      trigger_type: root.type.slice('trigger/'.length), trigger_config: program.triggerConfig({ triggerType: root.type.slice('trigger/'.length), entryNodeId: root.id, nodes }) });
+    let normal;
+    try {
+      normal = program.normalProjection({ nodes, entry_node_id: root.id,
+        trigger_type: root.type.slice('trigger/'.length), trigger_config: program.triggerConfig({ triggerType: root.type.slice('trigger/'.length), entryNodeId: root.id, nodes }) });
+    } catch {
+      return { ok: false, errors: [buildValidationError('program_details_native_graph_changed', 'Revisa la composición de programa y su configuración antes de publicar.')] };
+    }
     const project = row => ({ nodes: row.nodes, entry_node_id: row.entry_node_id, trigger_type: row.trigger_type, trigger_config: row.trigger_config || {} });
-    if (!source?.published_at || require('../lib/patient-program-booking-confirmation').hash(normal)
-      !== require('../lib/patient-program-booking-confirmation').hash(project(source))) {
+    const copy = require('../lib/appointment-message-copy');
+    if (!source?.published_at || require('../lib/patient-program-booking-confirmation').hash(copy.normalizeAcknowledgementGraph(normal))
+      !== require('../lib/patient-program-booking-confirmation').hash(copy.normalizeAcknowledgementGraph(project(source)))) {
       return { ok: false, errors: [buildValidationError('program_details_native_source_changed', 'La fuente publicada del flujo ha cambiado; revisa el borrador de programa.')] };
     }
     return require('../lib/appointment-single-notice-publication').validatePreservedNodeConfigs(source.toJSON ? source.toJSON() : source,
@@ -6006,7 +6019,9 @@ exports.createTemplateDraft = async (req, res) => {
         details: triggerConfigResolution.details,
       });
     }
-    const normalizedTriggerConfig = singleNoticeSource ? structuredClone(singleNoticeSource.trigger_config) : triggerConfigResolution.trigger_config;
+    const normalizedTriggerConfig = singleNoticeSource ? structuredClone(sourceField === 'message_copy_source_id'
+      ? preservedPublication.planEntry(singleNoticeSource.toJSON()).body.trigger_config : singleNoticeSource.trigger_config)
+      : triggerConfigResolution.trigger_config;
     const nodesWithTriggerConfig = singleNoticeSource ? nodes : applyTriggerConfigToNodes({
       triggerType: resolvedTriggerType,
       entryNodeId,
@@ -6711,7 +6726,9 @@ exports.publishTemplateVersion = async (req, res) => {
           triggerConfig: triggerConfigResolution.trigger_config,
         }),
         trigger_type: triggerResolution.trigger_type,
-        trigger_config: singleNoticeSource ? structuredClone(singleNoticeSource.trigger_config) : triggerConfigResolution.trigger_config,
+        trigger_config: singleNoticeSource ? structuredClone(sourceField === 'message_copy_source_id'
+          ? preservedPublication.planEntry(singleNoticeSource.toJSON()).body.trigger_config : singleNoticeSource.trigger_config)
+          : triggerConfigResolution.trigger_config,
         published_at: new Date(),
         published_by: access.user_id,
         is_active: activateOnPublish,

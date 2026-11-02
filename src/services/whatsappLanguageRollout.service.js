@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { neutralAcknowledgementText, NEUTRAL_ACKNOWLEDGEMENTS } = require('../lib/appointment-message-copy');
 const db = require('../../models');
 const jobRequestsService = require('./jobRequests.service');
 const jobScheduler = require('./jobScheduler.service');
@@ -78,7 +79,8 @@ const MANUAL_TRANSLATION_ROWS = Object.freeze([
     ca: 'Gràcies, queda confirmada. T’esperem demà a l’hora prevista.',
     en: 'Thank you, it is confirmed. We look forward to seeing you tomorrow at the scheduled time.',
   },
-]);
+].map(row => ({ ...row, ca: neutralAcknowledgementText(row.ca), en: neutralAcknowledgementText(row.en) }))
+  .concat([{ ...NEUTRAL_ACKNOWLEDGEMENTS }]));
 
 function cleanString(value) {
   return String(value ?? '').trim();

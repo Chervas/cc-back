@@ -56,8 +56,8 @@ test('tomorrow acknowledgement changes only its exact copy and preserves custom 
   node.config.suppress_if_response_needed = true;
   const before = structuredClone(s), next = updateAppointmentMessages(s);
   assert.deepEqual(s, before);
-  assert.equal(next.nodes[0].config.manual_message_text, 'Perfecto, {{paciente.nombre}}. Hasta mañana.');
-  assert.equal(next.nodes[0].config.language_routing.variants.ca.manual_message_text, 'Perfecte, {{paciente.nombre}}. Fins demà.');
+  assert.equal(next.nodes[0].config.manual_message_text, 'Perfecto, {{paciente.nombre}}. Gracias.');
+  assert.equal(next.nodes[0].config.language_routing.variants.ca.manual_message_text, 'Perfecte, {{paciente.nombre}}. Gràcies.');
   assert.equal(next.nodes[0].config.language_routing.variants.en.manual_message_text, 'TESTONLY custom reply');
   const restored = structuredClone(next);
   restored.nodes[0].config.manual_message_text = node.config.manual_message_text;

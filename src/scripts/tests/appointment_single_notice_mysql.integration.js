@@ -133,10 +133,15 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
       if(name==='../lib/appointment-template-scope')return require('../../lib/appointment-template-scope');
       if(name==='../lib/patient-mobile-verification')return require('../../lib/patient-mobile-verification');
       if(name==='../lib/patient-program-booking-confirmation')return require('../../lib/patient-program-booking-confirmation');
+      if(name==='../lib/patient-program-appointment-flow')return require('../../lib/patient-program-appointment-flow');
+      if(name==='../lib/appointment-message-copy')return require('../../lib/appointment-message-copy');
       assert.fail('Unexpected native publication dependency '+name);},
   };
   const graphStart=controller.indexOf('function validateFlowGraph('),graphEnd=controller.indexOf('\nfunction ',graphStart+10);
   context.validateFlowGraph=vm.runInNewContext('('+controller.slice(graphStart,graphEnd)+')',context);
+  context.validateBaseNodeConfigs=context.validateNodeConfigs;
+  const configStart=controller.indexOf('async function validateNodeConfigs('),configEnd=controller.indexOf('\nasync function validateBaseNodeConfigs',configStart);
+  context.validateNodeConfigs=vm.runInNewContext('('+controller.slice(configStart,configEnd)+')',context);
   for(const name of ['createTemplateDraft','publishTemplateVersion']){
     const start=controller.indexOf('exports.'+name+' ='),end=controller.indexOf('\nexports.',start+10);
     vm.runInNewContext(controller.slice(start,end),context);
@@ -204,6 +209,41 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     assert.equal((await copyPublication.publishEntry(plan,request)).skipped,true);
   }
   report.checks.push('Copy-only native SQL publication preserves both manual switches and legacy node defaults, updates only allowlisted text, leaves trigger/config unchanged and repeated publication no-ops');
+  const program=require('../../lib/patient-program-appointment-flow');
+  for(const is_active of [false,true]){
+    const clinic=501+Number(is_active),normalNodes=structuredClone(validNodes);
+    const closing=normalNodes.find(n=>n.type==='control/end');
+    closing.type='action/send_whatsapp';closing.config={message_mode:'manual',manual_message_text:'Perfecto, {{paciente.nombre}}. Hasta mañana.'};
+    const shape={...values,public_id:'TESTONLY_program_copy_'+is_active,clinic_id:clinic,
+      template_key:'env_o_de_datos_de_la_cita_tras_agendar__clinic_'+clinic,entry_node_id:'N1',nodes:normalNodes,is_active:false,trigger_config:{}};
+    const ordinary=await db.AutomationFlowTemplateV2.create({...shape,...notice.buildSingleNoticeFlow(shape)});
+    const adapted=program.adapt(ordinary.toJSON());
+    adapted.trigger_config.program_booking_v1.configured=true;
+    adapted.trigger_config.program_booking_v1.enabled_after='2030-01-01T00:00:00.000Z';
+    if(is_active)adapted.trigger_config.program_booking_v1.normal_sha256='0'.repeat(64);
+    adapted.nodes.find(n=>n.id===adapted.entry_node_id).config.program_booking_v1=structuredClone(adapted.trigger_config.program_booking_v1);
+    const scoped=await db.AutomationFlowTemplateV2.create({...adapted,id:undefined,version:2,is_active});
+    const plan=copyPublication.planEntry(scoped.toJSON()),result=await copyPublication.publishEntry(plan,request);
+    const installed=await db.AutomationFlowTemplateV2.findOne({where:{public_id:scoped.public_id,version:result.version}});
+    assert(program.graphValid(installed.toJSON()));assert.equal(installed.is_active,is_active);
+    const beforePolicy={...scoped.trigger_config.program_booking_v1},afterPolicy={...installed.trigger_config.program_booking_v1};
+    delete beforePolicy.normal_sha256;delete afterPolicy.normal_sha256;assert.deepEqual(afterPolicy,beforePolicy);
+    assert.equal(installed.nodes.find(n=>n.id===closing.id).config.manual_message_text,'Perfecto, {{paciente.nombre}}. Gracias.');
+    assert.equal((await copyPublication.publishEntry(plan,request)).skipped,true);
+    const bad=structuredClone(scoped.toJSON());
+    bad.nodes.find(n=>n.type==='condition/ai_analysis').config.instruction='TESTONLY unauthorized prompt change';
+    const altered=await db.AutomationFlowTemplateV2.create({...bad,id:undefined,version:installed.version+1});
+    const badPlan=copyPublication.planEntry(altered.toJSON());let status=200,response;
+    await native.createTemplateDraft({body:badPlan.body},{status(code){status=code;return this;},json(value){response=value;return this;}});
+    assert.equal(status,201);const rejectedDraft=response.data;
+    await native.publishTemplateVersion({params:{template_ref:altered.public_id,version:rejectedDraft.version},body:{
+      message_copy_source_id:altered.id,preserve_activation:true,expected_published_version:altered.version}},
+      {status(code){status=code;return this;},json(value){response=value;return this;}});
+    assert.equal(status,400,JSON.stringify(response));assert(response.validation_errors.some(e=>e.code==='program_details_native_source_changed'));
+    const unchangedDraft=await db.AutomationFlowTemplateV2.findByPk(rejectedDraft.id);
+    assert.equal(unchangedDraft.published_at,null);assert.equal(unchangedDraft.is_active,false);
+  }
+  report.checks.push('Neutral acknowledgement native SQL publication rebinds only the program normal digest, preserves source/cut/activation, remains idempotent and rejects an unrelated prompt change against its pinned published source');
   const ackPublication=require('../../lib/day-before-acknowledgement-publication');
   const ackBackfills=backfills;
   for(const is_active of [false,true]){

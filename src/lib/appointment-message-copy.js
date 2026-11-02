@@ -1,5 +1,54 @@
 'use strict';
 
+const NEUTRAL_ACKNOWLEDGEMENTS = Object.freeze({
+  es: 'Perfecto, {{paciente.nombre}}. Gracias.',
+  ca: 'Perfecte, {{paciente.nombre}}. Gràcies.',
+  en: 'Perfect, {{paciente.nombre}}. Thank you.',
+});
+const ACKNOWLEDGEMENT_ALIASES = {
+  es: ['¡Gracias {{paciente.nombre}}! Hasta mañana', 'Perfecto, {{paciente.nombre}}. Hasta mañana.',
+    '¡Muchas gracias {{paciente.nombre}}! Nos vemos ahora',
+    '¡Muchas gracias {{paciente.nombre}}! Nos vemos mañana a las {{cita.hora}}',
+    '¡Muchas gracias {{paciente.nombre}}! ¡Nos vemos!', '¡Hasta ahora!',
+    'Gracias, queda confirmada. Te esperamos mañana a la hora prevista.'],
+  ca: ['Gràcies, {{paciente.nombre}}! Fins demà', 'Perfecte, {{paciente.nombre}}. Fins demà.',
+    'Moltes gràcies, {{paciente.nombre}}! Ens veiem ara',
+    'Moltes gràcies, {{paciente.nombre}}! Ens veiem demà a les {{cita.hora}}',
+    'Moltes gràcies, {{paciente.nombre}}! Fins aviat!', 'Fins ara!',
+    'Gràcies, queda confirmada. T’esperem demà a l’hora prevista.'],
+  en: ['Thank you, {{paciente.nombre}}! See you tomorrow', 'Perfect, {{paciente.nombre}}. See you tomorrow.',
+    'Thank you very much, {{paciente.nombre}}! See you shortly',
+    'Thank you very much, {{paciente.nombre}}! See you tomorrow at {{cita.hora}}',
+    'Thank you very much, {{paciente.nombre}}! See you soon!', 'See you shortly!',
+    'Thank you, it is confirmed. We look forward to seeing you tomorrow at the scheduled time.'],
+};
+const copyKey = text => String(text ?? '').normalize('NFC').trim().replace(/\s+/g, ' ');
+const acknowledgementCopies = new Map(Object.entries(ACKNOWLEDGEMENT_ALIASES)
+  .flatMap(([locale, texts]) => [...texts, NEUTRAL_ACKNOWLEDGEMENTS[locale]]
+    .map(text => [copyKey(text), NEUTRAL_ACKNOWLEDGEMENTS[locale]])));
+
+// Exact presentation aliases only: no intent classification or date inference.
+function neutralAcknowledgementText(text) {
+  return acknowledgementCopies.get(copyKey(text)) || text;
+}
+function acknowledgementForExecution(text, triggerType) {
+  return ['appointment_created', 'appointment_rescheduled', 'appointment_reminder_window'].includes(triggerType)
+    ? neutralAcknowledgementText(text) : text;
+}
+function normalizeAcknowledgementGraph(source) {
+  const next = structuredClone(source);
+  for (const node of next.nodes || []) {
+    if (node.type !== 'action/send_whatsapp' || node.config?.message_mode !== 'manual') continue;
+    if (node.config.manual_message_text !== undefined)
+      node.config.manual_message_text = neutralAcknowledgementText(node.config.manual_message_text);
+    for (const variant of Object.values(node.config.language_routing?.variants || {})) {
+      if (variant && typeof variant === 'object' && variant.manual_message_text !== undefined)
+        variant.manual_message_text = neutralAcknowledgementText(variant.manual_message_text);
+    }
+  }
+  return next;
+}
+
 const RESPONSES = [
   {
     es: ['Gracias por avisarnos. Hemos cancelado tu cita. ¿Quieres que te ayudemos a concertar una nueva fecha?',
@@ -31,11 +80,11 @@ const RESPONSES = [
   },
   {
     es: ['¡Gracias {{paciente.nombre}}! Hasta mañana',
-      'Perfecto, {{paciente.nombre}}. Hasta mañana.'],
+      NEUTRAL_ACKNOWLEDGEMENTS.es],
     ca: ['Gràcies, {{paciente.nombre}}! Fins demà',
-      'Perfecte, {{paciente.nombre}}. Fins demà.'],
+      NEUTRAL_ACKNOWLEDGEMENTS.ca],
     en: ['Thank you, {{paciente.nombre}}! See you tomorrow',
-      'Perfect, {{paciente.nombre}}. See you tomorrow.'],
+      NEUTRAL_ACKNOWLEDGEMENTS.en],
   },
 ];
 
@@ -44,12 +93,17 @@ function updateAppointmentMessages(source) {
   for (const node of next.nodes || []) {
     if (node.type !== 'action/send_whatsapp' || node.config?.message_mode !== 'manual') continue;
     const copy = RESPONSES.find(item => item.es[0] === node.config.manual_message_text);
-    if (!copy) continue;
-    node.config.manual_message_text = copy.es[1];
+    if (copy) node.config.manual_message_text = copy.es[1];
     for (const locale of ['ca', 'en']) {
       const variant = node.config.language_routing?.variants?.[locale];
       // Customized translations are never silently replaced.
-      if (variant && copy[locale] && variant.manual_message_text === copy[locale][0]) variant.manual_message_text = copy[locale][1];
+      if (variant && copy?.[locale] && variant.manual_message_text === copy[locale][0]) variant.manual_message_text = copy[locale][1];
+    }
+    if (node.config.manual_message_text !== undefined)
+      node.config.manual_message_text = neutralAcknowledgementText(node.config.manual_message_text);
+    for (const variant of Object.values(node.config.language_routing?.variants || {})) {
+      if (variant && typeof variant === 'object' && variant.manual_message_text !== undefined)
+        variant.manual_message_text = neutralAcknowledgementText(variant.manual_message_text);
     }
     if (copy === RESPONSES[2] || copy === RESPONSES[3]) {
       const alert = next.nodes.find(candidate => candidate.id === node.outputs?.on_success);
@@ -60,6 +114,23 @@ function updateAppointmentMessages(source) {
         alert.config.human_response_followup_minutes = 30;
       }
     }
+  }
+  if (source.trigger_config?.program_booking_v1 && JSON.stringify(source.nodes) !== JSON.stringify(next.nodes)) {
+    const program = require('./patient-program-appointment-flow');
+    const { hash } = require('./patient-program-booking-confirmation');
+    const previous = source.trigger_config.program_booking_v1;
+    // Native publication separately revalidates the normal projection against
+    // its pinned published source. Permit rebinding an old stale digest only
+    // when all structural, scope and duplicate policy checks still hold.
+    if (!program.EVENTS.includes(source.trigger_type) || !require('./appointment-single-notice-flow').scoped(source)
+      || !program.branchValid(source)
+      || hash(source.nodes.find(node => node.id === source.entry_node_id)?.config?.program_booking_v1) !== hash(previous)
+      || hash(source.trigger_config) !== hash({ ...previous.normal_trigger_config, program_booking_v1: previous }))
+      throw Error('appointment_copy_program_source_invalid');
+    const policy = { ...next.trigger_config.program_booking_v1, normal_sha256: hash(program.normalProjection(next)) };
+    next.trigger_config.program_booking_v1 = policy;
+    next.nodes.find(node => node.id === next.entry_node_id).config.program_booking_v1 = structuredClone(policy);
+    if (!program.graphValid(next)) throw Error('appointment_copy_program_candidate_invalid');
   }
   return next;
 }
@@ -89,4 +160,5 @@ function updateAppointmentCatalog(catalog) {
   return next;
 }
 
-module.exports = { RESPONSES, REMINDER_APOLOGIES, updateAppointmentMessages, updateAppointmentCatalog };
+module.exports = { RESPONSES, REMINDER_APOLOGIES, NEUTRAL_ACKNOWLEDGEMENTS, ACKNOWLEDGEMENT_ALIASES,
+  neutralAcknowledgementText, acknowledgementForExecution, normalizeAcknowledgementGraph, updateAppointmentMessages, updateAppointmentCatalog };
