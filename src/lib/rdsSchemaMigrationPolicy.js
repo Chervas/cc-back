@@ -4,11 +4,12 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { digest, compare } = require('./securitySchemaContract');
+const { digest, compare, effectiveContract } = require('./securitySchemaContract');
 const enumExtension = require('./mysqlEnumExtension');
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const need = (value, code) => { if (!value) throw Error(code); };
 const NAME = /^[0-9]{14}-[a-z0-9-]+\.js$/;
+const PLAN_SCHEMA = 'clinicaclick-rds-selective-schema-plan/2';
 const METHODS = ['createTable', 'addColumn', 'changeColumn', 'addIndex', 'removeIndex', 'addConstraint',
   'removeConstraint', 'renameColumn', 'removeColumn', 'dropTable', 'describeTable', 'showAllTables',
   'showIndex', 'getForeignKeyReferencesForTable'];
@@ -41,16 +42,66 @@ function migrationFiles(source, names) {
   return [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
+// Runtime conditions choose requirements, never which migrations may execute.
+// Explicitly selecting a migration also requires its whole feature group after
+// DDL, even if that runtime's feature is currently disabled. No real env changes.
+function effectiveRequirements(info, selected, env, runtime = 'full-contract') {
+  need(Array.isArray(selected) && selected.length <= 20 && new Set(selected).size === selected.length && selected.every(name => NAME.test(name)), 'rds_schema_selection_invalid');
+  const raw = info.contract;
+  const contract = env === undefined ? structuredClone(raw) : effectiveContract(raw, env);
+  const disabled = new Set(contract.disabledFeatureGroups || []);
+  const runtimeGroups = Object.keys(raw.featureGroups || {}).filter(name => !disabled.has(name)).sort();
+  const forced = [];
+  for (const [name, group] of Object.entries(raw.featureGroups || {})) {
+    if (!(group.migrations || []).some(migration => selected.includes(migration))) continue;
+    forced.push(name); disabled.delete(name);
+    for (const table of group.tables || []) {
+      need(raw.tables[table], 'rds_schema_feature_contract_invalid');
+      contract.tables[table] = structuredClone(raw.tables[table]);
+    }
+    for (const migration of group.migrations || []) {
+      const pinned = raw.migrations.find(row => row.name === migration);
+      need(pinned, 'rds_schema_feature_contract_invalid');
+      if (!contract.migrations.some(row => row.name === migration)) contract.migrations.push(structuredClone(pinned));
+    }
+  }
+  // Stable source ordering keeps the digest independent of the order groups
+  // were restored. Execution order remains the explicitly selected plan order.
+  contract.tables = Object.fromEntries(Object.keys(raw.tables).filter(name => Object.hasOwn(contract.tables, name)).map(name => [name, contract.tables[name]]));
+  contract.migrations = raw.migrations.filter(row => contract.migrations.some(value => value.name === row.name)).map(row => structuredClone(row));
+  if (env !== undefined || Object.hasOwn(contract, 'disabledFeatureGroups')) contract.disabledFeatureGroups = [...disabled].sort();
+  const scope = { schema: 'clinicaclick-rds-effective-requirements/1', runtime,
+    selectedMigrations: selected.slice().sort(), runtimeFeatureGroups: runtimeGroups, selectedFeatureGroups: forced.sort() };
+  return { contract, scope, digest: digest({ contract, scope }) };
+}
+function requirementsFor(info, selected) {
+  if (!info.effectiveContract) return effectiveRequirements(info, selected);
+  const result = { contract: info.effectiveContract, scope: info.effectiveContractScope, digest: info.effectiveContractDigest };
+  need(result.scope?.schema === 'clinicaclick-rds-effective-requirements/1'
+    && digest(result.scope.selectedMigrations) === digest(selected.slice().sort())
+    && result.digest === digest({ contract: result.contract, scope: result.scope }), 'rds_schema_effective_requirements_invalid');
+  return result;
+}
+function assertRequirements(plan, info, selected) {
+  need(plan?.schema === PLAN_SCHEMA, 'rds_schema_plan_version_unsupported');
+  const current = requirementsFor(info, selected);
+  need(plan.effectiveContractDigest === current.digest && digest(plan.effectiveContractScope) === digest(current.scope),
+    'rds_schema_effective_requirements_changed');
+  need(digest(plan.operatorFiles) === digest(info.operatorFiles || []), 'rds_schema_operator_source_changed');
+  return current;
+}
 function buildPlan({ info, before, identity, selected, moduleFiles, profile, at, continuation }) {
   need(Array.isArray(selected) && selected.length <= 20 && new Set(selected).size === selected.length, 'rds_schema_selection_invalid');
   for (const name of selected) need(NAME.test(name) && /^[a-f0-9]{64}$/.test(info.migrations[name] || ''), 'rds_schema_migration_name');
   const pending = selected.filter(name => !before.migrations.includes(name));
-  return { schema: 'clinicaclick-rds-selective-schema-plan/1', createdAtEpochMs: at,
+  const requirements = requirementsFor(info, selected);
+  return { schema: PLAN_SCHEMA, createdAtEpochMs: at,
     sourceRevision: info.revision, contractDigest: info.contractDigest, awsProfile: profile,
+    effectiveContractDigest: requirements.digest, effectiveContractScope: requirements.scope, operatorFiles: info.operatorFiles || [],
     identity, beforeDigest: digest(before), before, moduleFiles,
     selected: selected.map(name => ({ name, sha256: info.migrations[name], alreadyApplied: before.migrations.includes(name) })),
     toApply: pending, unselectedPending: Object.keys(info.migrations).filter(name => !before.migrations.includes(name) && !selected.includes(name)).sort(),
-    compatibilityBefore: compare(before, info.contract), ...(continuation ? { continuation } : {}),
+    compatibilityBefore: compare(before, requirements.contract), ...(continuation ? { continuation } : {}),
     policy: { schemaOnly: true, clinicalRowDml: false, dcl: false, automaticHistoricalMigrations: false,
       destructiveDdl: false, maxDdlPhaseMs: 600000, maxStatementMs: 300000,
       enumMemberAppendOnly: true,
@@ -60,7 +111,8 @@ function buildPlan({ info, before, identity, selected, moduleFiles, profile, at,
 }
 
 function validatePlan(plan, { info, before, identity, moduleFiles, at }) {
-  need(plan?.schema === 'clinicaclick-rds-selective-schema-plan/1' && Number.isSafeInteger(plan.createdAtEpochMs)
+  assertRequirements(plan, info, plan.selected.map(row => row.name));
+  need(Number.isSafeInteger(plan.createdAtEpochMs)
     && plan.createdAtEpochMs <= at && at - plan.createdAtEpochMs <= 86400000, 'rds_schema_plan_expired');
   need(plan.sourceRevision === info.revision && plan.contractDigest === info.contractDigest
     && plan.beforeDigest === digest(before) && digest(plan.identity) === digest(identity)
@@ -130,4 +182,5 @@ function loadMigration(source, name, pins, Sequelize) {
   return { migration, facade };
 }
 
-module.exports = { NAME, METHODS, sha, need, buildPlan, validatePlan, statementKind, migrationFiles, loadMigration };
+module.exports = { NAME, PLAN_SCHEMA, METHODS, sha, need, effectiveRequirements, requirementsFor, assertRequirements,
+  buildPlan, validatePlan, statementKind, migrationFiles, loadMigration };

@@ -117,7 +117,7 @@ async function schemaSnapshot(admin) {
 
 // Gate the real mysql2 dispatch used by Sequelize, not a mirror SQL generator.
 // The same physical connection owns the lock, all DDL and SequelizeMeta writes.
-function migrationInterface({ admin, aws, journal, migrationName, continuation, Sequelize = require('sequelize'), ddlTimeoutMs = 300000 }) {
+function migrationInterface({ admin, aws, journal, migrationName, continuation, beforeDispatch = () => {}, Sequelize = require('sequelize'), ddlTimeoutMs = 300000 }) {
   const raw = admin.raw; const originals = { query: raw.query, execute: raw.execute };
   let tail = Promise.resolve(); let closed = false; let poisoned = false;
   for (const method of ['query', 'execute']) {
@@ -150,6 +150,7 @@ function migrationInterface({ admin, aws, journal, migrationName, continuation, 
         if (target) E.validate(await metadata(), target);
         return new Promise((resolve, reject) => {
           try {
+            if (isDdl) { beforeDispatch(); aws.assertFresh(ddlTimeoutMs + 30000); }
             if (isDdl) journal({ event: 'statement_request', migration: migrationName, sqlSha256: P.sha(sql), kind: 'ddl' });
           } catch (error) { reject(error); return; }
           // Serialize query AND execute, including their warning readback. No
@@ -193,15 +194,28 @@ function migrationInterface({ admin, aws, journal, migrationName, continuation, 
 }
 
 function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connectAdmin, storeFactory = createStore,
+  resolveEffectiveContract = (info, selected) => P.effectiveRequirements(info, selected), operatorPins = () => [],
   now = Date.now, operatorUid = () => process.getuid(), fileOwner = 0 } = {}) {
   async function open(profile) {
     const aws = awsFactory({ profile }); const db = await aws.inspect(); const secret = await aws.secret(db);
     const admin = await connect({ aws, db, secret }); return { aws, admin };
   }
-  function infoFor(source) { P.need(operatorUid() === 0, 'rds_schema_root_required'); return sourceInfo(source, true); }
+  function infoFor(source, selected = []) {
+    P.need(operatorUid() === 0, 'rds_schema_root_required');
+    const raw = sourceInfo(source, true), requirements = resolveEffectiveContract(raw, selected);
+    const info = { ...raw, effectiveContract: requirements.contract, effectiveContractScope: requirements.scope,
+      effectiveContractDigest: requirements.digest, operatorFiles: operatorPins(source) };
+    P.requirementsFor(info, selected); return info;
+  }
+  function fence(source, selected, plan) {
+    const fresh = infoFor(source, selected);
+    P.need(fresh.revision === plan.sourceRevision && fresh.contractDigest === plan.contractDigest, 'rds_schema_plan_stale');
+    P.assertRequirements(plan, fresh, selected); return fresh;
+  }
   async function continuationState({ source, info, store, runDirectory, before, identity }) {
     const pending = store.pending(runDirectory), original = pending.plan.value;
     const selected = original.selected.map(row => row.name), moduleFiles = P.migrationFiles(source, selected);
+    P.assertRequirements(original, info, selected);
     P.need(info.contractDigest === original.contractDigest && digest(moduleFiles) === digest(original.moduleFiles)
       && original.selected.every(row => !row.alreadyApplied && info.migrations[row.name] === row.sha256)
       && digest(original.toApply) === digest(selected), 'rds_schema_reconciliation_source_changed');
@@ -215,18 +229,22 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
   }
   return {
     async plan({ source, selected = [], profile = 'clinicaclick-prov-temp', out }) {
-      const info = infoFor(source); const moduleFiles = P.migrationFiles(source, selected);
+      const info = infoFor(source, selected); const moduleFiles = P.migrationFiles(source, selected);
       const { admin } = await open(profile); let plan; let closure;
       try { plan = P.buildPlan({ info, before: await schemaSnapshot(admin), identity: admin.identity, selected, moduleFiles, profile, at: now() }); }
       finally { closure = await admin.close(); }
+      fence(source, selected, plan);
       const dir = out ? path.dirname(out) : '/home/ubuntu/qa-evidence/rds-schema-plan-' + randomUUID();
       privateDirectory(dir, fileOwner); const planRef = writePrivate(out || dir + '/plan.json', plan);
       return { status: 'rds_schema_plan_ready', planRef, sourceRevision: info.revision, selected: plan.selected,
         toApply: plan.toApply, unselectedPendingCount: plan.unselectedPending.length, compatibilityBefore: plan.compatibilityBefore,
+        effectiveContractDigest: plan.effectiveContractDigest, effectiveContractScope: plan.effectiveContractScope, operatorFiles: plan.operatorFiles,
         statementPolicy: plan.policy, closure, instruction: 'Review selected migration code at this Git SHA; approve this exact plan SHA. Unselected history is never applied.' };
     },
     async reconcile({ source, runDirectory, out }) {
-      const info = infoFor(source), store = storeFactory(), pending = store.pending(runDirectory);
+      P.need(operatorUid() === 0, 'rds_schema_root_required');
+      const store = storeFactory(), pending = store.pending(runDirectory);
+      const selected = pending.plan.value.selected.map(row => row.name), info = infoFor(source, selected);
       const { admin } = await open(pending.plan.value.awsProfile); let plan; let closure;
       try {
         const lock = await admin.query("SELECT GET_LOCK('clinicaclick_rds_schema_release',0) AS acquired");
@@ -236,6 +254,7 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         plan = P.buildPlan({ info, before, identity: admin.identity, selected: state.selected, moduleFiles: state.moduleFiles,
           profile: pending.plan.value.awsProfile, at: now(), continuation: state.descriptor });
       } finally { closure = await admin.close(); }
+      fence(source, selected, plan);
       const dir = out ? path.dirname(out) : '/home/ubuntu/qa-evidence/rds-schema-continuation-' + randomUUID();
       privateDirectory(dir, fileOwner); const planRef = writePrivate(out || dir + '/plan.json', plan);
       return { status: 'rds_schema_continuation_plan_ready', planRef, sourceRevision: info.revision,
@@ -244,9 +263,13 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         instruction: 'Review this exact continuation plan SHA. The original warning is unknown; one CREATE is reconciled from exact metadata, never replayed or acknowledged retroactively.' };
     },
     async apply({ source, planFile, approvePlan }) {
-      const info = infoFor(source); const { value: plan, reference: planRef } = readPrivate(planFile, fileOwner);
+      P.need(operatorUid() === 0, 'rds_schema_root_required');
+      const { value: plan, reference: planRef } = readPrivate(planFile, fileOwner);
       P.need(approvePlan === planRef.sha256, 'rds_schema_explicit_plan_approval_required');
-      const moduleFiles = P.migrationFiles(source, plan.selected.map(item => item.name));
+      P.need(plan?.schema === P.PLAN_SCHEMA, 'rds_schema_plan_version_unsupported');
+      const selected = plan.selected.map(item => item.name), info = infoFor(source, selected);
+      P.assertRequirements(plan, info, selected);
+      const moduleFiles = P.migrationFiles(source, selected);
       P.need(plan.sourceRevision === info.revision && plan.contractDigest === info.contractDigest
         && digest(moduleFiles) === digest(plan.moduleFiles), 'rds_schema_plan_stale');
       P.need(Number.isSafeInteger(plan.createdAtEpochMs) && plan.createdAtEpochMs <= now()
@@ -264,6 +287,7 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
       try {
         const aws = awsFactory({ profile: plan.awsProfile }); await aws.inspect();
         backup = await aws.backup({ operationNonce: run.operationNonce, journal: run.journal });
+        fence(source, selected, plan);
         const db = await aws.inspect(); const secret = await aws.secret(db); admin = await connect({ aws, db, secret });
         const lock = await admin.query("SELECT GET_LOCK('clinicaclick_rds_schema_release',0) AS acquired");
         P.need(String(lock[0]?.acquired) === '1', 'rds_schema_migration_busy');
@@ -275,6 +299,7 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
           && Date.parse(backup.createdAt) >= plan.createdAtEpochMs, 'rds_schema_backup_not_bound_to_plan');
         if (aws.ensureFresh) await aws.ensureFresh(15 * 60 * 1000);
         aws.assertFresh(15 * 60 * 1000);
+        fence(source, selected, plan);
         const ddlDeadline = now() + plan.policy.maxDdlPhaseMs;
         const ddlAws = { assertFresh(milliseconds) {
           P.need(now() + Math.min(milliseconds, 300000) <= ddlDeadline, 'rds_schema_ddl_budget_exhausted');
@@ -284,6 +309,7 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         await admin.query('SET SESSION innodb_lock_wait_timeout=15');
         if (plan.policy.bootstrapSequelizeMeta) {
           const sql = 'CREATE TABLE SequelizeMeta (name VARCHAR(255) NOT NULL PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci';
+          fence(source, selected, plan);
           run.journal({ event: 'statement_request', kind: 'sequelize_meta_bootstrap', sqlSha256: P.sha(sql) });
           await admin.query(sql);
           run.journal({ event: 'statement_ack', kind: 'sequelize_meta_bootstrap', sqlSha256: P.sha(sql), warnings: 0 });
@@ -291,19 +317,23 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         const Sequelize = require('sequelize'); const completed = [];
         for (const name of plan.toApply) {
           const loaded = P.loadMigration(source, name, plan.moduleFiles, Sequelize);
-          const bridge = migrationInterface({ admin, aws: ddlAws, journal: run.journal, migrationName: name, continuation: resumed, Sequelize });
+          const bridge = migrationInterface({ admin, aws: ddlAws, journal: run.journal, migrationName: name, continuation: resumed,
+            beforeDispatch: () => fence(source, selected, plan), Sequelize });
           try { await loaded.migration.up(bridge.queryInterface, loaded.facade); } finally { await bridge.restore(); }
           P.need(!resumed?.pending, 'rds_schema_reconciliation_prefix_not_consumed');
           const sql = 'INSERT INTO SequelizeMeta (name) VALUES (?)';
+          fence(source, selected, plan);
           aws.assertFresh(60000); run.journal({ event: 'statement_request', migration: name, kind: 'sequelize_meta', sqlSha256: P.sha(sql) });
           const inserted = await admin.query(sql, [name]);
           P.need(inserted.affectedRows === 1, 'rds_schema_meta_ack_unknown');
           run.journal({ event: 'statement_ack', migration: name, kind: 'sequelize_meta', sqlSha256: P.sha(sql), affectedRows: 1, warnings: 0 });
           completed.push(name);
         }
-        const after = await schemaSnapshot(admin); const compatibility = compare(after, info.contract);
+        const after = await schemaSnapshot(admin), afterInfo = fence(source, selected, plan);
+        const compatibility = compare(after, afterInfo.effectiveContract);
         P.need(compatibility.compatible && plan.toApply.every(name => after.migrations.includes(name)), 'rds_schema_postcheck_incompatible');
         result = { status: 'rds_schema_applied_and_verified', sourceRevision: info.revision, planRef, completed,
+          effectiveContractDigest: plan.effectiveContractDigest, effectiveContractScope: plan.effectiveContractScope, operatorFiles: plan.operatorFiles,
           afterDigest: digest(after), after, compatibility, identity: admin.identity, backup,
           ...(continuation ? { continuation: plan.continuation, reconciledStatements: 1 } : {}),
           releaseGate: { revision: info.revision, requiredMigrations: completed, stagingPromotion: 'fast-forward-only',
@@ -326,14 +356,20 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         releaseGate: result.releaseGate, backup, closure, compatible: true };
     },
     async verify({ source, runDirectory }) {
-      const info = infoFor(source); const { value: result, reference: resultRef } = readPrivate(path.join(runDirectory, 'result.json'), fileOwner);
-      P.need(result.status === 'rds_schema_applied_and_verified' && result.sourceRevision === info.revision, 'rds_schema_successful_run_required');
+      P.need(operatorUid() === 0, 'rds_schema_root_required');
+      const { value: result, reference: resultRef } = readPrivate(path.join(runDirectory, 'result.json'), fileOwner);
+      P.need(result.status === 'rds_schema_applied_and_verified' && typeof result.planRef?.path === 'string', 'rds_schema_successful_run_required');
       const { value: plan, reference: planRef } = readPrivate(result.planRef.path, fileOwner);
       P.need(planRef.sha256 === result.planRef.sha256, 'rds_schema_plan_changed');
+      P.need(plan?.schema === P.PLAN_SCHEMA, 'rds_schema_plan_version_unsupported');
+      const selected = plan.selected.map(row => row.name), info = fence(source, selected, plan);
+      P.need(result.status === 'rds_schema_applied_and_verified' && result.sourceRevision === info.revision
+        && result.effectiveContractDigest === plan.effectiveContractDigest
+        && digest(result.effectiveContractScope) === digest(plan.effectiveContractScope), 'rds_schema_successful_run_required');
       const { admin } = await open(plan.awsProfile); let after; let closure;
       try { P.need(digest(admin.identity) === digest(result.identity), 'rds_schema_identity_changed'); after = await schemaSnapshot(admin); }
       finally { closure = await admin.close(); }
-      const compatibility = compare(after, info.contract);
+      const afterInfo = fence(source, selected, plan), compatibility = compare(after, afterInfo.effectiveContract);
       P.need(compatibility.compatible && digest(after) === result.afterDigest && result.completed.every(name => after.migrations.includes(name)), 'rds_schema_verify_drift');
       return { status: 'rds_schema_verified', sourceRevision: info.revision, resultRef, requiredMigrations: result.completed, compatible: true, closure };
     },

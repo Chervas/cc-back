@@ -5,8 +5,30 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { createInterface } = require('node:readline/promises');
 const { createRunner, safeCode, safeResultRef } = require('../lib/rdsSchemaMigration');
-const { need } = require('../lib/rdsSchemaMigrationPolicy');
+const { need, sha, effectiveRequirements } = require('../lib/rdsSchemaMigrationPolicy');
+const transport = require('../lib/rdsSchemaMigrationTransport');
 const SOURCE = path.resolve(__dirname, '../..');
+const OPERATOR_CODE = Object.freeze(['package.json', 'package-lock.json',
+  'src/lib/rdsSchemaMigration.js', 'src/lib/rdsSchemaMigrationPolicy.js', 'src/lib/rdsSchemaMigrationTransport.js',
+  'src/lib/rdsSchemaWarningPolicy.js', 'src/lib/rdsSchemaFirstCreateReconciliation.js', 'src/lib/mysqlEnumExtension.js',
+  'src/lib/securitySchemaContract.js', 'src/lib/schemaReleaseDatabase.js', 'src/lib/databaseTlsConfig.js',
+  'src/lib/databaseEncryptionMetadata.js', 'src/scripts/security-rds-schema-migrate.js', 'src/scripts/security-schema-release.js',
+  'src/scripts/security-email-login-metadata.js', 'src/scripts/security-database-metadata.js']);
+function operatorPins(source) {
+  return OPERATOR_CODE.slice().sort().map(relative => {
+    const file = path.join(source, relative), loaded = path.join(SOURCE, relative);
+    need(fs.realpathSync(file) === file && fs.lstatSync(file).isFile(), 'rds_schema_operator_source_invalid');
+    const sha256 = sha(fs.readFileSync(file));
+    need(sha256 === sha(fs.readFileSync(loaded)), 'rds_schema_operator_source_changed');
+    return { path: relative, sha256 };
+  });
+}
+function runtimeRequirements(info, selected, observe = require('./security-email-login-metadata').observedEnvironment) {
+  const env = observe('staging').env;
+  need(env.DB_TLS_REQUIRED === 'true' && env.DB_HOST === transport.HOST && env.DB_NAME === transport.DATABASE
+    && String(env.DB_PORT || '3306') === '3306', 'rds_schema_runtime_configuration');
+  return effectiveRequirements(info, selected, env, 'staging');
+}
 
 function parse(argv) {
   const action = String(argv.shift() || '').replace(/-rds$/, '');
@@ -33,7 +55,9 @@ function parse(argv) {
 
 async function run(argv, dependencies = {}) {
   const options = parse([...argv]);
-  const runner = dependencies.runner || createRunner({ sourceInfo: require('./security-schema-release').sourceInfo });
+  const runner = dependencies.runner || createRunner({ sourceInfo: dependencies.sourceInfo || require('./security-schema-release').sourceInfo,
+    resolveEffectiveContract: (info, selected) => runtimeRequirements(info, selected, dependencies.observe),
+    operatorPins: dependencies.operatorPins || operatorPins });
   if (options.action === 'plan') return runner.plan(options);
   if (options.action === 'apply') return runner.apply(options);
   if (options.action === 'verify') return runner.verify(options);
@@ -60,4 +84,4 @@ if (require.main === module) run(process.argv.slice(2)).then(result => {
   process.stderr.write(JSON.stringify({ status: 'failed', reason: safeCode(error), ...(resultRef ? { resultRef } : {}) }) + '\n');
   process.exitCode = 1;
 });
-module.exports = { parse, run };
+module.exports = { parse, run, operatorPins, runtimeRequirements };
