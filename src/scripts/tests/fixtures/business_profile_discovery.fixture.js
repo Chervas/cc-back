@@ -25,10 +25,13 @@ function loadDiscoverySource(relative, dependencies, { env = {}, logs = [] } = {
 function unusedMetaSurfaceDependencies() {
   const deny=()=>{throw Error('UNEXPECTED_META_SURFACE_IN_OAUTH_QA');};
   return {
-    '../services/metaConnectionMetadata.service':{createMetaConnectionMetadata:()=>({handler:()=>deny}),createMetaMetadataRepository:()=>deny},
+    '../services/metaConnectionMetadata.service':{createMetaConnectionMetadata:()=>({handler:()=>deny}),createMetaMetadataRepository:()=>deny,createMetaDataAccessRepository:()=>deny},
     '../services/metaMarketingAccessCheck.service':{createMetaMarketingAccessCheck:()=>({handler:()=>deny})},
     '../services/metaMarketingBrokerReader.service':{forModels:()=>({prepare:deny,read:deny})},
     './metaMarketingRevocation.routes':{createRouter:()=>deny},
+    // Gateway initializes its legacy Google guard while mounting OAuth. Only
+    // construction is allowed; using that unrelated surface still fails closed.
+    '../services/googleLegacyOAuthGuard.service':{createGoogleLegacyOAuthGuard:()=>({assertAllowed:deny})},
   };
 }
 module.exports = { loadDiscoverySource, unusedMetaSurfaceDependencies };
