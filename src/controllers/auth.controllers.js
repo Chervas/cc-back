@@ -171,7 +171,11 @@ function emailError(res, error) {
     const statuses = { auth_email_invalid: 401, auth_email_expired: 401, auth_email_locked: 429,
         auth_email_rate_limited: 429, auth_email_unavailable: 503, auth_email_configuration_invalid: 503 };
     const code = Object.hasOwn(statuses, error?.code) ? error.code : 'auth_email_unavailable';
+    const retryAfterSeconds = code === 'auth_email_rate_limited' && Number.isSafeInteger(error?.retryAfterSeconds)
+        && error.retryAfterSeconds >= 1 && error.retryAfterSeconds <= 3600 ? error.retryAfterSeconds : null;
+    if (retryAfterSeconds !== null) res.set('Retry-After', String(retryAfterSeconds));
     return res.status(statuses[code]).json({ error: code,
+        ...(retryAfterSeconds !== null ? { retryAfterSeconds } : {}),
         message: statuses[code] === 503 ? 'Authentication temporarily unavailable.' : 'Email verification could not be completed.' });
 }
 async function passwordWithEmail(req, res, legacy) {

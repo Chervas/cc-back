@@ -31,11 +31,12 @@ function createService({ models, sessions, trustedDevices, audit, queueEmail, co
     const health = await repo().health(now(), { includeUnresolved: false, transaction });
     if (health.pending >= 10000 || health.oldestAgeSeconds >= 3600) C.fail('auth_email_unavailable', 503);
   }
-  const resultError = (code, status = 401) => ({ error: { code, status } });
+  const resultError = (code, status = 401, retryAfterSeconds) => ({ error: { code, status,
+    ...(Number.isSafeInteger(retryAfterSeconds) ? { retryAfterSeconds } : {}) } });
   async function finish(work) {
     try {
       const result = await work();
-      if (result?.error) C.fail(result.error.code, result.error.status);
+      if (result?.error) throw Object.assign(Error(result.error.code), result.error);
       return result;
     } catch (error) {
       if (['auth_email_invalid', 'auth_email_expired', 'auth_email_locked', 'auth_email_rate_limited',
@@ -49,6 +50,31 @@ function createService({ models, sessions, trustedDevices, audit, queueEmail, co
       // conservative at the boundary and never drops a recent resend merely
       // because the password step was created earlier.
       last_sent_at: { [Op.gte]: new Date(now().getTime() - 3600000) } }, transaction })) || 0;
+  }
+  async function rateLimitRetryAfter(userId, lastSentAt, transaction) {
+    const at = now().getTime();
+    // Preserve the quota's whole-intent weighting and inclusive hour boundary.
+    // This read happens only after denial, under the same per-user lock.
+    const rows = await db().AuthEmailChallenge.findAll({ attributes: ['sends', 'last_sent_at'], raw: true,
+      where: { user_id: userId, last_sent_at: { [Op.gte]: new Date(at - 3600000) } },
+      order: [['last_sent_at', 'ASC']], transaction, logging: false });
+    let total = 0;
+    const expirations = rows.map(row => {
+      const sends = Number(row.sends), sentAt = row.last_sent_at?.getTime();
+      if (!Number.isSafeInteger(sends) || sends < 0 || !Number.isFinite(sentAt)) C.fail('auth_email_unavailable', 503);
+      total += sends;
+      if (!Number.isSafeInteger(total)) C.fail('auth_email_unavailable', 503);
+      return { sends, expiresAt: sentAt + 3600001 };
+    }).sort((a, b) => a.expiresAt - b.expiresAt);
+    let availableAt = lastSentAt ? lastSentAt.getTime() + C.LIMITS.minResendSeconds * 1000 : at;
+    if (total >= C.LIMITS.sendsPerUserHour) {
+      for (const row of expirations) {
+        total -= row.sends;
+        availableAt = Math.max(availableAt, row.expiresAt);
+        if (total < C.LIMITS.sendsPerUserHour) break;
+      }
+    }
+    return Math.max(1, Math.min(3600, Math.ceil((availableAt - at) / 1000)));
   }
   function response(row, token, email) {
     return { mfaRequired: true, method: 'email', challengeToken: token, maskedEmail: C.maskedEmail(email),
@@ -76,8 +102,9 @@ function createService({ models, sessions, trustedDevices, audit, queueEmail, co
         order: [['created_at', 'DESC']], transaction, lock: transaction.LOCK.UPDATE });
       if (recent && now().getTime() < recent.last_sent_at.getTime() + C.LIMITS.minResendSeconds * 1000
         || await sendsThisHour(fresh.id_usuario, transaction) >= C.LIMITS.sendsPerUserHour) {
+        const retryAfterSeconds = await rateLimitRetryAfter(fresh.id_usuario, recent?.last_sent_at, transaction);
         await record({ outcome: 'denied', reason: 'rate_limited', userId: fresh.id_usuario }, transaction);
-        return resultError('auth_email_rate_limited', 429);
+        return resultError('auth_email_rate_limited', 429, retryAfterSeconds);
       }
       await db().AuthEmailChallenge.update({ state: 'revoked' }, { where: { user_id: fresh.id_usuario,
         state: { [Op.in]: ['pending', 'verified'] } }, transaction });
@@ -103,10 +130,10 @@ function createService({ models, sessions, trustedDevices, audit, queueEmail, co
       const user = await db().Usuario.findByPk(hint.user_id, { attributes: FIELDS, transaction, lock: transaction.LOCK.UPDATE });
       const row = await db().AuthEmailChallenge.findByPk(hint.challenge_id, { transaction, lock: transaction.LOCK.UPDATE });
       await capacity(transaction);
-      const reject = async (reason, code, status = 401, state = null) => {
+      const reject = async (reason, code, status = 401, state = null, retryAfterSeconds) => {
         if (row && state) await row.update({ state }, { transaction });
         await record({ outcome: 'denied', reason, userId: row?.user_id || null, challengeId: row?.challenge_id || null }, transaction);
-        return resultError(code, status);
+        return resultError(code, status, retryAfterSeconds);
       };
       if (!row || !C.equalHash(row.challenge_hash, hash) || row.user_id !== hint.user_id || row.state !== 'pending') {
         return reject('challenge_rejected', 'auth_email_invalid');
@@ -120,8 +147,14 @@ function createService({ models, sessions, trustedDevices, audit, queueEmail, co
     });
   }
   const resend = token => finish(() => operate(token, async ({ cfg, row, user, transaction, reject }) => {
-    if (row.sends >= C.LIMITS.maxSends || now().getTime() < row.last_sent_at.getTime() + C.LIMITS.minResendSeconds * 1000
-      || await sendsThisHour(user.id_usuario, transaction) >= C.LIMITS.sendsPerUserHour) return reject('rate_limited', 'auth_email_rate_limited', 429);
+    // An exhausted intent cannot be reopened by waiting. Only temporary limits
+    // carry Retry-After; the existing maximum sends and error code stay intact.
+    if (row.sends >= C.LIMITS.maxSends) return reject('rate_limited', 'auth_email_rate_limited', 429);
+    if (now().getTime() < row.last_sent_at.getTime() + C.LIMITS.minResendSeconds * 1000
+      || await sendsThisHour(user.id_usuario, transaction) >= C.LIMITS.sendsPerUserHour) {
+      return reject('rate_limited', 'auth_email_rate_limited', 429, null,
+        await rateLimitRetryAfter(user.id_usuario, row.last_sent_at, transaction));
+    }
     const at = now(); let code;
     for (let i = 0; i < 10; i++) {
       const candidate = String(randomInt(0, 1000000)).padStart(6, '0');

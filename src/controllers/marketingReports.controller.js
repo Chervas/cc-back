@@ -4211,7 +4211,16 @@ exports.getOverview = async (req, res) => {
           try {
             const sessions = require('../services/accessSession.service');
             claims = await sessions.verify(sessions.bearer(req.headers?.authorization));
-          } catch { claims = null; }
+          } catch (error) {
+            // A failed live check must still deny disclosure, but a storage or
+            // audit outage is not evidence that the user's session is invalid.
+            const invalid = ['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error?.name)
+              || error?.code === 'auth_invalid';
+            const denied = error?.status === 403 || error?.httpStatus === 403;
+            const code = invalid ? 'search_console_session_required'
+              : denied ? 'search_console_scope_forbidden' : 'search_console_session_unavailable';
+            throw Object.assign(Error(code), { code, status: invalid ? 401 : denied ? 403 : 503 });
+          }
           if (!claims || !require('../lib/delegatedOperationPolicy').isManagedBusinessSession(claims) || !claims.jti || Number(claims.userId) !== userId) {
             throw Object.assign(Error('search_console_session_required'), { code: 'search_console_session_required', status: 401 });
           }
