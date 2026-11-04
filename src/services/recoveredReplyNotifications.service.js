@@ -107,5 +107,7 @@ function createService({models,emitUpdated=()=>{},emitState=()=>{},now=()=>new D
 let instance;
 function current(){return instance||=createService({models:require('../../models'),
   emitUpdated:n=>require('./notificationsRealtime.service').emitNotificationUpdated(n),
-  emitState:({clinicId,conversationId})=>require('./socket.service').getIO()?.to(`clinic:${clinicId}`).emit('conversation:updated',{id:String(conversationId)})});}
+  emitState:({clinicId,conversationId})=>require('./socket.service').getIO()?.to(`clinic:${clinicId}`).emit('conversation:updated',{
+    id:String(conversationId),clinic_id:Number(clinicId),realtime_refresh:true,
+  })});}
 module.exports={createService,current,requestFor,resolution};
