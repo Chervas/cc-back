@@ -2,6 +2,11 @@
   "version": 1,
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
   "featureGroups": {
+    "meta_marketing_recovery": {
+      "enabledWhenAny": {"DB_TLS_REQUIRED": "true", "META_MARKETING_LEGACY_RECOVERY_ENABLED": "true"},
+      "tables": ["MetaMarketingRecoveries"],
+      "migrations": ["20261104123000-create-meta-marketing-recoveries.js"]
+    },
     "google_ads_goal_policy_writes": {"enabledWhenAll":{"GOOGLE_ADS_GOAL_POLICY_BROKER_ENABLED":"true"},"tables":["GoogleAdsGoalPolicyJournals"],"migrations":["20261030090000-create-google-ads-goal-policy-journals.js"]},
     "delegated_sessions": {"enabledWhenAll":{"AUTH_DELEGATION_ENABLED":"true"},"tables":["DelegatedSessions"],"migrations":["20261028110000-create-delegated-sessions.js"]},
     "whatsapp_inbox_routing_reviews": {
@@ -62,6 +67,39 @@
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
+    "MetaMarketingRecoveries": {
+      "ENGINE": "InnoDB", "TABLE_COLLATION": "utf8mb4_bin",
+      "columns": [
+        {"COLUMN_NAME":"recovery_id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"scope_key","COLUMN_TYPE":"varchar(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"clinic_ids","COLUMN_TYPE":"text","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"app_id","COLUMN_TYPE":"varchar(30)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"meta_user_id","COLUMN_TYPE":"varchar(30)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"source_connection_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"canonical_connection_id","COLUMN_TYPE":"int","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"mapping_ids","COLUMN_TYPE":"text","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"snapshot","COLUMN_TYPE":"longtext","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"snapshot_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"prepared_by_user_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"prepared_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"expires_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"state","COLUMN_TYPE":"enum('prepared','flow_bound','active','retired')","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"flow_id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"candidate_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"enrollment_id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"bound_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"activated_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"retired_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}
+      ],
+      "indexes": [
+        {"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"recovery_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"cc_meta_recovery_canonical","columns":[{"INDEX_NAME":"cc_meta_recovery_canonical","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"canonical_connection_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"cc_meta_recovery_enrollment","columns":[{"INDEX_NAME":"cc_meta_recovery_enrollment","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"enrollment_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"cc_meta_recovery_flow","columns":[{"INDEX_NAME":"cc_meta_recovery_flow","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"flow_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"cc_meta_recovery_scope_state","columns":[{"INDEX_NAME":"cc_meta_recovery_scope_state","NON_UNIQUE":1,"SEQ_IN_INDEX":1,"COLUMN_NAME":"scope_key","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"cc_meta_recovery_scope_state","NON_UNIQUE":1,"SEQ_IN_INDEX":2,"COLUMN_NAME":"state","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}
+      ],
+      "foreignKeys": []
+    },
     "GoogleAdsGoalPolicyJournals": {"ENGINE":"InnoDB","TABLE_COLLATION":"utf8mb4_0900_ai_ci","columns":[{"COLUMN_NAME":"id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"policy_id","COLUMN_TYPE":"bigint unsigned","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"intake_config_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"customer_id","COLUMN_TYPE":"char(10)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"scope_key","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"active_lock_key","COLUMN_TYPE":"char(64)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"plan_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"scope_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"mandate_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"policy_version","COLUMN_TYPE":"int unsigned","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"lease_token","COLUMN_TYPE":"char(36)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"state","COLUMN_TYPE":"varchar(16)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"journal","COLUMN_TYPE":"json","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"version","COLUMN_TYPE":"int unsigned","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"created_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"updated_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}],"indexes":[{"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},{"name":"ix_goal_policy_customer_history","columns":[{"INDEX_NAME":"ix_goal_policy_customer_history","NON_UNIQUE":1,"SEQ_IN_INDEX":1,"COLUMN_NAME":"customer_id","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"ix_goal_policy_customer_history","NON_UNIQUE":1,"SEQ_IN_INDEX":2,"COLUMN_NAME":"created_at","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},{"name":"ix_goal_policy_policy_history","columns":[{"INDEX_NAME":"ix_goal_policy_policy_history","NON_UNIQUE":1,"SEQ_IN_INDEX":1,"COLUMN_NAME":"policy_id","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"ix_goal_policy_policy_history","NON_UNIQUE":1,"SEQ_IN_INDEX":2,"COLUMN_NAME":"created_at","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},{"name":"uq_goal_policy_active_lock","columns":[{"INDEX_NAME":"uq_goal_policy_active_lock","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"active_lock_key","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}],"foreignKeys":[]},
     "Instalaciones": {"columns":[{"COLUMN_NAME":"icono","COLUMN_TYPE":"varchar(96)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","GENERATION_EXPRESSION":""}],"indexes":[]},
     "Usuarios": {"columns":[{"COLUMN_NAME":"tratamiento_profesional","COLUMN_TYPE":"varchar(8)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","GENERATION_EXPRESSION":""}],"indexes":[]},
@@ -5815,6 +5853,7 @@
     }
   },
   "migrations": [
+    {"name":"20261104123000-create-meta-marketing-recoveries.js","sha256":"d007846d028cdac980d2ddd8f1969dde0539203f96f3a8502b49527af4c9c00f"},
     {"name":"20261030090000-create-google-ads-goal-policy-journals.js","sha256":"d08956c1f381a27f6df4f7c15c02bcd91c7e5a9f3ab2d5a981fa4c37e1b628b3"},
     {"name":"20261028110000-create-delegated-sessions.js","sha256":"d186aa13eee725796d0939b56d6c3fa9d1dfc2fc71eab30cde3012b7d66e0d10"},
     {"name":"20261020170000-add-patient-program-enrollment-snapshot.js","sha256":"e0a2b86deacc6d896f1c69f16dfae61acb1da45505a13d2fd56dbd69b2e6a208"},

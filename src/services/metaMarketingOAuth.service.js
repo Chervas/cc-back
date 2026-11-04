@@ -12,7 +12,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const origin=new URL(returnOrigin);if(origin.origin!==returnOrigin||!['http:','https:'].includes(origin.protocol))C.fail();
   const R=models.MetaMarketingOAuthRequest,S=models.MetaMarketingOAuthSlot,scope=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now});
   const audit=require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
-  const reviewAssignment=require('./metaMarketingEnrollmentReview.service').createReview({models,now});
+  const reviewAssignment=require('./metaMarketingEnrollmentReview.service').createReview({models,sessions,now});
   const tx=fn=>models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},fn),locked=transaction=>({transaction,lock:transaction.LOCK.UPDATE,logging:false});
   const plain=r=>r?.get?r.get({plain:true}):r;
   const gate=()=>{if(!enabled())C.fail('meta_oauth_disabled');};

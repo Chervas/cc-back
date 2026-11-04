@@ -2064,6 +2064,10 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
         const sinceStr = new Date(startDate).toISOString().slice(0,10);
         const untilStr = new Date(endDate).toISOString().slice(0,10);
         const stats = { entities: 0, insightsRows: 0, actionsRows: 0, linkedPromotions: 0 };
+        // No legacy token is used, even when an old caller still supplies one.
+        const adsSource = options.adsSource || await require('../services/metaMarketingAdsReader.service')
+            .forModels(require('../../models')).sourceForAsset(asset.id);
+        await adsSource.assert();
 
         const clinicsCache = new Map();
 
@@ -2181,6 +2185,7 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                 last_seen_at: new Date()
             };
 
+            await adsSource.assert();
             const [issue, created] = await AdAttributionIssue.findOrCreate({
                 where: {
                     provider: 'meta',
@@ -2191,6 +2196,7 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
             });
 
             if (!created) {
+                await adsSource.assert();
                 await issue.update({
                     ...payload,
                     resolved_at: null
@@ -2203,6 +2209,7 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                 return;
             }
 
+            await adsSource.assert();
             await AdAttributionIssue.update({
                 status: 'resolved',
                 resolved_at: new Date(),
@@ -2218,28 +2225,12 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
 
         // 1) Entidades (Campaigns/AdSets/Ads) — guardamos jerarquía completa
         try {
-            const { metaGet } = require('../lib/metaClient');
-            let pageLimit = parseInt(process.env.ADS_ENTITIES_LIMIT || '50', 10);
-
             // 1.a) Campaigns
             try {
-                let nextUrl = `${accountId}/campaigns`;
-                let params = { fields: 'id,name,status,effective_status,objective,buying_type,created_time,updated_time', limit: pageLimit };
-                while (nextUrl) {
-                    let resp;
-                    try {
-                        resp = await metaGet(nextUrl, { params, accessToken });
-                    } catch (ePage) {
-                        if ((ePage.response?.status || 0) === 500 && pageLimit > 25) {
-                            console.warn('⚠️ Campaigns 500, reduciendo límite a 25 y reintentando');
-                            pageLimit = 25;
-                            params = { fields: 'id,name,status,effective_status,objective,buying_type,created_time,updated_time', limit: pageLimit };
-                            continue;
-                        }
-                        throw ePage;
-                    }
-                    const data = resp.data?.data || [];
+                for await (const data of adsSource.pages('campaigns')) {
+                    await adsSource.assert();
                     for (const camp of data) {
+                        await adsSource.assert();
                         await SocialAdsEntity.upsert({
                             ad_account_id: accountId,
                             level: 'campaign',
@@ -2295,31 +2286,17 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                             name: camp.name || null
                         });
                     }
-                    const next = resp.data?.paging?.next;
-                    if (next) { nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, ''); params = {}; } else { nextUrl = null; }
                 }
             } catch (eCamp) {
-                console.warn('⚠️ Error sincronizando Campaigns:', eCamp.response?.data || eCamp.message);
+                throw eCamp;
             }
 
             // 1.b) AdSets
             try {
-                let nextUrl = `${accountId}/adsets`;
-                let params = { fields: 'id,name,campaign_id,status,effective_status,created_time,updated_time', limit: pageLimit };
-                while (nextUrl) {
-                    let resp;
-                    try { resp = await metaGet(nextUrl, { params, accessToken }); }
-                    catch (ePage) {
-                        if ((ePage.response?.status || 0) === 500 && pageLimit > 25) {
-                            console.warn('⚠️ AdSets 500, reduciendo límite a 25 y reintentando');
-                            pageLimit = 25;
-                            params = { fields: 'id,name,campaign_id,status,effective_status,created_time,updated_time', limit: pageLimit };
-                            continue;
-                        }
-                        throw ePage;
-                    }
-                    const data = resp.data?.data || [];
+                for await (const data of adsSource.pages('adsets')) {
+                    await adsSource.assert();
                     for (const aset of data) {
+                        await adsSource.assert();
                         await SocialAdsEntity.upsert({
                             ad_account_id: accountId,
                             level: 'adset',
@@ -2393,32 +2370,16 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                             name: aset.name || null
                         });
                     }
-                    const next = resp.data?.paging?.next;
-                    if (next) { nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, ''); params = {}; } else { nextUrl = null; }
                 }
             } catch (eAset) {
-                console.warn('⚠️ Error sincronizando AdSets:', eAset.response?.data || eAset.message);
+                throw eAset;
             }
 
             // 1.c) Ads con creatives para posible vínculo a posts (antes estaba como 1)
-            let nextUrl = `${accountId}/ads`;
-            const baseFields = 'id,name,adset_id,campaign_id,status,effective_status,created_time,updated_time,creative{id,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url}';
-            let params = { fields: baseFields, limit: pageLimit };
-            while (nextUrl) {
-                let resp;
-                try {
-                    resp = await metaGet(nextUrl, { params, accessToken });
-                } catch (ePage) {
-                    if ((ePage.response?.status || 0) === 500 && pageLimit > 25) {
-                        console.warn('⚠️ Ads list 500, reduciendo límite a 25 y reintentando');
-                        pageLimit = 25;
-                        params = { fields: baseFields, limit: pageLimit };
-                        continue; // reintentar misma página con menor límite
-                    }
-                    throw ePage;
-                }
-                const data = resp.data?.data || [];
+            for await (const data of adsSource.pages('ads')) {
+                await adsSource.assert();
                 for (const ad of data) {
+                    await adsSource.assert();
                     await SocialAdsEntity.upsert({
                         ad_account_id: accountId,
                         level: 'ad',
@@ -2550,138 +2511,94 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                                 status: ad.effective_status || ad.status || null
                             };
                             if (existingPromo) {
+                                await adsSource.assert();
                                 await existingPromo.update(payload);
                                 stats.linkedPromotions++;
                             } else {
+                                await adsSource.assert();
                                 await PostPromotions.create(payload);
                                 stats.linkedPromotions++;
                             }
                         }
                     } catch (linkErr) {
-                        console.warn('⚠️ Error vinculando anuncio con post orgánico:', linkErr.message);
+                        throw linkErr;
                     }
                 }
-                const next = resp.data?.paging?.next;
-                if (next) {
-                    // paging.next es URL absoluta; la convertimos a ruta + params para metaGet
-                    nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, '');
-                    params = {}; // ya incluye querystring en nextUrl
-                } else {
-                    nextUrl = null;
-                }
+
             }
             console.log(`🧾 Ads detectados/actualizados: ${stats.entities}`);
         } catch (e) {
-            console.warn('⚠️ Error sincronizando entidades de Ads:', e.response?.data || e.message);
+            throw e;
         }
 
-        // 2) Insights diarios (por ad, con breakdown) — troceado por días para evitar 500
+        // 2) Replace a fully read daily window atomically; a verified empty
+        // snapshot removes stale rows, while an interrupted page never purges.
         try {
             const untilDate = new Date(untilStr);
             const sinceDate = new Date(sinceStr);
-            const chunkDays = parseInt(process.env.ADS_CHUNK_DAYS || '3', 10);
+            const chunkDays = Math.max(1, Math.min(3, parseInt(process.env.ADS_CHUNK_DAYS || '3', 10) || 3));
             let totalRows = 0;
-            for (let d = new Date(sinceDate); d <= untilDate; d.setDate(d.getDate() + chunkDays)) {
+            for (let d = new Date(sinceDate); d <= untilDate; d.setUTCDate(d.getUTCDate() + chunkDays)) {
                 const cs = new Date(d);
-                const ce = new Date(Math.min(untilDate.getTime(), new Date(d).setDate(d.getDate() + chunkDays - 1)));
-                let params = {
-                    level: 'ad',
-                    time_increment: 1,
-                    time_range: JSON.stringify({ since: cs.toISOString().slice(0,10), until: ce.toISOString().slice(0,10) }),
-                    // Include ad_id explicitly to avoid 'unknown' entity_id rows
-                    fields: 'ad_id,impressions,reach,clicks,inline_link_clicks,spend,cpc,cpm,ctr,frequency',
-                    breakdowns: 'publisher_platform,platform_position',
-                    limit: parseInt(process.env.ADS_PAGE_LIMIT || '100', 10),
-                    access_token: accessToken
-                };
-                let nextUrl = `${accountId}/insights`;
-                const runChunk = async (lim) => {
-                    params.limit = lim;
-                    while (true) {
-                        const resp = await metaGet(nextUrl, { params, accessToken });
-                        const rows = resp.data?.data || [];
-                        // Agregar por (entity_id, date, publisher_platform, platform_position)
-                        const agg = new Map();
-                        for (const r of rows) {
-                            const dateStr = (r.date_start ? new Date(r.date_start) : new Date(endDate)).toISOString().slice(0,10);
-                            const entityId = r.ad_id ? String(r.ad_id) : null;
-                            const plat = (r.publisher_platform || '').toLowerCase() || null;
-                            const pos = (r.platform_position || '').toLowerCase() || 'unknown';
-                            const key = `${entityId}|${dateStr}|${plat}|${pos}`;
-                            const cur = agg.get(key) || { impressions:0, reach:0, clicks:0, inline:0, spend:0 };
-                            cur.impressions += parseInt(r.impressions || 0, 10) || 0;
-                            cur.reach += parseInt(r.reach || 0, 10) || 0;
-                            cur.clicks += parseInt(r.clicks || 0, 10) || 0;
-                            cur.inline += parseInt(r.inline_link_clicks || 0, 10) || 0;
-                            cur.spend += parseFloat(r.spend || 0) || 0;
-                            agg.set(key, cur);
-                        }
-                        const toFixed = (n, d) => Number.isFinite(n) ? Number(n.toFixed(d)) : 0;
-                        for (const [key, v] of agg.entries()) {
-                            const [entityId, dateStr, plat, pos] = key.split('|');
-                            const impressions = v.impressions;
-                            const clicks = v.clicks;
-                            const spend = v.spend;
-                            const cpm = impressions > 0 ? toFixed((spend * 1000) / impressions, 4) : 0;
-                            const cpc = clicks > 0 ? toFixed(spend / clicks, 4) : 0;
-                            const ctr = impressions > 0 ? toFixed((clicks / impressions) * 100, 4) : 0;
-                            const freq = v.reach > 0 ? toFixed(impressions / v.reach, 3) : 0;
-
-                            if (!entityId) {
-                                console.warn('⚠️ Insights row sin ad_id; se omite');
-                                continue;
-                            }
-                            const assignmentInfo = adAssignments.get(entityId) || {};
-                            let targetClinicId = assignmentInfo.clinicaId ?? null;
-                            let matchSource = assignmentInfo.source || null;
-                            let matchValue = assignmentInfo.matchValue || null;
-                            if (!targetClinicId && assignment.mode === 'manual') {
-                                targetClinicId = assignment.clinicaId || asset.clinicaId || null;
-                                matchSource = 'manual';
-                            }
-                            const grupoClinicaId = groupId;
-                            await SocialAdsInsightsDaily.upsert({
-                                ad_account_id: accountId,
-                                level: 'ad',
-                                entity_id: entityId,
-                                date: dateStr,
-                                publisher_platform: plat,
-                                platform_position: pos,
-                                clinica_id: targetClinicId,
-                                grupo_clinica_id: grupoClinicaId,
-                                impressions,
-                                reach: v.reach,
-                                clicks,
-                                inline_link_clicks: v.inline,
-                                spend,
-                                cpm,
-                                cpc,
-                                ctr: Math.min(ctr, 99.9999),
-                                frequency: Math.min(freq, 999.999),
-                                clinic_match_source: matchSource,
-                                clinic_match_value: matchValue
-                            });
-                            totalRows++;
-                        }
-                        const next = resp.data?.paging?.next;
-                        if (!next) break;
-                        nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, '');
-                        params = {}; // next URL carries params
-                    }
-                };
-                try {
-                    await runChunk(parseInt(process.env.ADS_PAGE_LIMIT || '100', 10));
-                } catch (e1) {
-                    if ((e1.response?.status || 0) === 500) {
-                        console.warn('⚠️ Insights 500, reintentando chunk con límite 50');
-                        await runChunk(50);
-                    } else {
-                        throw e1;
+                const ce = new Date(Math.min(untilDate.getTime(), new Date(d).setUTCDate(d.getUTCDate() + chunkDays - 1)));
+                const range = { startDate: cs.toISOString().slice(0,10), endDate: ce.toISOString().slice(0,10) };
+                const aggregate = new Map();
+                let pagesRead = 0;
+                for await (const rows of adsSource.pages('insights', range)) {
+                    await adsSource.assert(); pagesRead++;
+                    for (const row of rows) {
+                        const key = JSON.stringify([String(row.ad_id), row.date_start, row.publisher_platform.toLowerCase(), row.platform_position.toLowerCase()]);
+                        const value = aggregate.get(key) || { impressions: 0, reach: 0, clicks: 0, inline: 0, spend: 0 };
+                        value.impressions += Number(row.impressions || 0);
+                        value.reach += Number(row.reach || 0);
+                        value.clicks += Number(row.clicks || 0);
+                        value.inline += Number(row.inline_link_clicks || 0);
+                        value.spend += Number(row.spend || 0);
+                        aggregate.set(key, value);
                     }
                 }
+                if (!pagesRead) throw Object.assign(Error('provider_failed'), { code: 'provider_failed' });
+                const snapshots = [];
+                const toFixed = (value, digits) => Number.isFinite(value) ? Number(value.toFixed(digits)) : 0;
+                for (const [key, value] of aggregate) {
+                    const [entityId, date, platform, position] = JSON.parse(key);
+                    const assignmentInfo = adAssignments.get(entityId) || {};
+                    let clinicId = assignmentInfo.clinicaId ?? null;
+                    let matchSource = assignmentInfo.source || null;
+                    if (!clinicId && assignment.mode === 'manual') { clinicId = assignment.clinicaId || asset.clinicaId || null; matchSource = 'manual'; }
+                    snapshots.push({ ad_account_id: accountId, level: 'ad', entity_id: entityId, date,
+                        publisher_platform: platform, platform_position: position, clinica_id: clinicId, grupo_clinica_id: groupId,
+                        impressions: value.impressions, reach: value.reach, clicks: value.clicks, inline_link_clicks: value.inline, spend: value.spend,
+                        cpm: value.impressions ? toFixed(value.spend * 1000 / value.impressions, 4) : 0,
+                        cpc: value.clicks ? toFixed(value.spend / value.clicks, 4) : 0,
+                        ctr: Math.min(value.impressions ? toFixed(value.clicks * 100 / value.impressions, 4) : 0, 99.9999),
+                        frequency: Math.min(value.reach ? toFixed(value.impressions / value.reach, 3) : 0, 999.999),
+                        clinic_match_source: matchSource, clinic_match_value: assignmentInfo.matchValue || null });
+                }
+                await adsSource.assert();
+                await SocialAdsInsightsDaily.sequelize.transaction(async transaction => {
+                    await adsSource.assert();
+                    const where = { ad_account_id: accountId, level: 'ad', date: { [Op.between]: [range.startDate, range.endDate] } };
+                    const previous = await SocialAdsInsightsDaily.findAll({ where, attributes: ['id', 'entity_id', 'date', 'publisher_platform', 'platform_position'],
+                        raw: true, transaction, lock: transaction.LOCK.UPDATE });
+                    const keyOf = row => JSON.stringify([String(row.entity_id), row.date, row.publisher_platform, row.platform_position]);
+                    const retained = new Set(snapshots.map(keyOf));
+                    for (const snapshot of snapshots) {
+                        await adsSource.assert();
+                        await SocialAdsInsightsDaily.upsert(snapshot, { transaction });
+                    }
+                    const staleIds = previous.filter(row => !retained.has(keyOf(row))).map(row => row.id);
+                    if (staleIds.length) {
+                        await adsSource.assert();
+                        await SocialAdsInsightsDaily.destroy({ where: { ...where, id: { [Op.in]: staleIds } }, transaction });
+                    }
+                    await adsSource.assert();
+                });
+                totalRows += snapshots.length;
             }
             // Actualizar picos de frecuencia por anuncio para esta cuenta
             try {
+                await adsSource.assert();
                 await SocialAdsEntity.sequelize.query(`
                   UPDATE SocialAdsEntities se
                   LEFT JOIN (
@@ -2705,47 +2622,34 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                   WHERE se.ad_account_id = :acc AND se.level='ad';
                 `, { replacements: { acc: accountId } });
             } catch (ePeak) {
-                console.warn('⚠️ No se pudieron actualizar peak_frequency:', ePeak.message);
+                throw ePeak;
             }
             console.log(`📊 Insights de Ads guardados: ${totalRows} filas`);
             stats.insightsRows += totalRows;
         } catch (e) {
-            console.warn('⚠️ Error guardando insights de Ads:', e.response?.data || e.message);
+            throw e;
         }
 
         // 3) Actions diarios (por ad) — troceado por días y con breakdown de plataforma
         try {
             const untilDate = new Date(untilStr);
             const sinceDate = new Date(sinceStr);
-            const chunkDays = parseInt(process.env.ADS_CHUNK_DAYS || '3', 10);
+            const chunkDays = Math.max(1, Math.min(3, parseInt(process.env.ADS_CHUNK_DAYS || '3', 10) || 3));
             let totalActions = 0;
-            for (let d = new Date(sinceDate); d <= untilDate; d.setDate(d.getDate() + chunkDays)) {
+            for (let d = new Date(sinceDate); d <= untilDate; d.setUTCDate(d.getUTCDate() + chunkDays)) {
                 const cs = new Date(d);
-                const ce = new Date(Math.min(untilDate.getTime(), new Date(d).setDate(d.getDate() + chunkDays - 1)));
-                let params = {
-                    level: 'ad',
-                    time_increment: 1,
-                    time_range: JSON.stringify({ since: cs.toISOString().slice(0,10), until: ce.toISOString().slice(0,10) }),
-                    // Include ad_id to bind actions to the ad entity
-                    fields: 'ad_id,actions',
-                    action_breakdowns: 'action_type,action_destination',
-                    breakdowns: 'publisher_platform',
-                    limit: parseInt(process.env.ADS_PAGE_LIMIT || '100', 10),
-                    access_token: accessToken
-                };
-                let nextUrl = `${accountId}/insights`;
-                const runChunk = async (lim) => {
-                    params.limit = lim;
+                const ce = new Date(Math.min(untilDate.getTime(), new Date(d).setUTCDate(d.getUTCDate() + chunkDays - 1)));
+                const range = { startDate: cs.toISOString().slice(0,10), endDate: ce.toISOString().slice(0,10) };
+                const runChunk = async () => {
                     const rowsToPersist = [];
                     const chunkDates = [];
                     const chunkAdIds = new Set();
                     // Prefill chunkDates with every day in the interval so we can wipe stale rows even si Meta no devuelve datos
-                    for (let day = new Date(cs); day <= ce; day.setDate(day.getDate() + 1)) {
+                    for (let day = new Date(cs); day <= ce; day.setUTCDate(day.getUTCDate() + 1)) {
                         chunkDates.push(new Date(day).toISOString().slice(0,10));
                     }
-                    while (true) {
-                        const resp = await metaGet(nextUrl, { params, accessToken });
-                        const rows = resp.data?.data || [];
+                    for await (const rows of adsSource.pages('actions', range)) {
+                        await adsSource.assert();
                         for (const r of rows) {
                             const date = r.date_start ? new Date(r.date_start) : new Date(endDate);
                             const dateStr = date.toISOString().slice(0,10);
@@ -2785,10 +2689,7 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                                 });
                             }
                         }
-                        const next = resp.data?.paging?.next;
-                        if (!next) break;
-                        nextUrl = next.replace(/^https?:\/\/[^/]+\/[v\d\.]+\//, '');
-                        params = {};
+
                     }
                     const where = {
                         ad_account_id: accountId,
@@ -2798,33 +2699,34 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                     if (chunkAdIds.size) {
                         where.entity_id = { [Op.in]: Array.from(chunkAdIds) };
                     }
-                    await SocialAdsActionsDaily.destroy({ where });
-                    if (rowsToPersist.length) {
-                        await SocialAdsActionsDaily.bulkCreate(rowsToPersist);
-                        totalActions += rowsToPersist.length;
-                    }
+                    await adsSource.assert();
+                    await SocialAdsActionsDaily.sequelize.transaction(async transaction => {
+                        await adsSource.assert();
+                        await SocialAdsActionsDaily.destroy({ where, transaction });
+                        if (rowsToPersist.length) {
+                            await adsSource.assert();
+                            await SocialAdsActionsDaily.bulkCreate(rowsToPersist, { transaction });
+                        }
+                        await adsSource.assert();
+                    });
+                    totalActions += rowsToPersist.length;
                 };
-                try {
-                    await runChunk(parseInt(process.env.ADS_PAGE_LIMIT || '100', 10));
-                } catch (e1) {
-                    if ((e1.response?.status || 0) === 500) {
-                        console.warn('⚠️ Actions 500, reintentando chunk con límite 50');
-                        await runChunk(50);
-                    } else {
-                        throw e1;
-                    }
-                }
+                await runChunk();
             }
             console.log(`✅ Actions de Ads guardadas: ${totalActions} filas`);
             stats.actionsRows += totalActions;
         } catch (e) {
-            console.warn('⚠️ Error guardando actions de Ads:', e.response?.data || e.message);
+            throw e;
         }
 
         // 3.bis) Agregados diarios por adset (tabla auxiliar)
         try {
-            await SocialAdsAdsetDailyAgg.destroy({ where: { ad_account_id: accountId, date: { [Op.between]: [sinceStr, untilStr] } } });
-            await SocialAdsAdsetDailyAgg.sequelize.query(`
+            await adsSource.assert();
+            await SocialAdsAdsetDailyAgg.sequelize.transaction(async transaction => {
+                await adsSource.assert();
+                await SocialAdsAdsetDailyAgg.destroy({ where: { ad_account_id: accountId, date: { [Op.between]: [sinceStr, untilStr] } }, transaction });
+                await adsSource.assert();
+                await SocialAdsAdsetDailyAgg.sequelize.query(`
               INSERT INTO SocialAdsAdsetDailyAgg (ad_account_id, adset_id, date, spend, impressions, clicks, leads, created_at, updated_at)
               SELECT agg.ad_account_id, agg.adset_id, agg.date,
                      agg.spend, agg.impressions, agg.clicks, IFNULL(la.leads,0) AS leads, NOW(), NOW()
@@ -2860,9 +2762,11 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                 ) base
                 GROUP BY base.adset_id, base.date
               ) la ON la.adset_id = agg.adset_id AND la.date = agg.date;
-            `, { replacements: { acc: accountId, since: sinceStr, until: untilStr } });
+                `, { replacements: { acc: accountId, since: sinceStr, until: untilStr }, transaction });
+                await adsSource.assert();
+            });
         } catch (eAgg) {
-            console.warn('⚠️ No se pudieron actualizar agregados diarios por adset:', eAgg.message);
+            throw eAgg;
         }
 
         // 4) Volcar agregados por plataforma a SocialStatsDaily
@@ -2870,10 +2774,10 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
             // Obtener resumen por fecha/plataforma del rango
             const sinceDate = new Date(sinceStr);
             const untilDate = new Date(untilStr);
-            sinceDate.setHours(0,0,0,0);
-            untilDate.setHours(0,0,0,0);
+            sinceDate.setUTCHours(0,0,0,0);
+            untilDate.setUTCHours(0,0,0,0);
             const days = [];
-            for (let d = new Date(sinceDate); d <= untilDate; d.setDate(d.getDate() + 1)) {
+            for (let d = new Date(sinceDate); d <= untilDate; d.setUTCDate(d.getUTCDate() + 1)) {
                 days.push(new Date(d));
             }
 
@@ -2887,6 +2791,13 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                     raw: true
                 });
                 const clinicAggregates = new Map();
+                const previousStats = await SocialStatsDaily.findAll({
+                    attributes: ['clinica_id'], where: { asset_id: asset.id, asset_type: 'ad_account', date: dateStr }, raw: true
+                });
+                for (const previous of previousStats) {
+                    clinicAggregates.set(String(previous.clinica_id), { clinica_id: previous.clinica_id,
+                        instagram: { reach: 0, impressions: 0, spend: 0 }, facebook: { reach: 0, impressions: 0, spend: 0 } });
+                }
                 for (const r of rows) {
                     const clinicId = r.clinica_id || (assignment.mode === 'manual' ? (assignment.clinicaId || asset.clinicaId || null) : null);
                     if (!clinicId) {
@@ -2914,7 +2825,7 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                 }
 
                 for (const aggregate of clinicAggregates.values()) {
-                    const where = { clinica_id: aggregate.clinica_id, asset_id: asset.id, date: dateStr };
+                    const where = { clinica_id: aggregate.clinica_id, asset_id: asset.id, asset_type: 'ad_account', date: dateStr };
                     const payload = {
                         clinica_id: aggregate.clinica_id,
                         asset_id: asset.id,
@@ -2929,23 +2840,25 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                     };
                     const existing = await SocialStatsDaily.findOne({ where });
                     if (existing) {
+                        await adsSource.assert();
                         await existing.update(payload);
                     } else {
+                        await adsSource.assert();
                         await SocialStatsDaily.create(payload);
                     }
                 }
             }
             console.log('📈 Agregados Ads volcados a SocialStatsDaily');
         } catch (e) {
-            console.warn('⚠️ Error volcando agregados Ads a SocialStatsDaily:', e.message);
+            throw e;
         }
 
         return { status: 'completed', ...stats };
     } catch (error) {
-        console.error('❌ Error en syncAdAccountMetrics:', error);
         throw error;
     }
 }
+
 
 // Exportar funciones para uso desde los jobs (unificación de lógica)
 exports.syncAdAccountMetrics = syncAdAccountMetrics;

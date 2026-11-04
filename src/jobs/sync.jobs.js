@@ -1156,6 +1156,10 @@ class MetaSyncJobs {
    * Job: Sincronización diaria de Ads (ventana reciente)
    */
   async executeAdsSync(options = {}) {
+    if (process.env.META_MARKETING_ADS_SYNC_ENABLED !== 'true' || process.env.META_MARKETING_BROKER_ENABLED !== 'true') {
+      return { status: 'completed', skipped: true, reason: 'meta_ads_sync_disabled', processed: 0 };
+    }
+    require('../services/metaMarketingAdsReader.service').validateJobFilters(options);
     const windowLabel = options.windowLabel || 'default';
     console.log(`📢 Ejecutando adsSync (${windowLabel})...`);
 
@@ -1172,10 +1176,8 @@ class MetaSyncJobs {
     try {
       let activeAdAccounts = await ClinicMetaAsset.findAll({
         where: { isActive: true, assetType: 'ad_account' },
-        include: [
-          { model: MetaConnection, as: 'metaConnection' },
-          { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }
-        ]
+        attributes: ['id', 'metaConnectionId', 'assetType', 'metaAssetId', 'metaAssetName', 'assignmentScope', 'clinicaId', 'grupoClinicaId', 'isActive'],
+        include: [{ model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }]
       });
 
       if (Array.isArray(options.clinicIds) && options.clinicIds.length) {
@@ -1203,17 +1205,29 @@ class MetaSyncJobs {
         }
       }
 
-      console.log(`🧾 Cuentas publicitarias activas: ${activeAdAccounts.length}`);
+      const registry = await require('../../models').MetaMarketingBrokerBinding.findAll({
+        attributes: ['mapping_id'], where: { state: 'active' }, raw: true, logging: false
+      });
+      const activeBindings = new Set(registry.map(row => Number(row.mapping_id)));
+      report.notEnrolled = activeAdAccounts.filter(asset => !activeBindings.has(Number(asset.id))).length;
+      const seenAccounts = new Set();
+      activeAdAccounts = activeAdAccounts.filter(asset => {
+        if (!activeBindings.has(Number(asset.id))) return false;
+        const key = String(asset.metaConnectionId) + ':' + String(asset.metaAssetId).replace(/^act_/, '');
+        if (seenAccounts.has(key)) return false;
+        seenAccounts.add(key); return true;
+      });
+      console.log(`🧾 Cuentas Ads con binding activo: ${activeAdAccounts.length}`);
       report.accounts = activeAdAccounts.length;
       if (!activeAdAccounts.length) {
         await syncLog.update({
           status: 'completed',
           end_time: new Date(),
           records_processed: 0,
-          status_report: report
+          status_report: { ...report, skipped: true, reason: report.notEnrolled ? 'meta_ads_not_enrolled' : 'meta_ads_no_accounts' }
         });
         console.log('ℹ️ adsSync sin cuentas tras aplicar filtros.');
-        return { status: 'completed', ...report };
+        return { status: 'completed', skipped: true, reason: report.notEnrolled ? 'meta_ads_not_enrolled' : 'meta_ads_no_accounts', ...report };
       }
 
       const defaultEnd = new Date();
@@ -1228,8 +1242,8 @@ class MetaSyncJobs {
 
       for (const [idx, asset] of activeAdAccounts.entries()) {
         try {
-          const accessToken = asset.pageAccessToken || asset.metaConnection?.accessToken;
-          if (!accessToken) { throw new Error('Sin access token para ad_account'); }
+          const adsSource = await require('../services/metaMarketingAdsReader.service')
+            .forModels(require('../../models')).sourceForAsset(asset.id);
           // Detectar si es primera vez (sin logs previos)
           let start;
           let end = new Date(parsedEnd);
@@ -1260,10 +1274,9 @@ class MetaSyncJobs {
 
           console.log(`▶️ AdsSync ${asset.metaAssetName} (${asset.metaAssetId}) ${start.toISOString().slice(0,10)}..${end.toISOString().slice(0,10)}`);
           const assignment = await this._buildMetaAssignmentContext(asset);
-          const result = await syncAdAccountMetrics(asset, accessToken, start, end, { assignment });
-          // Persistir estado de cuenta y motivos de entrega (ligero)
-          try { await this._updateAdAccountStatus(asset, accessToken); } catch (e) { console.warn('Account status update error:', e.message); }
-          try { await this._enrichAdsetDeliveryReasons(asset, accessToken, end); } catch (e) { console.warn('Adset delivery enrich error:', e.message); }
+          const result = await syncAdAccountMetrics(asset, null, start, end, { assignment, adsSource });
+          if (result?.status !== 'completed') throw Object.assign(Error('meta_ads_sync_failed'), { code: 'meta_ads_sync_failed' });
+          report.deliveryReasonsRefreshed = false;
           report.processed += 1;
           if (result) {
             report.totals.entities += result.entities || 0;
@@ -1273,8 +1286,7 @@ class MetaSyncJobs {
           }
           // Progreso + estado de uso
           try {
-            const { getUsageStatus } = require('../lib/metaClient');
-            const u = await getUsageStatus();
+            const u = adsSource.usage();
             await syncLog.update({
               records_processed: report.processed,
               status_report: JSON.stringify({
@@ -1291,19 +1303,25 @@ class MetaSyncJobs {
             await new Promise(r => setTimeout(r, this.config.ads.betweenAccountsSleepMs));
           }
         } catch (err) {
-          console.error('❌ Error en adsSync para asset:', asset.id, err.message);
-          report.errors.push({ assetId: asset.id, name: asset.metaAssetName, error: err.message });
+          const failure = require('../services/metaMarketingAdsReader.service').safeError(err, 'meta_ads_sync_failed');
+          report.errors.push({ assetId: asset.id, name: asset.metaAssetName, error: failure.code });
+          if (failure.code === 'rate_limited') {
+            report.nextRunAt = new Date(Date.now() + Math.max(60000, failure.retryAfterMs || 2 * 60 * 60 * 1000));
+            break; // Do not send other accounts through a shared provider pause.
+          }
         }
       }
 
+      const status = report.errors.length ? 'failed' : 'completed';
       await syncLog.update({
-        status: 'completed',
+        status,
         end_time: new Date(),
         records_processed: report.processed,
+        error_message: report.errors.length ? report.errors.map(row => row.error).join(',') : null,
         status_report: report
       });
       console.log('✅ adsSync completado', report);
-      return { status: 'completed', ...report };
+      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report };
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
       console.error('❌ Error en adsSync:', error);
@@ -1315,6 +1333,10 @@ class MetaSyncJobs {
    * Job: Backfill semanal de Ads (ventana más larga)
    */
   async executeAdsBackfill(options = {}) {
+    if (process.env.META_MARKETING_ADS_SYNC_ENABLED !== 'true' || process.env.META_MARKETING_BROKER_ENABLED !== 'true') {
+      return { status: 'completed', skipped: true, reason: 'meta_ads_sync_disabled', processed: 0 };
+    }
+    require('../services/metaMarketingAdsReader.service').validateJobFilters(options);
     console.log('📢 Ejecutando adsBackfill (ventana extendida)...');
     this._groupAssignmentCache.clear();
     const syncLog = await SyncLog.create({
@@ -1328,10 +1350,8 @@ class MetaSyncJobs {
     try {
       let activeAdAccounts = await ClinicMetaAsset.findAll({
         where: { isActive: true, assetType: 'ad_account' },
-        include: [
-          { model: MetaConnection, as: 'metaConnection' },
-          { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }
-        ]
+        attributes: ['id', 'metaConnectionId', 'assetType', 'metaAssetId', 'metaAssetName', 'assignmentScope', 'clinicaId', 'grupoClinicaId', 'isActive'],
+        include: [{ model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }]
       });
 
       if (Array.isArray(options.clinicIds) && options.clinicIds.length) {
@@ -1357,8 +1377,25 @@ class MetaSyncJobs {
         }
       }
 
-      console.log(`🧾 Cuentas publicitarias activas: ${activeAdAccounts.length}`);
+      const registry = await require('../../models').MetaMarketingBrokerBinding.findAll({
+        attributes: ['mapping_id'], where: { state: 'active' }, raw: true, logging: false
+      });
+      const activeBindings = new Set(registry.map(row => Number(row.mapping_id)));
+      report.notEnrolled = activeAdAccounts.filter(asset => !activeBindings.has(Number(asset.id))).length;
+      const seenAccounts = new Set();
+      activeAdAccounts = activeAdAccounts.filter(asset => {
+        if (!activeBindings.has(Number(asset.id))) return false;
+        const key = String(asset.metaConnectionId) + ':' + String(asset.metaAssetId).replace(/^act_/, '');
+        if (seenAccounts.has(key)) return false;
+        seenAccounts.add(key); return true;
+      });
+      console.log(`🧾 Cuentas Ads con binding activo: ${activeAdAccounts.length}`);
       report.accounts = activeAdAccounts.length;
+      if (!activeAdAccounts.length) {
+        await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0,
+          status_report: { ...report, skipped: true, reason: report.notEnrolled ? 'meta_ads_not_enrolled' : 'meta_ads_no_accounts' } });
+        return { status: 'completed', skipped: true, reason: report.notEnrolled ? 'meta_ads_not_enrolled' : 'meta_ads_no_accounts', ...report };
+      }
 
       // Ventana: últimos M días hasta ayer
       const defaultEnd = new Date();
@@ -1389,16 +1426,15 @@ class MetaSyncJobs {
 
       for (const asset of activeAdAccounts) {
         try {
-          const accessToken = asset.pageAccessToken || asset.metaConnection?.accessToken;
-          if (!accessToken) { throw new Error('Sin access token para ad_account'); }
+          const adsSource = await require('../services/metaMarketingAdsReader.service')
+            .forModels(require('../../models')).sourceForAsset(asset.id);
           const assetStart = new Date(start);
           const assetEnd = new Date(end);
           console.log(`▶️ AdsBackfill ${asset.metaAssetName} (${asset.metaAssetId}) ${assetStart.toISOString().slice(0,10)}..${assetEnd.toISOString().slice(0,10)}`);
           const assignment = await this._buildMetaAssignmentContext(asset);
-          const result = await syncAdAccountMetrics(asset, accessToken, assetStart, assetEnd, { assignment });
-          // Sólo actualizar estado/motivos una vez por backfill (usa fin de ventana)
-          try { await this._updateAdAccountStatus(asset, accessToken); } catch (e) { console.warn('Account status update error:', e.message); }
-          try { await this._enrichAdsetDeliveryReasons(asset, accessToken, assetEnd); } catch (e) { console.warn('Adset delivery enrich error:', e.message); }
+          const result = await syncAdAccountMetrics(asset, null, assetStart, assetEnd, { assignment, adsSource });
+          if (result?.status !== 'completed') throw Object.assign(Error('meta_ads_sync_failed'), { code: 'meta_ads_sync_failed' });
+          report.deliveryReasonsRefreshed = false;
           report.processed += 1;
           if (result) {
             report.totals.entities += result.entities || 0;
@@ -1410,19 +1446,25 @@ class MetaSyncJobs {
             await new Promise(r => setTimeout(r, this.config.ads.betweenAccountsSleepMs));
           }
         } catch (err) {
-          console.error('❌ Error en adsBackfill para asset:', asset.id, err.message);
-          report.errors.push({ assetId: asset.id, name: asset.metaAssetName, error: err.message });
+          const failure = require('../services/metaMarketingAdsReader.service').safeError(err, 'meta_ads_sync_failed');
+          report.errors.push({ assetId: asset.id, name: asset.metaAssetName, error: failure.code });
+          if (failure.code === 'rate_limited') {
+            report.nextRunAt = new Date(Date.now() + Math.max(60000, failure.retryAfterMs || 2 * 60 * 60 * 1000));
+            break; // Do not send other accounts through a shared provider pause.
+          }
         }
       }
 
+      const status = report.errors.length ? 'failed' : 'completed';
       await syncLog.update({
-        status: 'completed',
+        status,
         end_time: new Date(),
         records_processed: report.processed,
+        error_message: report.errors.length ? report.errors.map(row => row.error).join(',') : null,
         status_report: report
       });
       console.log('✅ adsBackfill completado', report);
-      return { status: 'completed', ...report };
+      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report };
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
       console.error('❌ Error en adsBackfill:', error);

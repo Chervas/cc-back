@@ -7,6 +7,7 @@ const {drainAudit}=require('./audit'),tlsReload=require('./tls-reload');
 const C=require('./meta-marketing-oauth-contract');
 const D=require('./meta-marketing-discovery-contract');
 const E=require('./meta-marketing-enrollment-contract');
+const A=require('./meta-marketing-ads-contract');
 const {createMetaMarketingEnrollment}=require('./meta-marketing-enrollment');
 const {createMetaMarketingOAuthSecrets}=require('./meta-marketing-oauth-secrets');
 const {createMetaMarketingOAuthHttp}=require('./meta-marketing-oauth-http');
@@ -17,6 +18,7 @@ function validateConfig(config) {
   if (config && Object.hasOwn(config,'standby')) { fields.push('standby'); if(typeof config.standby!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetEnrollment')) { fields.push('assetEnrollment'); if(typeof config.assetEnrollment!=='boolean'||config.assetEnrollment&&!config.assetDiscovery)fail('invalid_request'); }
+  if (config && Object.hasOwn(config,'adsRead')) {fields.push('adsRead');A.config(config.adsRead);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if (config?.tlsRenewal) { fields.push('tlsRenewal');tlsReload.validateSettings(config.tlsRenewal); }
   if (!config || Object.keys(config).sort().join(',')!==fields.sort().join(',') || config.enabled!==true || config.cohort!==C.COHORT
     || !['dev','staging'].includes(config.environment) || !net.isIP(config.listenAddress) || !Number.isInteger(config.port)
@@ -51,9 +53,9 @@ function validateConfig(config) {
   if ([...slots].some(arn=>apps.has(arn))) fail('invalid_request');
   return config;
 }
-async function main(filename,{awsFactory=connectAws,http=createMetaMarketingOAuthHttp()}={}) {
+async function main(filename,{awsFactory=connectAws,http=createMetaMarketingOAuthHttp(),adsRequest,adsNow=Date.now,adsWait}={}) {
   const config=validateConfig(JSON.parse(privateFile(filename))),cert=privateFile(config.tlsCertFile,65536),key=privateFile(config.tlsKeyFile,65536);
-  const store=new BrokerStore(config.stateFile);let aws,oauth,enrollment,server,timer,draining;
+  const store=new BrokerStore(config.stateFile);let aws,oauth,enrollment,server,timer,draining,adsHttp,cursorKey;
   try {
     if(config.standby) {
       // This is installation before the first cohort, never a way to hide
@@ -66,7 +68,14 @@ async function main(filename,{awsFactory=connectAws,http=createMetaMarketingOAut
     aws=await awsFactory();
     const secrets=createMetaMarketingOAuthSecrets({client:aws.secrets,accountId:ACCOUNT,prefix:prefix(config.environment),kmsKeyArn:SECRET_KEY});
     oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id)});
-    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment});
+    if(config.adsRead){
+      const {createPacing,sqliteState}=require('./meta-marketing-ads-pacing');
+      const pacer=createPacing({state:sqliteState(store.db),now:adsNow,...(adsWait?{wait:adsWait}:{})});
+      cursorKey=require('node:crypto').randomBytes(32);
+      const cursor=require('./provider-cursor').cursorCodec(cursorKey,adsNow);
+      adsHttp=require('./meta-marketing-ads-http').createMetaMarketingAdsHttp({pacer,cursor,now:adsNow,...(adsRequest?{request:adsRequest}:{})});
+    }
+    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{})});
     const broker=new Broker({store,policy:config.policy,secrets,policyResolver:enrollment,operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations}});
     const controlKeys=new Set(config.policy.principals.filter(p=>p.id.startsWith('control:')).map(p=>p.keyId));
     let ordinary=0,controls=0;
@@ -80,9 +89,9 @@ async function main(filename,{awsFactory=connectAws,http=createMetaMarketingOAut
     await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(config.port,config.listenAddress,resolve);});
     const tick=()=>{if(!draining)draining=drainAudit(store,aws.sink,{limit:20}).catch(()=>null).finally(()=>{draining=null;});};
     tick();timer=setInterval(tick,1000);timer.unref();let closing;
-    const close=()=>closing||=(async()=>{clearInterval(timer);enrollment?.close();oauth.close();await new Promise(resolve=>{server.close(resolve);server.closeIdleConnections?.();});await draining;aws.close();key.fill(0);store.close();})();
+    const close=()=>closing||=(async()=>{clearInterval(timer);enrollment?.close();oauth.close();await new Promise(resolve=>{server.close(resolve);server.closeIdleConnections?.();});await draining;aws.close();key.fill(0);cursorKey?.fill(0);store.close();})();
     return {server,store,broker,close};
-  } catch(error) {clearInterval(timer);enrollment?.close();oauth?.close();server?.close();aws?.close();key.fill(0);store.close();throw error;}
+  } catch(error) {clearInterval(timer);enrollment?.close();oauth?.close();server?.close();aws?.close();key.fill(0);cursorKey?.fill(0);store.close();throw error;}
 }
 if(require.main===module)main(process.argv[2]).then(runtime=>{
   const stop=()=>runtime.close().catch(()=>{process.exitCode=1;});process.once('SIGTERM',stop);process.once('SIGINT',stop);

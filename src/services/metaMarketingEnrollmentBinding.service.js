@@ -4,9 +4,10 @@ const {fromEnrollment}=require('../../services/platform-audit/src/meta-enrollmen
 const plain=v=>v?.get?v.get({plain:true}):v;
 const fail=(code='meta_enrollment_scope_changed')=>C.fail(code,409);
 const scopeOf=row=>{const [assignmentScope,id]=row.scope_key.split(':');return {assignmentScope,clinicId:assignmentScope==='clinic'?Number(id):null,groupId:assignmentScope==='group'?Number(id):null};};
-function createBindings({models,authority,sessions,now=()=>new Date()}){
+function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGuard}){
   const R=models.MetaMarketingEnrollmentRequest,B=models.MetaMarketingBrokerBinding;
-  const S=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now});
+  const recovery=recoveryGuard||require('./metaMarketingLegacyRecovery.service').createRecovery({models,sessions,now});
+  const S=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now,recoveryGuard:recovery});
   const audit=require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
   const opts=transaction=>{
     if(!transaction?.LOCK?.UPDATE||transaction.finished)C.fail();
@@ -16,6 +17,7 @@ function createBindings({models,authority,sessions,now=()=>new Date()}){
     const health=await audit.health(now(),{includeUnresolved:false,transaction});
     if(!Number.isSafeInteger(health.pending)||health.pending>=10000||!Number.isFinite(health.oldestAgeSeconds)||health.oldestAgeSeconds>=3600)C.fail('audit_unavailable');
     await audit.append(fromEnrollment(row,reason,{now:now(),...actor}),{transaction});
+    if(reason==='meta_enrollment_cancelled')await recovery.retire(row.enrollment_id,transaction);
   }
   async function references(row,mappings,transaction,{newlyAllocated=false}={}){
     const o=opts(transaction),scope=scopeOf(row),ids=mappings.map(v=>Number(v.id)),clinics=C.clinics(row.clinic_ids);
@@ -48,13 +50,20 @@ function createBindings({models,authority,sessions,now=()=>new Date()}){
     const candidate=C.candidate(JSON.parse(flow.candidate_metadata),flow);
     if(candidate.digest!==row.candidate_digest||candidate.appId!==row.app_id||candidate.subjectId!==row.meta_user_id
       ||[candidate.expiresAt,candidate.dataAccessExpiresAt].some(v=>v!==null&&v<=+now()))fail();
-    if(await require('./metaScopeBlock.service').blocked(scope,{models,transaction,purpose:'meta'}))fail('meta_enrollment_scope_blocked');
+    const proof=await recovery.assertActive({flow,enrollmentId:id},transaction);
+    if(proof&&(proof.enrollmentId!==id||proof.flowId!==row.flow_id||Number(proof.canonicalConnectionId)!==Number(row.meta_connection_id)
+      ||proof.scopeKey!==row.scope_key||proof.subjectId!==row.meta_user_id||proof.appId!==row.app_id
+      ||JSON.stringify(proof.clinicIds)!==row.clinic_ids||JSON.stringify(proof.mappingIds)!==row.mapping_ids))fail();
+    if(await require('./metaScopeBlock.service').blocked(scope,{models,transaction,purpose:'meta'})&&!proof)fail('meta_enrollment_scope_blocked');
     const identity=await models.MetaMarketingEnrollmentIdentity.findByPk(row.meta_user_id,o);
     if(!identity||identity.app_id!==row.app_id||Number(identity.meta_connection_id)!==Number(row.meta_connection_id))fail();
-    const connections=await models.MetaConnection.findAll({...o,attributes:['id','metaUserId','broker_app_id','credentials_external',[literal('(accessToken IS NULL)'),'credentials_absent']],
-      where:{[Op.or]:[{id:row.meta_connection_id},{metaUserId:row.meta_user_id}]},limit:2});
-    if(connections.length!==1||Number(connections[0].id)!==Number(row.meta_connection_id)||connections[0].metaUserId!==row.meta_user_id
-      ||connections[0].broker_app_id!==row.app_id||Number(connections[0].credentials_external)!==1||Number(connections[0].credentials_absent)!==1)fail();
+    const connections=await models.MetaConnection.findAll({...o,attributes:['id','userId','metaUserId','broker_app_id','credentials_external',[literal('(accessToken IS NULL)'),'credentials_absent']],
+      where:proof?{id:row.meta_connection_id,metaUserId:row.meta_user_id}:{[Op.or]:[{id:row.meta_connection_id},{metaUserId:row.meta_user_id}]},limit:proof?1:2});
+    const canonical=connections.find(v=>Number(v.id)===Number(row.meta_connection_id));
+    if(!canonical||canonical.metaUserId!==row.meta_user_id||canonical.broker_app_id!==row.app_id
+      ||Number(canonical.credentials_external)!==1||Number(canonical.credentials_absent)!==1
+      ||proof&&(canonical.userId!==null||connections.length!==1)
+      ||!proof&&connections.length!==1)fail();
     const refs=C.physical(row.selected),claims=await models.MetaMarketingEnrollmentClaim.findAll({...o,attributes:['asset_ref','enrollment_id'],
       where:{[Op.or]:[{asset_ref:{[Op.in]:refs}},{enrollment_id:id}]},order:[['asset_ref','ASC']],limit:201});
     if(claims.length!==refs.length||claims.some((v,i)=>v.asset_ref!==refs[i]||v.enrollment_id!==id))fail('meta_enrollment_asset_in_use');
@@ -69,7 +78,7 @@ function createBindings({models,authority,sessions,now=()=>new Date()}){
       [literal('(pageAccessToken IS NULL AND waAccessToken IS NULL AND additionalData IS NULL)'),'credentials_absent']],where:{[Op.or]:aliases},order:[['id','ASC']],limit:201});
     if(mappings.length!==row.selected.length||JSON.stringify(mappings.map(v=>Number(v.id)))!==row.mapping_ids)fail('meta_enrollment_asset_in_use');
     for(const mapping of mappings){
-      const ref='meta-'+mapping.assetType+':'+mapping.metaAssetId,asset=expected.get(ref),binding=bindings.find(v=>Number(v.mapping_id)===Number(mapping.id));
+      const ref='meta-'+mapping.assetType+':'+String(mapping.metaAssetId).replace(/^act_/,''),asset=expected.get(ref),binding=bindings.find(v=>Number(v.mapping_id)===Number(mapping.id));
       if(!asset||!binding||Number(mapping.metaConnectionId)!==Number(row.meta_connection_id)||Number(mapping.isActive)!==1||Number(mapping.credentials_absent)!==1
         ||mapping.assignmentScope!==scope.assignmentScope||mapping.clinicaId!==scope.clinicId||mapping.grupoClinicaId!==scope.groupId
         ||binding.asset_ref!==ref||binding.parent_page_id!==asset.parentPageId||binding.state!=='active'||binding.enrollment_id!==id
@@ -86,18 +95,22 @@ function createBindings({models,authority,sessions,now=()=>new Date()}){
     const clinics=await models.Clinica.findAll({...o,attributes:['id_clinica','grupoClinicaId'],where:{id_clinica:{[Op.in]:row.clinicIds}},order:[['id_clinica','ASC']],limit:1001});
     if(clinics.length!==row.clinicIds.length)fail();
     const groups=[...new Set(clinics.map(v=>v.grupoClinicaId).filter(v=>v!==null))];
-    const grants=await models.MetaConnectionAssignment.findAll({...o,attributes:['id','scopeKey','assignmentScope','clinicaId','grupoClinicaId','metaConnectionId','status'],
+    const grants=proof?[]:await models.MetaConnectionAssignment.findAll({...o,attributes:['id','scopeKey','assignmentScope','clinicaId','grupoClinicaId','metaConnectionId','status'],
       where:{[Op.or]:[{assignmentScope:'clinic',clinicaId:{[Op.in]:row.clinicIds}},{assignmentScope:'group',grupoClinicaId:{[Op.in]:groups}}]},limit:2001});
     if(grants.length>2000)fail();
     const match=(kind,id)=>grants.filter(v=>v.assignmentScope===kind&&Number(kind==='clinic'?v.clinicaId:v.grupoClinicaId)===id);
     const check=rows=>{if(rows.length!==1)fail();const g=rows[0];if(g.status!=='active'||Number(g.metaConnectionId)!==Number(row.meta_connection_id)
       ||g.scopeKey!==g.assignmentScope+':'+(g.assignmentScope==='clinic'?g.clinicaId:g.grupoClinicaId)
       ||(g.assignmentScope==='clinic'?g.grupoClinicaId!==null:g.clinicaId!==null))fail('meta_enrollment_assignment_review');};
-    if(scope.assignmentScope==='group')check(match('group',scope.groupId));
-    for(const clinic of clinics){const direct=match('clinic',Number(clinic.id_clinica));check(direct.length?direct:match('group',Number(clinic.grupoClinicaId)));}
+    if(!proof){
+      if(scope.assignmentScope==='group')check(match('group',scope.groupId));
+      for(const clinic of clinics){const direct=match('clinic',Number(clinic.id_clinica));check(direct.length?direct:match('group',Number(clinic.grupoClinicaId)));}
+    }
     await references(row,mappings,transaction);
-    return {enrollmentId:id,flowId:row.flow_id,clinicIds:row.clinicIds,mappingIds:row.mappingIds,
-      digest:C.hash(JSON.stringify([id,row.flow_id,row.flow_digest,row.selection_digest,row.assets,row.mapping_ids,row.clinic_ids]))};
+    const pieces=[id,row.flow_id,row.flow_digest,row.selection_digest,row.assets,row.mapping_ids,row.clinic_ids];
+    if(proof)pieces.push(proof.snapshotDigest,proof.recoveryId,proof.canonicalConnectionId);
+    return {enrollmentId:id,flowId:row.flow_id,clinicIds:row.clinicIds,mappingIds:row.mappingIds,recovery:proof,
+      digest:C.hash(JSON.stringify(pieces))};
   }
   async function activate(value,remote,transaction){
     const expected=C.request(plain(value)),o=opts(transaction),stored=await R.findByPk(expected.enrollment_id,o);
@@ -106,8 +119,10 @@ function createBindings({models,authority,sessions,now=()=>new Date()}){
     if(row.state!=='activate_pending'||row.mappingIds.length)fail();
     const receipt=C.receipt(remote,row,{states:['active']});if(receipt.accessBlocked!==false)fail('meta_enrollment_asset_revoked');
     await authority.assertPending(row,transaction);
+    const flow=await models.MetaMarketingOAuthRequest.findByPk(row.flow_id,o),proof=await recovery.forFlow(flow,transaction,{phase:'pending'});
+    if(proof&&(proof.enrollmentId!==row.enrollment_id||Number(proof.canonicalConnectionId)!==Number(row.meta_connection_id)))fail();
     const scope=scopeOf(row),grant=await models.MetaConnectionAssignment.findOne({...o,where:{scopeKey:row.scope_key}});
-    if(!grant){
+    if(!grant&&!proof){
       // Generic connection grants are shared with WhatsApp. Never broaden that
       // access as a side effect of assigning new non-WhatsApp assets.
       if(await models.ClinicMetaAsset.findOne({...o,attributes:['id'],where:{metaConnectionId:row.meta_connection_id,
@@ -117,18 +132,28 @@ function createBindings({models,authority,sessions,now=()=>new Date()}){
     }
     const mappings=[];
     for(const asset of row.selected){
-      const mapping=await models.ClinicMetaAsset.create({metaConnectionId:row.meta_connection_id,assignmentScope:scope.assignmentScope,clinicaId:scope.clinicId,
+      let mapping;
+      if(proof){
+        const original=proof.aliases.find(v=>proof.mappingIds.includes(Number(v.id))&&v.assetType===asset.kind&&String(v.metaAssetId).replace(/^act_/,'')===asset.id);
+        if(!original||asset.kind!=='ad_account'||Number(original.credentials_absent)!==1)fail('meta_enrollment_asset_in_use');
+        const [changed]=await models.ClinicMetaAsset.update({metaConnectionId:row.meta_connection_id,assignmentScope:scope.assignmentScope,clinicaId:scope.clinicId,
+          grupoClinicaId:scope.groupId,isActive:true,pageAccessToken:null,waAccessToken:null,additionalData:null},{where:{id:Number(original.id),
+            metaConnectionId:Number(proof.sourceConnectionId),assetType:original.assetType,metaAssetId:original.metaAssetId,assignmentScope:original.assignmentScope,
+            clinicaId:original.clinicaId,grupoClinicaId:original.grupoClinicaId,isActive:original.isActive,pageAccessToken:null,waAccessToken:null,additionalData:null},transaction,logging:false});
+        if(changed!==1)fail('meta_enrollment_asset_in_use');mapping={id:Number(original.id)};
+      }else mapping=await models.ClinicMetaAsset.create({metaConnectionId:row.meta_connection_id,assignmentScope:scope.assignmentScope,clinicaId:scope.clinicId,
         grupoClinicaId:scope.groupId,assetType:asset.kind,metaAssetId:asset.id,metaAssetName:null,isActive:true,pageAccessToken:null,waAccessToken:null,additionalData:null},{transaction,logging:false});
       mappings.push({id:Number(mapping.id),assetType:asset.kind});
       await B.create({mapping_id:Number(mapping.id),enrollment_id:row.enrollment_id,asset_ref:asset.assetRef,meta_connection_id:row.meta_connection_id,meta_user_id:row.meta_user_id,
         app_id:row.app_id,connection_ref:row.connection_ref,scope_key:row.scope_key,tenant_clinic_id:row.clinicIds[0],parent_page_id:asset.parentPageId,state:'active'},{transaction,logging:false});
     }
-    await references(row,mappings,transaction,{newlyAllocated:true});
+    await references(row,mappings,transaction,{newlyAllocated:!proof});
     const current=C.request({...row,mapping_ids:JSON.stringify(mappings.map(v=>v.id).sort((a,b)=>a-b)),state:'active',activated_at:now(),updated_at:now(),last_error:null,
       lease_token:null,lease_until:null,next_attempt_at:new Date(+now()+300000)});
     const [changed]=await R.update({mapping_ids:current.mapping_ids,state:current.state,activated_at:current.activated_at,updated_at:current.updated_at,last_error:null,
       lease_token:null,lease_until:null,next_attempt_at:current.next_attempt_at},{where:{enrollment_id:row.enrollment_id,state:'activate_pending',lease_token:row.lease_token},transaction,logging:false});
     if(changed!==1)fail('meta_enrollment_lease_lost');
+    if(proof)await recovery.activate({flow,enrollment:current},transaction);
     await committed(row.enrollment_id,transaction);await record(current,'meta_enrollment_activated',transaction);return current;
   }
   return {activate,committed,record,scopeOf};

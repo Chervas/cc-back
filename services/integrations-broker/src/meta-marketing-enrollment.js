@@ -1,7 +1,11 @@
 'use strict';
 const {BrokerError,fail}=require('./errors'),{eventFor}=require('./audit'),{canonical}=require('./canonical');
 const C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),M=require('./meta-marketing-contract'),E=require('./meta-marketing-enrollment-contract');
-function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now()}){
+const A=require('./meta-marketing-ads-contract');
+function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp}){
+  if(adsRead!==undefined){A.config(adsRead);if(typeof adsHttp?.read!=='function')fail('invalid_request');}
+  const adsOperation=operation=>Object.values(A.OPERATIONS).includes(operation);
+  const validateRead=(operation,payload)=>adsOperation(operation)?A.validate(operation,payload):M.validate(operation,payload);
   const roles=E.roles(environment),running=new Map();let closed=false;
   // One owner and one journal with OAuth. Claims/history survive cancellation.
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_enrollments (
@@ -63,13 +67,16 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     const asset=selected(row).find(a=>a.assetRef===request.assetRef);if(!asset)fail('scope_denied');
     const control=request.operation===M.REVOKE&&principal.id===roles.assetControl;
     if(!control){
-      if(principal.id!==roles.reader||!M.OPERATIONS.includes(request.operation))fail('scope_denied');
+      if(principal.id!==roles.reader||![...M.OPERATIONS,...Object.values(A.OPERATIONS)].includes(request.operation))fail('scope_denied');
+      // Metrics are a distinct, explicitly reviewed cohort. Merely adding an
+      // operation to source or enrolling an account does not grant these reads.
+      if(adsOperation(request.operation)&&(!adsRead||!adsRead.assetRefs.includes(request.assetRef)||asset.kind!=='ad_account'||!b.scopes.includes('ads_read')))fail('scope_denied');
       enrollmentActive(row,binding,{requireActive:true});
     }
     return {row,binding,asset,control};
   }
   function resolve(request,principal,policy){
-    if(![...M.OPERATIONS,M.REVOKE].includes(request.operation))return policy;
+    if(![...M.OPERATIONS,M.REVOKE,...Object.values(A.OPERATIONS)].includes(request.operation))return policy;
     assetOwner(request,principal,policy);
     return {...policy,grants:[...policy.grants,{principalId:principal.id,tenantRef:request.tenantRef,
       connectionRef:request.connectionRef,assetRef:request.assetRef,operations:[request.operation]}]};
@@ -85,9 +92,9 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   const abortAsset=assetRef=>stop(task=>task.assets.flatMap(physical).includes(assetRef));
   async function execute({request,principal,binding,policy}){
     if(closed)fail('connection_blocked');
-    const name=Object.keys(E.OPERATIONS).find(k=>E.OPERATIONS[k]===request.operation),isRead=M.OPERATIONS.includes(request.operation);
+    const name=Object.keys(E.OPERATIONS).find(k=>E.OPERATIONS[k]===request.operation),isRead=M.OPERATIONS.includes(request.operation)||adsOperation(request.operation);
     if(!name&&!isRead)fail('operation_denied');
-    if(name){E.validators[name](request.payload);E.authorize({request,principal,binding},environment);}else M.validate(request.operation,request.payload);
+    if(name){E.validators[name](request.payload);E.authorize({request,principal,binding},environment);}else validateRead(request.operation,request.payload);
     const authority=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey])),configDigest=C.fingerprint(binding);
     const commandDigest=C.hash(canonical({operation:request.operation,tenantRef:request.tenantRef,connectionRef:request.connectionRef,assetRef:request.assetRef,payload:request.payload}));
     const event=(action,result,reason)=>eventFor(request,principal,policy,action,result,reason,now());
@@ -154,7 +161,11 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       if(!row||name==='activate'||isRead){
         data=await secrets.withCandidate(binding,context.flow,context.flow.secret_digest,async borrowed=>{
           context=check();if(JSON.stringify(borrowed.metadata)!==context.flow.credential_metadata)fail('secret_unavailable');
-          if(isRead)return http.readCandidate({binding,...borrowed,asset:context.asset,operation:request.operation,signal,authorize:check});
+          if(isRead){
+            if(adsOperation(request.operation))return adsHttp.read({binding,...borrowed,asset:context.asset,operation:request.operation,payload:request.payload,signal,authorize:check,
+              context:{principalId:principal.id,tenantRef:request.tenantRef,policyVersion:policy.version}});
+            return http.readCandidate({binding,...borrowed,asset:context.asset,operation:request.operation,signal,authorize:check});
+          }
           const inventory=await http.discover({binding,...borrowed,signal,authorize:check});D.checkAssets(inventory,borrowed.metadata);
           const refs=name==='prepare'?request.payload.assetRefs:context.assets.map(a=>a.assetRef);
           const result=E.assets(refs.map(ref=>{const value=inventory.find(a=>a.assetRef===ref);if(!value)fail('scope_denied');return E.identity(value);}));
@@ -185,12 +196,13 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     }catch(error){
       const code=error instanceof BrokerError?error.code:'internal_error';
       if(reserved)try{store.uncertain(principal.id,request.requestId,event('integration.failed','unknown',code));}catch{fail('audit_unavailable');}
-      throw new BrokerError(code);
+      const safe=new BrokerError(code);if(code==='rate_limited'&&Number.isSafeInteger(error.retryAfterMs)&&error.retryAfterMs>0)safe.retryAfterMs=error.retryAfterMs;throw safe;
     }finally{clearTimeout(timer);running.delete(enrollmentId);}
   }
   const operations=Object.fromEntries(Object.entries(E.OPERATIONS).map(([name,op])=>[op,{provider:C.PROVIDER,control:'meta_marketing_oauth',validate:E.validators[name],
     authorize:context=>E.authorize(context,environment),execute}]));
   for(const op of M.OPERATIONS)operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>M.validate(op,payload),execute};
+  if(adsRead)for(const op of Object.values(A.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>A.validate(op,payload),execute};
   operations[M.REVOKE]={provider:C.PROVIDER,control:'revoke_asset',validate:payload=>M.validate(M.REVOKE,payload),onRevoked:request=>abortAsset(request.assetRef)};
   return {operations,resolve,abortFlow,close(){closed=true;stop(()=>true);}};
 }

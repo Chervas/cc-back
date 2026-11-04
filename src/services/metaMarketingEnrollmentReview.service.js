@@ -3,9 +3,10 @@
 const {Op,literal}=require('sequelize');
 const C=require('./metaMarketingOAuth.contract');
 const D=require('../../services/integrations-broker/src/meta-marketing-discovery-contract');
-const REASONS=Object.freeze(['identity_review','scope_assignment_review','scope_blocked','asset_assigned','asset_registered','asset_revoked']);
+const REASONS=Object.freeze(['identity_review','scope_assignment_review','scope_blocked','asset_assigned','asset_registered','asset_revoked','recovery_not_selected']);
 const fail=()=>C.fail('meta_oauth_unavailable');
-function createReview({models,now=()=>new Date()}) {
+function createReview({models,sessions,now=()=>new Date(),recoveryGuard}) {
+  const recovery=recoveryGuard||require('./metaMarketingLegacyRecovery.service').createRecovery({models,sessions,now});
   return async function review({row,inventory},transaction) {
     if(!transaction||transaction.finished||row.state!=='staged'||inventory.flowId!==row.flow_id
       ||inventory.scopeKey!==row.scope_key||inventory.scopeDigest!==row.scope_digest||inventory.accessBlocked!==true)fail();
@@ -24,14 +25,17 @@ function createReview({models,now=()=>new Date()}) {
     if(JSON.stringify(clinics.map(v=>Number(v.id_clinica)))!==row.clinic_ids)fail();
     const groupIds=[...new Set(clinics.map(v=>Number(v.grupoClinicaId)).filter(C.positive))].sort((a,b)=>a-b);
     const scope={assignmentScope:scopeType,clinicId:scopeType==='clinic'?scopeId:null,groupId:scopeType==='group'?scopeId:null};
+    const proof=await recovery.forFlow(row,transaction,{phase:'pending'});
+    if(proof&&(proof.scopeKey!==row.scope_key||proof.appId!==metadata.appId||proof.subjectId!==metadata.subjectId
+      ||JSON.stringify(proof.clinicIds)!==row.clinic_ids||!Array.isArray(proof.aliases)||!Array.isArray(proof.mappingIds)))fail();
     const scopeReasons=[];
-    if(await require('./metaScopeBlock.service').blocked(scope,{models,transaction,purpose:'meta'}))scopeReasons.push('scope_blocked');
+    if(await require('./metaScopeBlock.service').blocked(scope,{models,transaction,purpose:'meta'})&&!proof)scopeReasons.push('scope_blocked');
     // Project only a boolean about credential presence; never materialize a token.
     const connections=await models.MetaConnection.findAll({...options,attributes:['id','broker_app_id','credentials_external',
       [literal('(accessToken IS NULL)'),'credentials_absent']],where:{metaUserId:metadata.subjectId},order:[['id','ASC']],limit:2});
     const connection=connections.length===1?connections[0]:null;
-    if(connections.length>1||connection&&(!C.positive(Number(connection.id))||Number(connection.credentials_external)!==1
-      ||Number(connection.credentials_absent)!==1||connection.broker_app_id!==metadata.appId))scopeReasons.push('identity_review');
+    if(!proof&&(connections.length>1||connection&&(!C.positive(Number(connection.id))||Number(connection.credentials_external)!==1
+      ||Number(connection.credentials_absent)!==1||connection.broker_app_id!==metadata.appId)))scopeReasons.push('identity_review');
     const keys=[...clinicIds.map(id=>'clinic:'+id),...groupIds.map(id=>'group:'+id)];
     const grants=await models.MetaConnectionAssignment.findAll({...options,attributes:['id','scopeKey','assignmentScope','clinicaId','grupoClinicaId','metaConnectionId','status'],
       where:{[Op.or]:[{scopeKey:{[Op.in]:keys}},{assignmentScope:'clinic',clinicaId:{[Op.in]:clinicIds}},{assignmentScope:'group',grupoClinicaId:{[Op.in]:groupIds}}]},
@@ -45,7 +49,7 @@ function createReview({models,now=()=>new Date()}) {
       const direct=grants.filter(v=>v.scopeKey==='clinic:'+clinic.id_clinica);
       check(direct.length?direct:grants.filter(v=>v.scopeKey==='group:'+clinic.grupoClinicaId));
     }
-    if(invalid)scopeReasons.push('scope_assignment_review');
+    if(invalid&&!proof)scopeReasons.push('scope_assignment_review');
 
     // Group selected identities and IG parents. No N queries per asset and no
     // token/additionalData column, even when an alias belongs to another clinic.
@@ -85,7 +89,10 @@ function createReview({models,now=()=>new Date()}) {
     return {version:1,checkedAt,reservationMade:false,scopeStatus:scopeReasons.length?'review_required':'clear',scopeReasons:scopeReasons.sort(),
       assets:inventory.assets.map(asset=>{
         const identities=[asset.assetRef,...(asset.parentPageId?['meta-facebook_page:'+asset.parentPageId]:[])],reasons=[];
-        if(identities.some(ref=>assigned.has(ref)))reasons.push('asset_assigned');
+        const adopted=proof&&asset.kind==='ad_account'&&proof.aliases.some(alias=>proof.mappingIds.includes(Number(alias.id))
+          &&alias.assetType==='ad_account'&&'meta-ad_account:'+String(alias.metaAssetId).replace(/^act_/,'')===asset.assetRef&&Number(alias.credentials_absent)===1);
+        if(identities.some(ref=>assigned.has(ref))&&!adopted)reasons.push('asset_assigned');
+        if(proof&&!adopted)reasons.push('recovery_not_selected');
         if(identities.some(ref=>registered.has(ref)))reasons.push('asset_registered');
         if(identities.some(ref=>revoked.has(ref)))reasons.push('asset_revoked');
         return {assetRef:asset.assetRef,status:scopeReasons.length||reasons.length?'review_required':'clear',reasons};

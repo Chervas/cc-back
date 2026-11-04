@@ -1,7 +1,8 @@
 'use strict';
-const {Op}=require('sequelize'),C=require('./metaMarketingOAuth.contract');
+const C=require('./metaMarketingOAuth.contract');
 const {hasMarketingClinicScopeAccess}=require('../lib/marketingScopeAccess');
-function createScope({models,sessions,now=()=>new Date()}){
+function createScope({models,sessions,now=()=>new Date(),recoveryGuard}){
+  const recovery=recoveryGuard||require('./metaMarketingLegacyRecovery.service').createRecovery({models,sessions,now});
   async function authorize({scopeKey,actorId,sessionRef,sessionExpiresAt},transaction){
     if(!transaction||typeof scopeKey!=='string'||!/^(clinic|group):[1-9][0-9]{0,9}$/.test(scopeKey)||!C.positive(actorId))C.fail('meta_oauth_scope_invalid',400);
     try{await sessions.verifyReference({userId:actorId,sessionRef,expiresAt:sessionExpiresAt},{transaction,requireEmail:true});}
@@ -11,18 +12,24 @@ function createScope({models,sessions,now=()=>new Date()}){
     const clinics=await models.Clinica.findAll({...options,attributes:['id_clinica'],where:type==='group'?{grupoClinicaId:id}:{id_clinica:id},order:[['id_clinica','ASC']],limit:1001});
     if(!clinics.length||clinics.length>1000)C.fail('meta_oauth_scope_changed',409);const clinicIds=clinics.map(r=>Number(r.id_clinica));
     if(!await hasMarketingClinicScopeAccess({userId:actorId,clinicIds,access:'write',membershipModel:{findAll:opts=>models.UsuarioClinica.findAll({...opts,...options})}}))C.fail('meta_oauth_scope_forbidden',403);
-    return {scopeKey,clinicIds,options};
+    return {scopeKey,clinicIds,actorId,sessionRef,sessionExpiresAt,options};
   }
-  async function captureStructure(authorized){
+  async function captureStructure(authorized,{flow=null,phase='pending'}={}){
     const {scopeKey,clinicIds,options}=authorized;
     const raw=await models.MetaMarketingOAuthSlot.findByPk(scopeKey,options);if(!raw)return {...authorized,slot:null};
     const slot=C.slot(raw);if(slot.state!=='active'||+slot.expires_at<=+now()||JSON.stringify(clinicIds)!==slot.clinic_ids)C.fail('meta_oauth_scope_changed',409);
-    const refs=['meta:'+scopeKey,...clinicIds.map(id=>'meta:clinic:'+id)];
-    const blocks=await models.MetaScopeBlock.findAll({...options,attributes:['scope_key'],where:{scope_key:{[Op.in]:refs}},limit:1});
-    if(blocks.length)C.fail('meta_oauth_scope_blocked',409);
+    const proof=flow?await recovery.forFlow(flow,options.transaction,{phase}):await recovery.inspectPrepared({scopeKey,clinicIds,appId:slot.app_id,
+      actorId:authorized.actorId,sessionRef:authorized.sessionRef,sessionExpiresAt:authorized.sessionExpiresAt},options.transaction);
+    const [assignmentScope,scopeId]=scopeKey.split(':');
+    // A raw tombstone remains universal. Only a fresh, root-prepared generation
+    // can authorize its exact non-WhatsApp scope; legacy readers keep the block.
+    if(await require('./metaScopeBlock.service').blocked({assignmentScope,clinicId:assignmentScope==='clinic'?Number(scopeId):null,
+      groupId:assignmentScope==='group'?Number(scopeId):null},{models,transaction:options.transaction,purpose:'meta'})&&!proof)C.fail('meta_oauth_scope_blocked',409);
     const revocations=await models.MetaMarketingBrokerRevocation.findAll({...options,attributes:['tuple_hash'],where:{scope_key:scopeKey},order:[['tuple_hash','ASC']],limit:1001});
     if(revocations.length>1000)C.fail();
-    return {...authorized,slot,slotDigest:C.slotDigest(slot),scopeDigest:C.hash(JSON.stringify([C.slotDigest(slot),clinicIds,revocations.map(r=>r.tuple_hash)]))};
+    const pieces=[C.slotDigest(slot),clinicIds,revocations.map(r=>r.tuple_hash)];
+    if(proof)pieces.push(proof.immutableDigest);
+    return {...authorized,slot,recovery:proof,slotDigest:C.slotDigest(slot),scopeDigest:C.hash(JSON.stringify(pieces))};
   }
   const capture=async(actor,transaction)=>captureStructure(await authorize(actor,transaction));
   function compare(row,fresh){
@@ -31,7 +38,8 @@ function createScope({models,sessions,now=()=>new Date()}){
     return fresh;
   }
   async function revalidate(row,transaction){
-    return compare(row,await capture({scopeKey:row.scope_key,actorId:Number(row.actor_user_id),sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at},transaction));
+    const authorized=await authorize({scopeKey:row.scope_key,actorId:Number(row.actor_user_id),sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at},transaction);
+    return compare(row,await captureStructure(authorized,{flow:row}));
   }
   async function revalidateStructure(row,transaction){
     // A confirmed clinic connection outlives the user's login. This internal
@@ -40,7 +48,7 @@ function createScope({models,sessions,now=()=>new Date()}){
     const [kind,id]=row.scope_key.split(':'),options={transaction,lock:transaction.LOCK.UPDATE,raw:true,logging:false};
     const clinics=await models.Clinica.findAll({...options,attributes:['id_clinica'],where:kind==='group'?{grupoClinicaId:Number(id)}:{id_clinica:Number(id)},order:[['id_clinica','ASC']],limit:1001});
     if(!clinics.length||clinics.length>1000)C.fail('meta_oauth_scope_changed',409);
-    return compare(row,await captureStructure({scopeKey:row.scope_key,clinicIds:clinics.map(v=>Number(v.id_clinica)),options}));
+    return compare(row,await captureStructure({scopeKey:row.scope_key,clinicIds:clinics.map(v=>Number(v.id_clinica)),options},{flow:row,phase:'active'}));
   }
   return {authorize,capture,revalidate,revalidateStructure};
 }
