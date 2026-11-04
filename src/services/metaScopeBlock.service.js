@@ -34,6 +34,11 @@ async function preserve({ scope, connectionId, actorId, clinicIds, models = requ
     await models.MetaScopeBlock.findOrCreate({ where: { scope_key: key },
       defaults: { scope_key: key, reason: 'scope_disconnected', connection_id: Number(connectionId), actor_user_id: Number(actorId), created_at: new Date() }, transaction });
   }
+  // A repeated withdrawal still retires a newer non-WA generation, even when
+  // findOrCreate preserves the same old tombstone and timestamp. The existing
+  // enrollment outbox owns remote revocation; shared WhatsApp stays untouched.
+  await require('./metaMarketingLegacyRecovery.service').createRecovery({ models })
+    .retireForScope({ scope, clinicIds }, transaction);
   const repo = require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
   const health = await repo.health(new Date(), { includeUnresolved: false, transaction });
   if (health.pending >= 10000 || health.oldestAgeSeconds >= 3600) unavailable();

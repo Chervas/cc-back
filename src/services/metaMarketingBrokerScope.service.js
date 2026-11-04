@@ -55,6 +55,11 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
       enrollment=await inspectEnrollment(selected.enrollment_id);
       if(enrollment?.enrollmentId!==selected.enrollment_id||!Array.isArray(enrollment.mappingIds)||!enrollment.mappingIds.includes(Number(mappingId)))fail();
     }
+    const recovery=enrollment?.recovery||null;
+    if(recovery&&(recovery.enrollmentId!==selected.enrollment_id||recovery.flowId!==enrollment.flowId
+      ||Number(recovery.canonicalConnectionId)!==selected.meta_connection_id||recovery.appId!==selected.app_id
+      ||recovery.subjectId!==selected.meta_user_id||recovery.scopeKey!==selected.scope_key
+      ||!Array.isArray(recovery.mappingIds)||!recovery.mappingIds.includes(Number(mappingId))))fail('scope_denied');
     if (!current) fail(); const requested = mapping(current);
     if (!requested.active || requested.assetRef !== selected.asset_ref || requested.connectionId !== selected.meta_connection_id) fail();
     const [scopeType, rawScopeId] = selected.scope_key.split(':'), scopeId = Number(rawScopeId);
@@ -65,7 +70,8 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
       || scopeType === 'clinic' && (clinicIds.length !== 1 || clinicIds[0] !== scopeId)
       || scopeType === 'group' && clinics.some(row => Number(row.grupoClinicaId) !== scopeId)) fail();
     if(enrollment&&JSON.stringify(enrollment.clinicIds)!==JSON.stringify(clinicIds))fail('scope_denied');
-    if (await blocked(scope)) fail('asset_revoked');
+    if(recovery&&JSON.stringify(recovery.clinicIds)!==JSON.stringify(clinicIds))fail('scope_denied');
+    if (await blocked(scope)&&!recovery) fail('asset_revoked');
     const records = bounded(await loadBindings(selected.asset_ref, null)).map(binding);
     const aliases = bounded(await loadMappings(requested));
     const all = aliases.map(mapping), active = all.filter(row => row.active);
@@ -102,16 +108,18 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
         || scopeType === 'group' && Number(group.id_grupo) !== scopeId) fail('scope_denied');
     }
     const groupIds = ids(clinics.map(row => row.grupoClinicaId).filter(value => value !== null));
-    const grants = bounded(await loadGrants(clinicIds, groupIds));
+    const grants = recovery?[]:bounded(await loadGrants(clinicIds, groupIds));
     const match = (type,id) => grants.filter(row => row.assignmentScope === type && Number(type === 'clinic' ? row.clinicaId : row.grupoClinicaId) === id);
     const assertGrant = rows => { if (rows.length !== 1 || rows[0].status !== 'active' || Number(rows[0].metaConnectionId) !== requested.connectionId) fail('scope_denied'); };
-    if (scopeType === 'group') assertGrant(match('group',scopeId));
-    for (const id of clinicIds) {
-      const direct = match('clinic',id);
-      if (direct.length) assertGrant(direct);
-      else assertGrant(match('group',Number(clinics.find(row => Number(row.id_clinica) === id).grupoClinicaId)));
+    if(!recovery){
+      if (scopeType === 'group') assertGrant(match('group',scopeId));
+      for (const id of clinicIds) {
+        const direct = match('clinic',id);
+        if (direct.length) assertGrant(direct);
+        else assertGrant(match('group',Number(clinics.find(row => Number(row.id_clinica) === id).grupoClinicaId)));
+      }
     }
-    const connection = await loadConnection(selected.meta_connection_id, selected.meta_user_id);
+    const connection = await loadConnection(selected.meta_connection_id, selected.meta_user_id,recovery);
     if (!connection || Number(connection.id) !== selected.meta_connection_id || connection.metaUserId !== selected.meta_user_id
       || connection.broker_app_id !== selected.app_id || Number(connection.credentials_external) !== 1 || Number(connection.credentials_absent) !== 1) fail();
     const captured = { mappingId:requested.mappingId, ...asset(selected.asset_ref), parentPageId:selected.parent_page_id,
@@ -148,9 +156,18 @@ function createMetaMarketingScopeRepository(getModels) {
       return field ? getModels().GrupoClinica.findAll({ ...options,attributes:['id_grupo',[field,'asset_id']],where:{[field]:{[Op.in]:mappingIds}},order:[['id_grupo','ASC']] }) : Promise.resolve([]); },
     loadGrants:(clinicIds,groupIds) => getModels().MetaConnectionAssignment.findAll({ ...options,attributes:['id','assignmentScope','clinicaId','grupoClinicaId','metaConnectionId','status','updated_at'],
       where:{[Op.or]:[{assignmentScope:'clinic',clinicaId:{[Op.in]:clinicIds}},{assignmentScope:'group',grupoClinicaId:{[Op.in]:groupIds}}]},order:[['id','ASC']] }),
-    loadConnection:async(id,subject) => { const rows=await getModels().MetaConnection.findAll({ ...options,limit:2,
-      attributes:['id','metaUserId','broker_app_id','credentials_external',[literal('(accessToken IS NULL)'),'credentials_absent']],
-      where:{[Op.or]:[{id},{metaUserId:subject}]},order:[['id','ASC']] });return rows.length === 1 ? rows[0] : null; },
+    loadConnection:async(id,subject,recovery=null) => {
+      const rows=await getModels().MetaConnection.findAll({ ...options,limit:recovery?1:2,
+        attributes:['id','userId','metaUserId','broker_app_id','credentials_external',[literal('(accessToken IS NULL)'),'credentials_absent']],
+        where:recovery?{id,metaUserId:subject}:{[Op.or]:[{id},{metaUserId:subject}]},order:[['id','ASC']] });
+      if(!recovery)return rows.length===1?rows[0]:null;
+      // The generation registry fixes the clean canonical connection by ID.
+      // Active reads do not inspect shared legacy credentials or derive grants
+      // from another connection with the same Meta subject.
+      if(Number(recovery.canonicalConnectionId)!==Number(id)||recovery.subjectId!==subject||rows.length!==1)return null;
+      const canonical=rows.find(row=>Number(row.id)===Number(id));
+      return canonical?.userId===null?canonical:null;
+    },
     blocked:scope => require('./metaScopeBlock.service').blocked(scope,{models:getModels(),purpose:'meta'}),
   };
 }

@@ -3,6 +3,14 @@ const test=require('node:test'),assert=require('node:assert/strict'),http=requir
 const express=require('express'),{loadDiscoverySource,unusedMetaSurfaceDependencies}=require('./fixtures/business_profile_discovery.fixture');
 const {connectionForTestServer}=require('./fixtures/campaign_offline_runtime.cjs');
 const C=require('../../services/metaMarketingOAuth.contract');
+test('Unrelated metadata and legacy Google doubles permit mounting only and reject every operation',()=>{
+  const dependencies=unusedMetaSurfaceDependencies(),closed=/UNEXPECTED_META_SURFACE_IN_OAUTH_QA/;
+  const metadata=dependencies['../services/metaConnectionMetadata.service'];
+  assert.throws(()=>metadata.createMetaMetadataRepository({})(),closed);
+  assert.throws(()=>metadata.createMetaDataAccessRepository({})(),closed);
+  assert.throws(()=>metadata.createMetaConnectionMetadata({}).handler()(),closed);
+  assert.throws(()=>dependencies['../services/googleLegacyOAuthGuard.service'].createGoogleLegacyOAuthGuard({models:{}}).assertAllowed(),closed);
+});
 test('Mounted OAuth router preserves authentication and uses the same configured origin for successful and rejected callbacks',async t=>{
   const previous=process.env.FRONTEND_URL;process.env.FRONTEND_URL='https://dev.example.invalid/configured/path';
   t.after(()=>{if(previous===undefined)delete process.env.FRONTEND_URL;else process.env.FRONTEND_URL=previous;});
