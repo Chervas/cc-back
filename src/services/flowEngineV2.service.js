@@ -7702,14 +7702,14 @@ async function notifyRecoveredReply(execution, conversationId, messageId) {
   if (!userIds.length) throw new Error('recovered_reply_assignee_missing');
   for (const userId of userIds) {
     const [notification, created] = await Notification.findOrCreate({
-      where: { dedupeKey: `automation:recovered-reply:${execution.id}:${messageId}:${userId}` },
+      where: { dedupeKey: `automation:recovered-reply:${execution.clinic_id}:${execution.trigger_entity_id}:${messageId}:${userId}` },
       defaults: {
         userId, role: adminFallback ? 'admin' : 'personaldeclinica',
         subrole: adminFallback ? '' : 'recepcion', category: 'general',
         event: 'automation.persistent_alert', title: 'Respuesta pendiente de revisión',
         message: 'El paciente respondió mientras se recuperaban mensajes de WhatsApp. Revisa la conversación y resuelve la cita; no se enviará otro recordatorio automático.',
         icon: 'heroicons_outline:bell-alert', level: 'warning', clinicaId: execution.clinic_id,
-        dedupeKey: `automation:recovered-reply:${execution.id}:${messageId}:${userId}`,
+        dedupeKey: `automation:recovered-reply:${execution.clinic_id}:${execution.trigger_entity_id}:${messageId}:${userId}`,
         data: { source: 'automations_v2', execution_id: execution.id,
           trigger_entity_type: 'appointment', trigger_entity_id: execution.trigger_entity_id,
           quickChatConversationId: conversationId, quickChatResponseMessageId: messageId,
@@ -7789,6 +7789,15 @@ async function resumeWaitingNode(execution, node, context, {
       if (pending?.kind === 'recovered') {
         const conversationId = toIntOrNull(anchor?.listened_output?.conversation_id || anchor?.listened_output?.chat_conversation_id);
         try {
+          const handled = await require('./recoveredReplyNotifications.service').current().alreadyHandled({
+            clinicId: execution.clinic_id,conversationId,messageId: pending.messageId,
+            appointmentId: toIntOrNull(execution.trigger_entity_id),
+          });
+          if (handled) {
+            await updateExecutionAndEmit(execution, {status:'cancelled',current_node_id:null,wait_until:null,waiting_meta:null,
+              last_error:'inbound_recovery_already_handled'}, 'flow_execution:cancelled');
+            return {resumed:false,context};
+          }
           await notifyRecoveredReply(execution, conversationId, pending.messageId);
           await conversationAutomationState.setState({
             clinicId: execution.clinic_id, conversationId, stage: 'review', status: 'review',

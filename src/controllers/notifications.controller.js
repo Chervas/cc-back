@@ -21,6 +21,11 @@ exports.list = async (req, res) => {
       order: [['createdAt', 'DESC']],
       limit: 200
     });
+    await require('../services/recoveredReplyNotifications.service').current()
+      .reconcileForUser(notifications,userId).catch(()=>{
+        // Uncertain evidence leaves the reviews visible. Do not break the inbox.
+        console.warn('[notifications] recovered review reconciliation unavailable');
+      });
     res.json(notifications.map(mapNotificationToDto));
   } catch (error) {
     console.error('Error fetching notifications:', error);
