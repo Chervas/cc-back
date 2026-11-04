@@ -31,7 +31,11 @@ test('historical recovery, another sender and out-of-window replies do not own t
  assert.equal(await check(message,{waitingMeta:{wait_starts_at:new Date(now).toISOString()}}),null);
 });
 test('a reply older than the dispatch limit needs review, never a false silence decision',async()=>{
- assert.equal(await check({...message,sent_at:new Date(now-90000000)}),9);
+ assert.deepEqual(await check({...message,sent_at:new Date(now-90000000)}),{kind:'recovered',messageId:9});
+ assert.equal(await check({...message,sent_at:new Date(now-86400000)}),9);
+ const old={...message,id:8,sent_at:new Date(now-90000000)};
+ assert.equal(await check([old,message]),9);
+ assert.equal(message.metadata.recovery_without_automation,undefined);
 });
 test('audio still being transcribed holds the native wait without changing the message',async()=>{
  const row={...message,message_type:'audio',metadata:{...message.metadata,provider_type:'audio',media:{id:'synthetic'},audio_transcription:{status:'pending'}}};

@@ -66,6 +66,7 @@ function state(snapshot, clinicId, now = Date.now(), { contactKeys = null, verif
   if (!clinic) return { healthy: false, reason: 'inbox_health_scope_missing' };
   let blockingReview = clinic.blockingReview;
   let identityReview = 0;
+  let echoReview = 0;
   if (Array.isArray(contactKeys) && contactKeys.every(contactKey)
     && Number.isSafeInteger(clinic.unscopedBlockingReview) && clinic.unscopedBlockingReview >= 0
     && clinic.unscopedBlockingReview <= clinic.blockingReview
@@ -74,11 +75,16 @@ function state(snapshot, clinicId, now = Date.now(), { contactKeys = null, verif
     blockingReview = clinic.unscopedBlockingReview
       + Number(clinic.blockingContactKeys.some(key => contactKeys.includes(key)));
     if (verifiedPhoneContact === true) {
-      const summary = summaryOf(clinic);
+      const summary = clinic.unscopedReviewSummary === undefined ? summaryOf(clinic)
+        : summaryOf({ ...clinic, reviewSummary: clinic.unscopedReviewSummary, blockingReview: clinic.unscopedBlockingReview });
       const count = summary?.filter(item => item.category === 'user_identity_unresolved')
         .reduce((total, item) => total + item.count, 0) || 0;
       if (count <= clinic.unscopedBlockingReview) {
         identityReview = count;
+        // Only the authenticated unscoped breakdown can exempt mobile echoes.
+        // Their receipts remain retained; known-contact conflicts still block.
+        if (clinic.unscopedReviewSummary !== undefined && summary) echoReview = summary
+          .filter(item => item.category === 'mobile_echoes').reduce((total, item) => total + item.count, 0);
         const old = Number.isSafeInteger(questionNotBefore) && questionNotBefore > 0 && questionNotBefore <= now
           ? (summary || []).filter(item => item.category === 'user_identity_unresolved'
             && Number.isSafeInteger(item.oldestAt) && item.oldestAt > 0
@@ -89,11 +95,12 @@ function state(snapshot, clinicId, now = Date.now(), { contactKeys = null, verif
       }
     }
   }
-  const readyForReplies = !snapshot.recoveryHold && blockingReview - identityReview === 0;
-  const healthy = readyForReplies && identityReview === 0
+  const readyForReplies = !snapshot.recoveryHold && blockingReview - identityReview - echoReview === 0;
+  const healthy = readyForReplies && identityReview === 0 && echoReview === 0
     && (clinic.oldestPendingAt === null || now - clinic.oldestPendingAt <= 120000);
   return { healthy, readyForReplies, readyForTimeout: healthy && clinic.oldestPendingAt === null,
-    reason: healthy ? null : identityReview ? 'inbox_user_identity_pending' : 'inbox_reception_delayed',
+    reason: healthy ? null : identityReview ? 'inbox_user_identity_pending'
+      : echoReview ? 'inbox_mobile_echo_review_pending' : 'inbox_reception_delayed',
     recoveryNotBefore: snapshot.recoveryNotBefore || null };
 }
 function publish(health, scopes, { recoveryNotBefore = null, recoveryHold = false } = {}) {
@@ -101,7 +108,7 @@ function publish(health, scopes, { recoveryNotBefore = null, recoveryHold = fals
   const clinics = new Map();
   for (const scope of scopes) for (const clinicId of scope.clinicIds) {
     const value = clinics.get(clinicId) || { clinicId, oldestPendingAt: null, blockingReview: 0, review: 0,
-      unscopedBlockingReview: 0, blockingContactKeys: [], reviewSummary: [], blockingReviewScopeKeys: [] };
+      unscopedBlockingReview: 0, blockingContactKeys: [], reviewSummary: [], unscopedReviewSummary: [], blockingReviewScopeKeys: [] };
     for (const group of health.groups.filter(g => g.scopes.includes(scope.wabaId + ':' + scope.phoneId))) {
       if (group.oldestPendingAt !== null) value.oldestPendingAt = Math.min(value.oldestPendingAt ?? Infinity, group.oldestPendingAt);
       value.blockingReview += Number(group.blockingReview) || 0; value.review += Number(group.review) || 0;
@@ -115,7 +122,12 @@ function publish(health, scopes, { recoveryNotBefore = null, recoveryHold = fals
         && isolation.scopedReviews > 0 && isolation.scopedReviews <= group.blockingReview
         && Array.isArray(isolation.contacts) && isolation.contacts.length > 0 && isolation.contacts.length <= 4096
         && isolation.contacts.every(c => Number.isSafeInteger(c.clinicId) && c.clinicId > 0 && contactKey(c.contactKey));
-      value.unscopedBlockingReview += (Number(group.blockingReview) || 0) - (valid ? isolation.scopedReviews : 0);
+      const unscopedCount = (Number(group.blockingReview) || 0) - (valid ? isolation.scopedReviews : 0);
+      value.unscopedBlockingReview += unscopedCount;
+      const unscopedSummary = summaryOf({ ...group, reviewSummary: group.unscopedReviewSummary, blockingReview: unscopedCount });
+      value.unscopedReviewSummary = mergeSummaries([...value.unscopedReviewSummary,
+        ...(unscopedSummary || (unscopedCount > 0 ? [{ category: 'unknown', count: unscopedCount,
+          oldestAt: null, newestAt: null, errorCodes: [] }] : []))]);
       if (valid) value.blockingContactKeys = [...new Set([...value.blockingContactKeys,
         ...isolation.contacts.filter(c => c.clinicId === clinicId).map(c => c.contactKey)])];
     }

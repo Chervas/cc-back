@@ -7,6 +7,31 @@ const {decide}=require('../../lib/whatsappAppointmentTimeout');
 const {reviewContacts}=require('../../../services/integrations-broker/src/whatsapp-inbox-review');
 const now=Date.parse('2026-09-29T08:00:00Z');
 const hash=peer=>createHash('sha256').update(JSON.stringify([72,'201',peer])).digest('hex');
+test('unattributed mobile echoes permit verified replies but never silence actions or conflicting contacts',async()=>{
+ const s={version:1,observedAt:now,recoveryHold:false,clinics:[{clinicId:72,oldestPendingAt:null,
+  blockingReview:25,unscopedBlockingReview:17,blockingContactKeys:[hash('19995550101')],
+  reviewSummary:[{category:'incoming_messages',count:8,oldestAt:now-86400000,newestAt:now,errorCodes:[]},
+   {category:'mobile_echoes',count:8,oldestAt:now-86400000,newestAt:now,errorCodes:[]},
+   {category:'user_identity_unresolved',count:9,oldestAt:now-86400000,newestAt:now,errorCodes:[]}],
+  unscopedReviewSummary:[{category:'mobile_echoes',count:8,oldestAt:now-86400000,newestAt:now,errorCodes:[]},
+   {category:'user_identity_unresolved',count:9,oldestAt:now-86400000,newestAt:now,errorCodes:[]}]}]};
+ const c={id:7,clinic_id:72,channel:'whatsapp',contact_id:'19995550202'},b=[{clinicId:72,phoneId:'201'}];
+ const check=(value,conversation=c,query=async()=>[[]])=>health.forConversation(value,conversation,b,query,{now});
+ const result=await check(s);assert.equal(result.readyForReplies,true);assert.equal(result.readyForTimeout,false);
+ assert.equal(result.healthy,false);assert.equal(health.state(s,72,now).readyForReplies,false);
+ assert.equal((await check(s,{...c,contact_id:'19995550101'})).readyForReplies,false);
+ assert.equal((await check(s,c,async()=>[[{contact_key:hash('19995550101')}]] )).readyForReplies,false);
+ for(const change of [x=>delete x.clinics[0].unscopedReviewSummary,
+  x=>x.clinics[0].unscopedReviewSummary[0].count=7,
+  x=>x.clinics[0].unscopedReviewSummary[0].category='incoming_messages',
+  x=>x.recoveryHold=true,x=>x.observedAt=now-90001]) {
+  const altered=structuredClone(s);change(altered);assert.notEqual((await check(altered)).readyForReplies,true);
+ }
+ // Same overall categories, different attribution: never exempt scoped echoes
+ // in place of unresolved incoming messages from an unidentified contact.
+ const swapped=structuredClone(s);swapped.clinics[0].unscopedReviewSummary[0].category='incoming_messages';
+ assert.equal((await check(swapped)).readyForReplies,false);
+});
 function snapshot(){return {version:1,observedAt:now,recoveryHold:false,clinics:[{clinicId:72,oldestPendingAt:null,blockingReview:4,
  unscopedBlockingReview:0,blockingContactKeys:[hash('19995550101')]}]};}
 test('signed-event attribution contains only contact hashes; mixed, unknown and malformed events stay unscoped',()=>{

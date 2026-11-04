@@ -328,6 +328,7 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
       const isolationReceipts = new Set(durable.map(row => row.receipt));
       const analysisReviews = [...new Map([...recent, ...durable].map(row => [row.receipt, row])).values()];
       const summaries = new Map();
+      const unscopedSummaries = new Map();
       const present = new Set(analysisReviews.map(r => r.receipt));
       for (const receipt of reviewCache.keys()) if (!present.has(receipt)) reviewCache.delete(receipt);
       let bytes = 0;
@@ -374,18 +375,36 @@ function createWhatsappInbox({ store, cipher, appId, bindings, auditContext, now
         item.newestAt = Math.max(item.newestAt, row.received_at);
         item.errorCodes = [...new Set([...item.errorCodes, ...summary.errorCodes])].sort((a, b) => a - b).slice(0, 10);
         items.set(summary.category, item); summaries.set(group.scopes, items);
-        if (!isolationReceipts.has(row.receipt) || !cached.contacts) continue;
-        const isolation = group.reviewIsolation ||= { version: 1, scopedReviews: 0, contacts: [] };
-        const contacts = new Map([...isolation.contacts, ...cached.contacts].map(c => [c.contactKey, c]));
-        if (contacts.size > 4096) continue;
-        isolation.scopedReviews++;
-        isolation.contacts = [...contacts.values()];
+        if (isolationReceipts.has(row.receipt) && cached.contacts) {
+          const isolation = group.reviewIsolation ||= { version: 1, scopedReviews: 0, contacts: [] };
+          const contacts = new Map([...isolation.contacts, ...cached.contacts].map(c => [c.contactKey, c]));
+          if (contacts.size <= 4096) {
+            isolation.scopedReviews++;
+            isolation.contacts = [...contacts.values()];
+            continue;
+          }
+        }
+        // Keep category attribution separate from contact attribution. A total
+        // category count cannot safely be subtracted from the unscoped count.
+        const unscoped = unscopedSummaries.get(group.scopes) || new Map();
+        const previous = unscoped.get(summary.category);
+        unscoped.set(summary.category, previous ? { ...previous, count: previous.count + 1,
+          oldestAt: Math.min(previous.oldestAt, row.received_at), newestAt: Math.max(previous.newestAt, row.received_at),
+          errorCodes: [...new Set([...previous.errorCodes, ...summary.errorCodes])].sort((a, b) => a - b).slice(0, 10),
+        } : { category: summary.category, count: 1, oldestAt: row.received_at, newestAt: row.received_at,
+          errorCodes: [...summary.errorCodes] });
+        unscopedSummaries.set(group.scopes, unscoped);
       }
       return { observedAt: now(), groups: groups.map(row => {
         const reviewSummary = [...(summaries.get(row.scopes)?.values() || [])];
         const unknown = row.blockingReview - reviewSummary.reduce((total, item) => total + item.count, 0);
         if (unknown > 0) reviewSummary.push({ category: 'unknown', count: unknown, oldestAt: null, newestAt: null, errorCodes: [] });
-        return { ...row, scopes: JSON.parse(row.scopes), reviewSummary };
+        const unscopedReviewSummary = [...(unscopedSummaries.get(row.scopes)?.values() || [])];
+        const unknownUnscoped = row.blockingReview - (row.reviewIsolation?.scopedReviews || 0)
+          - unscopedReviewSummary.reduce((total, item) => total + item.count, 0);
+        if (unknownUnscoped > 0) unscopedReviewSummary.push({ category: 'unknown', count: unknownUnscoped,
+          oldestAt: null, newestAt: null, errorCodes: [] });
+        return { ...row, scopes: JSON.parse(row.scopes), reviewSummary, unscopedReviewSummary };
       }),
         capacity: { rows: storage.rows, bytes: storage.bytes, maxRows, maxBytes,
           auditPending: store.backlog().pending, maxAuditBacklog },

@@ -26,6 +26,23 @@ function fixture(t, options = {}) {
   return { dir, filename, get store() { return store; }, get inbox() { return inbox; }, get cipher() { return cipher; }, advance(ms) { clock += ms; },
     restart() { cipher.close(); store.close(); open(); } };
 }
+test('health separates unscoped categories from scoped echoes without releasing or importing receipts', t => {
+  const f=fixture(t,{scopeBindings:[{wabaId:'301',phoneId:'401',clinicIds:[71]}]});
+  const add=(field,value)=>{const event={object:'whatsapp_business_account',entry:[{id:'301',changes:[{field,value:{
+    messaging_product:'whatsapp',metadata:{phone_number_id:'401'},...value}}]}]};
+    const r=f.inbox.accept(packet(event)),lease=f.inbox.lease(r.receipt);lease.raw.fill(0);
+    f.inbox.defer({receipt:r.receipt,lease:lease.lease,reason:'review_required'});return r.receipt;};
+  add('smb_message_echoes',{message_echoes:[{to:'34000000001',id:'synthetic-known'}]});
+  add('smb_message_echoes',{message_echoes:[{to:'unidentified',id:'synthetic-unknown'}]});
+  add('messages',{messages:[{from:'unknown',id:'synthetic-inbound'}]});
+  const before=f.store.db.prepare('SELECT receipt,body,state FROM whatsapp_inbox ORDER BY receipt').all();
+  for(let n=0;n<2;n++) {
+    const g=f.inbox.health().groups[0];assert.equal(g.blockingReview,3);assert.equal(g.reviewIsolation.scopedReviews,1);
+    assert.deepEqual(g.unscopedReviewSummary.map(s=>[s.category,s.count]).sort(),[['incoming_messages',1],['mobile_echoes',1]]);
+    assert.deepEqual(f.store.db.prepare('SELECT receipt,body,state FROM whatsapp_inbox ORDER BY receipt').all(),before);
+    f.restart();
+  }
+});
 test('BSUID diagnostics upgrade preserves ciphertext, lease and unresolved import across restart', t => {
   const scopes=[{wabaId:'301',phoneId:'401',clinicIds:[71]}];
   const f=fixture(t,{scopeBindings:scopes});

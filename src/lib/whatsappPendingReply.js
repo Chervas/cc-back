@@ -33,7 +33,10 @@ async function pendingReply({ clinicId, anchor, waitingMeta, bindings, snapshot,
     const guardBinding = recovered ? { ...binding, messageNotBefore: null } : binding;
     if (!eligible(message, { id: conversationId, clinic_id: Number(clinicId), channel: 'whatsapp' }, guardBinding, cutoff, now,
       { includeExpired: true })) continue;
-    if (recovered) recoveredMessageId ||= Number(row.id);
+    // The fresh dispatcher deliberately has a 24 h limit. Once outside it,
+    // keep the reply for human review rather than rescheduling forever or
+    // following the silence branch. This does not make the message replayable.
+    if (recovered || now - new Date(row.sent_at).getTime() > 86400000) recoveredMessageId ||= Number(row.id);
     else return Number(row.id);
   }
   return recoveredMessageId ? { kind: 'recovered', messageId: recoveredMessageId }
