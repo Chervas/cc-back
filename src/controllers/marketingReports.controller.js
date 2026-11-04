@@ -1774,6 +1774,22 @@ async function searchConsoleReportSource(scope, marketingState, range, replaceme
     range, replacements, prefix, ...options });
 }
 
+// Share two slots across these expensive SEO dimension SELECTs in this process.
+// A released slot goes directly to its oldest waiter, including after errors;
+// other API queries and transports do not enter this queue.
+const seoDimensionSqlWaiters = [];
+let seoDimensionSqlActive = 0;
+async function withSeoDimensionSqlSlot(work) {
+  if (seoDimensionSqlActive >= 2) await new Promise(resolve => seoDimensionSqlWaiters.push(resolve));
+  else seoDimensionSqlActive++;
+  try { return await work(); }
+  finally {
+    const next = seoDimensionSqlWaiters.shift();
+    if (next) next();
+    else seoDimensionSqlActive--;
+  }
+}
+
 async function fetchSeoDimensionRows(scope, range, marketingState, dimension, limit, keyPrefix, sourceChecks = []) {
   if (!WebScQueryDaily) return [];
   const startKey = `${keyPrefix}Start`;
@@ -1784,14 +1800,14 @@ async function fetchSeoDimensionRows(scope, range, marketingState, dimension, li
     [endKey]: range.endLabel,
     [limitKey]: limit,
   };
-  const source = await searchConsoleReportSource(scope, marketingState, range, replacements, keyPrefix);
+  const source = await searchConsoleReportSource(scope, marketingState, range, replacements, keyPrefix, { aggregate: true });
   if (source.validate) sourceChecks.push(source.validate);
   const scopeSql = source.scopeSql;
   const dimensionSql = dimension === 'page'
     ? "COALESCE(NULLIF(page_url, ''), 'Sin página')"
     : "COALESCE(NULLIF(query, ''), 'Sin query')";
 
-  const rows = await sequelize.query(
+  const rows = await withSeoDimensionSqlSlot(() => sequelize.query(
     `SELECT ${dimensionSql} AS value,
             SUM(clicks) AS clicks,
             SUM(impressions) AS impressions,
@@ -1804,7 +1820,7 @@ async function fetchSeoDimensionRows(scope, range, marketingState, dimension, li
       ORDER BY SUM(impressions) DESC, SUM(clicks) DESC
       LIMIT :${limitKey}`,
     { replacements, type: QueryTypes.SELECT }
-  );
+  ));
 
   if (source.validate) await source.validate();
   return rows.map((row) => ({
@@ -1826,13 +1842,13 @@ async function fetchSeoQueryPageRows(scope, range, marketingState, limit = 250, 
     [endKey]: range.endLabel,
     [limitKey]: limit,
   };
-  const source = await searchConsoleReportSource(scope, marketingState, range, replacements, keyPrefix);
+  const source = await searchConsoleReportSource(scope, marketingState, range, replacements, keyPrefix, { aggregate: true });
   if (source.validate) sourceChecks.push(source.validate);
   const scopeSql = source.scopeSql;
   const querySql = "COALESCE(NULLIF(query, ''), 'Sin query')";
   const pageSql = "COALESCE(NULLIF(page_url, ''), 'Sin página')";
 
-  const rows = await sequelize.query(
+  const rows = await withSeoDimensionSqlSlot(() => sequelize.query(
     `SELECT ${querySql} AS query,
             ${pageSql} AS page,
             SUM(clicks) AS clicks,
@@ -1846,7 +1862,7 @@ async function fetchSeoQueryPageRows(scope, range, marketingState, limit = 250, 
       ORDER BY SUM(clicks) DESC, SUM(impressions) DESC
       LIMIT :${limitKey}`,
     { replacements, type: QueryTypes.SELECT }
-  );
+  ));
 
   if (source.validate) await source.validate();
   return rows.map((row) => ({

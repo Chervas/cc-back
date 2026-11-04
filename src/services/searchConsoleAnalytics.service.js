@@ -302,10 +302,11 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
     });
   }
 
-  async function rawSource({ siteUrls, startDate, endDate, replacements, prefix = 'sca', totals = false, ranking = false } = {}) {
+  async function rawSource({ siteUrls, startDate, endDate, replacements, prefix = 'sca', totals = false, ranking = false, aggregate = false } = {}) {
     if (!isReadEnabled(env)) C.fail('sc_analytics_read_disabled');
     C.range(startDate, endDate);
-    if (!Array.isArray(siteUrls) || !siteUrls.length || siteUrls.length > 200 || !replacements || !/^[a-zA-Z][a-zA-Z0-9_]{0,24}$/.test(prefix) || totals && ranking) C.fail('sc_analytics_invalid_scope');
+    if (!Array.isArray(siteUrls) || !siteUrls.length || siteUrls.length > 200 || !replacements || !/^[a-zA-Z][a-zA-Z0-9_]{0,24}$/.test(prefix)
+      || totals && ranking || typeof aggregate !== 'boolean' || aggregate && (totals || ranking)) C.fail('sc_analytics_invalid_scope');
     const sites = [...new Map(siteUrls.map(C.property).map(p => [p.siteHash, p])).values()];
     const params = { [`${prefix}Start`]: startDate, [`${prefix}End`]: endDate };
     const placeholders = sites.map((p, i) => { params[prefix + i] = p.siteHash; return `UNHEX(:${prefix}${i})`; }).join(',');
@@ -334,7 +335,17 @@ function createSearchConsoleAnalytics({ sequelize, env = {}, now = () => new Dat
     let source;
     if (totals) source = `SELECT ${common},${position('d')} AS position,d.position_weighted,d.position_sum,d.position_count,CASE WHEN d.impressions>0 THEN d.clicks/d.impressions ELSE 0 END AS ctr FROM ScAnalyticsPropertyDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id ${where}`;
     else if (ranking) source = `SELECT d.property_id,p.site_url,d.date,d.queries_top3,d.queries_top10 FROM ScAnalyticsRankingDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id ${where}`;
-    else {
+    else if (aggregate) {
+      // Explicit period aggregates for the three SEO dimension reports only.
+      // Keep both IDs and property ownership until after grouping: dictionary
+      // joins still exclude the same orphan pairs and text/collation grouping
+      // remains the caller's final step, including empty-placeholder collisions.
+      const ids = 'd.property_id,d.query_id,d.page_id';
+      const sums = metrics.map(key => `SUM(d.${key}) AS ${key}`).join(',');
+      const grouped = `SELECT ${ids},${sums},MAX(d.date) AS date FROM ScAnalyticsDaily d JOIN ScAnalyticsProperties p ON p.id=d.property_id ${where} AND NOT EXISTS(SELECT 1 FROM ScAnalyticsArchiveBatches a WHERE a.property_id=d.property_id AND a.month=DATE_FORMAT(d.date,'%Y-%m-01')) GROUP BY ${ids}
+        UNION ALL SELECT ${ids},${sums},MAX(d.month) AS date FROM ScAnalyticsMonthly d JOIN ScAnalyticsProperties p ON p.id=d.property_id WHERE ${scope} AND d.month BETWEEN :${prefix}Start AND :${prefix}End AND EXISTS(SELECT 1 FROM ScAnalyticsArchiveBatches a WHERE a.property_id=d.property_id AND a.month=d.month) GROUP BY ${ids}`;
+      source = `SELECT g.property_id,p.site_url,g.date,g.clicks,g.impressions,q.value_text AS query,u.value_text AS page_url,${position('g')} AS position,g.position_weighted,g.position_sum,g.position_count FROM (${grouped}) g JOIN ScAnalyticsProperties p ON p.id=g.property_id JOIN ScAnalyticsQueries q ON q.id=g.query_id JOIN ScAnalyticsPages u ON u.id=g.page_id`;
+    } else {
       const dims = 'q.value_text AS query,u.value_text AS page_url';
       const joins = 'JOIN ScAnalyticsProperties p ON p.id=d.property_id JOIN ScAnalyticsQueries q ON q.id=d.query_id JOIN ScAnalyticsPages u ON u.id=d.page_id';
       source = `SELECT ${common},${dims},${position('d')} AS position,d.position_weighted,d.position_sum,d.position_count FROM ScAnalyticsDaily d ${joins} ${where} AND NOT EXISTS(SELECT 1 FROM ScAnalyticsArchiveBatches a WHERE a.property_id=d.property_id AND a.month=DATE_FORMAT(d.date,'%Y-%m-01'))

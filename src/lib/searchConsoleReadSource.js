@@ -46,10 +46,10 @@ async function readWithCurrentScope({ allowed, capture, generate, validate,
   return result;
 }
 
-async function propertySource({ storage, siteUrls, range, replacements, prefix, totals = false, ranking = false }) {
+async function propertySource({ storage, siteUrls, range, replacements, prefix, totals = false, ranking = false, aggregate = false }) {
   if (!siteUrls.length) return { sqlFrom: EMPTY_SOURCE, scopeSql: '', resolution: 'empty_authorized_scope' };
   return storage.rawSource({ siteUrls, startDate: range.startLabel ?? range.start,
-    endDate: range.endLabel ?? range.end, replacements, prefix: prefix + 'Src', totals, ranking });
+    endDate: range.endLabel ?? range.end, replacements, prefix: prefix + 'Src', totals, ranking, aggregate });
 }
 
 function comparablePeriods(range, availability) {
