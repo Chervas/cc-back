@@ -3864,7 +3864,8 @@ const metaConnectionMetadata = metaMetadataContract.createMetaConnectionMetadata
         catch { throw Object.assign(Error('meta_metadata_session_required'), { code: 'meta_metadata_session_required', httpStatus: 401 }); }
     },
     scopeResponse: buildScopeResponse,
-    loadMappings: metaMetadataContract.createMetaMetadataRepository(db)
+    loadMappings: metaMetadataContract.createMetaMetadataRepository(db),
+    loadDataAccess: metaMetadataContract.createMetaDataAccessRepository(db)
 });
 router.get('/meta/connection-status', metaConnectionMetadata.handler());
 const metaMarketingAccessCheck = require('../services/metaMarketingAccessCheck.service').createMetaMarketingAccessCheck({

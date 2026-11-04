@@ -10,7 +10,7 @@ const TYPES = Object.freeze(['facebook_page', 'instagram_business', 'ad_account'
 // Local metadata is not evidence of credential validity or provider availability.
 // No transport or credential loader belongs in this reader. Opening the broker
 // cohort later requires a separate, reviewed contract for live validation.
-function createMetaConnectionMetadata({ authorize, resolve, session, loadMappings, scopeResponse }) {
+function createMetaConnectionMetadata({ authorize, resolve, session, loadMappings, scopeResponse, loadDataAccess }) {
   async function snapshot(req) {
     const input = marketingScopeInputFromRequest(req);
     for (const value of [input.clinicIdRaw, input.groupIdRaw]) {
@@ -24,17 +24,24 @@ function createMetaConnectionMetadata({ authorize, resolve, session, loadMapping
     const clinicIds = [...new Set(authorization.clinicIds.map(Number))].sort((a, b) => a - b);
     if (clinicIds.length > 1000 || clinicIds.some(id => !Number.isSafeInteger(id) || id <= 0)) fail('meta_metadata_limit', 503);
     const { connection, assignment, scope, source } = resolved;
-    return { resolved, clinicIds, session: { userId: claims.userId, jti: claims.jti }, signature: signature({ userId: claims.userId, jti: claims.jti, clinicIds, scope,
+    const type = authorization.assignmentScope || scope?.assignmentScope;
+    const scopeId = type === 'group' ? authorization.groupId ?? scope?.groupId : authorization.clinicId ?? scope?.clinicId;
+    const scopeKey = ['group', 'clinic'].includes(type) && Number.isSafeInteger(Number(scopeId)) && Number(scopeId) > 0 ? `${type}:${Number(scopeId)}` : null;
+    return { resolved, clinicIds, scopeKey, session: { userId: claims.userId, jti: claims.jti }, signature: signature({ userId: claims.userId, jti: claims.jti, clinicIds, scope, scopeKey,
       source, connection: connection ? Object.fromEntries(['id', 'metaUserId', 'userId', 'userName', 'userEmail', 'expiresAt', 'updatedAt'].map(k => [k, connection[k]])) : null,
       assignment: assignment ? Object.fromEntries(['id', 'status', 'metaConnectionId', 'authorizedByUserId', 'authorizedByName', 'authorizedByEmail', 'updated_at'].map(k => [k, assignment[k]])) : null }) };
   }
   async function read(req, mappings = false) {
     const before = await snapshot(req);
+    const dataAccess = loadDataAccess ? await loadDataAccess({ scopeKey: before.scopeKey, clinicIds: before.clinicIds }) : null;
     const { connection, assignment, scope, source } = before.resolved;
     const rows = mappings && connection ? await loadMappings(connection.id, before.clinicIds, { scopeKey: scope?.scopeKey }) : [];
     if (!Array.isArray(rows) || rows.length > 1000) fail('meta_metadata_limit', 503);
     const after = await snapshot(req);
     if (before.signature !== after.signature) fail('meta_metadata_scope_changed', 409);
+    // This capability is SQL-only and independently fences the clean canonical
+    // generation. A blocked legacy resolver is not a grant for that generation.
+    if (dataAccess) await dataAccess.assert();
     // End with a fresh ACL and session check, after all metadata I/O.
     const finalAccess = await authorize(req);
     if (!finalAccess?.requested || signature([...new Set(finalAccess.clinicIds.map(Number))].sort((a,b) => a-b)) !== signature(before.clinicIds)) fail('meta_metadata_scope_changed', 409);
@@ -44,6 +51,7 @@ function createMetaConnectionMetadata({ authorize, resolve, session, loadMapping
     const status = { connected: false, connectionStored: !!connection, availability,
       reason: 'meta_security_quarantine', validationDeferred: true, reauthorizationRequired: false,
       scope: scopeResponse(scope, assignment), source,
+      ...(dataAccess ? { dataAccess: structuredClone(dataAccess.value) } : {}),
       ...(connection ? { metaUserId: connection.metaUserId, userName: connection.userName, userEmail: connection.userEmail,
         authorizedByUserId: assignment?.authorizedByUserId || connection.userId || null,
         authorizedByName: assignment?.authorizedByName || connection.userName || null,
@@ -73,7 +81,8 @@ function createMetaConnectionMetadata({ authorize, resolve, session, loadMapping
         assignmentScope: row.assignmentScope, groupId: row.assignmentScope === 'group' ? Number(row.grupoClinicaId) : null, verificationAvailable: row.verificationAvailable === true });
       group.totalAssets++; count++;
     }
-    return { success: true, availability, connectionStored: !!connection, mappings: [...grouped.values()], totalMappings: count, totalClinics: coveredClinics.size, totalGroups: groupCount };
+    return { success: true, availability, connectionStored: !!connection, mappings: [...grouped.values()], totalMappings: count, totalClinics: coveredClinics.size, totalGroups: groupCount,
+      ...(dataAccess ? { dataAccess: structuredClone(dataAccess.value) } : {}) };
   }
   return { read, handler: (mappings = false) => async (req, res) => {
     res.set('Cache-Control', 'private, no-store');
@@ -84,6 +93,57 @@ function createMetaConnectionMetadata({ authorize, resolve, session, loadMapping
       return res.status(status).json({ success: false, connected: false, error: known ? error.code : 'meta_metadata_unavailable' });
     }
   } };
+}
+const DATA_RECOVERY_FIELDS = Object.freeze(['recovery_id', 'scope_key', 'state', 'canonical_connection_id', 'mapping_ids', 'flow_id', 'enrollment_id', 'app_id', 'meta_user_id', 'snapshot_digest', 'candidate_digest']);
+const DATA_BINDING_FIELDS = Object.freeze(['mapping_id', 'enrollment_id', 'meta_connection_id', 'scope_key', 'asset_ref', 'state']);
+function createMetaDataAccessRepository(models, { broker, enabled = () => process.env.META_MARKETING_BROKER_ENABLED === 'true'
+  && process.env.META_MARKETING_ADS_SYNC_ENABLED === 'true' && process.env.META_MARKETING_LEGACY_RECOVERY_ENABLED === 'true' } = {}) {
+  const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 && Number(value) <= 2147483647;
+  const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value);
+  const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  async function capture(scopeKey) {
+    const rows = await models.MetaMarketingRecovery.findAll({ attributes: DATA_RECOVERY_FIELDS, raw: true, logging: false,
+      where: { scope_key: scopeKey, state: 'active' }, order: [['recovery_id', 'ASC']], limit: 2 });
+    if (!Array.isArray(rows) || rows.length > 1) fail('meta_metadata_data_access_unavailable', 503);
+    if (!rows.length) return null;
+    const row = Object.fromEntries(DATA_RECOVERY_FIELDS.map(key => [key, rows[0][key]])); let mappingIds;
+    try { mappingIds = JSON.parse(row.mapping_ids); } catch { fail('meta_metadata_data_access_unavailable', 503); }
+    if (row.scope_key !== scopeKey || row.state !== 'active' || !positive(row.canonical_connection_id)
+      || ![row.recovery_id, row.flow_id, row.enrollment_id].every(uuid) || ![row.snapshot_digest, row.candidate_digest].every(hash)
+      || !Array.isArray(mappingIds) || !mappingIds.length || mappingIds.length > 100
+      || mappingIds.some((id, i) => !positive(id) || typeof id !== 'number' || i > 0 && id <= mappingIds[i - 1])) fail('meta_metadata_data_access_unavailable', 503);
+    const bindings = await models.MetaMarketingBrokerBinding.findAll({ attributes: DATA_BINDING_FIELDS, raw: true, logging: false,
+      where: { enrollment_id: row.enrollment_id, meta_connection_id: row.canonical_connection_id, scope_key: scopeKey, state: 'active' }, order: [['mapping_id', 'ASC']], limit: 101 });
+    if (!Array.isArray(bindings) || bindings.length !== mappingIds.length || bindings.some((binding, i) => Number(binding.mapping_id) !== mappingIds[i]
+      || binding.state !== 'active' || binding.scope_key !== scopeKey || binding.enrollment_id !== row.enrollment_id
+      || Number(binding.meta_connection_id) !== Number(row.canonical_connection_id) || !/^meta-ad_account:[1-9][0-9]{0,29}$/.test(binding.asset_ref || ''))) fail('meta_metadata_data_access_unavailable', 503);
+    return { row, mappingIds, bindings: bindings.map(binding => Object.fromEntries(DATA_BINDING_FIELDS.map(key => [key, binding[key]]))) };
+  }
+  return async ({ scopeKey, clinicIds }) => {
+    if (!enabled()) return null;
+    if (!/^(clinic|group):[1-9][0-9]{0,9}$/.test(scopeKey || '') || !positive(scopeKey.split(':')[1]) || !Array.isArray(clinicIds)
+      || !clinicIds.length || clinicIds.length > 1000 || clinicIds.some((id, i) => !positive(id) || i > 0 && id <= clinicIds[i - 1])) fail('meta_metadata_data_access_unavailable', 503);
+    const before = await capture(scopeKey); if (!before) return null;
+    const reader = broker || require('./metaMarketingBrokerReader.service').forModels(models);
+    const contexts = [];
+    function matches(value, binding) {
+      if (value.kind !== 'ad_account' || value.mappingId !== Number(binding.mapping_id) || value.assetRef !== binding.asset_ref
+        || value.scopeKey !== scopeKey || value.connectionId !== Number(before.row.canonical_connection_id)
+        || value.appId !== before.row.app_id || value.subjectId !== before.row.meta_user_id
+        || JSON.stringify(value.clinicIds) !== JSON.stringify(clinicIds)) fail('meta_metadata_scope_changed', 409);
+    }
+    for (const binding of before.bindings) { const context = await reader.prepare(Number(binding.mapping_id)); matches(reader.describe(context), binding); contexts.push({ context, binding }); }
+    const [type, rawId] = scopeKey.split(':');
+    const value = Object.freeze({ version: 1, configured: true, readOnly: true, sources: ['meta_ads'],
+      scope: { type, id: Number(rawId), key: scopeKey, clinicCount: clinicIds.length } });
+    return { value, async assert() {
+      if (!enabled()) fail('meta_metadata_scope_changed', 409);
+      const after = await capture(scopeKey); if (!after || signature(after) !== signature(before)) fail('meta_metadata_scope_changed', 409);
+      for (const { context, binding } of contexts) matches(await reader.assertContext(context), binding);
+      const final = await capture(scopeKey); if (!final || signature(final) !== signature(before)) fail('meta_metadata_scope_changed', 409);
+      if (!enabled()) fail('meta_metadata_scope_changed', 409);
+    } };
+  };
 }
 function createMetaMetadataRepository(models) {
   return async (connectionId, clinicIds, { scopeKey } = {}) => {
@@ -109,4 +169,5 @@ function createMetaMetadataRepository(models) {
     return rows;
   };
 }
-module.exports = { createMetaConnectionMetadata, createMetaMetadataRepository, ASSET_FIELDS, TYPES };
+module.exports = { createMetaConnectionMetadata, createMetaMetadataRepository, createMetaDataAccessRepository,
+  ASSET_FIELDS, TYPES, DATA_RECOVERY_FIELDS, DATA_BINDING_FIELDS };
