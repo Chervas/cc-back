@@ -19,6 +19,13 @@ const AUDIENCE = 'broker:meta-marketing:staging';
 const CALLBACK = 'https://autenticacion.clinicaclick.com/oauth/meta/marketing/callback';
 const STATE_FILE = '/var/lib/clinicaclick-meta-marketing-staging/broker.sqlite';
 const CLIENT_ROOT = '/etc/clinicaclick-meta-clients-v1/staging';
+// Certificate publication relocates only the certificate; the enrolled private
+// key remains in its original service directory. Never rewrite an observation.
+const TLS_CERT_FILES = Object.freeze([
+  '/etc/clinicaclick-meta-marketing-staging/server.crt',
+  '/etc/clinicaclick-server-certificates/targets/meta-marketing-staging/server.crt',
+]);
+const TLS_KEY_FILE = '/etc/clinicaclick-meta-marketing-staging/server.key';
 const REQUIRED_TABLES = Object.freeze([
   'asset_revocations', 'audit_outbox', 'commands', 'connections',
   'google_ads_enrollment_cancellations', 'google_ads_enrollments', 'google_oauth_flows',
@@ -104,10 +111,7 @@ function validateObserved(observed) {
     || cfg.stateFile !== STATE_FILE || cfg.policy.audience !== AUDIENCE
     || cfg.policy.principals.length || cfg.policy.connections.length || cfg.policy.grants.length
     || Object.hasOwn(cfg, 'adsRead')) fail('meta_plan_expected_empty_staging_required');
-  for (const filename of [cfg.tlsCertFile, cfg.tlsKeyFile]) {
-    if (typeof filename !== 'string' || path.dirname(filename) !== '/etc/clinicaclick-meta-marketing-staging'
-      || path.normalize(filename) !== filename) fail('meta_plan_tls_environment_invalid');
-  }
+  if (!TLS_CERT_FILES.includes(cfg.tlsCertFile) || cfg.tlsKeyFile !== TLS_KEY_FILE) fail('meta_plan_tls_environment_invalid');
   return [];
 }
 function buildPlan(manifest) {

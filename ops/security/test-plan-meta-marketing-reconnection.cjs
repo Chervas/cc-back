@@ -60,6 +60,40 @@ test('minimum Ads scopes create a deterministic plan only; preserve observed tra
   assert(result.pendingLiveVerification.includes('legacy_mapping_adoption_review_without_deleting_aliases_or_scope_blocks'));
   assert.equal(result.restrictions.adsMetricsEnabled, false); assert.equal(result.restrictions.legacyTransportRemainsQuarantined, true);
 });
+test('published staging certificate preserves the observed key, renewal and source observation', () => {
+  const m = fixture();
+  m.observed.config.tlsCertFile = '/etc/clinicaclick-server-certificates/targets/meta-marketing-staging/server.crt';
+  m.observed.config.tlsRenewal = { issuerCaFile: '/etc/clinicaclick-meta-marketing-staging/issuer.crt' };
+  const original = JSON.stringify(m), result = P.buildPlan(m);
+  assert.equal(JSON.stringify(m), original);
+  assert.equal(result.status, 'plan_prepared'); assert.equal(result.ready, false); assert.equal(result.executable, false);
+  assert.equal(result.candidateConfig.tlsCertFile, m.observed.config.tlsCertFile);
+  assert.equal(result.candidateConfig.tlsKeyFile, m.observed.config.tlsKeyFile);
+  assert.deepEqual(result.candidateConfig.tlsRenewal, m.observed.config.tlsRenewal);
+  assert.notEqual(result.candidateConfig.tlsRenewal, m.observed.config.tlsRenewal);
+  assert.deepEqual(result.preconditions.preserveTlsFiles, [m.observed.config.tlsCertFile, m.observed.config.tlsKeyFile]);
+  assert.equal(result.preconditions.expectedObservedConfigCanonicalSha256, sha(JSON.stringify(m.observed.config)));
+});
+test('TLS paths are exact staging files, with no sibling target, basename or normalized alias admission', () => {
+  for (const value of [
+    '/etc/clinicaclick-meta-marketing-staging/other.crt',
+    '/etc/clinicaclick-server-certificates/targets/meta-marketing-staging/other.crt',
+    '/etc/clinicaclick-server-certificates/targets/meta-marketing-dev/server.crt',
+    '/etc/clinicaclick-server-certificates/targets/google-ads-staging/server.crt',
+    '/etc/clinicaclick-server-certificates/targets/meta-marketing-staging/../meta-marketing-staging/server.crt',
+    '/etc/clinicaclick-meta-marketing-staging/./server.crt',
+  ]) reject(m => { m.observed.config.tlsCertFile = value; }, 'meta_plan_tls_environment_invalid');
+  for (const value of [
+    '/etc/clinicaclick-meta-marketing-staging/other.key',
+    '/etc/clinicaclick-meta-marketing-dev/server.key',
+    '/etc/clinicaclick-server-certificates/targets/meta-marketing-staging/server.key',
+    '/etc/clinicaclick-meta-marketing-staging/../clinicaclick-meta-marketing-staging/server.key',
+  ]) reject(m => { m.observed.config.tlsKeyFile = value; }, 'meta_plan_tls_environment_invalid');
+});
+test('the existing runtime validator still rejects malformed certificate renewal settings', () => {
+  reject(m => { m.observed.config.tlsRenewal = { issuerCaFile: 'issuer.crt' }; }, 'meta_plan_observed_config_invalid');
+  reject(m => { m.observed.config.tlsRenewal = { issuerCaFile: '/etc/issuer.crt', extra: true }; }, 'meta_plan_observed_config_invalid');
+});
 test('five explicit read scopes and a clinic scope are accepted without adding WhatsApp rights', () => {
   const m = fixture(); m.scopes = ['ads_read', 'instagram_basic', 'pages_read_engagement', 'pages_show_list', 'public_profile'];
   m.scope = { kind: 'clinic', id: 701, clinicIds: [701] };
