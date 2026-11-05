@@ -42,6 +42,7 @@ async function main() {
     children: [],
   };
   section.children.push(imageId);
+  section.props.background_image = {asset_id:mediaId,fit:'cover'};
   document.bindings.content_heading = {
     target_node_id: headingId,
     target_prop: 'text',
@@ -139,7 +140,7 @@ async function main() {
   });
   assert.equal(revisionReads, 2);
   assert.equal(approved.status, 'approved');
-  assert.equal(approved.resolved_references.length, 2);
+  assert.equal(approved.resolved_references.length, 3);
   assert.deepEqual(approved.unresolved_references, []);
   assert.equal(saveOptions.webContentSnapshotFreeze, true);
   assert.equal(Object.keys(revision.contentSnapshot.content_entries).length, 1);

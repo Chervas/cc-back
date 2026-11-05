@@ -250,7 +250,7 @@ test('publica animaciones tipadas como clases seguras generadas por el renderer'
   const css = artifact.files[stylesheetPath];
   const html = artifact.files['index.html'];
 
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.18.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.19.0');
   assert.match(html, /cc-animate-slide_up/);
   assert.match(css, /\.cc-animate-slide_up\{animation:ccSlideUp \.46s cubic-bezier/);
   assert.match(css, /@media\(prefers-reduced-motion:no-preference\)/);
@@ -1099,7 +1099,7 @@ test('renderer actual honra tokens, responsive, fuentes e imagen focal en CSS de
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.18.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.19.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);
@@ -1253,4 +1253,48 @@ test('producción incrusta exactamente el runtime de medición confiable y previ
   assert.doesNotMatch(preview.manifest.headers['content-security-policy'], /unsafe-inline/);
   assert.doesNotMatch(preview.manifest.headers['content-security-policy'], /img-src[^;]*crm\.clinicaclick\.com/);
   assert.notEqual(preview.artifact_hash, production.artifact_hash);
+});
+
+test('container backgrounds freeze authorized media and keep presentation out of raw CSS', () => {
+  const input = fixture();
+  const section = input.document.nodes[input.document.pages[0].root_node_ids[0]];
+  section.props.background_image = { asset_id: 'background_media', fit: 'cover', focal_x: 25, focal_y: 70 };
+  section.style_tokens = { ...section.style_tokens, min_height: 480, content_align_x: 'center', content_align_y: 'center' };
+  section.responsive = { mobile: { min_height: 240, content_align_y: 'start' } };
+  input.contentSnapshot.media_assets.background_media = { variants: [{ key: 'original', url: 'https://media.clinicaclick.com/web/room.webp', width: 1200, height: 800 }] };
+  const output = compileWebArtifact(input);
+  const html = output.files['index.html'];
+  const css = Object.entries(output.files).find(([name]) => name.startsWith('assets/styles.'))[1];
+  assert.match(html, /cc-has-bg-image cc-bg-image-cover cc-bg-position-25-70/);
+  assert.match(html, /class="cc-section-bg" aria-hidden="true"><img src="https:\/\/media.clinicaclick.com\/web\/room.webp" alt=""/);
+  assert.match(css, /cc-min-h-480\{min-height:480px\}/);
+  assert.match(css, /cc-mobile-min-h-240\{min-height:240px\}/);
+  assert.match(css, /object-position:25% 70%/);
+  assert.doesNotMatch(html, /style="[^"]*background/);
+  const { collectWebResourceReferences } = require('../../services/webResourceResolver.service');
+  assert.ok(collectWebResourceReferences(input.document).some(r => r.kind === 'media' && r.id === 'background_media' && r.path.endsWith('/background_image/asset_id')));
+  delete input.contentSnapshot.media_assets.background_media;
+  assert.throws(() => compileWebArtifact(input), e => e.code === 'web_artifact_media_unresolved');
+});
+
+test('image fill and global typography are bounded native settings with noindex retained', () => {
+  const input = fixture();
+  input.document.design_system.tokens.typography = { body_size: 18, body_line_height: 1.6, heading_line_height: 1.15, heading_scale: 1.1 };
+  const section = input.document.nodes[input.document.pages[0].root_node_ids[0]];
+  section.children.push('fill_image');
+  input.document.nodes.fill_image = { id: 'fill_image', type: 'image', version: 1, children: [], props: { asset_id: 'fill_media', alt: 'Recepción', decorative: false, loading: 'lazy', height_mode: 'fill', aspect_ratio: '4:3' } };
+  input.contentSnapshot.media_assets.fill_media = { variants: [{key:'original',url:'https://media.clinicaclick.com/web/room.webp',width:1200,height:900}] };
+  const output=compileWebArtifact(input), css=Object.entries(output.files).find(([name])=>name.startsWith('assets/styles.'))[1];
+  assert.match(output.files['index.html'], /cc-image-fill/);
+  assert.match(output.files['index.html'], /alt="Recepción"/);
+  assert.match(output.files['index.html'], /name="robots" content="noindex/);
+  assert.match(css, /font-size:18px;line-height:1.6/);
+  assert.match(css, /line-height:1.15/);
+  for (const mutate of [
+    doc=>doc.design_system.tokens.typography.body_size=500,
+    doc=>doc.nodes[doc.pages[0].root_node_ids[0]].style_tokens.min_height=-1,
+    doc=>doc.nodes[doc.pages[0].root_node_ids[0]].props.background_image={asset_id:'https://outside.test/photo.jpg'},
+  ]) {
+    const bad=structuredClone(input);mutate(bad.document);assert.throws(()=>compileWebArtifact(bad));
+  }
 });

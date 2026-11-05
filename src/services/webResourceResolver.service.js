@@ -57,6 +57,9 @@ function collectWebResourceReferences(document, scope = null) {
     addReference(references, 'media', document.pages[index]?.seo?.social_asset_id, `/pages/${index}/seo/social_asset_id`);
   }
   for (const [nodeId, node] of Object.entries(document?.nodes || {})) {
+    if (node?.type === 'section') {
+      addReference(references, 'media', node.props?.background_image?.asset_id, `/nodes/${nodeId}/props/background_image/asset_id`);
+    }
     if (node?.type === 'image') {
       addReference(references, 'media', node.props?.asset_id, `/nodes/${nodeId}/props/asset_id`);
     }

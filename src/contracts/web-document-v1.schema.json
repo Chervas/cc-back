@@ -244,8 +244,63 @@
             },
             "layout_preset": {
               "enum": ["standard", "editorial"]
-            }
+            },
+            "typography": { "$ref": "#/definitions/typography" }
           }
+        }
+      }
+    },
+    "typography": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "body_size": {
+          "type": "number",
+          "minimum": 12,
+          "maximum": 24
+        },
+        "body_line_height": {
+          "type": "number",
+          "minimum": 1.2,
+          "maximum": 2.2
+        },
+        "heading_line_height": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 1.8
+        },
+        "heading_scale": {
+          "type": "number",
+          "minimum": 0.75,
+          "maximum": 1.5
+        }
+      }
+    },
+    "backgroundImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id"
+      ],
+      "properties": {
+        "asset_id": {
+          "$ref": "#/definitions/safeId"
+        },
+        "fit": {
+          "enum": [
+            "cover",
+            "contain"
+          ]
+        },
+        "focal_x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "focal_y": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
         }
       }
     },
@@ -344,6 +399,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "content_align_x": { "enum": ["start", "center", "end", "stretch"] },
+        "content_align_y": { "enum": ["start", "center", "end", "stretch", "space_between"] },
+        "min_height": { "type": "integer", "minimum": 0, "maximum": 2000 },
         "background": {
           "enum": ["transparent", "surface", "muted", "brand", "accent", "contrast"]
         },
@@ -386,6 +444,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "content_align_x": { "enum": ["start", "center", "end", "stretch"] },
+        "content_align_y": { "enum": ["start", "center", "end", "stretch", "space_between"] },
+        "min_height": { "type": "integer", "minimum": 0, "maximum": 2000 },
         "visible": { "type": "boolean" },
         "align": {
           "enum": ["start", "center", "end", "stretch"]
@@ -511,6 +572,7 @@
             "column_widths": { "$ref": "#/definitions/columnWidths" },
             "column_heights": { "$ref": "#/definitions/columnHeights" },
             "column_orders": { "$ref": "#/definitions/columnOrders" },
+            "background_image": { "$ref": "#/definitions/backgroundImage" },
             "semantic_tag": {
               "enum": ["section", "header", "main", "aside", "footer"]
             },
@@ -800,6 +862,7 @@
             "frame_width": { "type": "integer", "minimum": 1, "maximum": 4096 },
             "frame_height": { "type": "integer", "minimum": 1, "maximum": 4096 },
             "display_width": { "type": "integer", "minimum": 0, "maximum": 1600 },
+            "height_mode": { "enum": ["auto", "fill"] },
             "focal_x": {
               "type": "integer",
               "minimum": 0,

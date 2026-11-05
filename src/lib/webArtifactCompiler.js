@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { compiledFonts, fontStack } = require('./webFonts');
 const { editorialPresetCss, imageFrameClasses, imageFrameRules } = require('./webEditorialPreset');
+const { presentationClasses, presentationCss, typographyCss } = require('./webLayoutPresentation');
 const {
   assertValidWebDocument,
   canonicalSerialize,
@@ -15,7 +16,7 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('./webArtifactBudget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.18.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.19.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const SAFE_YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{6,64}$/;
 const SAFE_VIMEO_VIDEO_ID = /^[0-9]{6,12}$/;
@@ -553,6 +554,7 @@ function styleClassList(node) {
     `cc-radius-${style.radius || 'inherit'}`,
     `cc-shadow-${style.shadow || 'none'}`,
     `cc-align-${style.align || 'stretch'}`,
+    presentationClasses(node),
   ];
   if (node.animation && node.animation !== 'none') classes.push(`cc-animate-${node.animation}`);
   for (const breakpoint of ['desktop', 'tablet', 'mobile']) {
@@ -1259,7 +1261,8 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
     const globalAttribute = globalSlot ? ` data-cc-global="${globalSlot}"` : '';
     const globalClass = globalSlot ? ` cc-site-${globalSlot}` : '';
     const roleClass = `cc-role-${escapeHtml(node.props.structure_role || 'section')}`;
-    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(document, node)} ${sectionColumnClassList(document, node, parentSection, parentChildIndex)} ${styleClassList(node)}"><div class="cc-container">${children}</div></${tag}>`;
+    const background = node.props.background_image ? `<div class="cc-section-bg" aria-hidden="true"><img src="${escapeHtml(resolvedMediaImage(snapshot, node.props.background_image.asset_id, { node_id: node.id }).source)}" alt="" loading="lazy" decoding="async"></div>` : '';
+    return `<${tag} id="cc-${escapeHtml(node.id)}"${globalAttribute} class="cc-node cc-section${globalClass} ${roleClass} cc-layout-${escapeHtml(node.props.layout)} cc-cols-${Number(node.props.columns)} ${sectionTrackClassList(document, node)} ${sectionColumnClassList(document, node, parentSection, parentChildIndex)} ${styleClassList(node)}">${background}<div class="cc-container">${children}</div></${tag}>`;
   }
   if (node.type === 'heading') {
     const level = Math.min(6, Math.max(1, Number(node.props.level) || 2));
@@ -1695,7 +1698,7 @@ function compileWebArtifact(input = {}) {
     environment
   );
   const fonts = compiledFonts(document.design_system.tokens);
-  const css = [fonts.css, stylesheet(document.design_system.tokens, document), editorialPresetCss(document.design_system.tokens), imageFrameRules(document)].filter(Boolean).join('\n');
+  const css = [fonts.css, stylesheet(document.design_system.tokens, document), editorialPresetCss(document.design_system.tokens), imageFrameRules(document), presentationCss(document), typographyCss(document.design_system.tokens)].filter(Boolean).join('\n');
   const cssHash = sha256(css);
   const cssFile = `assets/styles.${cssHash.slice(0, 16)}.css`;
   const pageById = new Map(document.pages.map((page) => [page.id, page]));
