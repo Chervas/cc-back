@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const db = require('../../models');
 const { WEB_AD_FIELDS } = require('../lib/web-ad-attribution');
-const { resolveWebLandingAttribution } = require('./webLandingAttribution.service');
+const { resolveWebLandingAttribution, resolveWebLandingInterest, webLandingInterestNote } = require('./webLandingAttribution.service');
 const {
   runtimeCandidateForPublicationArtifact,
 } = require('./webIntakeRuntimeReconciliation.service');
@@ -342,12 +342,7 @@ async function prepareWebLandingSubmission({
   });
   // The choice and its label come from the immutable published revision,
   // never from a free-text browser field or an advertising URL parameter.
-  const interestOption = interest
-    ? attribution.form_interest_options?.find((option) => option.value === interest)
-    : null;
-  if (interest && !interestOption) {
-    throw new WebLandingSubmissionError('web_landing_interest_invalid', 'Elige una opción válida del formulario.');
-  }
+  const interestOption = resolveWebLandingInterest(attribution, { interest });
   const requestedLandingPath = body._cc_attr_landing_path
     ? canonicalLandingPath(body._cc_attr_landing_path)
     : canonicalLandingPath(pageUrl.pathname);
@@ -452,7 +447,7 @@ async function prepareWebLandingSubmission({
     nombre: [firstName, lastName].filter(Boolean).join(' ') || null,
     email: email || null,
     telefono: phone || null,
-    notas: [interestOption ? `Interés: ${interestOption.label}` : '', message].filter(Boolean).join('\n\n') || null,
+    notas: webLandingInterestNote(message, interestOption),
     consent: {
       contact: 'granted',
       ...(adUserData ? { ad_user_data: adUserData } : {}),

@@ -255,7 +255,7 @@ $tests['manifest rejects traversal, executable types and executable HTML'] = sta
 };
 
 /** @return array<string,mixed> */
-function ccw_test_artifact($marker)
+function ccw_test_artifact($marker, $interest = false)
 {
     $project_id = '11111111-1111-4111-8111-111111111111';
     $revision_id = '22222222-2222-4222-8222-222222222222';
@@ -271,6 +271,7 @@ function ccw_test_artifact($marker)
     $css = '.cc-' . $marker . '{color:#181d35}';
     $robots = "User-agent: *\nAllow: /\n";
     $sitemap = '<?xml version="1.0"?><urlset></urlset>';
+    if ($interest) $html = str_replace('<input type="checkbox" name="privacy_consent"', '<select name="interest" required><option value="valoracion">Valoración</option><option value="informacion">Información</option></select><input type="checkbox" name="privacy_consent"', $html);
     $files = array(
         'assets/styles.' . $marker . '.css' => $css,
         'index.html' => $html,
@@ -331,10 +332,10 @@ function ccw_test_artifact($marker)
                     'page_id' => $page_id,
                     'success_anchor' => 'cc-' . $form_id . '-success',
                     'error_anchor' => 'cc-' . $form_id . '-error',
-                    'fields' => array(
+                    'fields' => array_merge($interest ? array(array('name' => 'interest', 'type' => 'select', 'required' => true)) : array(), array(
                         array('name' => 'email', 'type' => 'email', 'required' => false),
                         array('name' => 'privacy_consent', 'type' => 'checkbox', 'required' => true),
-                    ),
+                    )),
                 ),
             ),
             'files' => $metadata,
@@ -817,7 +818,7 @@ $tests['legacy v1 runtime can cross-sign the key but cannot self-bootstrap'] = s
 };
 
 /** @return array<string,mixed> */
-function ccw_test_setup_intake($marker = 'intake', $global_form = false)
+function ccw_test_setup_intake($marker = 'intake', $global_form = false, $interest = false)
 {
     ccw_test_remove_tree(__DIR__ . '/tmp');
     $GLOBALS['ccw_test_options'] = array();
@@ -829,7 +830,7 @@ function ccw_test_setup_intake($marker = 'intake', $global_form = false)
     update_option(CCW_Config::OPTION_TOKEN, str_repeat('t', 48));
     $key = ccw_test_keypair();
     CCW_Trust_Store::import_configured_descriptor($key['descriptor']);
-    $artifact = $global_form ? ccw_test_global_form_artifact($marker) : ccw_test_artifact($marker);
+    $artifact = $global_form ? ccw_test_global_form_artifact($marker) : ccw_test_artifact($marker, $interest);
     ccw_test_install_remote($artifact, $key, 1, '"intake"');
     (new CCW_Sync())->run(true);
     $GLOBALS['ccw_test_posts'] = array();
@@ -1806,6 +1807,34 @@ $tests['global intake bridge selects the signed contract of the current page'] =
         $result['location'] === 'https://cliente.example.test/cita/informacion/?gclid=global_click#cc-form-global-bridge-success',
         'global form redirect did not use the current page contract'
     );
+};
+
+$tests['native bridge preserves declared interest for server validation, enforces required choice and does not attribute it to ads'] = static function () {
+    $setup = ccw_test_setup_intake('interest-form', false, true);
+    $captured = null;
+    $GLOBALS['ccw_test_http'][$setup['upstream']] = static function ($url, $args) use (&$captured) {
+        $captured = json_decode((string) $args['body'], true);
+        return array('code' => 201, 'body' => '{"id":323}');
+    };
+    ccw_test_throws('ccw_intake_required_field_missing', static function () use ($setup) {
+        ccw_test_bridge_process($setup['bridge'], $setup['server'], $setup['fields']);
+    });
+    ccw_test_assert($captured === null, 'missing required interest reached upstream');
+    $fields = $setup['fields']; $fields['interest'] = 'valoracion';
+    $first = ccw_test_bridge_process($setup['bridge'], $setup['server'], $fields);
+    ccw_test_assert(($captured['form_submission']['fields']['interest'] ?? '') === 'valoracion', 'interest lost at PHP relay');
+    ccw_test_assert(!isset($captured['attribution']['interest']), 'interest leaked into ad attribution');
+    $fields['interest'] = 'informacion';
+    $second = ccw_test_bridge_process($setup['bridge'], $setup['server'], $fields);
+    ccw_test_assert($first['event_id'] !== $second['event_id'], 'different interest collapsed into the same event');
+    $fields['interest'] = '<script>';
+    ccw_test_throws('ccw_intake_interest_invalid', static function () use ($setup, $fields) {
+        ccw_test_bridge_process($setup['bridge'], $setup['server'], $fields);
+    });
+    $setup = ccw_test_setup_intake('no-interest'); $fields = $setup['fields']; $fields['interest'] = 'valoracion';
+    ccw_test_throws('ccw_intake_interest_invalid', static function () use ($setup, $fields) {
+        ccw_test_bridge_process($setup['bridge'], $setup['server'], $fields);
+    });
 };
 
 $tests['native bridge advertises optional ad fields without exposing installation secrets'] = static function () {

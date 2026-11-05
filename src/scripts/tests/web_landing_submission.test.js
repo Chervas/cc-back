@@ -10,6 +10,8 @@ const {
 const {
   buildWebLandingAttributionSteps: buildResolvedLandingAuditSteps,
   longestPublicationMatch,
+  resolveWebLandingInterest,
+  webLandingInterestNote,
 } = require('../../services/webLandingAttribution.service');
 const { measurementFromIntake } = require('../../services/webWordpressInstallations.service');
 const {
@@ -176,6 +178,17 @@ test('rechaza intereses ajenos a la revisión, campos no declarados y ausencia d
   }
   const state = fixture({ interestOptions: [{ value: 'c02_01', label: 'Valoración facial' }] });
   await assert.rejects(prepareWebLandingSubmission(state), (error) => error.code === 'web_landing_field_required');
+});
+
+test('el receptor del relay ignora la etiqueta aportada y reconstruye una nota sin duplicarla', () => {
+  const attribution = { form_fields: [{ name: 'interest', required: true }],
+    form_interest_options: [{ value: 'valoracion', label: 'Valoración inicial' }] };
+  const choice = resolveWebLandingInterest(attribution, { interest: 'valoracion', interest_label: 'Etiqueta manipulada' });
+  assert.deepEqual(choice, { value: 'valoracion', label: 'Valoración inicial' });
+  const note = webLandingInterestNote('Llamadme por la tarde.', choice);
+  assert.equal(note, 'Interés: Valoración inicial\n\nLlamadme por la tarde.');
+  assert.equal(webLandingInterestNote(note, choice), note);
+  assert.throws(() => resolveWebLandingInterest(attribution, { interest: ['valoracion'] }), { code: 'web_landing_interest_invalid' });
 });
 
 test('fija identidad web, asignación y estrategia resueltas sin copiar campos del navegador', () => {

@@ -629,6 +629,14 @@ final class CCW_Intake_Bridge
         if ($preferred !== '' && !in_array($preferred, array('telefono', 'whatsapp', 'email'), true)) {
             $this->fail('ccw_intake_preferred_contact_invalid', 422);
         }
+        $interest = trim((string) ($fields['interest'] ?? ''));
+        $interest_declared = false;
+        foreach ((array) ($form_contract['fields'] ?? array()) as $field) {
+            if (($field['name'] ?? '') === 'interest') $interest_declared = true;
+        }
+        if ($interest !== '' && (!$interest_declared || !preg_match('/^[a-z0-9][a-z0-9_-]{0,63}$/', $interest))) {
+            $this->fail('ccw_intake_interest_invalid', 422);
+        }
         $ad_user_data = $this->optional_google_consent($fields['_cc_ad_user_data'] ?? '');
         $ad_personalization = $this->optional_google_consent($fields['_cc_ad_personalization'] ?? '');
         $lead = array(
@@ -638,6 +646,7 @@ final class CCW_Intake_Bridge
             'phone' => $phone,
             'message' => $message,
             'preferred_contact' => $preferred,
+            'interest' => $interest,
             'privacy_consent' => '1',
             '_cc_ad_user_data' => $ad_user_data,
             '_cc_ad_personalization' => $ad_personalization,
@@ -806,6 +815,7 @@ final class CCW_Intake_Bridge
             'phone' => $lead['phone'],
             'bucket' => (int) floor($now / 300),
         );
+        if ($lead['interest'] !== '') $fingerprint['interest'] = $lead['interest'];
         return 'ccw_' . hash_hmac('sha256', CCW_JSON::canonical($fingerprint), $secret);
     }
 
@@ -847,6 +857,7 @@ final class CCW_Intake_Bridge
             'phone' => $lead['phone'],
             'message' => $lead['message'],
             'preferred_contact' => $lead['preferred_contact'],
+            'interest' => $lead['interest'],
             'privacy_consent' => true,
         ), static function ($value) {
             return $value !== '';

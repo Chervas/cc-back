@@ -786,7 +786,28 @@ async function resolveWebLandingAttribution({ body = {}, models = db, now = new 
   }, { artifact, publication });
 }
 
+function resolveWebLandingInterest(attribution, fields = {}) {
+  const contract = attribution?.form_fields?.find((field) => field.name === 'interest');
+  const value = fields.interest;
+  if (value === undefined || value === null || value === '') {
+    if (contract?.required) throw new WebLandingAttributionError('web_landing_field_required', 'Falta un campo obligatorio del formulario publicado.', 400);
+    return null;
+  }
+  const choice = typeof value === 'string' && value.length <= 64 && contract
+    ? attribution.form_interest_options?.find((option) => option.value === value) : null;
+  if (!choice) throw new WebLandingAttributionError('web_landing_interest_invalid', 'Elige una opción válida del formulario.', 400);
+  return { value: choice.value, label: choice.label };
+}
+
+function webLandingInterestNote(note, choice) {
+  if (!choice) return note || null;
+  const prefix = `Interés: ${choice.label}`;
+  return note === prefix || note?.startsWith(prefix + '\n\n') ? note : [prefix, note].filter(Boolean).join('\n\n');
+}
+
 module.exports = {
+  resolveWebLandingInterest,
+  webLandingInterestNote,
   UUID_V4,
   WebLandingAttributionError,
   pageContainsNode,

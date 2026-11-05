@@ -151,6 +151,8 @@ const {
 const {
   buildWebLandingAttributionSteps,
   resolveWebLandingAttribution,
+  resolveWebLandingInterest,
+  webLandingInterestNote,
 } = require('../services/webLandingAttribution.service');
 const {
   runtimeConfigFromArtifactHeader,
@@ -3116,6 +3118,13 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const attribution = body?.attribution || {};
   const leadData = body?.lead_data || {};
   const formSubmission = normalizeFormSubmission(body?.form_submission || body?.formSubmission);
+  const webLandingInterest = webLandingAttribution
+    ? resolveWebLandingInterest(webLandingAttribution, formSubmission?.fields || {}) : null;
+  if (webLandingAttribution && formSubmission?.fields) {
+    // Only the published revision supplies the human label; ignore browser labels.
+    delete formSubmission.fields.interest_label;
+    if (webLandingInterest) formSubmission.fields.interest_label = webLandingInterest.label;
+  }
   const formLeadData = extractLeadDataFromFormFields(formSubmission?.fields || {});
   const clinicNameHint = extractClinicLabelHint(body, leadData, formLeadData, formSubmission?.fields || {});
 
@@ -3421,7 +3430,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   const leadNombre = sanitizeText(coalesce(leadData.nombre, formLeadData.nombre, nombre));
   const leadEmail = coalesce(leadData.email, formLeadData.email, email);
   const leadTelefono = coalesce(leadData.telefono, formLeadData.telefono, telefono);
-  const leadNotas = sanitizeLeadNoteText(coalesce(leadData.notas, notas));
+  const leadNotas = sanitizeLeadNoteText(webLandingInterestNote(coalesce(leadData.notas, notas), webLandingInterest));
   const consentValue = coalesce(req.body?.consent, consentimiento_canal);
   const derivedConsentMetadata = deriveLeadConsentMetadata(consentValue);
   const isCompletedChatbotLead = isCompletedChatbotLeadRequest(body);
