@@ -231,10 +231,10 @@
             "color_surface": { "$ref": "#/definitions/color" },
             "color_text": { "$ref": "#/definitions/color" },
             "font_heading": {
-              "enum": ["system", "inter", "manrope", "source_sans_3"]
+              "enum": ["system", "inter", "manrope", "source_sans_3", "montserrat", "lato"]
             },
             "font_body": {
-              "enum": ["system", "inter", "manrope", "source_sans_3"]
+              "enum": ["system", "inter", "manrope", "source_sans_3", "montserrat", "lato"]
             },
             "radius": {
               "enum": ["none", "sm", "md", "lg", "xl", "full"]
@@ -1627,7 +1627,7 @@
       "properties": {
         "id": { "$ref": "#/definitions/safeId" },
         "name": {
-          "enum": ["first_name", "last_name", "email", "phone", "message", "preferred_contact", "privacy_consent"]
+          "enum": ["first_name", "last_name", "email", "phone", "message", "preferred_contact", "interest", "privacy_consent"]
         },
         "type": {
           "enum": ["text", "email", "tel", "textarea", "select", "checkbox"]

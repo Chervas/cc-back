@@ -22,7 +22,13 @@ $manifest = CCW_Manifest::validate(
 foreach ($manifest['files'] as $path => $metadata) {
     ccw_test_assert(array_key_exists($path, $artifact['files']), 'compiler omitted file body: ' . $path);
     $temporary = tempnam(sys_get_temp_dir(), 'ccw-real-');
-    file_put_contents($temporary, (string) $artifact['files'][$path]);
+    $body = $artifact['files'][$path];
+    if (is_array($body)) {
+        ccw_test_assert(($body['encoding'] ?? '') === 'base64', 'unsupported binary fixture');
+        $body = base64_decode((string) ($body['data'] ?? ''), true);
+        ccw_test_assert($body !== false, 'invalid fixture base64');
+    }
+    file_put_contents($temporary, (string) $body);
     try {
         CCW_Manifest::inspect_file($path, $temporary, $metadata, $runtime, $manifest);
     } finally {

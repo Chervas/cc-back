@@ -891,6 +891,34 @@ test('WordPress alpha.6 no encola una revisión con formulario global y alpha.7 
   assert.equal(jobs, 1);
 });
 
+test('el selector de interés exige alpha.12 antes de encolar y deja intacta la publicación anterior', async () => {
+  const fixture = deploymentModels();
+  fixture.publication.channel = 'wordpress';
+  fixture.publication.wordpressInstallationId = 'b77c9c88-740f-474c-8160-9178afed7e70';
+  const installation = new Row({ id: fixture.publication.wordpressInstallationId,
+    scopeType: 'clinic', clinicaId: 66, grupoClinicaId: null, status: 'connected', pluginVersion: '2.0.0-alpha.11' });
+  const revision = new Row({ id: '6cf410dc-cc39-4405-b7e5-9fb56ccbc8f4', projectId: project().id,
+    status: 'approved', documentHash: 'a'.repeat(64), document: { nodes: {
+      local_form: { type: 'intake_form', props: { fields: [{ name: 'interest' }] } },
+    } } });
+  fixture.models.WebWordpressInstallation = { findByPk: async () => installation };
+  fixture.models.WebRevision = { findByPk: async () => revision };
+  let jobs = 0;
+  const enqueue = () => enqueueDeployment({ actorId: 9, publicationId: fixture.publication.id,
+    revisionId: revision.id, action: 'publish', models: fixture.models, sequelize: sequelize(),
+    assertAccess: async () => true, assertPublishing: () => true,
+    enqueueJob: async () => { jobs += 1; return new Row({ id: 314, status: 'pending' }); },
+  });
+  await assert.rejects(enqueue, (error) => error.code === 'web_wordpress_interest_plugin_outdated'
+    && error.details.required_plugin_version === '2.0.0-alpha.12');
+  assert.equal(jobs, 0);
+  assert.equal(fixture.created.length, 0);
+  assert.equal(fixture.publication.status, 'draft');
+  installation.pluginVersion = '2.0.0-alpha.12';
+  assert.equal((await enqueue()).job.status, 'pending');
+  assert.equal(jobs, 1);
+});
+
 test('WordPress alpha.6 conserva compatibilidad con header global sin formulario', async () => {
   const fixture = deploymentModels();
   fixture.publication.channel = 'wordpress';

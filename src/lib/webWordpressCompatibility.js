@@ -2,6 +2,7 @@
 
 const MIN_GLOBAL_INTAKE_PLUGIN_VERSION = '2.0.0-alpha.7';
 const MIN_MULTI_PUBLICATION_PLUGIN_VERSION = '2.0.0-alpha.8';
+const MIN_INTEREST_FIELD_PLUGIN_VERSION = '2.0.0-alpha.12';
 
 function parseSemver(value) {
   const match = String(value || '').trim().match(
@@ -117,6 +118,7 @@ function manifestHasGlobalIntakeContract(manifest) {
 }
 
 module.exports = {
+  MIN_INTEREST_FIELD_PLUGIN_VERSION,
   MIN_GLOBAL_INTAKE_PLUGIN_VERSION,
   MIN_MULTI_PUBLICATION_PLUGIN_VERSION,
   compareSemver,

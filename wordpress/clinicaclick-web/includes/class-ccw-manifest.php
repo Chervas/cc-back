@@ -310,6 +310,7 @@ final class CCW_Manifest
             'phone' => 'tel',
             'message' => 'textarea',
             'preferred_contact' => 'select',
+            'interest' => 'select',
             'privacy_consent' => 'checkbox',
         );
         if (!is_array($fields) || $fields === array() || count($fields) > count($types)) {
@@ -666,7 +667,7 @@ final class CCW_Manifest
                     throw new CCW_Error('ccw_artifact_form_required_mismatch', 'Los campos obligatorios no coinciden con el manifest firmado.');
                 }
             }
-            foreach (array('first_name', 'last_name', 'email', 'phone', 'message', 'preferred_contact', 'privacy_consent') as $name) {
+            foreach (array('first_name', 'last_name', 'email', 'phone', 'message', 'preferred_contact', 'interest', 'privacy_consent') as $name) {
                 if (isset($controls[$name]) !== isset($expected_field_names[$name])) {
                     throw new CCW_Error('ccw_artifact_form_fields_mismatch', 'Los campos visibles no coinciden con el manifest firmado.');
                 }
@@ -691,7 +692,7 @@ final class CCW_Manifest
     private static function named_form_controls($body)
     {
         $allowed_names = array_fill_keys(array(
-            'first_name', 'last_name', 'email', 'phone', 'message', 'preferred_contact',
+            'first_name', 'last_name', 'email', 'phone', 'message', 'preferred_contact', 'interest',
             'privacy_consent', '_cc_ad_user_data', '_cc_ad_personalization', '_cc_company',
             'web_project_id', 'web_revision_id', 'web_page_id', 'web_form_id',
             'web_artifact_input_hash',

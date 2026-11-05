@@ -26,7 +26,10 @@ function webArtifactBundleFootprintBytes(manifest) {
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
     const bodyBytes = Number(metadata.size_bytes);
     if (!Number.isSafeInteger(bodyBytes) || bodyBytes < 0) return null;
-    total += bodyBytes;
+    // Fonts use an explicit base64 envelope in the SQL JSON fallback. Reserve
+    // their encoded size as well as the small envelope before admitting a bundle.
+    total += String(metadata.content_type || '').startsWith('font/')
+      ? Math.ceil(bodyBytes / 3) * 4 + 64 : bodyBytes;
     total += Buffer.byteLength(String(path), 'utf8');
     total += Buffer.byteLength(String(metadata.sha256 || ''), 'utf8');
     total += Buffer.byteLength(String(metadata.content_type || ''), 'utf8');

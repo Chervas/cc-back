@@ -15,6 +15,7 @@ const { normalizeHost, normalizeRoutePath } = require('./webHostedPublisher.serv
 const jobRequestsService = require('./jobRequests.service');
 const {
   MIN_GLOBAL_INTAKE_PLUGIN_VERSION,
+  MIN_INTEREST_FIELD_PLUGIN_VERSION,
   documentHasGlobalIntakeForm,
   isReleasedWordpressPublication,
   semverAtLeast,
@@ -768,6 +769,18 @@ async function assertChannelReady(publication, { models, transaction, lockedWord
 }
 
 function assertWordpressRevisionCompatibility(publication, installation, revision) {
+  const document = plain(revision)?.document;
+  if (plain(publication)?.channel === 'wordpress'
+    && Object.values(document?.nodes || {}).some((node) => node?.type === 'intake_form'
+      && node.props?.fields?.some((field) => field.name === 'interest'))
+    && !semverAtLeast(plain(installation)?.pluginVersion, MIN_INTEREST_FIELD_PLUGIN_VERSION)) {
+    throw new WebPublicationServiceError(
+      'web_wordpress_interest_plugin_outdated',
+      'Actualiza el plugin de WordPress antes de publicar el selector de interés.',
+      409,
+      { actual_plugin_version: plain(installation)?.pluginVersion || null, required_plugin_version: MIN_INTEREST_FIELD_PLUGIN_VERSION }
+    );
+  }
   if (plain(publication)?.channel !== 'wordpress' || !documentHasGlobalIntakeForm(plain(revision)?.document)) {
     return true;
   }

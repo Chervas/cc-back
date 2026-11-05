@@ -29,7 +29,7 @@ const IDS = {
 };
 const HMAC = '0123456789abcdef0123456789abcdef';
 
-function fixture() {
+function fixture({ interestOptions = null } = {}) {
   const intake = {
     assignment_scope: 'clinic',
     clinic_id: 66,
@@ -51,13 +51,15 @@ function fixture() {
     { name: 'preferred_contact', type: 'select', required: false },
     { name: 'privacy_consent', type: 'checkbox', required: true },
   ];
+  if (interestOptions) formFields.splice(1, 0, { name: 'interest', type: 'select', required: true });
   const document = {
     pages: [
       { id: IDS.page, slug: 'inicio', root_node_ids: [IDS.form] },
       { id: IDS.landingPage, slug: 'informacion', root_node_ids: [IDS.landingText] },
     ],
     nodes: {
-      [IDS.form]: { id: IDS.form, type: 'intake_form', props: { fields: formFields }, children: [] },
+      [IDS.form]: { id: IDS.form, type: 'intake_form', props: { fields: formFields.map((field) => field.name === 'interest'
+        ? { ...field, options: interestOptions } : field) }, children: [] },
       [IDS.landingText]: { id: IDS.landingText, type: 'text', children: [] },
     },
   };
@@ -152,6 +154,29 @@ function fixture() {
   };
   return { artifact, body, headers, models, publication };
 }
+
+test('conserva el interés autorizado por la revisión en el formulario y las notas, fuera de la atribución publicitaria', async () => {
+  const state = fixture({ interestOptions: [{ value: 'c02_01', label: 'Valoración facial' }] });
+  const result = await prepareWebLandingSubmission({
+    ...state, body: { ...state.body, interest: 'c02_01' }, remoteAddress: '203.0.113.10',
+  });
+  assert.equal(result.payload.form_submission.fields.interest, 'c02_01');
+  assert.equal(result.payload.form_submission.fields.interest_label, 'Valoración facial');
+  assert.equal(result.payload.notas, 'Interés: Valoración facial\n\nQuiero pedir una primera visita.');
+  assert.equal(Object.hasOwn(result.payload.attribution, 'interest'), false);
+  assert.equal(new URL(result.success_url).searchParams.has('interest'), false);
+});
+
+test('rechaza intereses ajenos a la revisión, campos no declarados y ausencia de una elección obligatoria', async () => {
+  for (const interestOptions of [null, [{ value: 'c02_01', label: 'Valoración facial' }]]) {
+    const state = fixture({ interestOptions });
+    await assert.rejects(prepareWebLandingSubmission({
+      ...state, body: { ...state.body, interest: 'c99_99' },
+    }), (error) => error.code === 'web_landing_interest_invalid');
+  }
+  const state = fixture({ interestOptions: [{ value: 'c02_01', label: 'Valoración facial' }] });
+  await assert.rejects(prepareWebLandingSubmission(state), (error) => error.code === 'web_landing_field_required');
+});
 
 test('fija identidad web, asignación y estrategia resueltas sin copiar campos del navegador', () => {
   const base = {

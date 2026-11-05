@@ -64,6 +64,35 @@ test('compila el mismo input de forma determinista y preview siempre es noindex'
   assert.match(stylesheet, /\.cc-section\.cc-bg-brand \.cc-button-primary\{background:var\(--cc-surface\);color:var\(--cc-primary\)\}/);
 });
 
+test('brand fonts are immutable local WOFF2 assets with licenses and no external font dependency', () => {
+  const input = fixture();
+  input.document.design_system.tokens.font_heading = 'montserrat';
+  input.document.design_system.tokens.font_body = 'lato';
+  const output = compileWebArtifact(input);
+  const css = Object.entries(output.files).find(([name]) => name.startsWith('assets/styles.'))[1];
+  assert.match(css, /font-family:"Montserrat"/);
+  assert.match(css, /font-family:"Lato"/);
+  assert.match(css, /font-display:swap/);
+  assert.doesNotMatch(css, /https?:|fonts\.google/);
+  const fonts = Object.keys(output.files).filter(name => name.endsWith('.woff2'));
+  assert.equal(fonts.length, 3);
+  for (const name of fonts) {
+    assert.equal(output.files[name].encoding, 'base64');
+    const body = Buffer.from(output.files[name].data, 'base64');
+    assert.equal(body.subarray(0, 4).toString(), 'wOF2');
+    assert.equal(output.manifest.files[name].sha256, require('node:crypto').createHash('sha256').update(body).digest('hex'));
+    assert(css.includes(`fonts/${name.split('/').pop()}`));
+  }
+  assert.equal(Object.keys(output.files).filter(name => name.endsWith('-OFL.txt')).length, 2);
+  assert.match(output.manifest.headers['content-security-policy'], /font-src 'self'/);
+  assert.equal(compileWebArtifact(input).artifact_hash, output.artifact_hash);
+  const roundtrip = JSON.parse(JSON.stringify(output));
+  const bundle = require('../../services/webArtifactStorage.service').assertArtifactBundle(roundtrip);
+  for (const name of fonts) assert.equal(bundle.files[name].body.subarray(0, 4).toString(), 'wOF2');
+  roundtrip.files[fonts[0]].data += '?';
+  assert.throws(() => require('../../services/webArtifactStorage.service').assertArtifactBundle(roundtrip), { code: 'web_artifact_file_encoding_invalid' });
+});
+
 test('publica anchos dinámicos de columnas desde el modelo seguro de 12 partes', () => {
   const input = fixture();
   const sectionId = input.document.pages[0].root_node_ids[0];
@@ -181,7 +210,7 @@ test('publica animaciones tipadas como clases seguras generadas por el renderer'
   const css = artifact.files[stylesheetPath];
   const html = artifact.files['index.html'];
 
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.16.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.17.0');
   assert.match(html, /cc-animate-slide_up/);
   assert.match(css, /\.cc-animate-slide_up\{animation:ccSlideUp \.46s cubic-bezier/);
   assert.match(css, /@media\(prefers-reduced-motion:no-preference\)/);
@@ -1030,7 +1059,7 @@ test('renderer actual honra tokens, responsive, fuentes e imagen focal en CSS de
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.16.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.17.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);

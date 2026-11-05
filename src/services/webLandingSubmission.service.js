@@ -16,7 +16,7 @@ const {
 
 const BROWSER_FIELDS = new Set([
   ...WEB_AD_FIELDS.map(field => `_cc_attr_${field}`),
-  'first_name', 'last_name', 'email', 'phone', 'message', 'preferred_contact',
+  'first_name', 'last_name', 'email', 'phone', 'message', 'preferred_contact', 'interest',
   'privacy_consent', '_cc_company', 'web_project_id', 'web_revision_id',
   'web_page_id', 'web_form_id', 'web_artifact_input_hash',
   '_cc_ad_user_data', '_cc_ad_personalization',
@@ -280,6 +280,7 @@ async function prepareWebLandingSubmission({
   const phone = scalar(body, 'phone', 40);
   const message = scalar(body, 'message', 4000);
   const preferredContact = scalar(body, 'preferred_contact', 24);
+  const interest = scalar(body, 'interest', 64);
   const privacyConsent = scalar(body, 'privacy_consent', 1, { required: true });
   const honeypot = scalar(body, '_cc_company', 256);
   const adUserData = optionalConsentChoice(body, '_cc_ad_user_data');
@@ -336,8 +337,17 @@ async function prepareWebLandingSubmission({
     phone,
     message,
     preferred_contact: preferredContact,
+    interest,
     privacy_consent: privacyConsent === '1' ? '1' : '',
   });
+  // The choice and its label come from the immutable published revision,
+  // never from a free-text browser field or an advertising URL parameter.
+  const interestOption = interest
+    ? attribution.form_interest_options?.find((option) => option.value === interest)
+    : null;
+  if (interest && !interestOption) {
+    throw new WebLandingSubmissionError('web_landing_interest_invalid', 'Elige una opción válida del formulario.');
+  }
   const requestedLandingPath = body._cc_attr_landing_path
     ? canonicalLandingPath(body._cc_attr_landing_path)
     : canonicalLandingPath(pageUrl.pathname);
@@ -419,6 +429,7 @@ async function prepareWebLandingSubmission({
     ...(phone ? { phone } : {}),
     ...(message ? { message } : {}),
     ...(preferredContact ? { preferred_contact: preferredContact } : {}),
+    ...(interestOption ? { interest: interestOption.value, interest_label: interestOption.label } : {}),
     privacy_consent: '1',
   };
   const payload = {
@@ -441,7 +452,7 @@ async function prepareWebLandingSubmission({
     nombre: [firstName, lastName].filter(Boolean).join(' ') || null,
     email: email || null,
     telefono: phone || null,
-    notas: message || null,
+    notas: [interestOption ? `Interés: ${interestOption.label}` : '', message].filter(Boolean).join('\n\n') || null,
     consent: {
       contact: 'granted',
       ...(adUserData ? { ad_user_data: adUserData } : {}),

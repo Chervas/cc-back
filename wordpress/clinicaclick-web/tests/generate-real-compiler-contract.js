@@ -12,6 +12,14 @@ const { compileWebArtifact } = require('../../../src/lib/webArtifactCompiler');
 const installationId = 'd6d6d9bb-093e-4a40-8465-5ebf9edcde44';
 const hmacKey = '0123456789abcdef0123456789abcdef';
 const document = createBlankWebDocument({ name: 'Implantes dentales', locale: 'es-ES' });
+if (process.argv.includes('--brand-fonts')) {
+  document.design_system.tokens.font_heading = 'montserrat';
+  document.design_system.tokens.font_body = 'lato';
+  Object.values(document.nodes).find((node) => node.type === 'intake_form').props.fields.splice(1, 0, {
+    id: 'interest_choice', name: 'interest', type: 'select', label: '¿Qué te interesa?', required: true,
+    options: [{ value: 'valoracion', label: 'Valoración inicial' }, { value: 'informacion', label: 'Información general' }],
+  });
+}
 document.consent = {
   provider: 'clinicaclick',
   preview_mode: false,

@@ -167,6 +167,7 @@ final class CCW_Intake_Bridge
             'phone',
             'message',
             'preferred_contact',
+            'interest',
             'privacy_consent',
             '_cc_ad_user_data',
             '_cc_ad_personalization',

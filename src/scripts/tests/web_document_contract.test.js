@@ -493,6 +493,14 @@ function testCanonicalSerializationAndHash() {
 }
 
 function run() {
+  const interestDocument = buildValidWebDocument();
+  interestDocument.nodes.form_lead.props.fields.splice(1, 0, {
+    id: 'field_interest', name: 'interest', type: 'select', label: '¿Qué te interesa?', required: true,
+    options: [{ value: 'valoracion', label: 'Valoración' }],
+  });
+  assert.equal(validateWebDocument(interestDocument).valid, true);
+  interestDocument.nodes.form_lead.props.fields[1].options.push({ value: 'valoracion', label: 'Duplicado' });
+  assertInvalid(interestDocument, 'fieldOptions');
   testValidContractCoversInitialBlocks();
   testNoArbitraryCodeMarkupStylesOrClasses();
   testSectionColumnTracksUseSafeTwelveColumnGrid();

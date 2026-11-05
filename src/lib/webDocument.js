@@ -80,6 +80,7 @@ const FIELD_TYPES = Object.freeze({
   phone: 'tel',
   message: 'textarea',
   preferred_contact: 'select',
+  interest: 'select',
   privacy_consent: 'checkbox',
 });
 
@@ -318,12 +319,14 @@ function validateIntakeForm(node, path, errors) {
         `el campo ${field.name} debe usar el tipo ${FIELD_TYPES[field.name]}`
       ));
     }
-    if (field.name === 'preferred_contact') {
+    if (field.type === 'select') {
       if (!Array.isArray(field.options) || field.options.length === 0) {
-        errors.push(validationError('fieldOptions', `${fieldPath}/options`, 'preferred_contact necesita opciones'));
+        errors.push(validationError('fieldOptions', `${fieldPath}/options`, `${field.name} necesita opciones`));
+      } else if (new Set(field.options.map((option) => option.value)).size !== field.options.length) {
+        errors.push(validationError('fieldOptions', `${fieldPath}/options`, 'las opciones deben tener valores únicos'));
       }
     } else if (field.options !== undefined) {
-      errors.push(validationError('fieldOptions', `${fieldPath}/options`, 'solo preferred_contact admite opciones'));
+      errors.push(validationError('fieldOptions', `${fieldPath}/options`, 'solo los campos select admiten opciones'));
     }
   }
 

@@ -18,6 +18,7 @@ final class CCW_Config
     const OPTION_SYNC = 'ccw_sync_state';
     const OPTION_PURGE = 'ccw_purge_on_uninstall';
     const OPTION_SITE_CLAIM_ACK = 'ccw_site_claim_ack';
+    const OPTION_PRIVATE_CACHE_BASE = 'ccw_private_cache_base';
 
     public static function installation_id()
     {
@@ -344,9 +345,7 @@ final class CCW_Config
             ? (bool) $context['uses_default']
             : !defined('CLINICACLICK_WEB_CACHE_DIR');
         if ($cache_root === null) {
-            $cache_root = defined('CLINICACLICK_WEB_CACHE_DIR')
-                ? (string) constant('CLINICACLICK_WEB_CACHE_DIR')
-                : rtrim((string) WP_CONTENT_DIR, '/\\') . '/clinicaclick-web-cache';
+            $cache_root = self::cache_root();
         }
         $root = self::canonical_filesystem_path((string) $cache_root);
 
@@ -412,9 +411,70 @@ final class CCW_Config
             $root = (string) constant('CLINICACLICK_WEB_CACHE_DIR');
         } else {
             $root = rtrim((string) WP_CONTENT_DIR, '/\\') . '/clinicaclick-web-cache';
+            if (self::is_managed_configuration()) {
+                $roots = array(ABSPATH);
+                if (!empty($_SERVER['DOCUMENT_ROOT'])) $roots[] = (string) $_SERVER['DOCUMENT_ROOT'];
+                $saved = (string) get_option(self::OPTION_PRIVATE_CACHE_BASE, '');
+                $site_key = hash('sha256', self::installation_id() . '|' . home_url('/'));
+                $private = self::prepare_private_cache_base($roots, $site_key, $saved);
+                if ($private !== '') {
+                    $root = $private;
+                    if ($saved === '') update_option(self::OPTION_PRIVATE_CACHE_BASE, $root, false);
+                }
+            }
         }
         $site_key = hash('sha256', self::installation_id() . '|' . home_url('/'));
         return rtrim($root, '/\\') . '/' . $site_key;
+    }
+
+    /**
+     * Prepare persistent storage beside, never below, every known public root.
+     * No temporary-directory fallback: losing LKG on host cleanup is unsafe.
+     * Existing choices are pinned; a failed choice needs repair, not a silent
+     * empty cache. Explicit server configuration always takes precedence.
+     * @param array<int,string> $document_roots
+     */
+    public static function prepare_private_cache_base(array $document_roots, $site_key, $saved = '')
+    {
+        if (!preg_match('/^[a-f0-9]{64}$/', (string) $site_key)) return '';
+        $roots = array();
+        foreach ($document_roots as $public_root) {
+            $canonical = self::canonical_filesystem_path((string) $public_root);
+            if ($canonical !== '') $roots[] = $canonical;
+        }
+        if ($roots === array()) return '';
+        $candidates = array();
+        if ($saved !== '') {
+            $candidates[] = $saved;
+        } else {
+            foreach ($roots as $public_root) {
+                $parent = dirname($public_root);
+                if ($parent !== '/' && $parent !== '.' && $parent !== $public_root) {
+                    $candidates[] = $parent . '/.clinicaclick-web-' . substr($site_key, 0, 24);
+                }
+            }
+        }
+        foreach (array_unique($candidates) as $candidate) {
+            $candidate = rtrim((string) $candidate, '/\\');
+            if (basename($candidate) !== '.clinicaclick-web-' . substr($site_key, 0, 24)) continue;
+            if (is_link($candidate)) continue;
+            $canonical = self::canonical_filesystem_path($candidate);
+            $public = false;
+            foreach ($roots as $public_root) {
+                if (self::path_is_within($canonical, $public_root)) $public = true;
+            }
+            if ($public || $canonical === '' || !is_dir(dirname($canonical))) continue;
+            if (!is_dir($canonical) && !@mkdir($canonical, 0700, false)) continue;
+            clearstatcache(true, $canonical);
+            if (is_link($canonical) || !is_dir($canonical) || !is_writable($canonical)) continue;
+            // Never take over an existing directory owned by another user.
+            if (function_exists('posix_geteuid') && fileowner($canonical) !== posix_geteuid()) continue;
+            if (!@chmod($canonical, 0700)) continue;
+            clearstatcache(true, $canonical);
+            if ((fileperms($canonical) & 0077) !== 0) continue;
+            return $canonical;
+        }
+        return '';
     }
 
     private static function canonical_filesystem_path($value)

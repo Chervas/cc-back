@@ -72,7 +72,7 @@ final class CCW_Admin
                 <div class="notice notice-error inline" style="max-width:860px;margin:16px 0 0">
                     <p><strong>La publicación está detenida para proteger las credenciales de medición.</strong></p>
                     <p><?php echo esc_html((string) $storage['message']); ?></p>
-                    <p>Añade en <code>wp-config.php</code> una ruta privada, por ejemplo <code>define('CLINICACLICK_WEB_CACHE_DIR', '/ruta/fuera-del-document-root/clinicaclick-web-cache');</code>. El plugin no mueve ni copia automáticamente la caché existente. Si ya había una caché pública, el responsable del servidor debe bloquearla o retirarla y verificar que sus JSON responden <code>404</code>.</p>
+                    <p>El alojamiento no ha permitido preparar automáticamente una carpeta privada. Pide a su administrador una ruta fuera del directorio público y defínela en <code>wp-config.php</code>, por ejemplo <code>define('CLINICACLICK_WEB_CACHE_DIR', '/ruta/privada/clinicaclick-web-cache');</code>. El plugin no mueve ni copia una caché anterior. Si ya había una caché pública, el responsable del servidor debe bloquearla o retirarla y verificar que sus JSON responden <code>404</code>.</p>
                 </div>
             <?php endif; ?>
 

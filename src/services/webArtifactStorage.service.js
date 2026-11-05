@@ -178,7 +178,18 @@ function assertArtifactBundle(artifact) {
   const normalized = {};
   for (const path of actualPaths) {
     const safePath = safeFilePath(path);
-    const body = Buffer.isBuffer(files[path]) ? files[path] : Buffer.from(String(files[path]), 'utf8');
+    const value = files[path];
+    let body;
+    if (Buffer.isBuffer(value)) body = value;
+    else if (typeof value === 'string') body = Buffer.from(value, 'utf8');
+    else if (value && typeof value === 'object' && Object.keys(value).sort().join(',') === 'data,encoding'
+      && value.encoding === 'base64' && typeof value.data === 'string'
+      && value.data.length <= Math.ceil(MAX_WEB_ARTIFACT_BUNDLE_BYTES / 3) * 4
+      && /^[A-Za-z0-9+/]*={0,2}$/.test(value.data)) {
+      body = Buffer.from(value.data, 'base64');
+      if (body.toString('base64') !== value.data) body = null;
+    }
+    if (!body) throw new WebArtifactStorageError('web_artifact_file_encoding_invalid', 'El fichero no tiene una codificación admitida.', 422);
     const expected = manifest.files[path] || {};
     const actualHash = sha256(body);
     if (

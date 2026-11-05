@@ -84,6 +84,44 @@ $tests['managed runtime fails closed when the default cache is below document ro
     ccw_test_assert(!empty($generic['safe']), 'generic unmanaged install was broken by the managed guard');
 };
 
+$tests['automatic cache uses a persistent private sibling with restrictive permissions'] = static function () {
+    $base = sys_get_temp_dir() . '/ccw-auto-' . bin2hex(random_bytes(8));
+    mkdir($base . '/htdocs', 0750, true);
+    $key = hash('sha256', 'site-a');
+    $private = CCW_Config::prepare_private_cache_base(array($base . '/htdocs'), $key);
+    ccw_test_assert($private === $base . '/.clinicaclick-web-' . substr($key, 0, 24), 'private sibling not selected');
+    ccw_test_assert((fileperms($private) & 0077) === 0, 'private sibling is accessible to other OS users');
+    file_put_contents($private . '/lkg', 'preserve');
+    ccw_test_assert(CCW_Config::prepare_private_cache_base(array($base . '/htdocs'), $key, $private) === $private, 'pinned private root changed');
+    ccw_test_assert(file_get_contents($private . '/lkg') === 'preserve', 'existing LKG was modified');
+    $other = CCW_Config::prepare_private_cache_base(array($base . '/htdocs'), hash('sha256', 'site-b'));
+    ccw_test_assert($other !== $private, 'two installations share automatic storage');
+    unlink($private . '/lkg'); rmdir($private); rmdir($other); rmdir($base . '/htdocs'); rmdir($base);
+};
+
+$tests['automatic cache rejects public parents, symlinks and arbitrary pinned paths'] = static function () {
+    $base = sys_get_temp_dir() . '/ccw-auto-' . bin2hex(random_bytes(8));
+    mkdir($base . '/public/wp', 0750, true);
+    $key = hash('sha256', 'site-c');
+    $public_candidate = $base . '/public/.clinicaclick-web-' . substr($key, 0, 24);
+    ccw_test_assert(CCW_Config::prepare_private_cache_base(array($base . '/public/wp', $base . '/public'), $key, $public_candidate) === '', 'candidate inside larger public root was accepted');
+    ccw_test_assert(!file_exists($public_candidate), 'unsafe public folder was created');
+    ccw_test_assert(CCW_Config::prepare_private_cache_base(array($base . '/public'), $key, $base) === '', 'arbitrary pinned root was accepted');
+    $link = $base . '/.clinicaclick-web-' . substr($key, 0, 24);
+    symlink($base . '/public', $link);
+    ccw_test_assert(CCW_Config::prepare_private_cache_base(array($base . '/public'), $key) === '', 'symlink was accepted');
+    unlink($link); rmdir($base . '/public/wp'); rmdir($base . '/public'); rmdir($base);
+};
+
+$tests['automatic cache fails closed without using shared temporary storage'] = static function () {
+    $base = sys_get_temp_dir() . '/ccw-auto-' . bin2hex(random_bytes(8));
+    mkdir($base . '/htdocs', 0750, true);
+    chmod($base, 0550);
+    $key = hash('sha256', 'site-d');
+    ccw_test_assert(CCW_Config::prepare_private_cache_base(array($base . '/htdocs'), $key) === '', 'unwritable hosting silently fell back to another directory');
+    chmod($base, 0750); rmdir($base . '/htdocs'); rmdir($base);
+};
+
 $tests['artifact bearer is sent only to the exact API origin'] = static function () {
     $GLOBALS['ccw_test_options'] = array();
     $GLOBALS['ccw_test_http'] = array();

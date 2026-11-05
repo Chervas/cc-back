@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { compiledFonts, fontStack } = require('./webFonts');
 const {
   assertValidWebDocument,
   canonicalSerialize,
@@ -13,7 +14,7 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('./webArtifactBudget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.16.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.17.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const SAFE_YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{6,64}$/;
 const SAFE_VIMEO_VIDEO_ID = /^[0-9]{6,12}$/;
@@ -1301,12 +1302,7 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
   });
 }
 
-function fontStackCss(_token) {
-  // No se publican binarios de fuentes en el artefacto. Los tokens antiguos se
-  // aceptan para compatibilidad documental, pero se renderizan de forma
-  // determinista con la pila disponible en el sistema.
-  return 'ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
-}
+function fontStackCss(token) { return fontStack(token); }
 
 function stylesheet(tokens, document = { nodes: {} }) {
   const density = tokens.spacing_density === 'compact'
@@ -1697,7 +1693,8 @@ function compileWebArtifact(input = {}) {
     input.intakeEndpoint || (environment === 'production' ? PRODUCTION_INTAKE_ENDPOINT : '/api/intake/web'),
     environment
   );
-  const css = stylesheet(document.design_system.tokens, document);
+  const fonts = compiledFonts(document.design_system.tokens);
+  const css = [fonts.css, stylesheet(document.design_system.tokens, document)].filter(Boolean).join('\n');
   const cssHash = sha256(css);
   const cssFile = `assets/styles.${cssHash.slice(0, 16)}.css`;
   const pageById = new Map(document.pages.map((page) => [page.id, page]));
@@ -1805,6 +1802,7 @@ function compileWebArtifact(input = {}) {
     intake_forms: intakeForms,
     site_configuration: siteConfiguration,
     files: {
+      ...fonts.manifest,
       [cssFile]: { sha256: cssHash, content_type: 'text/css; charset=utf-8', size_bytes: Buffer.byteLength(css) },
       'robots.txt': { sha256: sha256(robots), content_type: 'text/plain; charset=utf-8', size_bytes: Buffer.byteLength(robots) },
       'sitemap.xml': { sha256: sha256(sitemap), content_type: 'application/xml; charset=utf-8', size_bytes: Buffer.byteLength(sitemap) },
@@ -1836,6 +1834,7 @@ function compileWebArtifact(input = {}) {
     artifact_hash: artifactHash,
     manifest,
     files: {
+      ...fonts.files,
       [cssFile]: css,
       'robots.txt': robots,
       'sitemap.xml': sitemap,

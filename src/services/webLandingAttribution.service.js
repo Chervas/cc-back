@@ -770,6 +770,10 @@ async function resolveWebLandingAttribution({ body = {}, models = db, now = new 
     success_anchor: String(formContract.success_anchor),
     error_anchor: String(formContract.error_anchor),
     form_fields: expectedFields,
+    ...(expectedFields.some((field) => field.name === 'interest') ? {
+      form_interest_options: form.props.fields.find((field) => field.name === 'interest').options
+        .map(({ value, label }) => ({ value, label })),
+    } : {}),
     ...(googleAttribution ? {
       google_ads_customer_id: googleAttribution.customer_id,
       google_ads_campaign_id: googleAttribution.campaign_id,
