@@ -10,7 +10,7 @@ function fixture({access=true,open=true,existing=null,unknown=false}={}){
   const metadata=[];
   const context={exports:{},console,Buffer,Op:{and:Symbol('and')},
     require:name=>{if(name==='../lib/quickchat-image')return image;if(name==='../services/temporaryPatientDirection.service')return{observeConversation:async()=>{}};throw Error('Forbidden module '+name);},
-    db:{sequelize:{transaction:async()=>transaction,where:()=>({}),fn:()=>({}),col:()=>({})}},
+    db:{sequelize:{transaction:async()=>transaction,where:()=>({}),json:()=>({})}},
     Conversation:{findByPk:async()=>conversation}, Message:{findOne:async()=>existing,create:async values=>{calls.rows.push(structuredClone(values));return{...values,id:77,save:async()=>{}};}},
     getUserClinics:async()=>({clinicIds:[123]}),ensureAccess:()=>access,ensureQuickChatConversationReadAccess:async()=>{},sendQuickChatCategoryForbidden:()=>{},
     findCanonicalWhatsappConversation:async()=>null,getIO:()=>null,

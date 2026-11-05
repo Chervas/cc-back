@@ -2164,10 +2164,8 @@ exports.postMessage = async (req, res) => {
       // Serialize request identity per conversation. Repeating a request can
       // only return its existing message, never spend another delivery right.
       await Conversation.findByPk(conversation.id, { transaction, lock: transaction.LOCK.UPDATE });
-      const existing = await Message.findOne({ where: {
-        conversation_id: conversation.id,
-        [Op.and]: db.sequelize.where(db.sequelize.fn('JSON_UNQUOTE', db.sequelize.fn('JSON_EXTRACT', db.sequelize.col('metadata'), '$.outbound_attachment_request_id')), attachment.requestId),
-      }, transaction });
+      const existing = await Message.findOne({ where:
+        require('../lib/quickchat-image').requestWhere(db.sequelize, conversation.id, attachment.requestId), transaction });
       if (existing) {
         await transaction.rollback();
         if (Number(existing.sender_id) !== Number(userId) || existing.metadata?.outbound_attachment?.sha256 !== attachment.image.sha256

@@ -19,6 +19,12 @@ function metadata(value) { return { kind: 'quickchat_outbound_image',
   outbound_attachment_request_id: value.requestId,
   outbound_attachment: { sha256: value.image.sha256, mime_type: value.image.mime_type },
   media: { kind: 'image', mime_type: value.image.mime_type, sha256: value.image.sha256 } }; }
+function requestWhere(sequelize, conversationId, requestId) {
+  // Native JSON expressions keep the path intact. Passing '$.path' through
+  // nested fn() escapes it as '$$.path' in the installed Sequelize dialect.
+  return { conversation_id: conversationId, [require('sequelize').Op.and]:
+    sequelize.where(sequelize.json('metadata.outbound_attachment_request_id'), requestId) };
+}
 function isReceipt(message) {
   const m = message?.metadata;
   return message?.direction === 'outbound' && message?.message_type === 'image'
@@ -27,4 +33,4 @@ function isReceipt(message) {
     && m.media.sha256 === m.outbound_attachment?.sha256
     && m.media.mime_type === m.outbound_attachment?.mime_type;
 }
-module.exports = { parse, metadata, isReceipt, MAX_BYTES: imageContract.MAX_BYTES };
+module.exports = { parse, metadata, requestWhere, isReceipt, MAX_BYTES: imageContract.MAX_BYTES };
