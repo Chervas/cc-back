@@ -2111,8 +2111,19 @@ $tests['site claim exposes only a digest and disappears after backend ACK'] = st
     ccw_test_assert(($document['claim_token_sha256'] ?? '') === hash('sha256', $raw_claim), 'site claim digest mismatch');
     ccw_test_assert(strpos(json_encode($document), $raw_claim) === false, 'site claim leaked the raw challenge');
 
+    $claim = new CCW_Site_Claim(); $claim->rest_route();
+    ccw_test_assert($GLOBALS['ccw_test_rest_route'][0] === 'clinicaclick-web/v1', 'wrong REST namespace');
+    ccw_test_assert($GLOBALS['ccw_test_rest_route'][2]['methods'] === 'GET', 'REST proof must be read-only');
+    $response = $claim->rest_response();
+    ccw_test_assert($response->status === 200 && $response->data === $document, 'REST proof differs from well-known');
+    ccw_test_assert($response->headers['Cache-Control'] === 'no-store, max-age=0', 'REST proof must not be cached');
+    $GLOBALS['ccw_test_ssl'] = false;
+    ccw_test_assert($claim->rest_response()->status === 404, 'REST proof exposed without HTTPS');
+    $GLOBALS['ccw_test_ssl'] = true;
+
     ccw_test_assert(CCW_Config::acknowledge_site_claim() === true, 'site claim ACK was not persisted');
     ccw_test_assert(CCW_Site_Claim::claim_document() === null, 'site claim remained public after ACK');
+    ccw_test_assert($claim->rest_response()->status === 404, 'REST proof remained public after ACK');
     $property->setValue(null, array());
     delete_option(CCW_Config::OPTION_SITE_CLAIM_ACK);
 };

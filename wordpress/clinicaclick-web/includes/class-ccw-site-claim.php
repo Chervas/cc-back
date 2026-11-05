@@ -11,9 +11,29 @@ final class CCW_Site_Claim
 
     public function register()
     {
+        add_action('rest_api_init', array($this, 'rest_route'));
         add_filter('query_vars', array($this, 'query_vars'));
         add_action('init', array($this, 'rewrite_rules'));
         add_action('template_redirect', array($this, 'maybe_serve'), 0);
+    }
+
+    public function rest_route()
+    {
+        register_rest_route('clinicaclick-web/v1', '/site-claim', array(
+            'methods' => 'GET',
+            'callback' => array($this, 'rest_response'),
+            'permission_callback' => '__return_true',
+        ));
+    }
+
+    public function rest_response()
+    {
+        $document = self::claim_document();
+        $available = $document !== null && is_ssl();
+        return new WP_REST_Response($available ? $document : array('code' => 'not_found'), $available ? 200 : 404, array(
+            'Cache-Control' => 'no-store, max-age=0',
+            'X-Content-Type-Options' => 'nosniff',
+        ));
     }
 
     public function query_vars($vars)

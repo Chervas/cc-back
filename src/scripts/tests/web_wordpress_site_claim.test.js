@@ -16,6 +16,7 @@ const {
 } = require('../../services/webWordpressInstallations.service');
 const {
   SITE_CLAIM_PATH,
+  REST_SITE_CLAIM_PATH,
   verifyWordpressSiteClaim,
 } = require('../../services/webWordpressSiteClaim.service');
 
@@ -194,6 +195,30 @@ test('el verifier hace GET real fijado a DNS público y exige identidad, digest 
   assert.equal(requested.options.maxContentLength, 4096);
   assert.equal(proof.site_url_hash, tokenHash('https://cliente.example'));
   assert.deepEqual(destroyed.sort(), ['http', 'https']);
+});
+
+test('un 404 en well-known permite la ruta REST del mismo origen con las mismas guardas', async () => {
+  const installationId = crypto.randomUUID(), digest = tokenHash('challenge');
+  const addresses = [{ address: '93.184.216.34', family: 4 }], calls = [];
+  const options = { installationId, siteUrl: 'https://cliente.example', expectedClaimTokenHash: digest,
+    resolveTarget: async url => ({ url, hostname: 'cliente.example', addresses }),
+    resolveAddresses: async () => addresses,
+    httpClient: { async get(url, config) {
+      calls.push(url); assert.equal(config.maxRedirects, 0); assert.equal(config.proxy, false);
+      return url.endsWith(SITE_CLAIM_PATH) ? { status: 404, headers: {}, data: 'Missing' }
+        : { status: 200, headers: { 'content-type': 'application/json' }, data: JSON.stringify({
+          installation_id: installationId, claim_token_sha256: digest, canonical_home_url: 'https://cliente.example',
+        }) };
+    } },
+  };
+  assert.equal((await verifyWordpressSiteClaim(options)).installation_id, installationId);
+  assert.deepEqual(calls, ['https://cliente.example'+SITE_CLAIM_PATH, 'https://cliente.example'+REST_SITE_CLAIM_PATH]);
+  calls.length = 0;
+  await assert.rejects(verifyWordpressSiteClaim({ ...options, httpClient: { async get(url) {
+    calls.push(url); return { status: 403, headers: {}, data: 'Forbidden' };
+  } } }), { code: 'web_wordpress_site_claim_invalid' });
+  assert.equal(calls.length, 1, 'do not retry forbidden, invalid or redirected proofs');
+  await assert.rejects(verifyWordpressSiteClaim({ ...options, resolveAddresses: async () => [{ address: '127.0.0.1', family: 4 }] }), { code: 'web_wordpress_site_claim_dns_changed' });
 });
 
 test('el verifier bloquea IP privada, rebinding, redirects, MIME y documentos de otra instalación', async () => {

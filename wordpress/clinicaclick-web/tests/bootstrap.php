@@ -3,7 +3,7 @@
 define('CCW_TESTING', true);
 define('ABSPATH', __DIR__ . '/wp/');
 define('WP_CONTENT_DIR', __DIR__ . '/tmp/wp-content');
-define('CCW_VERSION', '2.0.0-alpha.12');
+define('CCW_VERSION', '2.0.0-alpha.13');
 define('DAY_IN_SECONDS', 86400);
 define('MINUTE_IN_SECONDS', 60);
 
@@ -20,6 +20,20 @@ final class WP_Error
         $this->message = $message;
     }
 }
+
+final class WP_REST_Response
+{
+    public $data;
+    public $status;
+    public $headers;
+    public function __construct($data, $status = 200, $headers = array())
+    {
+        $this->data = $data; $this->status = $status; $this->headers = $headers;
+    }
+}
+
+function is_ssl() { return $GLOBALS['ccw_test_ssl'] ?? true; }
+function register_rest_route($namespace, $path, $args) { $GLOBALS['ccw_test_rest_route'] = array($namespace, $path, $args); }
 
 function get_option($key, $default = false)
 {

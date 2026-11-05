@@ -10,6 +10,7 @@ const {
 const { normalizeSiteUrl, WebPublicationServiceError } = require('./webPublications.service');
 
 const SITE_CLAIM_PATH = '/.well-known/clinicaclick-wordpress-claim';
+const REST_SITE_CLAIM_PATH = '/wp-json/clinicaclick-web/v1/site-claim';
 const MAX_SITE_CLAIM_RESPONSE_BYTES = 4096;
 const DEFAULT_SITE_CLAIM_TIMEOUT_MS = 5000;
 
@@ -23,9 +24,10 @@ function siteClaimError(code, message, status = 409, details = undefined) {
   return new WebPublicationServiceError(code, message, status, details);
 }
 
-function siteClaimUrl(siteUrl) {
+function siteClaimUrl(siteUrl, useRestRoute = false) {
   const normalized = normalizeSiteUrl(siteUrl).url;
-  const url = new URL(SITE_CLAIM_PATH, `${normalized}/`);
+  const path = useRestRoute ? REST_SITE_CLAIM_PATH : SITE_CLAIM_PATH;
+  const url = new URL(path, `${normalized}/`);
   if (
     url.protocol !== 'https:'
     || url.port
@@ -33,7 +35,7 @@ function siteClaimUrl(siteUrl) {
     || url.password
     || url.search
     || url.hash
-    || url.pathname !== SITE_CLAIM_PATH
+    || url.pathname !== path
   ) {
     throw siteClaimError(
       'web_wordpress_site_claim_target_invalid',
@@ -82,7 +84,18 @@ function parseClaimDocument(value) {
   return decoded;
 }
 
-async function verifyWordpressSiteClaim({
+async function verifyWordpressSiteClaim(options = {}) {
+  try {
+    return await verifyWordpressSiteClaimAtRoute(options, false);
+  } catch (error) {
+    // Some hosts reserve .well-known for static files. Retry only a missing
+    // route, on the same verified origin, with the very same ownership proof.
+    if (error.code !== 'web_wordpress_site_claim_invalid' || error.details?.http_status !== 404) throw error;
+    return verifyWordpressSiteClaimAtRoute(options, true);
+  }
+}
+
+async function verifyWordpressSiteClaimAtRoute({
   installationId,
   siteUrl,
   expectedClaimTokenHash,
@@ -90,7 +103,7 @@ async function verifyWordpressSiteClaim({
   resolveTarget = resolveSafeHttpTarget,
   resolveAddresses = resolvePublicAddresses,
   timeoutMs = DEFAULT_SITE_CLAIM_TIMEOUT_MS,
-} = {}) {
+} = {}, useRestRoute = false) {
   const installation = String(installationId || '').trim().toLowerCase();
   const expectedDigest = String(expectedClaimTokenHash || '').trim().toLowerCase();
   if (
@@ -102,7 +115,7 @@ async function verifyWordpressSiteClaim({
       'Vuelve a descargar e instalar el plugin para demostrar el control de este WordPress.'
     );
   }
-  const target = siteClaimUrl(siteUrl);
+  const target = siteClaimUrl(siteUrl, useRestRoute);
   let safeTarget;
   try {
     safeTarget = await resolveTarget(target.claim_url);
@@ -163,7 +176,9 @@ async function verifyWordpressSiteClaim({
       status >= 300 && status < 400
         ? 'web_wordpress_site_claim_redirect_blocked'
         : 'web_wordpress_site_claim_invalid',
-      'WordPress no ha devuelto una prueba de control válida.'
+      'WordPress no ha devuelto una prueba de control válida.',
+      409,
+      { http_status: status }
     );
   }
 
@@ -211,6 +226,7 @@ async function verifyWordpressSiteClaim({
 }
 
 module.exports = {
+  REST_SITE_CLAIM_PATH,
   DEFAULT_SITE_CLAIM_TIMEOUT_MS,
   MAX_SITE_CLAIM_RESPONSE_BYTES,
   SITE_CLAIM_PATH,

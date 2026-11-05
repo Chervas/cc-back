@@ -2,7 +2,7 @@
 Contributors: clinicaclick
 Requires at least: 5.8
 Requires PHP: 7.4
-Stable tag: 2.0.0-alpha.12
+Stable tag: 2.0.0-alpha.13
 License: Proprietary
 
 Medición de ClinicaClick y publicación segura de landings firmadas con caché local.
