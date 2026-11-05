@@ -4437,15 +4437,18 @@ async function handleSendWhatsapp(node, context, runtime) {
 
   const targetPatientId = toIntOrNull(targets.patient_id);
   const targetLeadId = toIntOrNull(targets.lead_id);
+  const isolateAppointmentContact = !!targetPatientId && execution?.trigger_entity_type === 'appointment'
+    && recipientData.recipient_mode === 'context_patient'
+    && Number(targets.appointment_id) === Number(execution.trigger_entity_id);
   let conversation = null;
 
   conversation = await findCanonicalWhatsappConversation({
     requireExactContact: true,
-    isolatePatientContact: !!operational,
+    isolatePatientContact: !!operational || isolateAppointmentContact,
     clinicId,
     contactId: recipientData.recipient,
     patientId: targetPatientId,
-    leadId: targetLeadId,
+    leadId: isolateAppointmentContact ? null : targetLeadId,
     createIfMissing: false,
   });
 
@@ -4486,11 +4489,11 @@ async function handleSendWhatsapp(node, context, runtime) {
     }
     conversation = await findCanonicalWhatsappConversation({
       requireExactContact: true,
-      isolatePatientContact: !!operational,
+      isolatePatientContact: !!operational || isolateAppointmentContact,
       clinicId,
       contactId: recipientData.recipient,
       patientId: targetPatientId,
-      leadId: targetLeadId,
+      leadId: isolateAppointmentContact ? null : targetLeadId,
       createIfMissing: true,
       lastMessageAt: new Date(),
     });

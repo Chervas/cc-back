@@ -1496,6 +1496,16 @@ exports.getPacienteActivity = async (req, res) => {
     );
 
     const operationalEventConfig = {
+      [PATIENT_EVENT_TYPES.manualAppointmentNotice]: {
+        tipo:'appointment_manual_notice_requested',titulo:'Reenvío manual de datos de cita',
+        icono:'heroicons_outline:paper-airplane',color:'info',
+        descripcion:()=> 'Se ha solicitado reenviar los datos actuales de la cita. La entrega se muestra en el mensaje de WhatsApp.',
+      },
+      [PATIENT_EVENT_TYPES.phoneChanged]: {
+        tipo: 'patient_phone_changed', titulo: 'Teléfono del paciente actualizado',
+        icono: 'heroicons_outline:arrows-right-left', color: 'info',
+        descripcion: (_source, metadata) => `${metadata.previous_phone || 'Sin teléfono'} → ${metadata.current_phone || 'Sin teléfono'}. El historial del número anterior se conserva.`,
+      },
       [PATIENT_EVENT_TYPES.created]: {
         tipo: 'patient_created',
         titulo: 'Alta del paciente',
@@ -1540,7 +1550,7 @@ exports.getPacienteActivity = async (req, res) => {
         fecha: event.occurred_at,
         tipo: config.tipo,
         titulo: config.titulo,
-        descripcion: config.descripcion(sourceLabel),
+        descripcion: config.descripcion(sourceLabel, event.metadata || {}),
         icono: config.icono,
         color: config.color,
         usuarioId: actor ? String(actor.id_usuario) : 'system',

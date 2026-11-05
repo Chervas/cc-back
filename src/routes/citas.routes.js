@@ -13,6 +13,8 @@ router.get('/calendar', authMiddleware, citasController.getCitasCalendar);
 router.get('/calendar-search', authMiddleware, citasController.searchCalendarAppointments);
 router.get('/hub', authMiddleware, citasController.getAppointmentHubList);
 router.post('/:id/desvincular', authMiddleware, citasController.unlinkPatientAppointments);
+router.get('/:id/reenviar-datos', authMiddleware, require('../controllers/appointmentManualNotice.controller').preview);
+router.post('/:id/reenviar-datos', authMiddleware, require('../controllers/appointmentManualNotice.controller').send);
 router.get('/:id/recuperacion', authMiddleware, citasController.getAppointmentRestoration);
 router.post('/:id/recuperar', authMiddleware, citasController.restoreAppointment);
 router.get('/:id/activity', authMiddleware, citasController.getAppointmentHubActivity);

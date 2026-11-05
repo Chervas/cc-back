@@ -18,6 +18,8 @@ const PATIENT_EVENT_TYPES = Object.freeze({
   created: 'patient.created',
   whatsappAuthorized: 'patient.whatsapp_contact_authorized',
   whatsappConversationStarted: 'patient.whatsapp_conversation_started',
+  phoneChanged: 'patient.whatsapp_phone_changed',
+  manualAppointmentNotice: 'appointment.manual_notice_requested',
 });
 
 const ALLOWED_SOURCES = new Set([
@@ -430,6 +432,8 @@ async function startPatientWhatsappConversation({
   }
 
   const existingConversation = await findCanonicalWhatsappConversation({
+    requireExactContact: true,
+    isolatePatientContact: true,
     clinicId: normalizedClinicId,
     contactId: contactPhone,
     patientId: patient.id_paciente,
@@ -437,6 +441,8 @@ async function startPatientWhatsappConversation({
     transaction,
   });
   const conversation = existingConversation || await findCanonicalWhatsappConversation({
+    requireExactContact: true,
+    isolatePatientContact: true,
     clinicId: normalizedClinicId,
     contactId: contactPhone,
     patientId: patient.id_paciente,

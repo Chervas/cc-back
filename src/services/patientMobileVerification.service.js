@@ -496,6 +496,8 @@ function createRuntime(deps) {
       await deps.checkCorrection({ db, patient: plain(patient), patch: { telefono_movil: next }, clinicIds: await deps.groupClinicIds(db, clinicId, transaction), transaction, allowExistingPatientChat: true });
       const previousPhone = patient.telefono_movil;
       await patient.update({ telefono_movil: next }, { transaction });
+      await require('./patientWhatsappContactChange.service').record({ db, patientId, clinicId, previousPhone,
+        nextPhone: next, actorId, transaction });
       const created = await recordRequest({ patient_id: patientId, clinic_id: clinicId, actor_user_id: actorId,
         source: 'reception_mobile_verification', channel: 'internal', metadata: { schema_version: C.SCHEMA,
           document_id: request.metadata.document_id, snapshot_hash: request.metadata.snapshot_hash,
@@ -543,6 +545,8 @@ async function withPatientMobileChange({ db, patientId, clinicId, nextClinicId =
     if (authorizeCurrent) await authorizeCurrent(patient);
     const result = await save(transaction);
     await originRuntime(db).invalidateForPhoneChange({ patientId, actorId, previousPhone, nextPhone, transaction });
+    await require('./patientWhatsappContactChange.service').record({ db, patientId, clinicId: nextClinicId,
+      previousPhone, nextPhone, actorId, transaction });
     return result;
   }).catch(error => {
     if (['ER_LOCK_DEADLOCK', 'ER_LOCK_WAIT_TIMEOUT'].includes(error.original?.code || error.parent?.code || error.code)) {

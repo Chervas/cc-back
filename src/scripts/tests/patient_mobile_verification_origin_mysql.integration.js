@@ -43,6 +43,7 @@ withIsolatedCampaignMysql(async scope => {
   await db.Clinica.update({ grupoClinicaId: 50 }, { where: { id_clinica: [72, 73] } });
   t.checkCorrection = nativeProfile.checkContactCollisions;
   const profile = loadSource('patientPrivacyProfile.service', {
+    './patientWhatsappContactChange.service': require('../../services/patientWhatsappContactChange.service'),
     'node:crypto': require('node:crypto'),
     './patientPrivacyStatus.service': require('../../services/patientPrivacyStatus.service'),
     './patientMobileVerification.service': { recordRequest: ({ db: ignored, ...values }, options) => t.runtime.recordRequest(values, options) },
@@ -205,6 +206,7 @@ withIsolatedCampaignMysql(async scope => {
   check('Dejar pendiente preserves silence review and the existing reception task without false resolution; valid late YES still closes it after restart');
 
   const mobileService = loadSource('patientMobileVerification.service', {
+    './patientWhatsappContactChange.service': require('../../services/patientWhatsappContactChange.service'),
     'node:crypto': require('node:crypto'), './patientPrivacyProfile.service': nativeProfile,
     './jobRequests.service': t.requests,
     './notificationsRealtime.service': { emitNotificationUpdated() {} },

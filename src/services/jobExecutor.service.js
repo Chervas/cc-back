@@ -601,6 +601,7 @@ const JOB_HANDLERS = {
   whatsapp_authorized_dispatch_retry: async (payload, job, claim) => require('./whatsappDispatchWait.service').run(payload, job, claim),
   appointment_same_day_catchup: async payload => require('./appointmentSameDayCatchup.service').run(payload),
   whatsapp_manual_template_resend: async (payload = {}) => require('./whatsappTemplateResend.service').dispatch(payload),
+  appointment_manual_notice: async payload => require('./appointmentManualNotice.service').current().dispatch(payload),
   appointment_automation_schedule_fire: async (payload = {}, _job, claim) => runAppointmentAutomationScheduleJob(payload, claim),
   lead_callback_reminder_notify: async (payload = {}, jobRequest) => runLeadCallbackReminderJob(payload, jobRequest),
   lead_auto_reply_backfill: async (payload = {}, jobRequest) => (

@@ -228,12 +228,12 @@ async function findCanonicalWhatsappConversation({
 
   const contactCandidates = normalizeContactCandidates(contactId);
   if (isolatePatientContact) {
-    // Explicit number verification is allowed to open a separate chat, never to
+    // An explicit current-patient contact may open a separate chat, never to
     // repoint the patient's old one. Serialize lookup/create with source edits
     // and keep every existing conversation and message untouched.
     if (!requireExactContact || !Number.isSafeInteger(Number(patientId)) || Number(patientId) <= 0
       || leadId || !contactCandidates.length) {
-      throw Object.assign(new Error('La verificación requiere un paciente y un teléfono de destino exactos.'),
+      throw Object.assign(new Error('Se requiere un paciente y un teléfono de destino exactos.'),
         { code: 'whatsapp_contact_identity_conflict', status: 409 });
     }
     if (!transaction) return db.sequelize.transaction(owned => findCanonicalWhatsappConversation({
@@ -250,7 +250,7 @@ async function findCanonicalWhatsappConversation({
       where: { paciente_id: patientId, clinica_id: normalizedClinicId }, transaction, lock: transaction.LOCK.SHARE,
     });
     if (!belongs) {
-      throw Object.assign(new Error('El paciente ya no pertenece a la clínica de la verificación.'),
+      throw Object.assign(new Error('El paciente ya no pertenece a la clínica del envío.'),
         { code: 'whatsapp_contact_identity_conflict', status: 409 });
     }
   }

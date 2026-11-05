@@ -34,6 +34,7 @@ async function findHumanReplyAfterMessage(conversationId, responseMessageId, opt
       AND id > :responseMessageId
       AND direction = 'outbound'
       AND message_type <> 'event'
+      AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.kind')), '') <> 'manual_appointment_notice'
       AND status <> 'failed'
       AND (
         sender_id IS NOT NULL

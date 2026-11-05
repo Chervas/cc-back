@@ -12,7 +12,7 @@ function fixture() {
     event_type: C.REQUEST, source: 'privacy_profile_review',
     metadata: { schema_version: C.SCHEMA, phone: patient.telefono_movil, document_id: 50,
       snapshot_hash: 'TESTONLY-source', delivery_enabled: true, reply_token: 'TESTONLY-private' } };
-  const transitions = [], locks = [], writes = [], emitted = [];
+  const transitions = [], locks = [], writes = [], emitted = [], contactEvents=[];
   const notification = { isRead: false, data: { request_event_id: request.id, requiresAcknowledgement: true },
     async update(patch, options) { assert.equal(options.transaction, tx); Object.assign(this, patch); } };
   const tx = { LOCK: { UPDATE: 'UPDATE', SHARE: 'SHARE' }, afterCommit: fn => emitted.push(fn) };
@@ -26,19 +26,21 @@ function fixture() {
   } },
   Clinica: { findByPk: async (id, options) => { locks.push(['clinic', id, options.transaction]); return { id_clinica: id }; } },
   Paciente: { findByPk: async (_id, options) => { if (options?.lock) locks.push(['patient', patient.id_paciente, options.transaction]); return patient; } },
-  PacienteClinica: { findOne: async () => null },
+  PacienteClinica: { findOne: async () => null, findAll: async () => [] },
   PatientConsentDocument: { findByPk: async () => ({ paciente_id: 101, clinica_id: 72,
     status: 'signed', snapshot_hash: request.metadata.snapshot_hash }) },
   PatientOperationalEvent: { findOne: async () => request, findAll: async () => transitions,
     create: async (values, options) => {
       assert.equal(options.transaction, tx);
       if (f.eventFailure) throw Error('TESTONLY_AUDIT_FAILURE');
+      if (values.event_type==='patient.whatsapp_phone_changed') {contactEvents.push(values);return values;}
       const row = { ...values, id: request.id + transitions.length + 1 };
       transitions.push(row); return row;
     } },
   Notification: { findAll: async () => [notification] },
   FlowExecutionV2: { findOne: async () => null } };
   const service = loadSource('patientMobileVerification.service', {
+    './patientWhatsappContactChange.service': {record: values=>require('../../services/patientWhatsappContactChange.service').record({...values,emit:()=>{}})},
     'node:crypto': require('node:crypto'), './patientPrivacyProfile.service': { groupClinicIds: async () => [73, 72] },
     './notificationsRealtime.service': { emitNotificationUpdated: value => writes.push(value) },
   }, {});
@@ -46,7 +48,7 @@ function fixture() {
   const change = (phone, extra = {}) => service.withPatientMobileChange({ db, patientId: patient.id_paciente,
     clinicId: 72, previousPhone: patient.telefono_movil, nextPhone: phone, actorId: 16, ...extra },
   async transaction => { writes.push({ phone, transaction }); patient.telefono_movil = phone; return 'saved'; });
-  return Object.assign(f, { patient, request, transitions, locks, writes, emitted, notification, tx, db, service, runtime, change });
+  return Object.assign(f, { patient, request, transitions, contactEvents, locks, writes, emitted, notification, tx, db, service, runtime, change });
 }
 
 test('generic mobile change retires previous verification atomically without requesting another message', async () => {
@@ -60,7 +62,8 @@ test('generic mobile change retires previous verification atomically without req
   assert.equal(f.notification.isRead, true); assert.equal(f.notification.data.resolution, 'superseded');
   assert.deepEqual(f.locks.map(([type, id]) => [type, id]), [['clinic', 72], ['clinic', 73], ['patient', 101]]);
   assert(f.locks.every(([, , tx]) => tx === f.tx)); assert.equal(f.writes[0].transaction, f.tx);
-  assert.equal(f.emitted.length, 1, 'realtime notification update is deferred until commit');
+  assert.equal(f.contactEvents.length,1);assert.equal(f.contactEvents[0].metadata.current_phone,'+34600000002');
+  assert.equal(f.emitted.length, 2, 'verification and contact refresh are deferred until commit');
 });
 
 test('A to B to A through the generic editor cannot revive the old request', async () => {

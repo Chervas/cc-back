@@ -219,6 +219,8 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         fail('whatsapp_authorized_message_ineligible');
       }
       assertMessageEligibility(message, bindingCutoff(config, selectedBinding));
+      if (message.metadata?.kind === 'manual_appointment_notice') await require('../services/appointmentManualNotice.service')
+        .current().assertReady({ message, conversation, payload:intent.message });
       await require('./whatsappAppointmentEligibility').assertAutomatedMessageEligibility({ message, conversation,
         payload: intent.message, loadExecution, loadAppointment, patientHeld,
         loadNativeReplyAcknowledgement,

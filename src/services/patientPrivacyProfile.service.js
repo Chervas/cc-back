@@ -126,6 +126,8 @@ async function apply({ db, patientId, clinicId, actorId, authorizedPrimaryClinic
     allowExistingPatientChat: payload.acknowledge_contact_changes === true });
   if (patch.fecha_nacimiento) patch.edad = null;
   await patientRow.update(patch, { transaction });
+  if (patch.telefono_movil) await require('./patientWhatsappContactChange.service').record({ db, patientId, clinicId,
+    previousPhone: patient.telefono_movil, nextPhone: patch.telefono_movil, actorId, transaction });
   await db.PatientOperationalEvent.create({ patient_id: patientId, clinic_id: clinicId, actor_user_id: actorId,
     event_type: 'patient.privacy_profile_applied', source: 'privacy_profile_review', channel: 'internal', metadata: {
       document_id: current.document.id, snapshot_hash: current.document.snapshot_hash,

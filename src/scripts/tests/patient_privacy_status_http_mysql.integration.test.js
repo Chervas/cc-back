@@ -33,7 +33,7 @@ test('native privacy HTTP endpoints enforce JWT/MFA/ACL and exact patient/clinic
     assert.equal(challenge.status, 202);
     const row = await db.AuthEmailChallenge.findOne({ where: { challenge_hash: C.challengeHash(challenge.body.challengeToken) } });
     const verified = await request('POST', '/api/auth/email-code/verify', { challengeToken: challenge.body.challengeToken,
-      code: f.codeFor(row.challenge_id) }); assert.equal(verified.status, 200); return verified.body.token;
+      code: f.codeFor(row.challenge_id) }); assert.equal(verified.status, 200, JSON.stringify(verified.body)); return verified.body.token;
   };
   const patientId = 92501, importedId = 92502, foreignId = 92503, appointmentId = 78501;
   const calendarTreatment = 93501;

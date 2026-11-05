@@ -32,6 +32,7 @@ function createService({models,emitUpdated=()=>{},emitState=()=>{},now=()=>new D
       s.appointment_id state_appointment_id,s.manual_action_required,s.needs_response,s.possible_urgency,
       (SELECT MAX(h.id) FROM Messages h WHERE h.conversation_id=c.id AND h.id>source.id AND h.sent_at>=source.sent_at
         AND h.direction='outbound' AND h.message_type<>'event' AND h.status IN ('sent','delivered','read')
+        AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(h.metadata,'$.kind')),'')<>'manual_appointment_notice'
         AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(h.metadata,'$.delivery_unknown')),'false')<>'true'
         AND JSON_EXTRACT(h.metadata,'$.revoke') IS NULL
         AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(h.metadata,'$.coexistence.last_event')),'')<>'revoke'
