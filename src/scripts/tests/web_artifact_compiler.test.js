@@ -64,6 +64,46 @@ test('compila el mismo input de forma determinista y preview siempre es noindex'
   assert.match(stylesheet, /\.cc-section\.cc-bg-brand \.cc-button-primary\{background:var\(--cc-surface\);color:var\(--cc-primary\)\}/);
 });
 
+test('production keeps noindex at site or page level and excludes those pages from the sitemap', () => {
+  for (const level of ['site', 'page']) {
+    const input = fixture({ environment: 'production', intakeEndpoint: '/_clinicaclick/intake' });
+    input.document.seo.indexing = level === 'site' ? 'noindex' : 'index';
+    input.document.pages[0].seo.index = level !== 'page';
+    input.document.pages[0].seo.follow = true;
+    const output = compileWebArtifact(input);
+    assert.match(output.files['index.html'], /name="robots" content="noindex,follow"/);
+    assert.doesNotMatch(output.files['sitemap.xml'], /<loc>/);
+  }
+});
+
+test('editorial layout and exact image frames are opt-in and preserve semantic content', () => {
+  const input = fixture();
+  const standard = compileWebArtifact(input);
+  assert.doesNotMatch(standard.files['index.html'], /body class="cc-editorial"/);
+  input.document.design_system.tokens.layout_preset = 'editorial';
+  const section = input.document.nodes[input.document.pages[0].root_node_ids[0]];
+  section.children.push('editorial_logo');
+  input.document.nodes.editorial_logo = {
+    id: 'editorial_logo', type: 'image', version: 1, children: [],
+    props: { asset_id: 'editorial_logo_media', alt: 'Marca de la clínica', decorative: false,
+      loading: 'eager', fit: 'contain', aspect_ratio: 'custom', frame_width: 52, frame_height: 53, display_width: 52 },
+    style_tokens: { content_width: 'full' },
+  };
+  input.contentSnapshot.media_assets.editorial_logo_media = { variants: [
+    { key: 'original', url: 'https://media.clinicaclick.com/web/logo.webp', width: 104, height: 106 },
+  ] };
+  const output = compileWebArtifact(input);
+  const css = Object.entries(output.files).find(([name]) => name.startsWith('assets/styles.'))[1];
+  assert.match(output.files['index.html'], /body class="cc-editorial"/);
+  assert.match(output.files['index.html'], /alt="Marca de la clínica"/);
+  assert.match(css, /\.cc-image-frame-52-53 \.cc-image-frame\{aspect-ratio:52\/53\}/);
+  assert.match(css, /\.cc-node\.cc-image-width-52:not\(\.cc-section\)\{width:52px;max-width:100%\}/);
+  assert.match(css, /\.cc-editorial \.cc-node\.cc-form\{width:min\(100%,640px\)/);
+  assert.equal(compileWebArtifact(input).artifact_hash, output.artifact_hash);
+  delete input.document.nodes.editorial_logo.props.frame_height;
+  assert.throws(() => require('../../lib/webDocument').assertValidWebDocument(input.document));
+});
+
 test('brand fonts are immutable local WOFF2 assets with licenses and no external font dependency', () => {
   const input = fixture();
   input.document.design_system.tokens.font_heading = 'montserrat';
@@ -210,7 +250,7 @@ test('publica animaciones tipadas como clases seguras generadas por el renderer'
   const css = artifact.files[stylesheetPath];
   const html = artifact.files['index.html'];
 
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.17.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.18.0');
   assert.match(html, /cc-animate-slide_up/);
   assert.match(css, /\.cc-animate-slide_up\{animation:ccSlideUp \.46s cubic-bezier/);
   assert.match(css, /@media\(prefers-reduced-motion:no-preference\)/);
@@ -1059,7 +1099,7 @@ test('renderer actual honra tokens, responsive, fuentes e imagen focal en CSS de
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.17.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.18.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);

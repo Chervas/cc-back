@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const { compiledFonts, fontStack } = require('./webFonts');
+const { editorialPresetCss, imageFrameClasses, imageFrameRules } = require('./webEditorialPreset');
 const {
   assertValidWebDocument,
   canonicalSerialize,
@@ -14,7 +15,7 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('./webArtifactBudget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.17.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.18.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const SAFE_YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{6,64}$/;
 const SAFE_VIMEO_VIDEO_ID = /^[0-9]{6,12}$/;
@@ -657,7 +658,7 @@ function imageClassList(node) {
   const aspect = String(node.props.aspect_ratio || 'auto').replace(':', '-');
   const focalX = Number.isInteger(node.props.focal_x) ? node.props.focal_x : 50;
   const focalY = Number.isInteger(node.props.focal_y) ? node.props.focal_y : 50;
-  return `cc-fit-${fit} cc-aspect-${aspect} cc-focal-${focalX}-${focalY}`;
+  return [`cc-fit-${fit} cc-aspect-${aspect} cc-focal-${focalX}-${focalY}`, imageFrameClasses(node.props)].filter(Boolean).join(' ');
 }
 
 function videoEmbedUrl(node) {
@@ -1265,7 +1266,7 @@ function renderNode(nodeId, document, snapshot, context, ancestors = new Set(), 
     return `<h${level} id="cc-${escapeHtml(node.id)}" class="cc-node cc-heading cc-size-${escapeHtml(node.props.size || 'lg')} cc-text-${escapeHtml(node.props.align || 'left')} cc-tone-${escapeHtml(node.props.tone || 'default')} ${styleClassList(node)}">${escapeHtml(node.props.text)}</h${level}>`;
   }
   if (node.type === 'text') {
-    return `<p id="cc-${escapeHtml(node.id)}" class="cc-node cc-text cc-size-${escapeHtml(node.props.size || 'md')} cc-text-${escapeHtml(node.props.align || 'left')} cc-tone-${escapeHtml(node.props.tone || 'default')} ${styleClassList(node)}">${escapeHtml(node.props.text)}</p>`;
+    return `<p id="cc-${escapeHtml(node.id)}" class="cc-node cc-text${node.props.decoration === 'line_through' ? ' cc-decoration-line-through' : ''} cc-size-${escapeHtml(node.props.size || 'md')} cc-text-${escapeHtml(node.props.align || 'left')} cc-tone-${escapeHtml(node.props.tone || 'default')} ${styleClassList(node)}">${escapeHtml(node.props.text)}</p>`;
   }
   if (node.type === 'divider') {
     return `<hr id="cc-${escapeHtml(node.id)}" class="cc-node cc-divider cc-divider-${escapeHtml(node.props.line_style)} cc-divider-tone-${escapeHtml(node.props.tone)} ${styleClassList(node)}">`;
@@ -1410,7 +1411,7 @@ function stylesheet(tokens, document = { nodes: {} }) {
     '.cc-node.cc-bg-transparent{background:transparent}.cc-node.cc-bg-surface{background:var(--cc-surface)}.cc-node.cc-bg-muted{background:#f5f6fa}.cc-node.cc-bg-brand{background:var(--cc-primary)}.cc-node.cc-bg-accent{background:var(--cc-accent)}.cc-node.cc-fg-default{color:var(--cc-text)}.cc-node.cc-fg-muted,.cc-node.cc-tone-muted{color:#5f6b7f}.cc-node.cc-fg-inverse,.cc-node.cc-tone-inverse{color:#fff}.cc-node.cc-fg-brand,.cc-node.cc-tone-brand{color:var(--cc-primary)}.cc-node.cc-fg-accent,.cc-node.cc-tone-accent{color:var(--cc-accent)}.cc-node.cc-tone-default{color:var(--cc-text)}',
     '.cc-node.cc-radius-inherit{border-radius:var(--cc-radius)}.cc-node.cc-radius-none{border-radius:0}.cc-node.cc-radius-sm{border-radius:.25rem}.cc-node.cc-radius-md{border-radius:.5rem}.cc-node.cc-radius-lg{border-radius:.9rem}.cc-node.cc-radius-xl{border-radius:1.35rem}.cc-node.cc-radius-full{border-radius:9999px}.cc-node.cc-shadow-none{box-shadow:none}.cc-node.cc-shadow-sm{box-shadow:0 2px 8px #181d3514}.cc-node.cc-shadow-md{box-shadow:0 8px 24px #181d3521}.cc-node.cc-shadow-lg{box-shadow:0 18px 50px #181d3529}',
     '@media(prefers-reduced-motion:no-preference){.cc-animate-fade_in{animation:ccFadeIn .42s cubic-bezier(.2,0,0,1) both}.cc-animate-slide_up{animation:ccSlideUp .46s cubic-bezier(.2,0,0,1) both}.cc-animate-scale_in{animation:ccScaleIn .38s cubic-bezier(.2,0,0,1) both}}@keyframes ccFadeIn{from{opacity:0}to{opacity:1}}@keyframes ccSlideUp{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}@keyframes ccScaleIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}',
-    '.cc-heading{margin:0;font-family:var(--cc-font-heading);line-height:1.12;letter-spacing:-.025em}.cc-heading.cc-size-sm{font-size:1.25rem}.cc-heading.cc-size-md{font-size:1.5rem}.cc-heading.cc-size-lg{font-size:1.875rem}.cc-heading.cc-size-xl{font-size:clamp(1.55rem,3vw,2.35rem)}.cc-heading.cc-size-2xl{font-size:clamp(1.9rem,4vw,3.2rem)}.cc-heading.cc-size-3xl{font-size:clamp(2.25rem,6vw,4.5rem)}.cc-text{margin:0;max-width:68ch;white-space:pre-wrap}.cc-text.cc-size-sm{font-size:.875rem}.cc-text.cc-size-md{font-size:1rem}.cc-text.cc-size-lg{font-size:1.125rem}.cc-text-left{text-align:left}.cc-text-center{text-align:center}.cc-text-right{text-align:right}',
+    '.cc-heading{margin:0;font-family:var(--cc-font-heading);line-height:1.12;letter-spacing:-.025em}.cc-heading.cc-size-sm{font-size:1.25rem}.cc-heading.cc-size-md{font-size:1.5rem}.cc-heading.cc-size-lg{font-size:1.875rem}.cc-heading.cc-size-xl{font-size:clamp(1.55rem,3vw,2.35rem)}.cc-heading.cc-size-2xl{font-size:clamp(1.9rem,4vw,3.2rem)}.cc-heading.cc-size-3xl{font-size:clamp(2.25rem,6vw,4.5rem)}.cc-decoration-line-through{text-decoration:line-through}.cc-bg-contrast{background:#262623}.cc-text{margin:0;max-width:68ch;white-space:pre-wrap}.cc-text.cc-size-sm{font-size:.875rem}.cc-text.cc-size-md{font-size:1rem}.cc-text.cc-size-lg{font-size:1.125rem}.cc-text-left{text-align:left}.cc-text-center{text-align:center}.cc-text-right{text-align:right}',
     '.cc-divider{width:100%;height:0;margin:0;border:0;border-top-width:1px;border-top-style:solid}.cc-divider-solid{border-top-style:solid}.cc-divider-dashed{border-top-style:dashed}.cc-divider-dotted{border-top-style:dotted}.cc-divider-tone-muted{border-top-color:#dfe3ec}.cc-divider-tone-brand{border-top-color:var(--cc-primary)}.cc-divider-tone-accent{border-top-color:var(--cc-accent)}.cc-spacer{display:block;width:100%;flex:none}.cc-spacer-xs{height:.25rem}.cc-spacer-sm{height:var(--cc-sm)}.cc-spacer-md{height:var(--cc-md)}.cc-spacer-lg{height:var(--cc-lg)}.cc-spacer-xl{height:var(--cc-xl)}.cc-spacer-2xl{height:var(--cc-2xl)}',
     '.cc-button{display:inline-flex;width:fit-content;align-items:center;justify-content:center;min-height:44px;padding:.75rem 1.15rem;border-radius:var(--cc-radius);font-weight:700;text-decoration:none;border:1px solid transparent;cursor:pointer}.cc-button-primary{background:var(--cc-primary);color:#fff}.cc-section.cc-bg-brand .cc-button-primary{background:var(--cc-surface);color:var(--cc-primary)}.cc-button-secondary{background:var(--cc-secondary);color:#fff}.cc-button-outline{border-color:currentColor;color:var(--cc-primary);background:transparent}.cc-button-link{padding-inline:0;color:var(--cc-primary)}',
     '.cc-form{display:grid;gap:var(--cc-md);padding:var(--cc-xl);border:1px solid #dfe3ec;border-radius:var(--cc-radius);background:#fff}.cc-field{display:grid;gap:.35rem}.cc-field input:not([type=checkbox]),.cc-field textarea,.cc-field select{width:100%;min-height:44px;border:1px solid #aab1c2;border-radius:.5rem;padding:.7rem;font:inherit}.cc-checkbox{grid-template-columns:auto 1fr;align-items:start}.cc-honeypot{position:absolute!important;left:-10000px!important;width:1px!important;height:1px!important;overflow:hidden!important}.cc-form-status{display:none;padding:.75rem;border-radius:.5rem}.cc-form-success{background:#e9f8f1;color:#145c3d}.cc-form-error{background:#fff1f1;color:#8b1f1f}.cc-form-status:target{display:block}',
@@ -1635,7 +1636,7 @@ function renderPage({ page, document, snapshot, context, project, baseUrl, clini
   const socialImageTags = safeSocialUrl
     ? `<meta property="og:image" content="${escapeHtml(safeSocialUrl)}"><meta property="og:image:alt" content="${escapeHtml(socialImageAlt)}"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="${escapeHtml(safeSocialUrl)}"><meta name="twitter:image:alt" content="${escapeHtml(socialImageAlt)}">`
     : '<meta name="twitter:card" content="summary">';
-  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/svg+xml" href="${escapeHtml(favicon)}"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:site_name" content="${escapeHtml(project.name)}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">${socialImageTags}<meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${escapeHtml(description)}"><link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id, artifactMarker })}</head><body data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-page-template="${escapeHtml(templateType)}" data-cc-web-artifact-input-hash="${escapeHtml(artifactMarker)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
+  const html = `<!doctype html><html lang="${escapeHtml(project.locale)}"><head><meta charset="utf-8"><meta name="clinicaclick-artifact-input" content="${escapeHtml(artifactMarker)}"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(pageCsp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/svg+xml" href="${escapeHtml(favicon)}"><title>${escapeHtml(title)}</title><meta name="description" content="${escapeHtml(description)}"><meta name="robots" content="${robots}"><link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:type" content="website"><meta property="og:site_name" content="${escapeHtml(project.name)}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">${socialImageTags}<meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${escapeHtml(description)}"><link rel="stylesheet" href="${escapeHtml(`${baseUrl}/${cssFile}`)}"><script type="application/ld+json">${jsonLdText}</script>${measurementLoaderTag(context.measurement, { projectId: project.id, revisionId: context.revisionId, pageId: page.id, artifactMarker })}</head><body${document.design_system.tokens.layout_preset === 'editorial' ? ' class="cc-editorial"' : ''} data-cc-web-project-id="${escapeHtml(project.id)}" data-cc-web-revision-id="${escapeHtml(context.revisionId)}" data-cc-web-page-template="${escapeHtml(templateType)}" data-cc-web-artifact-input-hash="${escapeHtml(artifactMarker)}" data-cc-web-base-path="${escapeHtml(publicationBasePath)}">${header}${body}${footer}</body></html>`;
   return {
     path: page.slug === 'inicio' ? '/' : `/${page.slug}/`,
     html,
@@ -1694,7 +1695,7 @@ function compileWebArtifact(input = {}) {
     environment
   );
   const fonts = compiledFonts(document.design_system.tokens);
-  const css = [fonts.css, stylesheet(document.design_system.tokens, document)].filter(Boolean).join('\n');
+  const css = [fonts.css, stylesheet(document.design_system.tokens, document), editorialPresetCss(document.design_system.tokens), imageFrameRules(document)].filter(Boolean).join('\n');
   const cssHash = sha256(css);
   const cssFile = `assets/styles.${cssHash.slice(0, 16)}.css`;
   const pageById = new Map(document.pages.map((page) => [page.id, page]));

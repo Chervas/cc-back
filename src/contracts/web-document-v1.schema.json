@@ -241,6 +241,9 @@
             },
             "spacing_density": {
               "enum": ["compact", "comfortable", "spacious"]
+            },
+            "layout_preset": {
+              "enum": ["standard", "editorial"]
             }
           }
         }
@@ -342,7 +345,7 @@
       "additionalProperties": false,
       "properties": {
         "background": {
-          "enum": ["transparent", "surface", "muted", "brand", "accent"]
+          "enum": ["transparent", "surface", "muted", "brand", "accent", "contrast"]
         },
         "foreground": {
           "enum": ["default", "muted", "inverse", "brand", "accent"]
@@ -595,6 +598,7 @@
             "size": {
               "enum": ["sm", "md", "lg"]
             },
+            "decoration": { "enum": ["none", "line_through"] },
             "align": {
               "enum": ["left", "center", "right"]
             },
@@ -791,8 +795,11 @@
             "loading": { "enum": ["lazy", "eager"] },
             "fit": { "enum": ["cover", "contain"] },
             "aspect_ratio": {
-              "enum": ["auto", "1:1", "4:3", "3:2", "16:9", "21:9"]
+              "enum": ["auto", "1:1", "4:3", "3:2", "16:9", "21:9", "custom"]
             },
+            "frame_width": { "type": "integer", "minimum": 1, "maximum": 4096 },
+            "frame_height": { "type": "integer", "minimum": 1, "maximum": 4096 },
+            "display_width": { "type": "integer", "minimum": 0, "maximum": 1600 },
             "focal_x": {
               "type": "integer",
               "minimum": 0,

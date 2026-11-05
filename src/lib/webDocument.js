@@ -553,6 +553,10 @@ function validateGraph(document) {
     }
 
     if (node.type === 'image') {
+      if (node.props.aspect_ratio === 'custom'
+        && ![node.props.frame_width, node.props.frame_height].every(value => Number.isInteger(value) && value >= 1 && value <= 4096)) {
+        errors.push(validationError('imageFrame', `${nodePath}/props`, 'una proporción personalizada necesita ancho y alto válidos'));
+      }
       if (node.props.decorative && node.props.alt !== '') {
         errors.push(validationError('imageAlt', `${nodePath}/props/alt`, 'una imagen decorativa debe tener alt vacío'));
       }
