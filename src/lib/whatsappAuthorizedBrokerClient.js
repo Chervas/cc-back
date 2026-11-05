@@ -122,7 +122,8 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
     attributes: ['id','clinicaId','grupoClinicaId','assignmentScope','assetType','phoneNumberId','wabaId','isActive',
       'whatsappAuthorizationId', [models().sequelize.literal("JSON_EXTRACT(`additionalData`, '$.whatsappManualDisconnect')"), 'manualDisconnect']], raw: true }),
   loadClinic = clinicId => models().Clinica.findByPk(clinicId, { attributes: ['id_clinica','grupoClinicaId'], raw: true }),
-  loadMessage = messageId => models().Message.findByPk(messageId, { attributes: ['id','conversation_id','direction','status','createdAt','metadata','content','message_type'], raw: true }),
+  loadMessage = messageId => models().Message.findByPk(messageId, { attributes: ['id','conversation_id','sender_id','automation_delivery_key','direction','status','createdAt','metadata','content','message_type'], raw: true }),
+  authorizeManualNotice = input => require('../services/appointmentManualNotice.service').current().assertReady(input),
   // Never bootstrap models merely for an injected pure client. In the actual
   // application the model index is already loaded by the common sender. A
   // persisted managed binding cannot be bypassed by stripping Message metadata.
@@ -219,8 +220,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         fail('whatsapp_authorized_message_ineligible');
       }
       assertMessageEligibility(message, bindingCutoff(config, selectedBinding));
-      if (message.metadata?.kind === 'manual_appointment_notice') await require('../services/appointmentManualNotice.service')
-        .current().assertReady({ message, conversation, payload:intent.message });
+      if (message.metadata?.kind === 'manual_appointment_notice') await authorizeManualNotice({ message, conversation, payload:intent.message });
       await require('./whatsappAppointmentEligibility').assertAutomatedMessageEligibility({ message, conversation,
         payload: intent.message, loadExecution, loadAppointment, patientHeld,
         loadNativeReplyAcknowledgement,

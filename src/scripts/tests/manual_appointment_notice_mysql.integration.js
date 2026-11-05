@@ -51,6 +51,20 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   assert.deepEqual((await old.reload()).toJSON(),oldSnapshot);assert.deepEqual((await oldMessage.reload()).toJSON(),oldMessageSnapshot);
   assert.equal((await db.CitaPaciente.findByPk(10)).estado,'reprogramada');assert.equal((await db.FlowExecutionV2.findByPk(99)).status,'waiting');assert.equal(await db.FlowExecutionV2.count(),1);
   assert(!message.metadata.execution_id);assert.equal(message.metadata.suppress_flow_event,true);
+  const binding={connectionRef:'wa:qa:72',authorizationId:'a1234567-1234-4234-8234-123456789abc',clinicId:72,assetId:9,phoneId:'201',wabaId:'101',revision:1,sendEnabled:true};
+  const config={version:1,origin:'https://broker.example.invalid:8445',keyId:'staging-whatsapp',audience:'authorized-wa',messageNotBefore:'2026-09-15T00:00:00Z',
+    privateKeyFile:'/etc/clinicaclick-whatsapp-authorized/staging/private.pem',caFile:'/etc/clinicaclick-whatsapp-authorized/staging/ca.pem',bindings:[binding]};
+  let transportCalls=0,finalChecks=0;
+  const broker=require('../../lib/whatsappAuthorizedBrokerClient').createWhatsappAuthorizedBrokerClient({
+    environment:()=>({RUNTIME_ROLE:'api',JOB_RUNTIME_NAMESPACE:'staging',QUEUE_PREFIX:'staging',JOBS_WORKER_ENABLED:'true'}),loadConfiguration:()=>config,
+    loadAsset:async()=>({id:9,assetType:'whatsapp_phone_number',assignmentScope:'clinic',clinicaId:72,grupoClinicaId:null,phoneNumberId:'201',wabaId:'101',isActive:true}),
+    loadClinic:async()=>({id_clinica:72,grupoClinicaId:null}),isBlocked:async()=>false,patientHeld:async()=>false,
+    authorizeManualNotice:async input=>{finalChecks++;assert.equal(input.message.sender_id,7);assert.equal(input.message.automation_delivery_key,message.automation_delivery_key);return service.assertReady(input)},
+    createTransport:()=>({execute:async command=>{transportCalls++;return {requestId:command.requestId,replayed:false,data:{messages:[{id:'wamid.FICTITIOUS_ACCEPTED',message_status:'accepted'}]}}}})});
+  const brokerPayload={messaging_product:'whatsapp',recipient_type:'individual',to:'34600000002',type:'template',template:{name:C.FAMILY,language:{code:'es'},components:[{type:'body',parameters:Object.values(message.metadata.template_params).map(text=>({type:'text',text}))}]}};
+  await broker.send({messageId:String(message.id),clinicId:72,assetId:9,expectedBinding:binding,message:brokerPayload});
+  assert.equal(finalChecks,2);assert.equal(transportCalls,1);
+  report.checks.push('native broker loads the persisted actor and delivery key; both final preflights use the real manual service before one simulated transport');
   report.checks.push('three concurrent requests, one message/job/event; new-number chat, old history and appointment/flow state intact');
   await service.dispatch({message_id:message.id});await service.dispatch({message_id:message.id});
   assert.equal(queued.length,2);assert.equal(queued[0].options.jobId,queued[1].options.jobId);
