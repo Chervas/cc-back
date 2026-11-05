@@ -111,7 +111,7 @@ function configuredTransport(config, { timeoutMs = 30000 } = {}) {
     try {
       key = privateFile(config.privateKeyFile, 8192); ca = privateFile(config.caFile, 65536);
       const client = createIntegrationsBrokerClient({ origin: config.origin, keyId: config.keyId, audience: config.audience,
-        privateKey: key, ca, timeoutMs });
+        privateKey: key, ca, timeoutMs, transportProfile: 'whatsapp-authorized' });
       return await client.execute(command);
     } finally { key?.fill(0); ca?.fill(0); }
   } };
@@ -122,7 +122,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
     attributes: ['id','clinicaId','grupoClinicaId','assignmentScope','assetType','phoneNumberId','wabaId','isActive',
       'whatsappAuthorizationId', [models().sequelize.literal("JSON_EXTRACT(`additionalData`, '$.whatsappManualDisconnect')"), 'manualDisconnect']], raw: true }),
   loadClinic = clinicId => models().Clinica.findByPk(clinicId, { attributes: ['id_clinica','grupoClinicaId'], raw: true }),
-  loadMessage = messageId => models().Message.findByPk(messageId, { attributes: ['id','conversation_id','direction','status','createdAt','metadata'], raw: true }),
+  loadMessage = messageId => models().Message.findByPk(messageId, { attributes: ['id','conversation_id','direction','status','createdAt','metadata','content','message_type'], raw: true }),
   // Never bootstrap models merely for an injected pure client. In the actual
   // application the model index is already loaded by the common sender. A
   // persisted managed binding cannot be bypassed by stripping Message metadata.
@@ -225,6 +225,10 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         authorizeProgramBatch: args => require('../services/patientProgramBookingNotice.service').current().authorizeEligibility(args),
         getReceptionState: execution => loadReceptionState(conversation, config.bindings, execution) });
       const metadata = message.metadata || {};
+      if (intent.message.type === 'image' && (message.message_type !== 'image'
+        || metadata.outbound_attachment?.sha256 !== intent.message.image.sha256
+        || metadata.outbound_attachment?.mime_type !== intent.message.image.mime_type
+        || String(message.content || '') !== String(intent.message.image.caption || ''))) fail('whatsapp_authorized_message_ineligible');
       if (Number.isSafeInteger(Number(metadata.execution_id)) && Number(metadata.execution_id) > 0) {
         const execution = await loadExecution(Number(metadata.execution_id));
         const classifier = require('./appointment-reminder-sequence');
@@ -275,7 +279,10 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       const message=await loadMessage(Number(messageId));
       const conversation=message&&await loadConversation(message.conversation_id), m=message?.metadata;
       const config=read();
-      const candidate=config?.bindings.find(b=>b.clinicId===Number(conversation?.clinic_id)&&b.phoneId===m?.phone_number_id&&b.wabaId===m?.waba_id);
+      const outboundPhoto = require('./quickchat-image').isReceipt(message);
+      const phoneId = outboundPhoto ? m.phoneNumberId : m?.phone_number_id;
+      const wabaId = outboundPhoto ? m.wabaId : m?.waba_id;
+      const candidate=config?.bindings.find(b=>b.clinicId===Number(conversation?.clinic_id)&&b.phoneId===phoneId&&b.wabaId===wabaId);
       if(!candidate||!providerId(m?.media?.id)||conversation?.id!==message.conversation_id)fail('whatsapp_authorized_binding_invalid');
       const captured=await binding(candidate.clinicId,candidate.assetId);
       if(!captured)fail('whatsapp_authorized_binding_invalid');
@@ -286,7 +293,10 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       const latest=await binding(captured.clinicId,captured.assetId);
       if(!latest||!sameBinding(captured,latest)||JSON.stringify(read())!==JSON.stringify(config)||result?.requestId!==requestId)fail('whatsapp_authorized_binding_changed');
       const data=R.project(result.data);const buffer=Buffer.from(data.base64,'base64');
-      if(data.id!==m.media.id||buffer.length!==data.size||createHash('sha256').update(buffer).digest('hex')!==data.sha256)fail('whatsapp_authorized_request_invalid');
+      if(data.id!==m.media.id||buffer.length!==data.size||createHash('sha256').update(buffer).digest('hex')!==data.sha256
+        ||outboundPhoto&&(data.sha256!==m.media.sha256||data.mimeType!==m.media.mime_type)) {
+        buffer.fill(0); fail('whatsapp_authorized_request_invalid');
+      }
       return {buffer,contentType:data.mimeType,mediaInfo:{id:data.id,mime_type:data.mimeType,sha256:data.sha256,file_size:data.size}};
     },
     async annotate(clinicId, assets = []) {
@@ -411,10 +421,12 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         runtime.namespace(environment());
         const latest = await binding(intent.clinicId, intent.assetId);
         if (!latest || !sameBinding(captured, latest) || !exact(result, ['requestId','data','replayed']) || result.requestId !== requestId
-          || typeof result.replayed !== 'boolean' || !exact(result.data, ['messages']) || !Array.isArray(result.data.messages)
+          || typeof result.replayed !== 'boolean' || !exact(result.data, ['messages', ...(intent.message.type === 'image' ? ['media'] : [])]) || !Array.isArray(result.data.messages)
           || result.data.messages.length !== 1 || !exact(result.data.messages[0], ['id', ...(Object.hasOwn(result.data.messages[0] || {}, 'message_status') ? ['message_status'] : [])])) {
           fail('whatsapp_delivery_unknown', true);
         }
+        if (intent.message.type === 'image' && (result.data.media?.sha256 !== intent.message.image.sha256
+          || result.data.media?.mime_type !== intent.message.image.mime_type)) fail('whatsapp_delivery_unknown', true);
         return C.projectResult(result.data);
       } catch { fail('whatsapp_delivery_unknown', true); }
     },

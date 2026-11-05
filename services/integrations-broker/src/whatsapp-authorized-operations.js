@@ -19,9 +19,21 @@ function createWhatsappAuthorizedOperations({ http, secrets, registry, store }) 
         // broker protects credentials and tenant/phone scope, without a second
         // template allowlist, content fingerprint or provider GET before POST.
         if (signal?.aborted) fail('provider_timeout'); assertActive(); registry.assert(binding);
+        let media;
+        if (message.type === 'image') {
+          media = { mime_type: message.image.mime_type, sha256: message.image.sha256 };
+          const uploaded = await http({ action: 'media_upload', id: value.definition.phoneId, token: secret,
+            proof: secrets.proof(secret, binding.connectionRef), json: message.image, signal });
+          if (typeof uploaded?.id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(uploaded.id)) fail('provider_failed');
+          media.id = uploaded.id;
+          const caption = message.image.caption;
+          message.image.base64 = '';
+          message.image = { id: uploaded.id, ...(caption ? { caption } : {}) };
+          if (signal?.aborted) fail('provider_timeout'); assertActive(); registry.assert(binding);
+        }
         const result = await http({ action: 'send', id: value.definition.phoneId, token: secret,
           proof: secrets.proof(secret, binding.connectionRef), json: message, signal });
-        assertActive(); registry.assert(binding); return C.projectResult(result);
+        assertActive(); registry.assert(binding); return C.projectResult({ ...result, ...(media ? { media } : {}) });
       },
       project: C.projectResult,
     }),

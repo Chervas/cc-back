@@ -34,12 +34,16 @@ function definitionComponents(raw) {
   return components;
 }
 function templateDigest(raw) { return createHash('sha256').update(canonical(definitionComponents(raw))).digest('hex'); }
-function validateMessage(message) {
+function validateMessage(message, { provider = false } = {}) {
   requireValue(keys(message, ['messaging_product','to','type', message?.type], ['recipient_type']) && message.messaging_product === 'whatsapp'
     && typeof message.to === 'string' && /^\+?[1-9][0-9]{6,14}$/.test(message.to) && (!Object.hasOwn(message, 'recipient_type') || message.recipient_type === 'individual'));
   if (message.type === 'text') requireValue(keys(message.text, ['body'], ['preview_url']) && text(message.text.body)
     && (!Object.hasOwn(message.text, 'preview_url') || typeof message.text.preview_url === 'boolean'));
-  else if (message.type === 'interactive') {
+  else if (message.type === 'image') {
+    if (provider) requireValue(keys(message.image, ['id'], ['caption']) && E.id(message.image.id)
+      && (message.image.caption === undefined || typeof message.image.caption === 'string' && [...message.image.caption].length <= 1024));
+    else require('./whatsapp-image').validate(message.image);
+  } else if (message.type === 'interactive') {
     const v = message.interactive;
     requireValue(keys(v, ['type','body','action']) && v.type === 'cta_url' && keys(v.body, ['text']) && text(v.body.text, 1024)
       && keys(v.action, ['name','parameters']) && v.action.name === 'cta_url' && keys(v.action.parameters, ['display_text','url'])
@@ -67,7 +71,7 @@ function validateMessage(message) {
       }
     }
   } else fail('invalid_request');
-  requireValue(Buffer.byteLength(JSON.stringify(message)) <= 24576); return message;
+  requireValue(Buffer.byteLength(JSON.stringify(message)) <= (message.type === 'image' && !provider ? require('./whatsapp-image').MAX_REQUEST_BYTES - 16384 : 24576)); return message;
 }
 function validateSend(payload) {
   requireValue(keys(payload, ['authorizationId','phoneId','message'], ['dispatchLane']) && E.uuid(payload.authorizationId) && E.id(payload.phoneId)
@@ -104,6 +108,10 @@ function projectResult(raw) {
   if (raw?.error || raw?.messaging_product && raw.messaging_product !== 'whatsapp' || !Array.isArray(raw?.messages) || raw.messages.length !== 1) fail('provider_failed');
   const m = raw.messages[0];
   if (!/^wamid\.[A-Za-z0-9+/=_-]{2,512}$/.test(m?.id) || m.message_status !== undefined && !['accepted','held_for_quality_assessment'].includes(m.message_status)) fail('provider_failed');
-  return { messages: [{ id: m.id, ...(m.message_status !== undefined ? { message_status: m.message_status } : {}) }] };
+  const media = raw.media;
+  if (media !== undefined) requireValue(keys(media, ['id','mime_type','sha256']) && E.id(media.id)
+    && ['image/jpeg','image/png'].includes(media.mime_type) && /^[a-f0-9]{64}$/.test(media.sha256));
+  return { messages: [{ id: m.id, ...(m.message_status !== undefined ? { message_status: m.message_status } : {}) }],
+    ...(media ? { media: { id: media.id, mime_type: media.mime_type, sha256: media.sha256 } } : {}) };
 }
 module.exports = { PROVIDER, COHORT, SEND, REVOKE, keys, httpsUrl, validateMessage, validateSend, templateDigest, verifyTemplate, projectResult };

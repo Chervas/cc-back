@@ -118,14 +118,14 @@ async function main(filename, { awsFactory = connectAws, http = createWhatsappAu
     store = new BrokerStore(config.stateFile);
     aws = await awsFactory();
     secrets = createWhatsappAuthorizedSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY, registry, http });
-    broker = new Broker({ store, policy: config.policy, secrets, operations: createWhatsappAuthorizedOperations({ http, secrets, registry, store }), timeoutMs: 25000,
+    broker = new Broker({ store, policy: config.policy, secrets, operations: createWhatsappAuthorizedOperations({ http, secrets, registry, store }), timeoutMs: 25000, transportProfile: 'whatsapp-authorized',
       admission: require('./whatsapp-dispatch-capacity').createCapacity({ store, settings: config.dispatchCapacity }),
       policyResolver:activations?{resolve:(request,principal,policy)=>activations.resolve(request,principal,policy,store)}:undefined });
     server = createServer({ execute(...args) {
       if (!accepting) fail('whatsapp_broker_draining');
       const work = broker.execute(...args); pending.add(work);
       void work.then(() => pending.delete(work), () => pending.delete(work)); return work;
-    } }, { cert, key });
+    } }, { cert, key }, { transportProfile: 'whatsapp-authorized' });
     server.maxConnections = 64; server.timeout = 35000;
     tlsReload.install(server, config, { cert, key });
     await new Promise((resolve, reject) => {

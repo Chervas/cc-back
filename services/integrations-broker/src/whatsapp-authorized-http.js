@@ -9,20 +9,28 @@ function createWhatsappAuthorizedHttp({ request = https.request, timeoutMs = 800
   return async input => {
     if (!input || Object.keys(input).some(key => !['action', 'id', 'token', 'proof', 'candidate', 'json', 'signal', 'after'].includes(key))) fail('invalid_request');
     const { action, id, token, proof, candidate, json, signal, after } = input;
-    if (!['send', 'template', 'inspect', 'phones', 'phone_state', 'profile', 'waba_owner','templates_list','templates_create','templates_delete'].includes(action) || typeof id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(id)
+    if (!['send', 'media_upload', 'template', 'inspect', 'phones', 'phone_state', 'profile', 'waba_owner','templates_list','templates_create','templates_delete'].includes(action) || typeof id !== 'string' || !/^[1-9][0-9]{0,29}$/.test(id)
       || !Buffer.isBuffer(token) || !tokenText(token.toString('utf8'))
       || action !== 'inspect' && (typeof proof !== 'string' || !/^[a-f0-9]{64}$/.test(proof) || candidate !== undefined)
       || action === 'inspect' && (proof !== undefined || json !== undefined || !Buffer.isBuffer(candidate) || !tokenText(candidate.toString('utf8'))
         || !new RegExp('^' + id + '\\|[a-f0-9]{32}$').test(token.toString('utf8')))
       || ['template', 'phones', 'phone_state', 'profile', 'waba_owner'].includes(action) && json !== undefined
       || after !== undefined && (!['phones','templates_list'].includes(action) || typeof after !== 'string' || !/^[A-Za-z0-9_+=/-]{1,2048}$/.test(after))
-      || action === 'send' && (json?.messaging_product !== 'whatsapp' || !['text', 'template', 'interactive'].includes(json.type))) fail('invalid_request');
-    if (action === 'send') validateMessage(json);
+      || action === 'send' && (json?.messaging_product !== 'whatsapp' || !['text', 'template', 'interactive', 'image'].includes(json.type))) fail('invalid_request');
+    if (action === 'send') validateMessage(json, { provider: true });
     if (action === 'templates_create' && (!json || Object.keys(json).sort().join(',') !== 'category,components,language,name')) fail('invalid_request');
     if (action === 'templates_delete' && (!json || Object.keys(json).sort().join(',') !== 'hsm_id,name' || !/^[1-9][0-9]{0,29}$/.test(json.hsm_id) || !/^[a-z0-9_]{1,512}$/.test(json.name))) fail('invalid_request');
     if (action === 'templates_list' && json !== undefined) fail('invalid_request');
-    const body = ['send','templates_create'].includes(action) ? Buffer.from(JSON.stringify(json)) : null;
-    if (body?.length > 32768) fail('invalid_request');
+    let body = ['send','templates_create'].includes(action) ? Buffer.from(JSON.stringify(json)) : null;
+    let uploadBuffer;
+    const boundary = 'clinicaclick-' + require('node:crypto').randomUUID();
+    if (action === 'media_upload') {
+      uploadBuffer = require('./whatsapp-image').decode(json);
+      const extension = json.mime_type === 'image/png' ? 'png' : 'jpg';
+      body = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="messaging_product"\r\n\r\nwhatsapp\r\n--${boundary}\r\nContent-Disposition: form-data; name="type"\r\n\r\n${json.mime_type}\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="image.${extension}"\r\nContent-Type: ${json.mime_type}\r\n\r\n`), uploadBuffer, Buffer.from(`\r\n--${boundary}--\r\n`)]);
+      uploadBuffer.fill(0);
+    }
+    if (body?.length > (action === 'media_upload' ? require('./whatsapp-image').MAX_BYTES + 2048 : 32768)) fail('invalid_request');
     if (signal?.aborted) fail('provider_timeout');
     // Meta's documented debug_token protocol places input_token in the query
     // sent over TLS to Meta. This internal URL must never be logged or returned
@@ -37,14 +45,14 @@ function createWhatsappAuthorizedHttp({ request = https.request, timeoutMs = 800
     if (action === 'waba_owner') query.set('fields', 'id,owner_business_info');
     return new Promise((resolve, reject) => {
       let req; let timer; let settled = false;
-      const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); error ? reject(error) : resolve(value); };
+      const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); if (action === 'media_upload') body?.fill(0); error ? reject(error) : resolve(value); };
       const abort = () => { finish(new BrokerError('provider_timeout')); req?.destroy(); };
       timer = setTimeout(abort, timeoutMs); timer.unref?.();
       try {
         req = request({ protocol: 'https:', hostname: 'graph.facebook.com', port: 443,
-          method: ['send','templates_create'].includes(action) ? 'POST' : action === 'templates_delete' ? 'DELETE' : 'GET', path: `/${GRAPH_VERSION}/${action === 'inspect' ? 'debug_token' : id}${action === 'send' ? '/messages' : action === 'phones' ? '/phone_numbers' : action.startsWith('templates_') ? '/message_templates' : ''}?${query}`,
+          method: ['send','media_upload','templates_create'].includes(action) ? 'POST' : action === 'templates_delete' ? 'DELETE' : 'GET', path: `/${GRAPH_VERSION}/${action === 'inspect' ? 'debug_token' : id}${action === 'send' ? '/messages' : action === 'media_upload' ? '/media' : action === 'phones' ? '/phone_numbers' : action.startsWith('templates_') ? '/message_templates' : ''}?${query}`,
           agent: false, rejectUnauthorized: true, minVersion: 'TLSv1.2', headers: { authorization: 'Bearer ' + token.toString('utf8'),
-            accept: 'application/json', 'accept-encoding': 'identity', ...(body ? { 'content-type': 'application/json', 'content-length': body.length } : {}) } }, res => {
+            accept: 'application/json', 'accept-encoding': 'identity', ...(body ? { 'content-type': action === 'media_upload' ? `multipart/form-data; boundary=${boundary}` : 'application/json', 'content-length': body.length } : {}) } }, res => {
           const contentType = String(res.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
           if (contentType !== 'application/json' || !['', 'identity'].includes(String(res.headers['content-encoding'] || '').toLowerCase())
             || res.statusCode >= 300 && res.statusCode < 400) { finish(new BrokerError('provider_failed')); res.destroy(); req?.destroy(); return; }

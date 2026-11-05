@@ -42,6 +42,7 @@ async function fixture(t, { enabled = true, ongoing = false, omitEventsGrant = f
     state.calls.push({ action: request.action, id: request.id, ...(request.json ? { json: structuredClone(request.json) } : {}) });
     await state.before?.(request); let result;
     if (request.action === 'send') result = structuredClone(state.response);
+    else if (request.action === 'media_upload') result = { id: '501' };
     else if (request.action === 'template') result = structuredClone(state.remoteTemplate);
     else if (request.action === 'profile') result = { id: '401', status: 'CONNECTED', code_verification_status: 'VERIFIED',
       quality_rating: 'GREEN', is_on_biz_app: false, platform_type: 'CLOUD_API',
@@ -57,7 +58,7 @@ async function fixture(t, { enabled = true, ongoing = false, omitEventsGrant = f
       { principalId: 'control:whatsapp', tenantRef: 'clinic:'+id, connectionRef: binding.connectionRef, assetRef: 'wa-phone:401', operations: [C.REVOKE] }]) };
   const filename = path.join(f.dir, 'authorized.sqlite'); const stores=[];
   const make = () => { const store = new BrokerStore(filename); stores.push(store); return { store, broker: new Broker({ store, policy, secrets,
-    operations: createWhatsappAuthorizedOperations({ http, secrets, registry, store }), now: f.now }) }; };
+    operations: createWhatsappAuthorizedOperations({ http, secrets, registry, store }), now: f.now, transportProfile: 'whatsapp-authorized' }) }; };
   let current = make();
   const request = (message = textMessage(), overrides = {}) => ({ requestId: randomUUID(), tenantRef: 'clinic:71', connectionRef: binding.connectionRef,
     assetRef: 'wa-phone:401', operation: C.SEND, payload: { authorizationId: flow.flowId, phoneId: '401', message }, ...overrides });

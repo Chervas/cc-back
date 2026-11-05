@@ -25,6 +25,7 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
   const email = transportProfile === 'email';
   const publicMedia = transportProfile === 'public-media';
   const onboarding = transportProfile === 'whatsapp-onboarding';
+  const whatsapp = transportProfile === 'whatsapp-authorized';
   const maxTimeout = ai ? aiLimits.MAX_TIMEOUT_MS : onboarding ? activationLimits.CLIENT_TIMEOUT_MS
     : publicMedia ? publicMediaLimits.MAX_TIMEOUT_MS : 30000;
   let base; let key;
@@ -33,12 +34,13 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
     if (base.protocol !== 'https:' || base.username || base.password || base.pathname !== '/' || base.search || base.hash
       || key.asymmetricKeyType !== 'ed25519' || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(keyId)
       || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(audience) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > maxTimeout
-      || !['default', 'ai', 'email', 'public-media', 'whatsapp-onboarding'].includes(transportProfile)) throw Error();
+      || !['default', 'ai', 'email', 'public-media', 'whatsapp-onboarding', 'whatsapp-authorized'].includes(transportProfile)) throw Error();
   } catch { throw error('broker_configuration_invalid'); }
   const executeOriginal = (command, options = {}) => {
       const operationLimit = onboarding && command.operation !== activationLimits.ACTIVATE ? 30000 : maxTimeout;
       const budget = options.timeoutMs === undefined ? Math.min(timeoutMs, operationLimit) : options.timeoutMs;
       if (!Number.isInteger(budget) || budget < 1 || budget > operationLimit
+        || whatsapp && !String(command.operation).startsWith('meta.whatsapp.authorized.')
         || onboarding && !/^meta\.whatsapp\.onboarding\.(?:prepare|begin|finish|status|abort|profile|activate|activation-status)\.v1$/.test(command.operation)
         || ai && !aiLimits.isAiOperation(command.operation)
         || email && !emailLimits.isEmailOperation(command.operation)
@@ -46,7 +48,8 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
       const requestId = command.requestId || randomUUID();
       const body = Buffer.from(JSON.stringify({ ...command, requestId, version: 1, audience, issuedAt: Date.now(), nonce: randomUUID() }));
       if (body.length > (ai ? aiLimits.MAX_REQUEST_BYTES : email ? emailLimits.MAX_REQUEST_BYTES
-        : publicMedia ? publicMediaLimits.MAX_REQUEST_BYTES : 32768)) return Promise.reject(error('invalid_request'));
+        : publicMedia ? publicMediaLimits.MAX_REQUEST_BYTES
+          : whatsapp ? require('../../services/integrations-broker/src/whatsapp-image').MAX_REQUEST_BYTES : 32768)) return Promise.reject(error('invalid_request'));
       const message = Buffer.from(`clinicaclick-broker-v1\nPOST\n/v1/execute\n${createHash('sha256').update(body).digest('hex')}`);
       return new Promise((resolve, reject) => {
         let settled = false; let timer; let connected = false;

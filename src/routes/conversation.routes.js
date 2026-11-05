@@ -16,6 +16,7 @@ router.post('/conversations/messages/:messageId/send-now', conversationControlle
 router.post('/conversations/messages/:messageId/retry-template', conversationController.retryFailedTemplate);
 router.get('/conversations/:id/messages', conversationController.getMessages);
 router.post('/conversations/:id/messages', conversationController.postMessage);
+router.post('/conversations/:id/images', conversationController.postImage);
 router.patch('/conversations/:id/read', conversationController.markAsRead);
 router.patch('/conversations/:id/automation-attention/resolve', conversationController.resolveAutomationAttention);
 router.post('/conversations/:id/routing-reviews/:reviewId/resolve', conversationController.resolveRoutingReview);

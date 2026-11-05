@@ -87,6 +87,20 @@ test('Typed interactive CTA remains supported with fixed sender',async t=>{
   const a=await fixture(t);const message={messaging_product:'whatsapp',to:'34000000123',type:'interactive',interactive:{type:'cta_url',body:{text:'QA'},action:{name:'cta_url',parameters:{display_text:'Abrir',url:'https://clinic.example.invalid/qa'}}}};
   await a.execute(a.request(message));assert.deepEqual(a.sends()[0].json,message);
 });
+test('A signed photo crosses the isolated broker and replay stores only receipt data, never image bytes', async t => {
+  const a = await fixture(t); const { createHash } = require('node:crypto');
+  const bytes = Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), Buffer.alloc(40000, 71)]);
+  const image = { base64: bytes.toString('base64'), mime_type: 'image/png', sha256: createHash('sha256').update(bytes).digest('hex') };
+  const request = a.request({ messaging_product:'whatsapp', to:'34000000123', type:'image', image });
+  const first = await a.execute(request);
+  assert.equal(first.data.media.id, '501');
+  assert.deepEqual(a.state.calls.map(c => c.action), ['media_upload', 'send']);
+  a.restart(); const replay = await a.execute(request);
+  assert.equal(replay.replayed, true); assert.deepEqual(replay.data, first.data);
+  assert.equal(a.sends().length, 1);
+  const dump = a.current.store.db.prepare('SELECT * FROM commands').all();
+  assert(!JSON.stringify(dump).includes(image.base64));
+});
 test('Malformed message, token, endpoint and unsupported operations are rejected by schema',()=>{
   for(const message of [{...textMessage(),access_token:'FICTITIOUS'}, {...textMessage(),type:'reaction'}, {...textMessage(),text:{body:'QA',url:'https://other.invalid/'}},
     {...templateMessage(),template:{...templateMessage().template,components:[{type:'header',parameters:[{type:'image',image:{link:'http://other.invalid/x'}}]}]}}])assert.throws(()=>C.validateMessage(message),{code:'invalid_request'});

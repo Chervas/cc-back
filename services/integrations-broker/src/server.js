@@ -6,9 +6,10 @@ const aiLimits = require('./ai-limits');
 const emailLimits = require('./email-limits');
 const publicMediaLimits = require('./public-media-limits');
 function handler(broker, { transportProfile = 'default' } = {}) {
-  if (!['default', 'ai', 'email', 'public-media'].includes(transportProfile)) throw Error('Invalid transport profile');
+  if (!['default', 'ai', 'email', 'public-media', 'whatsapp-authorized'].includes(transportProfile)) throw Error('Invalid transport profile');
   const limits = transportProfile === 'ai' ? aiLimits : transportProfile === 'email' ? emailLimits
-    : transportProfile === 'public-media' ? publicMediaLimits : null;
+    : transportProfile === 'public-media' ? publicMediaLimits
+      : transportProfile === 'whatsapp-authorized' ? require('./whatsapp-image') : null;
   const maxRequestBytes = limits ? limits.MAX_REQUEST_BYTES : 32768;
   let activeRequests = 0, pendingBytes = 0;
   return async (req, res) => {

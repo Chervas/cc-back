@@ -28,6 +28,25 @@ function fixture(overrides = {}) {
     ...overrides });
   return { state, client, calls, counters };
 }
+test('sent photo reads use its stored clinic/phone receipt and verify the original bytes without a legacy token', async () => {
+  const { createHash } = require('node:crypto');
+  const bytes = Buffer.from('FICTITIOUS_IMAGE_BYTES'), sha256 = createHash('sha256').update(bytes).digest('hex');
+  const row = { id: 123, conversation_id: 71, direction: 'outbound', message_type: 'image', metadata: {
+    kind: 'quickchat_outbound_image', transport_origin: 'clinicaclick', phoneNumberId: '401', wabaId: '501',
+    outbound_attachment: { sha256, mime_type: 'image/png' }, media: { id: '601', sha256, mime_type: 'image/png' },
+  } };
+  let calls = 0;
+  const f = fixture({ loadMessage: async () => structuredClone(row), createTransport: () => ({ execute: async command => {
+    calls++; assert.equal(command.operation, 'meta.whatsapp.authorized.media.read.v1');
+    assert.equal(command.tenantRef, 'clinic:123'); assert.equal(command.payload.phoneId, '401');
+    return { requestId: command.requestId, data: { id: '601', mimeType: 'image/png', sha256, size: bytes.length, base64: bytes.toString('base64') } };
+  } }) });
+  assert.deepEqual((await f.client.media(123)).buffer, bytes); assert.equal(calls, 1);
+  row.metadata.phoneNumberId = '402';
+  await assert.rejects(f.client.media(123), { code: 'whatsapp_authorized_binding_invalid' }); assert.equal(calls, 1);
+  row.metadata.phoneNumberId = '401'; row.metadata.media.sha256 = 'a'.repeat(64); row.metadata.outbound_attachment.sha256 = 'a'.repeat(64);
+  await assert.rejects(f.client.media(123), { code: 'whatsapp_authorized_request_invalid' });
+});
 test('final broker revalidates question-scoped identity reviews and blocks a new event before transport', async () => {
   const H = require('../../lib/whatsappInboxHealth'), now = Date.now(), start = new Date(now + 10800000).toISOString();
   for (const lateEvent of [false, true]) {

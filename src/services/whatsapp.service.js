@@ -274,6 +274,7 @@ class WhatsAppService {
         templateComponents,
         interactiveCtaUrl,
         interactiveCtaText,
+        image,
         clinicConfig = {},
         healthContext = {},
     }) {
@@ -290,6 +291,11 @@ class WhatsAppService {
             useTemplate !== undefined ? useTemplate : this.defaultUseTemplate;
 
         try {
+            if (image) {
+                if (!clinicConfig.authorizedBroker || shouldUseTemplate) throw Object.assign(new Error('whatsapp_image_transport_unavailable'), { code: 'whatsapp_image_transport_unavailable' });
+                return await this.dispatchMessage({ messaging_product: 'whatsapp', recipient_type: 'individual', to,
+                    type: 'image', image: { ...image, ...(body ? { caption: body } : {}) } }, clinicConfig, healthContext);
+            }
             if (shouldUseTemplate) {
                 return await this.sendTemplateMessage({
                     to,
@@ -712,7 +718,11 @@ class WhatsAppService {
                 return await whatsappAuthorizedBroker.send({ messageId, clinicId: Number(clinicConfig.clinicId || clinicConfig.clinicaId),
                     assetId: Number(clinicConfig.originId), expectedBinding: binding, message: payload }, healthContext.visitDispatchAuthorization);
             } catch (error) {
-                if (require('../lib/whatsapp-dispatch-wait').deferred(error) && !healthContext.visitDispatchAuthorization) {
+                if (payload.type === 'image') throw Object.assign(new Error(error.code || 'whatsapp_delivery_unknown'), {
+                    code: error.code || 'whatsapp_delivery_unknown', retryable: false,
+                    ...(error.delivery_unknown ? { delivery_unknown: true } : {}),
+                });
+                if (payload.type !== 'image' && require('../lib/whatsapp-dispatch-wait').deferred(error) && !healthContext.visitDispatchAuthorization) {
                     await require('./whatsappDispatchWait.service').defer(error);
                 }
                 throw error;

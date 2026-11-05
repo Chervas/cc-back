@@ -1726,7 +1726,8 @@ exports.streamMessageMedia = async (req, res) => {
       return res.status(410).json({ error: unavailableMediaError(kind) });
     }
 
-    const brokerMedia = metadata.passive_recovery === true && !!require('../lib/whatsappAuthorizedBrokerClient').configuration();
+    const brokerMedia = (metadata.passive_recovery === true || require('../lib/quickchat-image').isReceipt(message))
+      && !!require('../lib/whatsappAuthorizedBrokerClient').configuration();
     const clinicConfig = brokerMedia ? null : await whatsappService.getClinicConfig(conversation.clinic_id);
     if (!brokerMedia && !clinicConfig?.accessToken) {
       return res.status(410).json({ error: unavailableMediaError(kind) });
@@ -2101,6 +2102,7 @@ exports.resolveAutomationAttention = async (req, res) => {
 
 exports.postMessage = async (req, res) => {
   const transaction = await db.sequelize.transaction();
+  let attachment = null;
   try {
     const userId = req.userData?.userId;
     const conversationId = req.params.id;
@@ -2151,6 +2153,29 @@ exports.postMessage = async (req, res) => {
       return sendQuickChatCategoryForbidden(res, accessError);
     }
 
+    if (message_type === 'image' || req.body.attachment !== undefined) {
+      if (req.quickChatImageUpload !== true) {
+        await transaction.rollback(); return res.status(400).json({ error: 'quickchat_image_endpoint_required' });
+      }
+      if (conversation.channel !== 'whatsapp' || message_type !== 'image' || useTemplate) {
+        await transaction.rollback(); return res.status(400).json({ error: 'quickchat_image_channel_unsupported' });
+      }
+      attachment = require('../lib/quickchat-image').parse(req.body);
+      // Serialize request identity per conversation. Repeating a request can
+      // only return its existing message, never spend another delivery right.
+      await Conversation.findByPk(conversation.id, { transaction, lock: transaction.LOCK.UPDATE });
+      const existing = await Message.findOne({ where: {
+        conversation_id: conversation.id,
+        [Op.and]: db.sequelize.where(db.sequelize.fn('JSON_UNQUOTE', db.sequelize.fn('JSON_EXTRACT', db.sequelize.col('metadata'), '$.outbound_attachment_request_id')), attachment.requestId),
+      }, transaction });
+      if (existing) {
+        await transaction.rollback();
+        if (Number(existing.sender_id) !== Number(userId) || existing.metadata?.outbound_attachment?.sha256 !== attachment.image.sha256
+          || String(existing.content || '') !== attachment.caption) return res.status(409).json({ error: 'quickchat_image_request_conflict' });
+        return res.status(existing.status === 'failed' ? 409 : 200).json({ message: existing, replayed: true,
+          ...(existing.status === 'failed' ? { error: existing.metadata?.error || 'quickchat_image_previous_attempt_failed' } : {}) });
+      }
+    }
     const isTemplate = useTemplate || message_type === 'template';
 
     const io = getIO();
@@ -2223,6 +2248,9 @@ exports.postMessage = async (req, res) => {
       if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
         await transaction.rollback();
         return res.status(500).json({ error: 'whatsapp_config_missing' });
+      }
+      if (attachment && !clinicConfig.authorizedBroker) {
+        await transaction.rollback(); return res.status(409).json({ error: 'whatsapp_image_transport_unavailable' });
       }
       if (!isTemplate) {
         const serviceWindow = await resolveWhatsappServiceWindow({
@@ -2307,7 +2335,7 @@ exports.postMessage = async (req, res) => {
     }
 
     const baseMetadata = {
-      ...(metadata || {}),
+      ...(attachment ? require('../lib/quickchat-image').metadata(attachment) : (metadata || {})),
       ...(templateParams ? { templateParams } : {}),
       ...(templateComponents ? { templateComponents } : {}),
       ...(resolvedTemplate?.id ? { template_id: Number(resolvedTemplate.id) } : {}),
@@ -2344,8 +2372,8 @@ exports.postMessage = async (req, res) => {
           conversation_id: conversation.id,
           sender_id: userId || null,
           direction: 'outbound',
-          content: message,
-          message_type: message_type === 'template' ? 'template' : 'text',
+          content: attachment ? attachment.caption : message,
+          message_type: attachment ? 'image' : message_type === 'template' ? 'template' : 'text',
           status: 'failed',
           sent_at: new Date(),
           metadata: limitMeta,
@@ -2394,8 +2422,8 @@ exports.postMessage = async (req, res) => {
         conversation_id: conversation.id,
         sender_id: userId || null,
         direction: 'outbound',
-        content: message,
-        message_type: message_type === 'template' ? 'template' : 'text',
+        content: attachment ? attachment.caption : message,
+        message_type: attachment ? 'image' : message_type === 'template' ? 'template' : 'text',
         status: conversation.channel === 'whatsapp' ? 'pending' : 'sent',
         sent_at: new Date(),
         metadata: baseMetadata,
@@ -2430,7 +2458,7 @@ exports.postMessage = async (req, res) => {
       }
     }
 
-    if (conversation.channel === 'whatsapp') {
+    if (conversation.channel === 'whatsapp' && !attachment) {
       // Encolar solo despues del commit para evitar carreras con la transaccion
       outboundJobPayload = {
         messageId: msg.id,
@@ -2455,6 +2483,32 @@ exports.postMessage = async (req, res) => {
     await transaction.commit();
 
     let outboundWhatsappQueued = false;
+    if (attachment) {
+      // Image bytes exist only in this request and the private broker RPC.
+      // Never enqueue them, create an asset, or defer an uncertain send.
+      try {
+        msg.status = 'sending'; await msg.save();
+        const response = await whatsappService.sendMessage({ to, body: attachment.caption, image: attachment.image,
+          useTemplate: false, clinicConfig, healthContext: { source: 'quickchat_image', messageId: msg.id } });
+        const wamid = response?.messages?.[0]?.id;
+        if (!wamid || !response.media?.id) throw Object.assign(new Error('whatsapp_delivery_unknown'), { code: 'whatsapp_delivery_unknown', delivery_unknown: true });
+        msg.status = 'pending';
+        msg.metadata = { ...baseMetadata, wamid, provider_acceptance_at: new Date().toISOString(),
+          provider_acceptance_status: response.messages[0].message_status || 'accepted',
+          media: { ...baseMetadata.media, ...response.media }, transport_origin: 'clinicaclick' };
+        msg.sent_at = null;
+        await msg.save(); outboundWhatsappQueued = true;
+      } catch (error) {
+        msg.status = 'failed';
+        msg.metadata = { ...baseMetadata, error: error.code || 'whatsapp_image_send_failed',
+          ...(error.delivery_unknown || error.code === 'whatsapp_delivery_unknown' ? { delivery_unknown: true } : {}) };
+        await msg.save();
+      }
+      if (io) io.to(`clinic:${conversation.clinic_id}`).emit('message:updated', {
+        id: msg.id, conversation_id: String(conversation.id), status: msg.status, metadata: msg.metadata, message_type: 'image', content: msg.content,
+      });
+      if (msg.status === 'failed') return res.status(502).json({ error: msg.metadata.error, message: msg });
+    }
     if (outboundJobPayload) {
       try {
         await queues.outboundWhatsApp.add('send', outboundJobPayload);
@@ -2544,12 +2598,29 @@ exports.postMessage = async (req, res) => {
 
     return res.json({ message: msg });
   } catch (err) {
-    await transaction.rollback();
+    if (!transaction.finished) await transaction.rollback();
+    if (String(err.code || '').startsWith('quickchat_image_')) return res.status(err.status || 400).json({ error: err.code });
     if (['WHATSAPP_CHANNEL_REFUSED', 'WHATSAPP_RECIPIENT_NUMBER_RESTRICTED'].includes(err.code)) return res.status(409).json({ code: err.code, error: err.code, message: err.message });
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error postMessage', err);
     return res.status(500).json({ error: 'Error enviando mensaje' });
+  } finally {
+    if (attachment) attachment.image.base64 = '';
+    if (req.body?.attachment) req.body.attachment.base64 = '';
+    if (attachment && Buffer.isBuffer(req.rawBody)) req.rawBody.fill(0);
   }
+};
+
+exports.postImage = (req, res) => {
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)
+    || Object.keys(req.body).some(key => !['message','message_type','attachment','attachmentRequestId','patientDirectionTakeConfirmed','metadata'].includes(key))
+    || typeof req.body.message !== 'string'
+    || req.body.patientDirectionTakeConfirmed !== undefined && typeof req.body.patientDirectionTakeConfirmed !== 'boolean') {
+    return res.status(400).json({ error: 'quickchat_image_invalid' });
+  }
+  req.quickChatImageUpload = true;
+  req.body.message_type = 'image';
+  return exports.postMessage(req, res);
 };
 
 exports.sendScheduledMessageNow = async (req, res) => {

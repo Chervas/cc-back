@@ -33,6 +33,19 @@ test('Authorized transport refuses arbitrary Graph payloads, endpoints and token
     {json:{...message(),interactive:{...message().interactive,type:'flow'}}}])await assert.rejects(http({...input(),...change}),{code:'invalid_request'});
   assert.equal(f.calls.length,0);
 });
+test('photo upload uses fixed Graph phone/media with multipart bytes only in memory, followed by an ID-only message', async () => {
+  const { createHash } = require('node:crypto');
+  const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jB1sAAAAASUVORK5CYII=','base64');
+  const image={base64:bytes.toString('base64'),mime_type:'image/png',sha256:createHash('sha256').update(bytes).digest('hex')};
+  const f=fixture({response:{id:'501'}});let captured;
+  const request=(options,callback)=>{const req=f.request(options,callback),end=req.end;req.end=body=>{captured=Buffer.from(body);end(body);};return req;};
+  await createWhatsappAuthorizedHttp({request})({...input(),action:'media_upload',json:image});
+  assert.equal(new URL('https://graph.facebook.com'+f.calls[0].options.path).pathname,'/v24.0/401/media');
+  assert.match(f.calls[0].options.headers['content-type'],/^multipart\/form-data; boundary=clinicaclick-/);
+  assert(captured.includes(bytes));assert(f.calls[0].body.every(v=>v===0));
+  const send=fixture();await createWhatsappAuthorizedHttp({request:send.request})({...input(),json:{messaging_product:'whatsapp',to:'34000000123',type:'image',image:{id:'501',caption:'QA'}}});
+  assert.deepEqual(JSON.parse(send.calls[0].body).image,{id:'501',caption:'QA'});
+});
 
 test('only the exact profile GET 100/33 means this phone is unavailable; other errors keep their semantics', async () => {
   for (const [action,status,subcode,expected] of [
