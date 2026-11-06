@@ -402,6 +402,15 @@ function validateSectionColumnWidths(node, path, errors) {
   }
 }
 
+function validateSectionColumnWidthModes(node, path, errors) {
+  if (node.props.column_width_modes && node.props.structure_role !== 'column') {
+    errors.push(validationError(
+      'columnWidthModes', `${path}/props/column_width_modes`,
+      'solo las columnas pueden guardar modos de ancho por breakpoint'
+    ));
+  }
+}
+
 function validateSectionColumnHeights(node, path, errors) {
   const heights = node.props.column_heights;
   if (!heights) return;
@@ -568,6 +577,7 @@ function validateGraph(document) {
     if (node.type === 'section') {
       validateSectionColumnTracks(node, nodePath, errors);
       validateSectionColumnWidths(node, nodePath, errors);
+      validateSectionColumnWidthModes(node, nodePath, errors);
       validateSectionColumnHeights(node, nodePath, errors);
       validateSectionColumnOrders(node, nodePath, errors);
     }

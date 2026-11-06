@@ -1,7 +1,7 @@
 'use strict';
 
-const AXIS_X = ['start', 'center', 'end', 'stretch'];
-const AXIS_Y = [...AXIS_X, 'space_between'];
+const AXIS_X = ['start', 'center', 'end', 'stretch', 'space_between'];
+const AXIS_Y = [...AXIS_X];
 const BREAKPOINTS = ['desktop', 'tablet', 'mobile'];
 
 function presentationClasses(node) {
@@ -12,6 +12,7 @@ function presentationClasses(node) {
     if (typeof style?.min_height === 'number' && Number.isInteger(style.min_height) && style.min_height >= 0 && style.min_height <= 2000) result.push(`cc-${prefix}min-h-${style.min_height}`);
   };
   if (node.type === 'section') {
+    if (node.props.pin_last_child === true) result.push('cc-pin-last-child');
     add(node.style_tokens, '');
     for (const bp of BREAKPOINTS) add(node.responsive?.[bp], `${bp}-`);
     const bg = node.props.background_image;
@@ -21,22 +22,46 @@ function presentationClasses(node) {
   return result.join(' ');
 }
 
-function alignmentCss(prefix = '') {
+function alignmentCss(prefix = '', stackedRows = false) {
   const value = { start: 'flex-start', center: 'center', end: 'flex-end', stretch: 'stretch', space_between: 'space-between' };
   const rules = [];
+  const rowRules = [];
+  const columnWidthRules = [];
   for (const x of AXIS_X) {
     const selector = `.cc-section.cc-${prefix}content-x-${x}`;
-    rules.push(`${selector}.cc-layout-stack>.cc-container{align-items:${value[x]}}`);
-    rules.push(`${selector}.cc-layout-row>.cc-container{justify-content:${x === 'stretch' ? 'normal' : value[x]}}`);
-    rules.push(`${selector}.cc-layout-grid>.cc-container{justify-items:${x}}`);
+    const cross = x === 'space_between' ? 'stretch' : value[x];
+    rules.push(`${selector}.cc-layout-stack>.cc-container{align-items:${cross}}`);
+    rowRules.push(stackedRows
+      ? `${selector}.cc-layout-row>.cc-container{align-items:${cross}}`
+      : `${selector}.cc-layout-row>.cc-container{justify-content:${x === 'stretch' ? 'normal' : value[x]}}`);
+    rules.push(`${selector}.cc-layout-grid>.cc-container{justify-items:${x === 'space_between' ? 'stretch' : x}}`);
+    columnWidthRules.push(`${selector}.cc-column-widths>.cc-container{justify-content:${x === 'stretch' ? 'normal' : value[x]}}`);
   }
   for (const y of AXIS_Y) {
     const selector = `.cc-section.cc-${prefix}content-y-${y}`;
     rules.push(`${selector}.cc-layout-stack>.cc-container{justify-content:${y === 'stretch' ? 'normal' : value[y]}}`);
-    rules.push(`${selector}.cc-layout-row>.cc-container{align-items:${y === 'space_between' ? 'stretch' : value[y]};align-content:${value[y]}}`);
+    rowRules.push(stackedRows
+      ? `${selector}.cc-layout-row>.cc-container{justify-content:${y === 'stretch' ? 'normal' : value[y]}}`
+      : `${selector}.cc-layout-row>.cc-container{align-items:${y === 'space_between' ? 'stretch' : value[y]};align-content:${value[y]}}`);
     rules.push(`${selector}.cc-layout-grid>.cc-container{align-items:${y === 'space_between' ? 'start' : y};align-content:${value[y]}}`);
+    columnWidthRules.push(`${selector}.cc-column-widths>.cc-container{align-items:${y === 'space_between' ? 'stretch' : value[y]};align-content:${value[y]}}`);
   }
+  // Base row axes apply only while the row is horizontal. On mobile, reapply
+  // base axes as a column before mobile overrides, without cross-axis resets.
+  rules.push(!prefix && !stackedRows
+    ? `@media(min-width:768px){${rowRules.join('')}}`
+    : rowRules.join(''));
+  // Structural Auto/Fit/manual rows remain horizontal flex even on mobile.
+  rules.push(columnWidthRules.join(''));
   return rules.join('');
+}
+
+function columnGapCss(prefix = '') {
+  const gaps = { none: '0px', xs: '.25rem', sm: 'var(--cc-sm)', md: 'var(--cc-md)',
+    lg: 'var(--cc-lg)', xl: 'var(--cc-xl)', '2xl': 'var(--cc-2xl)' };
+  return Object.entries(gaps).map(([name, value]) => (
+    `.cc-role-row.cc-column-widths.cc-${prefix}gap-${name}>.cc-container{--cc-column-gap:${value}}`
+  )).join('');
 }
 
 function presentationCss(document) {
@@ -51,6 +76,12 @@ function presentationCss(document) {
     }
     return [...list].sort().join('');
   };
+  // A growing inner wrapper carries min-height and parent stretch to its content.
+  rules.add('.cc-section{flex-direction:column}.cc-section>.cc-container{flex:1 1 auto;min-height:0}');
+  rules.add('.cc-role-row.cc-column-widths>.cc-container{flex-direction:row}');
+  rules.add(columnGapCss());
+  // Editor insertion targets are siblings, but are not content nodes.
+  rules.add('.cc-section.cc-layout-stack.cc-pin-last-child>.cc-container>.cc-node:not(:has(~.cc-node)){margin-top:auto}');
   rules.add('.cc-has-bg-image{position:relative;isolation:isolate}.cc-section-bg{position:absolute;inset:0;z-index:0;overflow:hidden;border-radius:inherit;pointer-events:none}.cc-section-bg img{display:block;width:100%;height:100%;object-fit:cover}.cc-bg-image-contain>.cc-section-bg img{object-fit:contain}.cc-has-bg-image>.cc-container{position:relative;z-index:1}');
   rules.add('.cc-node.cc-image.cc-image-fill{display:flex;flex-direction:column;flex:1 1 auto;align-self:stretch;width:100%;min-height:0}.cc-image.cc-image-fill>.cc-image-frame{position:relative;flex:1 1 auto;min-height:0}.cc-image.cc-image-fill.cc-aspect-auto>.cc-image-frame{aspect-ratio:4/3}.cc-node.cc-image.cc-image-fill>.cc-image-frame>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.cc-node.cc-image.cc-image-fill.cc-fit-contain>.cc-image-frame>img{object-fit:contain}');
   for (const node of Object.values(document.nodes || {})) {
@@ -59,9 +90,9 @@ function presentationCss(document) {
     if ([x, y].every(n => Number.isInteger(n) && n >= 0 && n <= 100)) rules.add(`.cc-bg-position-${x}-${y}>.cc-section-bg img{object-position:${x}% ${y}%}`);
   }
   rules.add(alignmentCss() + heights(null));
-  rules.add(`@media(min-width:1024px){${alignmentCss('desktop-')}${heights('desktop')}}`);
-  rules.add(`@media(min-width:768px) and (max-width:1023px){${alignmentCss('tablet-')}${heights('tablet')}}`);
-  rules.add(`@media(max-width:767px){${alignmentCss('mobile-')}${heights('mobile')}}`);
+  rules.add(`@media(min-width:1024px){${alignmentCss('desktop-')}${heights('desktop')}${columnGapCss('desktop-')}}`);
+  rules.add(`@media(min-width:768px) and (max-width:1023px){${alignmentCss('tablet-')}${heights('tablet')}${columnGapCss('tablet-')}}`);
+  rules.add(`@media(max-width:767px){${alignmentCss('', true)}${alignmentCss('mobile-', true)}${heights('mobile')}${columnGapCss('mobile-')}}`);
   return [...rules].join('\n');
 }
 

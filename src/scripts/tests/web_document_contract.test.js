@@ -166,6 +166,74 @@ function testSectionColumnWidthsBelongToColumnsOnly() {
   assertInvalid(invalidWidth, 'maximum');
 }
 
+function testSectionPinAndContentAlignmentAreOptionalClosedSettings() {
+  const legacy = buildValidWebDocument();
+  const legacyHash = hashWebDocument(legacy);
+  assert.equal(assertValidWebDocument(legacy).valid, true);
+  assert.equal(Object.hasOwn(legacy.nodes.section_hero.props, 'pin_last_child'), false);
+  for (const layout of ['stack', 'row', 'grid']) {
+    for (const pin of [false, true]) {
+      const document = clone(legacy);
+      const section = document.nodes.section_hero;
+      section.props.layout = layout;
+      section.props.pin_last_child = pin;
+      for (const value of ['start', 'center', 'end', 'stretch', 'space_between']) {
+        section.style_tokens.content_align_x = value;
+        section.style_tokens.content_align_y = value;
+        for (const bp of ['desktop', 'tablet', 'mobile']) section.responsive[bp] = {
+          content_align_x: value, content_align_y: value,
+        };
+        const before = canonicalSerialize(document);
+        assert.equal(assertValidWebDocument(document).valid, true);
+        assert.equal(canonicalSerialize(document), before, 'validation does not normalize input');
+      }
+      assert.notEqual(hashWebDocument(document), legacyHash);
+    }
+  }
+  const reject = (mutate, path, keyword) => {
+    const document = clone(legacy);
+    mutate(document);
+    assertInvalid(document, keyword);
+    assert.ok(validateWebDocument(document).errors.some(error => error.keyword === keyword && error.instancePath === path), path);
+  };
+  for (const value of ['true', 'false', 0, 1, null, {}, []]) reject(
+    doc => { doc.nodes.section_hero.props.pin_last_child = value; },
+    '/nodes/section_hero/props/pin_last_child', 'type'
+  );
+  reject(doc => { doc.nodes.heading_main.props.pin_last_child = true; }, '/nodes/heading_main/props', 'additionalProperties');
+  reject(doc => { doc.nodes.section_hero.style_tokens.pin_last_child = true; }, '/nodes/section_hero/style_tokens', 'additionalProperties');
+  reject(doc => { doc.nodes.section_hero.responsive.mobile.pin_last_child = true; }, '/nodes/section_hero/responsive/mobile', 'additionalProperties');
+  reject(doc => { doc.nodes.section_hero.props.pin_last_children = true; }, '/nodes/section_hero/props', 'additionalProperties');
+  for (const value of ['space-between', 'space_around', 'normal', null, 0]) {
+    reject(doc => { doc.nodes.section_hero.style_tokens.content_align_x = value; }, '/nodes/section_hero/style_tokens/content_align_x', 'enum');
+    for (const bp of ['desktop', 'tablet', 'mobile']) reject(
+      doc => { doc.nodes.section_hero.responsive[bp] = { content_align_x: value }; },
+      `/nodes/section_hero/responsive/${bp}/content_align_x`, 'enum'
+    );
+  }
+  assert.equal(hashWebDocument(legacy), legacyHash);
+}
+
+function testColumnFitModesAreClosedAndColumnOnly() {
+  const document = buildValidWebDocument();
+  const section = document.nodes.section_hero;
+  section.props.structure_role = 'column';
+  section.props.column_width_modes = { desktop: 'fit', tablet: 'fit', mobile: 'fit' };
+  section.props.column_widths = { desktop: 8 };
+  assert.equal(assertValidWebDocument(document).valid, true);
+  for (const value of ['auto', 'full', 'Fit', 0, null, {}]) {
+    const invalid = clone(document);
+    invalid.nodes.section_hero.props.column_width_modes.mobile = value;
+    assertInvalid(invalid, 'enum');
+  }
+  const extra = clone(document);
+  extra.nodes.section_hero.props.column_width_modes.wide = 'fit';
+  assertInvalid(extra, 'additionalProperties');
+  section.props.structure_role = 'row';
+  delete section.props.column_widths;
+  assertInvalid(document, 'columnWidthModes');
+}
+
 function testNodeAnimationsUseClosedPresets() {
   const valid = buildValidWebDocument();
   valid.nodes.section_hero.animation = 'slide_up';
@@ -505,6 +573,8 @@ function run() {
   testNoArbitraryCodeMarkupStylesOrClasses();
   testSectionColumnTracksUseSafeTwelveColumnGrid();
   testSectionColumnWidthsBelongToColumnsOnly();
+  testSectionPinAndContentAlignmentAreOptionalClosedSettings();
+  testColumnFitModesAreClosedAndColumnOnly();
   testNodeAnimationsUseClosedPresets();
   testGraphReferencesCyclesDepthAndOrphans();
   testSemanticImageFormButtonAndBindingRules();

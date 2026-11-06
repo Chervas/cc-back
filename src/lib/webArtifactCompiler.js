@@ -16,7 +16,7 @@ const {
   webArtifactBundleFootprintBytes,
 } = require('./webArtifactBudget');
 
-const RENDERER_VERSION = 'clinicaclick-web-renderer/1.19.0';
+const RENDERER_VERSION = 'clinicaclick-web-renderer/1.20.0';
 const SAFE_EXTERNAL_REL = /^(?:\/[A-Za-z0-9_][A-Za-z0-9/_-]*|https:\/\/[^\s]+)$/;
 const SAFE_YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{6,64}$/;
 const SAFE_VIMEO_VIDEO_ID = /^[0-9]{6,12}$/;
@@ -604,17 +604,16 @@ function sectionRole(node) {
   return node?.props?.structure_role || 'section';
 }
 
-function rowUsesColumnWidths(document, node) {
+function rowHasColumnChildren(document, node) {
   return sectionRole(node) === 'row' && (node.children || []).some((childId) => {
     const child = document.nodes?.[childId];
     return child?.type === 'section'
-      && sectionRole(child) === 'column'
-      && Boolean(child.props.column_widths && Object.keys(child.props.column_widths).length);
+      && sectionRole(child) === 'column';
   });
 }
 
 function sectionTrackClassList(document, node) {
-  if (rowUsesColumnWidths(document, node)) return 'cc-column-widths';
+  if (rowHasColumnChildren(document, node)) return 'cc-column-widths';
   return ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
     const tracks = validColumnTracks(node, breakpoint);
     if (!tracks) return '';
@@ -626,6 +625,9 @@ function sectionTrackClassList(document, node) {
 function sectionColumnClassList(document, node, parentRow = null, parentChildIndex = null) {
   if (sectionRole(node) !== 'column') return '';
   const widthClasses = ['desktop', 'tablet', 'mobile'].map((breakpoint) => {
+    if (node.props.column_width_modes?.[breakpoint] === 'fit') {
+      return breakpoint === 'desktop' ? 'cc-col-fit' : `cc-${breakpoint}-col-fit`;
+    }
     const width = validColumnWidth(node, breakpoint)
       || fallbackColumnWidthFromParent(document, parentRow, parentChildIndex, breakpoint);
     if (!width) return '';
@@ -648,11 +650,13 @@ function sectionColumnClassList(document, node, parentRow = null, parentChildInd
 }
 
 function fallbackColumnWidthFromParent(document, parentRow, parentChildIndex, breakpoint) {
-  if (!parentRow || sectionRole(parentRow) !== 'row' || !rowUsesColumnWidths(document, parentRow)) return null;
+  if (!parentRow || sectionRole(parentRow) !== 'row') return null;
   if (!Number.isInteger(parentChildIndex) || parentChildIndex < 0) return null;
   const tracks = validColumnTracks(parentRow, breakpoint);
   const width = tracks?.[parentChildIndex];
-  return Number.isInteger(width) && width >= 1 && width <= 12 ? width : 12;
+  // Explicit legacy tracks retain their full-width fallback for extra siblings
+  // (notably a mobile [12] stack). Without tracks, the column remains Auto.
+  return Number.isInteger(width) && width >= 1 && width <= 12 ? width : (tracks ? 12 : null);
 }
 
 function imageClassList(node) {
@@ -1339,11 +1343,14 @@ function stylesheet(tokens, document = { nodes: {} }) {
       : `.cc-layout-grid.cc-cols-${count}`;
     return `${selector}>.cc-container{display:grid;grid-template-columns:repeat(${count},minmax(0,1fr))}`;
   }).join('');
+  const columnWidthPercent = (span) => ((span / 12) * 100).toFixed(6).replace(/\.?0+$/, '');
+  const columnWidthValue = (span) => `calc(${columnWidthPercent(span)}% - var(--cc-column-gap,0px) * ${(1 - span / 12).toFixed(6).replace(/\.?0+$/, '') || '0'})`;
   const columnWidthRules = (prefix = '') => (
-    '.cc-role-row.cc-column-widths>.cc-container{display:grid;grid-template-columns:repeat(12,minmax(0,1fr))}'
-    + '.cc-role-row.cc-column-widths>.cc-container>.cc-role-column{grid-column:span 12/span 12}'
+    '.cc-role-row.cc-column-widths>.cc-container{display:flex;flex-direction:row;flex-wrap:wrap;align-items:stretch;gap:inherit}'
+    + '.cc-role-row.cc-column-widths>.cc-container>.cc-role-column{flex:1 1 0;min-width:0;max-width:100%;width:auto}'
+    + `.cc-role-row.cc-column-widths>.cc-container>.cc-role-column.cc-${prefix}col-fit{flex:0 1 auto;width:max-content;max-width:100%}`
     + Array.from({ length: 12 }, (_value, index) => index + 1)
-      .map((span) => `.cc-role-row.cc-column-widths>.cc-container>.cc-role-column.cc-${prefix}col-span-${span}{grid-column:span ${span}/span ${span}}`)
+      .map((span) => `.cc-role-row.cc-column-widths>.cc-container>.cc-role-column.cc-${prefix}col-span-${span}{flex:0 0 ${columnWidthValue(span)};max-width:${columnWidthValue(span)};width:${columnWidthValue(span)}}`)
       .join('')
   );
   const distinctColumnNumbers = (prop, breakpoint) => [...new Set(Object.values(document.nodes || {})

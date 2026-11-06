@@ -10,6 +10,7 @@ const {
   safePublicButtonUrl,
 } = require('../../lib/webArtifactCompiler');
 const { MAX_WEB_ARTIFACT_BUNDLE_BYTES } = require('../../lib/webArtifactBudget');
+const { webLayoutFixture, webColumnsFixture } = require('./fixtures/webLayout.fixture');
 
 function fixture(overrides = {}) {
   const document = createBlankWebDocument({ name: 'Implantes dentales', locale: 'es-ES' });
@@ -231,8 +232,8 @@ test('publica anchos propios de columna con fallback seguro para hermanas hereda
   assert.doesNotMatch(html, /cc-tracks-6-6/);
   assert.match(html, new RegExp(`${leftColumnId}[^"]*" class="[^"]*cc-col-span-8[^"]*cc-tablet-col-span-6[^"]*cc-mobile-col-span-12[^"]*cc-col-min-h-320[^"]*cc-tablet-col-min-h-240[^"]*cc-col-order-2[^"]*cc-mobile-col-order-n1`));
   assert.match(html, new RegExp(`${rightColumnId}[^"]*" class="[^"]*cc-col-span-6[^"]*cc-tablet-col-span-6[^"]*cc-mobile-col-span-12`));
-  assert.match(css, /\.cc-role-row\.cc-column-widths>\.cc-container\{display:grid;grid-template-columns:repeat\(12,minmax\(0,1fr\)\)\}/);
-  assert.match(css, /\.cc-role-row\.cc-column-widths>\.cc-container>\.cc-role-column\.cc-col-span-8\{grid-column:span 8\/span 8\}/);
+  assert.match(css, /\.cc-role-row\.cc-column-widths>\.cc-container\{display:flex;flex-direction:row;flex-wrap:wrap;align-items:stretch;gap:inherit\}/);
+  assert.ok(css.includes('.cc-role-row.cc-column-widths>.cc-container>.cc-role-column.cc-col-span-8{flex:0 0 calc(66.666667% - var(--cc-column-gap,0px) * 0.333333);max-width:calc(66.666667% - var(--cc-column-gap,0px) * 0.333333);width:calc(66.666667% - var(--cc-column-gap,0px) * 0.333333)}'));
   assert.match(css, /\.cc-role-column\.cc-col-min-h-320\{min-height:320px\}/);
   assert.match(css, /\.cc-role-column\.cc-tablet-col-min-h-240\{min-height:240px\}/);
   assert.match(css, /\.cc-role-column\.cc-col-order-2\{order:2\}/);
@@ -250,7 +251,7 @@ test('publica animaciones tipadas como clases seguras generadas por el renderer'
   const css = artifact.files[stylesheetPath];
   const html = artifact.files['index.html'];
 
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.19.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.20.0');
   assert.match(html, /cc-animate-slide_up/);
   assert.match(css, /\.cc-animate-slide_up\{animation:ccSlideUp \.46s cubic-bezier/);
   assert.match(css, /@media\(prefers-reduced-motion:no-preference\)/);
@@ -1099,7 +1100,7 @@ test('renderer actual honra tokens, responsive, fuentes e imagen focal en CSS de
   const cssPath = Object.keys(artifact.files).find((path) => path.endsWith('.css'));
   const css = artifact.files[cssPath];
   const html = artifact.files['index.html'];
-  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.19.0');
+  assert.equal(artifact.manifest.renderer_version, 'clinicaclick-web-renderer/1.20.0');
   assert.match(html, /cc-layout-grid cc-cols-4[^"\n]*cc-bg-brand[^"\n]*cc-width-wide[^"\n]*cc-pt-2xl[^"\n]*cc-radius-full[^"\n]*cc-shadow-lg[^"\n]*cc-mobile-cols-1/);
   assert.match(html, /cc-fit-contain cc-aspect-21-9 cc-focal-37-62/);
   assert.match(html, /<div class="cc-image-frame"><img[^>]*width="2100" height="900">/);
@@ -1297,4 +1298,93 @@ test('image fill and global typography are bounded native settings with noindex 
   ]) {
     const bad=structuredClone(input);mutate(bad.document);assert.throws(()=>compileWebArtifact(bad));
   }
+});
+
+test('pin-last-child is optional, deterministic and scoped to the final stack content node', () => {
+  const input = webLayoutFixture();
+  const original = compileWebArtifact(input);
+  assert.doesNotMatch(original.files['index.html'], /cc-pin-last-child/);
+  input.document.nodes.layout.props.pin_last_child = false;
+  assert.doesNotMatch(compileWebArtifact(input).files['index.html'], /cc-pin-last-child/);
+  input.document.nodes.layout.props.pin_last_child = true;
+  const pinned = compileWebArtifact(input);
+  assert.match(pinned.files['index.html'], /cc-pin-last-child/);
+  const css = Object.entries(pinned.files).find(([name]) => name.startsWith('assets/styles.'))[1];
+  assert.ok(css.includes('.cc-section.cc-layout-stack.cc-pin-last-child>.cc-container>.cc-node:not(:has(~.cc-node)){margin-top:auto}'));
+  assert.ok(css.includes('.cc-section{flex-direction:column}.cc-section>.cc-container{flex:1 1 auto;min-height:0}'));
+  assert.doesNotMatch(css, /position:\s*fixed|\.cc-layout-(row|grid)\.cc-pin-last-child/);
+  assert.doesNotMatch(pinned.files['index.html'], /\bstyle=/);
+  assert.equal(pinned.artifact_hash, compileWebArtifact(input).artifact_hash);
+  assert.notEqual(pinned.artifact_hash, original.artifact_hash);
+  assert.equal(pinned.manifest.renderer_version, 'clinicaclick-web-renderer/1.20.0');
+});
+
+test('content axes distribute only along rows and map base/mobile axes independently', () => {
+  const input = webLayoutFixture({ layout: 'row' });
+  const section = input.document.nodes.layout;
+  section.style_tokens.content_align_x = 'space_between';
+  section.style_tokens.content_align_y = 'end';
+  section.responsive = {
+    desktop: { content_align_x: 'center', content_align_y: 'stretch' },
+    tablet: { content_align_x: 'end', content_align_y: 'space_between' },
+    mobile: { content_align_x: 'space_between', content_align_y: 'center' },
+  };
+  const output = compileWebArtifact(input);
+  const css = Object.entries(output.files).find(([name]) => name.startsWith('assets/styles.'))[1];
+  const html = output.files['index.html'];
+  for (const className of ['cc-content-x-space_between', 'cc-desktop-content-x-center', 'cc-tablet-content-y-space_between', 'cc-mobile-content-x-space_between']) assert.ok(html.includes(className));
+  assert.ok(css.includes('.cc-section.cc-content-x-space_between.cc-layout-stack>.cc-container{align-items:stretch}'));
+  assert.ok(css.includes('.cc-section.cc-content-x-space_between.cc-layout-grid>.cc-container{justify-items:stretch}'));
+  assert.ok(css.includes('@media(min-width:768px){.cc-section.cc-content-x-start.cc-layout-row>.cc-container{justify-content:flex-start}'));
+  assert.ok(css.includes('.cc-section.cc-content-x-space_between.cc-layout-row>.cc-container{justify-content:space-between}'));
+  assert.ok(css.includes('.cc-section.cc-desktop-content-x-center.cc-layout-row>.cc-container{justify-content:center}'));
+  const mobile = css.slice(css.lastIndexOf('@media(max-width:767px){'));
+  const baseX = '.cc-section.cc-content-x-space_between.cc-layout-row>.cc-container{align-items:stretch}';
+  const baseY = '.cc-section.cc-content-y-end.cc-layout-row>.cc-container{justify-content:flex-end}';
+  const overrideX = '.cc-section.cc-mobile-content-x-space_between.cc-layout-row>.cc-container{align-items:stretch}';
+  const overrideY = '.cc-section.cc-mobile-content-y-center.cc-layout-row>.cc-container{justify-content:center}';
+  for (const rule of [baseX, baseY, overrideX, overrideY]) assert.ok(mobile.includes(rule), rule);
+  assert.ok(mobile.indexOf(baseX) < mobile.indexOf(overrideX));
+  assert.ok(mobile.indexOf(baseY) < mobile.indexOf(overrideY));
+  assert.doesNotMatch(mobile, /content-x-space_between\.cc-layout-row>\.cc-container\{justify-content/);
+  assert.doesNotMatch(css, /align-items:space-between|justify-items:space_between/);
+});
+
+test('compiler rejects coercion, unknown pin props and invalid axis values', () => {
+  for (const mutate of [
+    section => { section.props.pin_last_child = 'true'; },
+    section => { section.props.pin_last_child = 1; },
+    section => { section.props.pin_last_children = true; },
+    section => { section.style_tokens.content_align_x = 'space-between'; },
+    section => { section.responsive = { mobile: { content_align_x: 'space_around' } }; },
+  ]) {
+    const input = webLayoutFixture();
+    mutate(input.document.nodes.layout);
+    assert.throws(() => compileWebArtifact(input), error => error.code === 'WEB_DOCUMENT_INVALID');
+  }
+});
+
+test('structural rows use actual Auto/Fit/manual columns and retain explicit legacy tracks', () => {
+  const input = webColumnsFixture(1);
+  let output = compileWebArtifact(input);
+  assert.match(output.files['index.html'], /cc-role-row cc-layout-grid cc-cols-2 cc-column-widths/);
+  const columnClass = html => html.match(/id="cc-column_0"[^>]+class="([^"]+)"/)[1];
+  assert.doesNotMatch(columnClass(output.files['index.html']), /col-span|col-fit/);
+  const column = input.document.nodes.column_0;
+  column.props.column_widths = { desktop: 8, mobile: 12 };
+  column.props.column_width_modes = { desktop: 'fit' };
+  output = compileWebArtifact(input);
+  assert.match(columnClass(output.files['index.html']), /cc-col-fit/);
+  assert.doesNotMatch(columnClass(output.files['index.html']), /cc-col-span-8/);
+  assert.match(columnClass(output.files['index.html']), /cc-mobile-col-span-12/);
+  const css = Object.entries(output.files).find(([name]) => name.startsWith('assets/styles.'))[1];
+  assert.ok(css.includes('.cc-role-row.cc-column-widths>.cc-container>.cc-role-column{flex:1 1 0;min-width:0;max-width:100%;width:auto}'));
+  assert.ok(css.includes('.cc-role-row.cc-column-widths>.cc-container>.cc-role-column.cc-col-fit{flex:0 1 auto;width:max-content;max-width:100%}'));
+  const legacy = webColumnsFixture(2);
+  legacy.document.nodes.layout.props.column_tracks = { desktop: [8, 4], mobile: [12] };
+  legacy.document.nodes.layout.responsive = { mobile: { columns: 1 } };
+  output = compileWebArtifact(legacy);
+  assert.match(output.files['index.html'], /id="cc-column_0"[^>]+cc-col-span-8[^>]+cc-mobile-col-span-12/);
+  assert.match(output.files['index.html'], /id="cc-column_1"[^>]+cc-col-span-4/);
+  assert.doesNotMatch(output.files['index.html'], /cc-tracks-8-4/);
 });

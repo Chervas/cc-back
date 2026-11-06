@@ -399,7 +399,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "content_align_x": { "enum": ["start", "center", "end", "stretch"] },
+        "content_align_x": { "enum": ["start", "center", "end", "stretch", "space_between"] },
         "content_align_y": { "enum": ["start", "center", "end", "stretch", "space_between"] },
         "min_height": { "type": "integer", "minimum": 0, "maximum": 2000 },
         "background": {
@@ -444,7 +444,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "content_align_x": { "enum": ["start", "center", "end", "stretch"] },
+        "content_align_x": { "enum": ["start", "center", "end", "stretch", "space_between"] },
         "content_align_y": { "enum": ["start", "center", "end", "stretch", "space_between"] },
         "min_height": { "type": "integer", "minimum": 0, "maximum": 2000 },
         "visible": { "type": "boolean" },
@@ -499,6 +499,15 @@
           "minimum": 1,
           "maximum": 12
         }
+      }
+    },
+    "columnWidthModes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "desktop": { "enum": ["fit"] },
+        "tablet": { "enum": ["fit"] },
+        "mobile": { "enum": ["fit"] }
       }
     },
     "columnHeights": {
@@ -563,6 +572,7 @@
           "required": ["layout", "columns"],
           "properties": {
             "layout": { "enum": ["stack", "row", "grid"] },
+            "pin_last_child": { "type": "boolean" },
             "columns": {
               "type": "integer",
               "minimum": 1,
@@ -570,6 +580,7 @@
             },
             "column_tracks": { "$ref": "#/definitions/columnTracks" },
             "column_widths": { "$ref": "#/definitions/columnWidths" },
+            "column_width_modes": { "$ref": "#/definitions/columnWidthModes" },
             "column_heights": { "$ref": "#/definitions/columnHeights" },
             "column_orders": { "$ref": "#/definitions/columnOrders" },
             "background_image": { "$ref": "#/definitions/backgroundImage" },
