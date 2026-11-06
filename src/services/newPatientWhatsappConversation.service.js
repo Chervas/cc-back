@@ -11,6 +11,12 @@ async function link({ db, patient, clinicId, transaction }) {
   const phone = normalizePhoneE164(patient.telefono_movil);
   if (!Number.isSafeInteger(clinic) || clinic <= 0 || !phone) return null;
   await db.Clinica.findByPk(clinic, { transaction, lock: transaction.LOCK.SHARE });
+  const current = await db.Paciente.findByPk(patientId, { transaction, lock: transaction.LOCK.UPDATE });
+  if (!current || normalizePhoneE164(current.telefono_movil) !== phone) return null;
+  // Booking can create the patient just before its own persistence transaction.
+  // A concurrent contact edit, including A -> B -> A, cancels the initial link.
+  if (await db.PatientOperationalEvent.findOne({ where: { patient_id: patientId,
+    event_type: 'patient.whatsapp_phone_changed' }, attributes: ['id'], transaction })) return null;
   const candidates = [...new Set(getPhoneIdentityCandidates(phone).map(value => value.replace(/\D/g, '')))];
   const normalizedColumn = name => fn('REGEXP_REPLACE', fn('REGEXP_REPLACE', col(name), '[^0-9]', ''), '^00', '');
   // Do not attach a household/shared number or a patient's record in another
