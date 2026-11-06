@@ -44,18 +44,25 @@ function reviewBsLandingDocument({ key, document: original, assets }) {
       cta(`${p}_cta`, offer.cta, offer),
     ];
     const photo = offer.images ? c.imagePair(`${p}_photo`, offer.images, `${offer.name} · Imagen ilustrativa del servicio`, plan.horizontal_offer ? { height_mode: 'fill' } : {}) : null;
+    const action = body.pop();
+    // Figma separates the photograph, the padded white information panel and
+    // the CTA. In the editorial preset shadow:sm is the bordered panel style
+    // with 24px horizontal inset; vertical inset stays editable as spacing.
+    const content = c.group(`${p}_content`, body, {
+      gap: 'md', spacing_top: 'lg', spacing_bottom: 'lg',
+      background: 'surface', radius: 'lg', shadow: 'sm',
+    });
     if (plan.horizontal_offer) {
-      const content = c.group(`${p}_content`, body, {
-        gap: 'md', spacing_top: 'lg', spacing_bottom: 'lg', background: 'surface',
+      const details = c.group(`${p}_details`, [content, action], {
+        gap: 'md',
       }, { pin_last_child: true });
-      const row = c.grid(`${p}_horizontal`, [photo, content], 2, 1, { gap: 'lg' });
-      return c.group(`${p}_card`, [row], { background: 'surface', radius: 'lg', gap: 'none' });
+      const row = c.grid(`${p}_horizontal`, [photo, details], 2, 1, { gap: 'lg' });
+      return c.group(`${p}_card`, [row], { gap: 'none' });
     }
     // The CTA must be the direct last child of the equal-height grid card.
-    // Pinning a nested auto-height body cannot consume the outer free space.
-    return c.group(`${p}_card`, [...(photo ? [photo] : []), ...body], {
-      background: 'surface', radius: 'lg', gap: 'md',
-      spacing_top: photo ? 'none' : 'lg', spacing_bottom: 'lg',
+    // Pinning it does not require flattening the independently padded panel.
+    return c.group(`${p}_card`, [...(photo ? [photo] : []), content, action], {
+      gap: 'md',
     }, { pin_last_child: true });
   });
   const offersHeading = c.heading('offers_title', plan.offers_title, { tone: isDark ? 'inverse' : 'default' });
@@ -77,7 +84,9 @@ function reviewBsLandingDocument({ key, document: original, assets }) {
       c.heading(`ona_step_${i}_title`, title, { level: 3, size: 'sm' }),
       c.text(`ona_step_${i}_description`, description),
     ], { background: 'muted', radius: 'lg', spacing_top: 'lg', spacing_bottom: 'lg' }));
-    offersChildren.push(c.grid('ona_steps', stepCards, 4, 1));
+    // Two readable columns also fit tablet widths without long technique
+    // names escaping their panel. Mobile keeps one step per row.
+    offersChildren.push(c.grid('ona_steps', stepCards, 2, 1));
   }
   if (plan.capilar_hold) {
     offersChildren.push(c.text('diagnostic_intro', 'Una sesión gratuita con el equipo capilar para valorar tu situación, conocer las opciones y explicar qué puedes esperar.'));
