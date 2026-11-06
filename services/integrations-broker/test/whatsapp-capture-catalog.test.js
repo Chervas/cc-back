@@ -24,6 +24,8 @@ test('capture preserves historical scopes without widening or changing ownership
   assert.equal(fs.readFileSync(file,'utf8'),snapshot);
  }
  capture.publish(file,'301',[]);assert.equal(fs.readFileSync(file,'utf8'),snapshot);
+ capture.publish(file,'301',[{phoneId:'403',wabaId:'503',clinicIds:[90]}]);
+ assert.deepEqual(capture.read(file,'301').map(s=>[s.phoneId,s.clinicIds]),[['401',[71]],['402',[71]],['403',[90]]]);
  assert.equal(fs.statSync(file).mode&0o777,0o640);
  assert.deepEqual(fs.readdirSync(dir),['capture.json']);
 });
