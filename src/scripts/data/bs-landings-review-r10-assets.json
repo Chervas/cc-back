@@ -1,0 +1,218 @@
+{
+  "revision": "bs-landings-review-r10-20261106",
+  "source_version": "20261106-legibilidad-r10",
+  "assets": [
+    {
+      "resource": "LOGO-MEDICAL",
+      "file": "marca/bs-medical.svg",
+      "source_sha256": "9766e3a0044e95db4d23fbd3e8f8fe396f738151de1690cf2627b3db40f779ad",
+      "native_image_sha256": "109c832d170f013692c23ba447803740d77590c4bf8154c211d594ec952f9a75",
+      "width": 416,
+      "height": 418,
+      "content_type": "image/png",
+      "source_node": null,
+      "native_projection": "Official SVG rasterized with transparent background at 416px width; paths unchanged"
+    },
+    {
+      "resource": "IMG-024",
+      "file": "recursos/IMG-024.png",
+      "source_sha256": "1548fcc2b183406813f361d6359d9e63710a20c1b7d6df6772b414a68ee07165",
+      "native_image_sha256": "1548fcc2b183406813f361d6359d9e63710a20c1b7d6df6772b414a68ee07165",
+      "width": 628,
+      "height": 240,
+      "content_type": "image/png",
+      "source_node": "161:748"
+    },
+    {
+      "resource": "IMG-029",
+      "file": "recursos/IMG-029.png",
+      "source_sha256": "97b03c02d20584a95345ab69a89766093c8a2b559e4335794aab90ea55ebd385",
+      "native_image_sha256": "97b03c02d20584a95345ab69a89766093c8a2b559e4335794aab90ea55ebd385",
+      "width": 342,
+      "height": 210,
+      "content_type": "image/png",
+      "source_node": "161:978"
+    },
+    {
+      "resource": "IMG-025",
+      "file": "recursos/IMG-025.png",
+      "source_sha256": "29a78edfe5682f899c65128349f0810ad35d1def836fe739f78bf594a358e7c2",
+      "native_image_sha256": "29a78edfe5682f899c65128349f0810ad35d1def836fe739f78bf594a358e7c2",
+      "width": 628,
+      "height": 240,
+      "content_type": "image/png",
+      "source_node": "161:757"
+    },
+    {
+      "resource": "IMG-030",
+      "file": "recursos/IMG-030.png",
+      "source_sha256": "a99d2063984dda785f759be6a9fccad0e1048394c50f2803845e0ae3f5eec9d1",
+      "native_image_sha256": "a99d2063984dda785f759be6a9fccad0e1048394c50f2803845e0ae3f5eec9d1",
+      "width": 342,
+      "height": 210,
+      "content_type": "image/png",
+      "source_node": "161:988"
+    },
+    {
+      "resource": "IMG-067",
+      "file": "recursos/IMG-067.png",
+      "source_sha256": "64888119511ef25b6a172498773fe07e44023508f871b6772841f8a45d575cab",
+      "native_image_sha256": "64888119511ef25b6a172498773fe07e44023508f871b6772841f8a45d575cab",
+      "width": 628,
+      "height": 240,
+      "content_type": "image/png",
+      "source_node": "164:1100"
+    },
+    {
+      "resource": "IMG-070",
+      "file": "recursos/IMG-070.png",
+      "source_sha256": "3580dba2c33fe12efc6b89112622ff0862a5380df5fc47569582e74f54774962",
+      "native_image_sha256": "3580dba2c33fe12efc6b89112622ff0862a5380df5fc47569582e74f54774962",
+      "width": 342,
+      "height": 210,
+      "content_type": "image/png",
+      "source_node": "164:1262"
+    },
+    {
+      "resource": "IMG-002",
+      "file": "recursos/IMG-002.png",
+      "source_sha256": "ca5da925037fc4733e310adf745d35be0d31323140f93d8822c96b8621e7470e",
+      "native_image_sha256": "ca5da925037fc4733e310adf745d35be0d31323140f93d8822c96b8621e7470e",
+      "width": 628,
+      "height": 240,
+      "content_type": "image/png",
+      "source_node": "161:248"
+    },
+    {
+      "resource": "IMG-013",
+      "file": "recursos/IMG-013.png",
+      "source_sha256": "37cb288ecdee3e34d6c855481cf7e51fec9c36bae57ca1a169ad6045ca339c1c",
+      "native_image_sha256": "37cb288ecdee3e34d6c855481cf7e51fec9c36bae57ca1a169ad6045ca339c1c",
+      "width": 342,
+      "height": 210,
+      "content_type": "image/png",
+      "source_node": "161:497"
+    },
+    {
+      "resource": "IMG-003",
+      "file": "recursos/IMG-003.png",
+      "source_sha256": "43ec0b6116da2c2d3973afea86066f0714cf399d6919a932695a3ea33228b657",
+      "native_image_sha256": "43ec0b6116da2c2d3973afea86066f0714cf399d6919a932695a3ea33228b657",
+      "width": 628,
+      "height": 240,
+      "content_type": "image/png",
+      "source_node": "161:257"
+    },
+    {
+      "resource": "IMG-014",
+      "file": "recursos/IMG-014.png",
+      "source_sha256": "12ca4de2b268007e1740d6971eb1074a8e9ca26c1e2c6e82ed6e8e175a1391f7",
+      "native_image_sha256": "12ca4de2b268007e1740d6971eb1074a8e9ca26c1e2c6e82ed6e8e175a1391f7",
+      "width": 342,
+      "height": 210,
+      "content_type": "image/png",
+      "source_node": "161:507"
+    },
+    {
+      "resource": "IMG-004",
+      "file": "recursos/IMG-004.png",
+      "source_sha256": "5a46907eefa02644d6b7199e039c373ad73c0b934df4ea28c3b44484955a333b",
+      "native_image_sha256": "5a46907eefa02644d6b7199e039c373ad73c0b934df4ea28c3b44484955a333b",
+      "width": 628,
+      "height": 240,
+      "content_type": "image/png",
+      "source_node": "161:267"
+    },
+    {
+      "resource": "IMG-015",
+      "file": "recursos/IMG-015.png",
+      "source_sha256": "8f9b827f679e5979764a596240f4396f076648736fe73ae31daef93be074e08d",
+      "native_image_sha256": "8f9b827f679e5979764a596240f4396f076648736fe73ae31daef93be074e08d",
+      "width": 342,
+      "height": 210,
+      "content_type": "image/png",
+      "source_node": "161:517"
+    },
+    {
+      "resource": "IMG-091",
+      "file": "recursos/IMG-091.png",
+      "source_sha256": "12d3edad059a7b060e412e1d6f28f73bb380ba57365ac70fdb808e45cb1a0fda",
+      "native_image_sha256": "12d3edad059a7b060e412e1d6f28f73bb380ba57365ac70fdb808e45cb1a0fda",
+      "width": 896,
+      "height": 335,
+      "content_type": "image/png",
+      "source_node": "318:3187"
+    },
+    {
+      "resource": "IMG-092",
+      "file": "recursos/IMG-092.png",
+      "source_sha256": "d0d58367ba5c8a299a64d303b5cb413930d8dd968f3fa3f3e4046e8b1e5970dc",
+      "native_image_sha256": "d0d58367ba5c8a299a64d303b5cb413930d8dd968f3fa3f3e4046e8b1e5970dc",
+      "width": 896,
+      "height": 382,
+      "content_type": "image/png",
+      "source_node": "318:3190"
+    },
+    {
+      "resource": "IMG-093",
+      "file": "recursos/IMG-093.png",
+      "source_sha256": "8c20527d7dc5ec05561231ae02e9e910192bf8d958aa3cd064c1349ad1182b60",
+      "native_image_sha256": "8c20527d7dc5ec05561231ae02e9e910192bf8d958aa3cd064c1349ad1182b60",
+      "width": 896,
+      "height": 437,
+      "content_type": "image/png",
+      "source_node": "316:682"
+    },
+    {
+      "resource": "IMG-094",
+      "file": "recursos/IMG-094.png",
+      "source_sha256": "f384937fc59665ab3562e0ed8ac365a2aa619c4200e92be6a7eefb3a5fc12a2a",
+      "native_image_sha256": "f384937fc59665ab3562e0ed8ac365a2aa619c4200e92be6a7eefb3a5fc12a2a",
+      "width": 896,
+      "height": 452,
+      "content_type": "image/png",
+      "source_node": "317:838"
+    },
+    {
+      "resource": "LOGO-CAPILAR",
+      "file": "marca/bs-capilar.svg",
+      "source_sha256": "c624f35e014c01a03d0264edb843186efe4c96c27e36e2a23087e0b5324558b3",
+      "native_image_sha256": "3d81d79f58e1cd65038eede591377aae5642d207cc04655ea2a8806016487a27",
+      "width": 416,
+      "height": 418,
+      "content_type": "image/png",
+      "source_node": null,
+      "native_projection": "Official SVG rasterized with transparent background at 416px width; paths unchanged"
+    },
+    {
+      "resource": "IMG-037",
+      "file": "recursos/IMG-037.png",
+      "source_sha256": "df92051e1f14b07d08d81780a03084855de007fcd9a1f5816d34988378f8b27a",
+      "native_image_sha256": "df92051e1f14b07d08d81780a03084855de007fcd9a1f5816d34988378f8b27a",
+      "width": 627,
+      "height": 430,
+      "content_type": "image/png",
+      "source_node": "236:4113"
+    },
+    {
+      "resource": "IMG-049",
+      "file": "recursos/IMG-049.png",
+      "source_sha256": "52272a85e46f2254a680b5f46b0aa50e63c8a972237284c0838a2bbcf25b21ba",
+      "native_image_sha256": "52272a85e46f2254a680b5f46b0aa50e63c8a972237284c0838a2bbcf25b21ba",
+      "width": 341,
+      "height": 320,
+      "content_type": "image/png",
+      "source_node": "236:4115"
+    },
+    {
+      "resource": "IMG-048",
+      "file": "recursos/IMG-048.png",
+      "source_sha256": "79b2e6a321b428a2f01de9f067c92fe071c715e0cd0f028854870d270be300ec",
+      "native_image_sha256": "79b2e6a321b428a2f01de9f067c92fe071c715e0cd0f028854870d270be300ec",
+      "width": 400,
+      "height": 500,
+      "content_type": "image/png",
+      "source_node": "162:556"
+    }
+  ]
+}

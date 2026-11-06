@@ -1,0 +1,460 @@
+{
+  "revision": "bs-landings-review-r10-20261106",
+  "source_url": "https://modmarketing.net/entregas/bs-medical-capilar/2026-11-05-881e352f289b9d80e02742f4c69177c1",
+  "source_version": "20261106-legibilidad-r10",
+  "review_only": true,
+  "finance_legal_copy": "*Ejemplo de financiación para un injerto de 4.390 € al contado: entrada de 1.690 € e importe solicitado de 2.700 €; comisión de apertura financiada del 1,25 % (33,75 €). 36 cuotas mensuales de 84,41 €. TIN 7,00 %; TAE 8,129 %. Importe total adeudado por el crédito: 3.038,76 €. Coste total del crédito: 338,76 €. Precio total a plazos, incluida la entrada: 4.728,76 €. Sin seguro de protección. Financiación ofrecida y sujeta a aprobación de Sabadell Consumer Finance, S.A.U. Ejemplo según la simulación facilitada; las condiciones y la primera cuota pueden variar con la fecha de formalización.",
+  "deferred_variants": [
+    {
+      "key": "LP-C06-COMPRA",
+      "reason": "Compra aplazada por el titular; sin pagos ni nueva ruta operativa"
+    },
+    {
+      "key": "LP-C07",
+      "reason": "Tarjeta regalo y compra aplazadas; sin Stripe ni emisión PDF"
+    }
+  ],
+  "source_conflicts": [
+    {
+      "subject": "Contorno 10",
+      "choice": "920 € como suma de 10 citas por separado; sin 349 € anterior en esta comparativa",
+      "authority": "Petición de revisión del titular, 06/11/2026"
+    },
+    {
+      "subject": "BF ondas acústicas",
+      "choice": "375 € por 5 sesiones separadas; no tratarlo como precio anterior del bono (330 €)",
+      "authority": "Petición de revisión del titular, 06/11/2026"
+    },
+    {
+      "subject": "Programa BS 28",
+      "choice": "Nombre Programa BS 28, mesoterapia sin itinerario en resumen",
+      "authority": "BS28_copy_comercial y petición del titular"
+    }
+  ],
+  "plans": {
+    "c03": {
+      "anchors": {
+        "hero": "bs_c03_23",
+        "offers": "bs_c03_59",
+        "gallery": "bs_c03_97"
+      },
+      "title": "Tratamiento para reducir volumen localizado",
+      "offers_title": "Elige tu programa corporal",
+      "hero_economics": {
+        "amount": "Desde 129 €",
+        "detail": "Programa BS 28 · 4 citas en total · 1 zona",
+        "note": "También Contorno 10: 10 citas, hasta 2 zonas, por 299 €"
+      },
+      "offers": [
+        {
+          "id": "c03_01",
+          "badge": "Más vendido · BS Medical",
+          "benefit": "Tratamiento para reducir volumen localizado",
+          "name": "Programa BS 28",
+          "reference_label": "4 citas por separado:",
+          "reference_amount": "460 €",
+          "amount": "129 €",
+          "quantity": "4 citas en total · 1 zona",
+          "images": [
+            "IMG-024",
+            "IMG-029"
+          ],
+          "inclusions": [
+            "Carboxiterapia y drenaje linfático con tecnología médica",
+            "Mesoterapia",
+            "Mediciones iniciales y finales"
+          ],
+          "cta": "Solicita tu valoración"
+        },
+        {
+          "id": "c03_02",
+          "badge": "Hasta dos zonas",
+          "benefit": "Un plan corporal con seguimiento",
+          "name": "Contorno 10",
+          "reference_label": "10 citas por separado:",
+          "reference_amount": "920 €",
+          "amount": "299 €",
+          "quantity": "10 citas en total · Hasta 2 zonas",
+          "images": [
+            "IMG-025",
+            "IMG-030"
+          ],
+          "inclusions": [
+            "Carboxiterapia, drenaje linfático con tecnología médica y mesoterapia",
+            "Controles y pauta nutricional escrita"
+          ],
+          "cta": "Solicitar valoración de Contorno 10"
+        }
+      ],
+      "key": "c03",
+      "brand": "BS Medical",
+      "clinic_id": 72,
+      "price_module_preview_enabled": true,
+      "allowed_for_publication": false,
+      "patient_cases_enabled": false,
+      "patient_testimonials_enabled": false,
+      "public_prices_enabled": false
+    },
+    "c02": {
+      "anchors": {
+        "hero": "bs_c02_23",
+        "offers": "bs_c02_91",
+        "gallery": "bs_c02_141"
+      },
+      "title": "Piel más limpia y luminosa, labios más definidos",
+      "offers_title": "Elige el cuidado facial que buscas",
+      "ona_steps": true,
+      "offers": [
+        {
+          "id": "c02_01",
+          "badge": "Limpieza profunda · Piel más luminosa",
+          "name": "INDIBA ONA",
+          "reference_label": "Antes:",
+          "reference_amount": "120 €",
+          "amount": "95 €",
+          "quantity": "1 sesión de 75 minutos",
+          "images": [
+            "IMG-002",
+            "IMG-013"
+          ],
+          "inclusions": [
+            "Limpieza e hidrodermoabrasión · Doble peeling",
+            "Sérum hidratante por electroporación sin agujas",
+            "LED y electroestimulación de baja frecuencia"
+          ],
+          "cta": "Solicitar sesión de ONA"
+        },
+        {
+          "id": "c02_04",
+          "badge": "Más volumen · Labios más definidos",
+          "name": "Aumento y perfilado de labios",
+          "reference_label": "Antes:",
+          "reference_amount": "440 €",
+          "amount": "230 €",
+          "quantity": "Técnica personalizada tras valoración",
+          "images": [
+            "IMG-003",
+            "IMG-014"
+          ],
+          "inclusions": [
+            "Perfilado, relleno o Russian Lips según anatomía y objetivos",
+            "La técnica se elige tras valorar el caso"
+          ],
+          "cta": "Solicitar valoración de labios"
+        },
+        {
+          "id": "c02_02",
+          "badge": "Hidratación y elasticidad",
+          "name": "Polinucleótidos · Rostro y cuello",
+          "reference_label": "Antes:",
+          "reference_amount": "360 €",
+          "amount": "260 €",
+          "quantity": "1 sesión · 2 ml totales",
+          "images": [
+            "IMG-004",
+            "IMG-015"
+          ],
+          "inclusions": [
+            "Para rostro o rostro y cuello",
+            "No incluye el contorno de ojos"
+          ],
+          "cta": "Solicitar valoración de rostro y cuello"
+        },
+        {
+          "id": "c02_03",
+          "badge": "Cuidado específico de esta zona",
+          "name": "Polinucleótidos · Contorno de ojos",
+          "reference_label": "Antes:",
+          "reference_amount": "220 €",
+          "amount": "170 €",
+          "quantity": "1 sesión · 1 ml total",
+          "images": [
+            "IMG-091",
+            "IMG-092"
+          ],
+          "inclusions": [
+            "Valoración y aplicación médica",
+            "El abordaje se adapta a las características del contorno"
+          ],
+          "cta": "Solicitar valoración del contorno de ojos"
+        }
+      ],
+      "key": "c02",
+      "brand": "BS Medical",
+      "clinic_id": 72,
+      "price_module_preview_enabled": true,
+      "allowed_for_publication": false,
+      "patient_cases_enabled": false,
+      "patient_testimonials_enabled": false,
+      "public_prices_enabled": false
+    },
+    "c04": {
+      "anchors": {
+        "hero": "bs_c04_23",
+        "offers": "bs_c04_46",
+        "gallery": "bs_c04_73"
+      },
+      "title": "Cuida la textura y la firmeza del escote",
+      "offers_title": "Qué incluye tu pack de escote",
+      "horizontal_offer": true,
+      "offers": [
+        {
+          "id": "c04_01",
+          "badge": "Valoración y planificación",
+          "name": "Pack escote",
+          "amount": "395 €",
+          "quantity": "Un plan combinado para el escote",
+          "images": [
+            "IMG-093",
+            "IMG-094"
+          ],
+          "inclusions": [
+            "EXION · 3 carboxiterapias",
+            "Mesoterapia con ácido hialurónico · Polinucleótidos",
+            "El equipo valora la zona y concreta la planificación"
+          ],
+          "cta": "Solicitar valoración de escote"
+        }
+      ],
+      "key": "c04",
+      "brand": "BS Medical",
+      "clinic_id": 72,
+      "price_module_preview_enabled": true,
+      "allowed_for_publication": false,
+      "patient_cases_enabled": false,
+      "patient_testimonials_enabled": false,
+      "public_prices_enabled": false
+    },
+    "c06-cupon": {
+      "anchors": {
+        "hero": "bs_c06_cupon_18",
+        "offers": "bs_c06_cupon_57"
+      },
+      "title": "Black Friday · Bonos de cinco sesiones",
+      "offers_title": "Elige tu bono de cinco sesiones",
+      "hero_economics": {
+        "amount": "Desde 265 €",
+        "detail": "Bonos de 5 sesiones · Valoración previa",
+        "note": "Canje hasta el 31/12/2026"
+      },
+      "contact_eyebrow": "INFÓRMATE SOBRE TU BONO",
+      "page_cta": "Solicitar información del bono",
+      "offers": [
+        {
+          "id": "c06_01",
+          "badge": "Black Friday · Firmeza corporal",
+          "name": "Bono INDIBA corporal",
+          "reference_label": "5 sesiones por separado:",
+          "reference_amount": "450 €",
+          "amount": "295 €",
+          "quantity": "5 sesiones · Valoración previa",
+          "images": [
+            "IMG-024",
+            "IMG-029"
+          ],
+          "inclusions": [
+            "INDIBA corporal con planificación del equipo",
+            "Canje hasta el 31/12/2026"
+          ],
+          "cta": "Solicitar información de INDIBA corporal"
+        },
+        {
+          "id": "c06_03",
+          "badge": "Black Friday · Aspecto de la celulitis",
+          "name": "Bono de ondas acústicas",
+          "reference_label": "5 sesiones por separado:",
+          "reference_amount": "375 €",
+          "amount": "265 €",
+          "quantity": "5 sesiones · 1 zona",
+          "images": [
+            "IMG-067",
+            "IMG-070"
+          ],
+          "inclusions": [
+            "Valoración previa para concretar la zona",
+            "Canje hasta el 31/12/2026"
+          ],
+          "cta": "Solicitar información de ondas acústicas"
+        }
+      ],
+      "key": "c06-cupon",
+      "brand": "BS Medical",
+      "clinic_id": 72,
+      "price_module_preview_enabled": true,
+      "allowed_for_publication": false,
+      "patient_cases_enabled": false,
+      "patient_testimonials_enabled": false,
+      "public_prices_enabled": false
+    },
+    "c10-nut": {
+      "anchors": {
+        "hero": "bs_c10_nut_19",
+        "offers": "bs_c10_nut_23"
+      },
+      "title": "Nutrición con la Dra. Celia",
+      "offers_title": "Tu seguimiento nutricional con la Dra. Celia",
+      "page_cta": "Solicitar cita con la Dra. Celia",
+      "hero_economics": {
+        "amount": "170 €",
+        "detail": "3 sesiones de 45 minutos con la Dra. Celia",
+        "note": "Referencia: 195 € por separado. Consulta médica inicial, cuando corresponda: 70 € aparte"
+      },
+      "offers": [
+        {
+          "id": "c10_01",
+          "badge": "Hábitos y acompañamiento",
+          "name": "Nutrición con la Dra. Celia",
+          "reference_label": "3 sesiones por separado:",
+          "reference_amount": "195 €",
+          "amount": "170 €",
+          "quantity": "3 sesiones de 45 minutos",
+          "inclusions": [
+            "Plan nutricional y seguimiento adaptados a ti",
+            "Consulta médica inicial de la unidad, cuando corresponda: 70 € aparte"
+          ],
+          "cta": "Solicitar cita con la Dra. Celia"
+        }
+      ],
+      "key": "c10-nut",
+      "brand": "BS Medical",
+      "clinic_id": 72,
+      "price_module_preview_enabled": true,
+      "allowed_for_publication": false,
+      "patient_cases_enabled": false,
+      "patient_testimonials_enabled": false,
+      "public_prices_enabled": false
+    },
+    "c10-med": {
+      "anchors": {
+        "hero": "bs_c10_med_19",
+        "offers": "bs_c10_med_23"
+      },
+      "title": "Control médico del peso con la Dra. Celia",
+      "offers_title": "Qué incluye el recorrido médico inicial",
+      "page_cta": "Solicitar consulta médica",
+      "hero_economics": {
+        "amount": "320 €",
+        "detail": "Consulta inicial (70 €) + 3 revisiones (250 €)",
+        "note": "Recorrido inicial completo · Medicación no incluida"
+      },
+      "offers": [
+        {
+          "id": "c10_02",
+          "badge": "Valoración médica y seguimiento",
+          "name": "Recorrido médico inicial",
+          "amount": "320 €",
+          "quantity": "Consulta inicial + 3 revisiones",
+          "inclusions": [
+            "Consulta médica inicial: 70 €",
+            "Bono de 3 revisiones: 250 €",
+            "Seguimiento con la Dra. Celia · Medicación no incluida"
+          ],
+          "cta": "Solicitar consulta médica"
+        }
+      ],
+      "key": "c10-med",
+      "brand": "BS Medical",
+      "clinic_id": 72,
+      "price_module_preview_enabled": true,
+      "allowed_for_publication": false,
+      "patient_cases_enabled": false,
+      "patient_testimonials_enabled": false,
+      "public_prices_enabled": false
+    },
+    "c01-pro": {
+      "anchors": {
+        "hero": "bs_c01_pro_28",
+        "offers": "bs_c01_pro_159",
+        "team": "bs_c01_pro_176",
+        "gallery": "bs_c01_pro_212"
+      },
+      "title": "Conoce qué necesita tu cabello",
+      "offers_title": "Qué incluye tu diagnóstico gratuito",
+      "hero_images": [
+        "IMG-037",
+        "IMG-049"
+      ],
+      "page_cta": "Solicitar diagnóstico gratuito",
+      "offers": [],
+      "capilar_hold": true,
+      "key": "c01-pro",
+      "brand": "BS Capilar",
+      "clinic_id": 66,
+      "price_module_preview_enabled": true,
+      "allowed_for_publication": false,
+      "patient_cases_enabled": false,
+      "patient_testimonials_enabled": false,
+      "public_prices_enabled": false
+    },
+    "c01-bf": {
+      "anchors": {
+        "hero": "bs_c01_bf_28",
+        "offers": "bs_c01_bf_111",
+        "team": "bs_c01_bf_128",
+        "gallery": "bs_c01_bf_164"
+      },
+      "title": "Información sobre cuidado capilar",
+      "offers_title": "Empieza por una valoración capilar",
+      "hero_images": [
+        "IMG-037",
+        "IMG-049"
+      ],
+      "page_cta": "Solicitar diagnóstico gratuito",
+      "offers": [],
+      "capilar_hold": true,
+      "bf_not_ready": true,
+      "key": "c01-bf",
+      "brand": "BS Capilar",
+      "clinic_id": 66,
+      "price_module_preview_enabled": true,
+      "allowed_for_publication": false,
+      "patient_cases_enabled": false,
+      "patient_testimonials_enabled": false,
+      "public_prices_enabled": false
+    },
+    "c01-inj": {
+      "anchors": {
+        "hero": "bs_c01_inj_44",
+        "offers": "bs_c01_inj_120",
+        "team": "bs_c01_inj_137",
+        "gallery": "bs_c01_inj_173"
+      },
+      "title": "Injerto capilar con planificación y seguimiento",
+      "offers_title": "Tu injerto capilar, paso a paso",
+      "hero_images": [
+        "IMG-037",
+        "IMG-049"
+      ],
+      "page_cta": "Solicitar diagnóstico gratuito",
+      "hero_economics": {
+        "amount": "Desde 84,41 €/mes*",
+        "detail": "Entrada de 1.690 € · 36 cuotas · Desde 4.390 € al contado",
+        "note": "TIN 7,00 % · TAE 8,129 % · Financiación sujeta a aprobación"
+      },
+      "offers": [
+        {
+          "id": "c01_01",
+          "badge": "Valoración de la zona donante y planificación",
+          "name": "Injerto capilar",
+          "amount": "Desde 84,41 €/mes*",
+          "quantity": "36 cuotas · Entrada de 1.690 €",
+          "cash_price": "Desde 4.390 € al contado",
+          "inclusions": [
+            "Estudio de idoneidad, planificación e intervención según valoración",
+            "Cuidados y seguimiento concretados con el equipo"
+          ],
+          "cta": "Solicitar diagnóstico gratuito",
+          "finance_example": "*Ejemplo de financiación para un injerto de 4.390 € al contado: entrada de 1.690 € e importe solicitado de 2.700 €; comisión de apertura financiada del 1,25 % (33,75 €). 36 cuotas mensuales de 84,41 €. TIN 7,00 %; TAE 8,129 %. Importe total adeudado por el crédito: 3.038,76 €. Coste total del crédito: 338,76 €. Precio total a plazos, incluida la entrada: 4.728,76 €. Sin seguro de protección. Financiación ofrecida y sujeta a aprobación de Sabadell Consumer Finance, S.A.U. Ejemplo según la simulación facilitada; las condiciones y la primera cuota pueden variar con la fecha de formalización."
+        }
+      ],
+      "key": "c01-inj",
+      "brand": "BS Capilar",
+      "clinic_id": 66,
+      "price_module_preview_enabled": true,
+      "allowed_for_publication": false,
+      "patient_cases_enabled": false,
+      "patient_testimonials_enabled": false,
+      "public_prices_enabled": false
+    }
+  }
+}
