@@ -43,15 +43,20 @@ function reviewBsLandingDocument({ key, document: original, assets }) {
       ...(offer.finance_example ? [c.text(`${p}_finance_legal`, offer.finance_example, { size: 'md' })] : []),
       cta(`${p}_cta`, offer.cta, offer),
     ];
-    const content = c.group(`${p}_content`, body, {
-      gap: 'md', spacing_top: 'lg', spacing_bottom: 'lg', background: 'surface',
-    }, { pin_last_child: true });
     const photo = offer.images ? c.imagePair(`${p}_photo`, offer.images, `${offer.name} · Imagen ilustrativa del servicio`, plan.horizontal_offer ? { height_mode: 'fill' } : {}) : null;
     if (plan.horizontal_offer) {
+      const content = c.group(`${p}_content`, body, {
+        gap: 'md', spacing_top: 'lg', spacing_bottom: 'lg', background: 'surface',
+      }, { pin_last_child: true });
       const row = c.grid(`${p}_horizontal`, [photo, content], 2, 1, { gap: 'lg' });
       return c.group(`${p}_card`, [row], { background: 'surface', radius: 'lg', gap: 'none' });
     }
-    return c.group(`${p}_card`, [...(photo ? [photo] : []), content], { background: 'surface', radius: 'lg', gap: 'none' });
+    // The CTA must be the direct last child of the equal-height grid card.
+    // Pinning a nested auto-height body cannot consume the outer free space.
+    return c.group(`${p}_card`, [...(photo ? [photo] : []), ...body], {
+      background: 'surface', radius: 'lg', gap: 'md',
+      spacing_top: photo ? 'none' : 'lg', spacing_bottom: 'lg',
+    }, { pin_last_child: true });
   });
   const offersHeading = c.heading('offers_title', plan.offers_title, { tone: isDark ? 'inverse' : 'default' });
   const offersChildren = [c.text('offers_eyebrow', plan.capilar_hold ? 'TU PRIMER PASO' : 'CONOCE LAS OPCIONES', { size: 'sm', tone: isDark ? 'inverse' : 'brand' }), offersHeading];

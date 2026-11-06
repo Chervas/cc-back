@@ -78,6 +78,11 @@ for (const key of Object.keys(specification.plans)) {
     for (const context of result.contact_context) {
       assert.equal(result.document.nodes[context.button_node_id].props.target, context.form_node_id);
       assert.equal(context.native_interest_field, nativeOptions.some(option => option.value === context.value));
+      if (!specification.plans[key].horizontal_offer) {
+        const card = result.document.nodes[`r10_${key.replaceAll('-', '_')}_${context.value}_card`];
+        assert.equal(card.props.pin_last_child, true);
+        assert.equal(card.children.at(-1), context.button_node_id);
+      }
     }
   });
 }
