@@ -218,6 +218,7 @@ async function findCanonicalWhatsappConversation({
   createIfMissing = false,
   requireExactContact = false,
   isolatePatientContact = false,
+  readOnly = false,
   lastMessageAt = null,
   transaction = null,
 } = {}) {
@@ -227,6 +228,7 @@ async function findCanonicalWhatsappConversation({
   }
 
   const contactCandidates = normalizeContactCandidates(contactId);
+  if (readOnly && (!requireExactContact || !contactCandidates.length || (!patientId && !leadId))) return null;
   if (isolatePatientContact) {
     // An explicit current-patient contact may open a separate chat, never to
     // repoint the patient's old one. Serialize lookup/create with source edits
@@ -261,15 +263,15 @@ async function findCanonicalWhatsappConversation({
 
   const contactOr = [];
   if (contactCandidates.length) {
-    contactOr.push(isolatePatientContact ? db.Sequelize.where(db.Sequelize.fn('REGEXP_REPLACE',
+    contactOr.push(isolatePatientContact || readOnly ? db.Sequelize.where(db.Sequelize.fn('REGEXP_REPLACE',
       db.Sequelize.fn('REGEXP_REPLACE', db.Sequelize.col('contact_id'), '[^0-9]', ''), '^00', ''), {
       [Op.in]: [...new Set(contactCandidates.map(value => value.replace(/\D/g, '')))],
     }) : { contact_id: { [Op.in]: contactCandidates } });
   }
-  if (patientId && !isolatePatientContact) {
+  if (patientId && !isolatePatientContact && !readOnly) {
     contactOr.push({ patient_id: patientId });
   }
-  if (leadId && !isolatePatientContact) {
+  if (leadId && !isolatePatientContact && !readOnly) {
     contactOr.push({ lead_id: leadId });
   }
 
@@ -288,6 +290,15 @@ async function findCanonicalWhatsappConversation({
     ],
     transaction,
   });
+
+  // Diagnostics may describe an existing owned chat, never create, attach,
+  // merge or refresh one as a side effect of a failed send.
+  if (readOnly) {
+    const exact = conversations.filter(c => normalizePhoneE164(c.contact_id) === normalizePhoneE164(contactId));
+    return conversations.length === 1 && exact.length === 1
+      && (!patientId || Number(exact[0].patient_id) === Number(patientId))
+      && (!leadId || Number(exact[0].lead_id) === Number(leadId)) ? exact[0] : null;
+  }
 
   if (!conversations.length) {
     if (!createIfMissing || !contactCandidates.length) {

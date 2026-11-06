@@ -13,8 +13,18 @@ function read(filename,appId){
   return validate(JSON.parse(fs.readFileSync(filename,'utf8')),appId);
 }
 function publish(filename,appId,scopes){
-  const value={version:1,appId,scopes};validate(value,appId);
-  const before=read(filename,appId);for(const old of before)if(JSON.stringify(scopes.find(s=>s.phoneId===old.phoneId))!==JSON.stringify(old))fail('scope_denied');
+  const incoming=validate({version:1,appId,scopes},appId),before=read(filename,appId);
+  // Capture is an append-only ownership catalogue, not the active send grant
+  // registry. A superseded activation disappears from the reader, but replies
+  // for its already-published identity must remain attributable. Never change
+  // an existing phone's WABA or clinical ownership while retaining that history.
+  const merged=new Map(before.map(scope=>[scope.phoneId,scope]));
+  for(const scope of incoming){
+    const old=merged.get(scope.phoneId);
+    if(old&&JSON.stringify(old)!==JSON.stringify(scope))fail('scope_denied');
+    merged.set(scope.phoneId,scope);
+  }
+  const value={version:1,appId,scopes:[...merged.values()]};value.scopes=validate(value,appId);
   const dir=path.dirname(filename),s=fs.statSync(dir);if(!s.isDirectory()||s.mode&0o027||fs.realpathSync(dir)!==dir)fail('invalid_request');
   const temp=filename+'.'+randomUUID();let fd;
   try{fd=fs.openSync(temp,'wx',0o640);fs.fchmodSync(fd,0o640);fs.writeFileSync(fd,JSON.stringify(value));fs.fsyncSync(fd);fs.closeSync(fd);fd=null;

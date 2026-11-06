@@ -5215,12 +5215,12 @@ async function materializeFailedAutomationWhatsappMessage({ node, context, execu
     const targetLeadId = toIntOrNull(targets.lead_intake_id);
     const conversation = await findCanonicalWhatsappConversation({
       requireExactContact: true,
+      readOnly: true,
       clinicId,
       contactId: recipientData.recipient,
       patientId: targetPatientId,
       leadId: targetLeadId,
-      createIfMissing: true,
-      lastMessageAt: new Date(),
+      createIfMissing: false,
     });
     if (!conversation) return null;
 

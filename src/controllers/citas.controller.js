@@ -1253,7 +1253,7 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
                 es_principal: false
             });
         }
-        return existente;
+        return { patient: existente, created: false };
     }
 
     const whereContacto = [];
@@ -1309,7 +1309,7 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
                 es_principal: false
             });
         }
-        return paciente;
+        return { patient: paciente, created: false };
     }
 
     const nuevoPaciente = await Paciente.create({
@@ -1330,7 +1330,7 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
         es_principal: true
     });
 
-    return nuevoPaciente;
+    return { patient: nuevoPaciente, created: true };
 }
 
 const parseBool = (v) => v === true || v === 'true' || v === '1';
@@ -2160,7 +2160,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         }
 
         // Resolver/crear paciente
-        const paciente = await findOrCreatePaciente({
+        const { patient: paciente, created: patientCreated } = await findOrCreatePaciente({
             clinica_id,
             nombre: datosPaciente.nombre,
             apellidos: datosPaciente.apellidos,
@@ -2221,6 +2221,9 @@ exports.createCita = asyncHandler(async (req, res) => {
             patient: paciente,
             requestedLanguage: datosPaciente.idioma_preferido,
             afterPersist: async (appointment, transaction) => {
+                if (patientCreated) await require('../services/newPatientWhatsappConversation.service').link({
+                    db, patient: paciente, clinicId: clinica_id, transaction,
+                });
                 if (!bookingEnabled || pastHistoryOnly) {
                     await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, appointment, transaction });
                 }

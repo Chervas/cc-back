@@ -221,3 +221,24 @@ test('rotated IDs cannot supersede an asset when Meta authenticates another visi
   const reader=createActivationReader(f.f.filename);t.after(()=>reader.close());
   assert.deepEqual(reader.scopes('101'),[{phoneId:'401',wabaId:'301',clinicIds:[71,72]}]);
 });
+test('three coexistence ID rotations and a restart preserve capture but only the latest sender grant',async t=>{
+  const f=await setup(t);Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
+  await f.prepare();await f.execute();
+  const flows=[f.flow.flowId];
+  for(let i=2;i<=4;i++){
+    const wabaId=String(300+i),phoneId=String(400+i);
+    f.f.state.selectedWabaId=wabaId;f.f.state.selectedPhoneId=phoneId;
+    const next=await f.f.begin();flows.push(next.flowId);await f.f.finish(next,{wabaId,phoneId});
+    f.state.profile={...f.state.profile,id:phoneId};await f.executeFlow(next,A.PROFILE);
+    if(i===3){f.state.captureError=Error('FICTITIOUS_LOST_CAPTURE_ACK');await assert.rejects(f.executeFlow(next));f.state.captureError=null;f.restart();}
+    assert.equal((await f.executeFlow(next)).data.state,'active');
+    const reader=createActivationReader(f.f.filename);
+    try{
+      assert.deepEqual(reader.definitions().map(d=>d.authorizationId),[next.flowId]);
+      assert.deepEqual(reader.scopes('101').map(s=>s.phoneId),[phoneId]);
+      assert.deepEqual(capture.read(f.captureFile,'101').map(s=>s.phoneId),Array.from({length:i},(_,n)=>String(401+n)));
+    }finally{reader.close();}
+  }
+  for(const id of flows.slice(0,-1))await assert.rejects(f.executeFlow({flowId:id,payload:f.flow.payload},A.STATUS),/asset_revoked/);
+  assert.equal(f.state.calls.includes('register_phone'),false);
+});
