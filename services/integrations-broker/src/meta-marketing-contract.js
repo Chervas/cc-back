@@ -1,7 +1,7 @@
 'use strict';
 const Ajv = require('ajv');
 const { schema, ref } = require('./contracts');
-const { fail } = require('./errors');
+const { BrokerError, fail } = require('./errors');
 const PROVIDER = 'meta_marketing';
 const COHORT = 'meta-marketing-read-v1';
 const GRAPH_VERSION = 'v24.0';
@@ -46,11 +46,21 @@ function validate(operation, payload) {
   return empty(payload);
 }
 function expiry(value, now) {
-  if (!Number.isSafeInteger(value) || value < 0 || value > Math.floor(Number.MAX_SAFE_INTEGER / 1000)) fail('oauth_credentials_incomplete');
+  if (!Number.isSafeInteger(value) || value < 0 || value > Math.floor(Number.MAX_SAFE_INTEGER / 1000)) credentialFailure('debug_expiry_shape');
   if (value === 0) return null;
   if (value * 1000 <= now) fail('credential_revoked');
   return value * 1000;
 }
+function credentialFailure(reason) {
+  // Fixed diagnostics only: never print provider values, permissions, tokens,
+  // identifiers or a thrown provider message. This survives the outer safeError
+  // projection without adding an RPC field or changing the audit envelope.
+  const error = new BrokerError('oauth_credentials_incomplete');
+  Object.defineProperty(error, 'credentialValidationReason', { value: reason });
+  try { process.stderr.write(JSON.stringify({ event: 'meta_marketing_credential_validation_failed', reason }) + '\n'); } catch {}
+  throw error;
+}
+const observedScope = value => typeof value === 'string' && /^[a-z][a-z0-9_]{0,127}$/.test(value);
 function verifyCredential(raw, binding, now) {
   return inspectCredential(raw, bindingFor(binding), now);
 }
@@ -59,18 +69,31 @@ function inspectCredential(raw, expected, now) {
     || !expected.scopes.length || new Set(expected.scopes).size !== expected.scopes.length
     || expected.scopes.some(scope => !SCOPES.includes(scope))) fail('invalid_request');
   const data = raw?.data;
-  if (raw?.error || !data || typeof data !== 'object' || Array.isArray(data)) fail('oauth_credentials_incomplete');
+  if (raw?.error || !data || typeof data !== 'object' || Array.isArray(data)) credentialFailure('debug_response_shape');
   if (data.is_valid !== true) fail('credential_revoked');
   if (data.app_id !== expected.appId || data.user_id !== expected.subjectId || !['USER', 'SYSTEM_USER'].includes(data.type)) fail('oauth_identity_mismatch');
-  if (!Array.isArray(data.scopes) || data.scopes.length !== expected.scopes.length || new Set(data.scopes).size !== data.scopes.length
-    || data.scopes.some(scope => !expected.scopes.includes(scope))) fail('oauth_credentials_incomplete');
+  // Meta's opaque token may contain earlier app grants. They are observation,
+  // never broker authority: validate the entire bounded set, require the binding
+  // subset, then project exactly that subset into our credential metadata.
+  if (!Array.isArray(data.scopes) || !data.scopes.length || data.scopes.length > 64
+    || !data.scopes.every(observedScope) || new Set(data.scopes).size !== data.scopes.length) credentialFailure('debug_scope_shape');
+  if (!expected.scopes.every(scope => data.scopes.includes(scope))) credentialFailure('debug_required_scope_missing');
   const granular = data.granular_scopes === undefined ? [] : data.granular_scopes;
-  if (!Array.isArray(granular) || granular.length > SCOPES.length || new Set(granular.map(row => row?.scope)).size !== granular.length
-    || granular.some(row => !row || !expected.scopes.includes(row.scope) || !Array.isArray(row.target_ids)
-      || row.target_ids.length > 1000 || !row.target_ids.every(graphId) || new Set(row.target_ids).size !== row.target_ids.length)) fail('oauth_credentials_incomplete');
-  return { appId: expected.appId, subjectId: expected.subjectId, tokenType: data.type,
-    scopes: [...data.scopes].sort(), expiresAt: expiry(data.expires_at, now),
-    dataAccessExpiresAt: expiry(data.data_access_expires_at, now), granularScopes: granular.map(row => ({ scope: row.scope, targetIds: [...row.target_ids] })), verifiedAt: now };
+  let targets = 0;
+  if (!Array.isArray(granular) || granular.length > 64 || new Set(granular.map(row => row?.scope)).size !== granular.length
+    || granular.some(row => !row || Object.getPrototypeOf(row) !== Object.prototype
+      || Object.keys(row).sort().join(',') !== 'scope,target_ids' || !observedScope(row.scope) || !data.scopes.includes(row.scope)
+      || !Array.isArray(row.target_ids) || row.target_ids.length > 1000 || !row.target_ids.every(graphId)
+      || new Set(row.target_ids).size !== row.target_ids.length || (targets += row.target_ids.length) > 10000)) credentialFailure('debug_granular_shape');
+  const metadata = { appId: expected.appId, subjectId: expected.subjectId, tokenType: data.type,
+    scopes: [...expected.scopes].sort(), expiresAt: expiry(data.expires_at, now),
+    dataAccessExpiresAt: expiry(data.data_access_expires_at, now), granularScopes: granular.filter(row => expected.scopes.includes(row.scope))
+      .map(row => ({ scope: row.scope, targetIds: [...row.target_ids] })), verifiedAt: now };
+  const ignoredScopeCount = data.scopes.length - expected.scopes.length;
+  if (ignoredScopeCount > 0) {
+    try { process.stderr.write(JSON.stringify({ event: 'meta_marketing_scopes_projected', requestedScopeCount: expected.scopes.length, ignoredScopeCount }) + '\n'); } catch {}
+  }
+  return metadata;
 }
 function assertAssetCredential(metadata, asset) {
   for (const scope of requiredScopes(asset.kind)) {
