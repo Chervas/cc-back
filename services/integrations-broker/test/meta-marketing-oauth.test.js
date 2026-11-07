@@ -65,7 +65,7 @@ for(const [name,modify] of [
   ['wrong app',d=>d.app_id='999'],['wrong token type',d=>d.type='SYSTEM_USER'],['invalid token',d=>d.is_valid=false],
   ['malformed extra scope',d=>d.scopes.push('whatsapp business messaging')],['missing scope',d=>d.scopes.pop()],
   ['duplicate scope',d=>d.scopes.push(d.scopes[0])],['expired',d=>d.expires_at=1],['missing expiry',d=>delete d.data_access_expires_at],
-  ['unbound granular scope',d=>d.granular_scopes.push({scope:'leads_retrieval',target_ids:['1']})],
+  ['malformed unrequested granular target',d=>d.granular_scopes.push({scope:'leads_retrieval',target_ids:[1]})],
   ['repeated granular target',d=>d.granular_scopes[0].target_ids.push('301')],['non-numeric subject',d=>d.user_id='unknown'],
 ])test('OAuth rejects '+name+' before vault write',async t=>{
   const f=fixture(t),flow=await f.begin();f.state.afterGraph=(kind,response)=>{if(kind==='inspect')modify(response.data);return response;};

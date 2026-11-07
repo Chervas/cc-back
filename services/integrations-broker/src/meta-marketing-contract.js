@@ -51,16 +51,42 @@ function expiry(value, now) {
   if (value * 1000 <= now) fail('credential_revoked');
   return value * 1000;
 }
-function credentialFailure(reason) {
+function credentialFailure(reason, dimensions) {
   // Fixed diagnostics only: never print provider values, permissions, tokens,
   // identifiers or a thrown provider message. This survives the outer safeError
   // projection without adding an RPC field or changing the audit envelope.
   const error = new BrokerError('oauth_credentials_incomplete');
   Object.defineProperty(error, 'credentialValidationReason', { value: reason });
-  try { process.stderr.write(JSON.stringify({ event: 'meta_marketing_credential_validation_failed', reason }) + '\n'); } catch {}
+  try { process.stderr.write(JSON.stringify({ event: 'meta_marketing_credential_validation_failed', reason, ...(dimensions ? { dimensions } : {}) }) + '\n'); } catch {}
   throw error;
 }
 const observedScope = value => typeof value === 'string' && /^[a-z][a-z0-9_]{0,127}$/.test(value);
+function granularDimensions(value, scopes, expected) {
+  // Fixed keys, categories and bounded counts only; never provider key names or
+  // values. Inspect a bounded prefix even when the response itself is invalid.
+  const rows = Array.isArray(value) ? value.slice(0, 64) : [];
+  const result = { kind: value === undefined ? 'absent' : Array.isArray(value) ? 'array' : 'invalid',
+    rowCount: Array.isArray(value) ? Math.min(value.length, 65) : 0, invalidRows: 0, unknownKeys: 0,
+    badScopeSyntax: 0, duplicateScopes: 0, scopesAbsentFromTopLevel: 0, unrequestedScopes: 0,
+    missingTargets: 0, withTargets: 0, nonArrayTargets: 0, excessiveTargetRows: 0,
+    badTargetIds: 0, duplicateTargetIds: 0, targetsTotal: 0 };
+  const seen = new Set();
+  for (const row of rows) {
+    if (!row || Object.getPrototypeOf(row) !== Object.prototype) { result.invalidRows++; continue; }
+    if (!['scope', 'scope,target_ids'].includes(Object.keys(row).sort().join(','))) result.unknownKeys++;
+    if (!observedScope(row.scope)) result.badScopeSyntax++;
+    else { if (!scopes.includes(row.scope)) result.scopesAbsentFromTopLevel++; if (!expected.includes(row.scope)) result.unrequestedScopes++; }
+    if (seen.has(row.scope)) result.duplicateScopes++; seen.add(row.scope);
+    if (!Object.hasOwn(row, 'target_ids')) { result.missingTargets++; continue; }
+    result.withTargets++;
+    if (!Array.isArray(row.target_ids)) { result.nonArrayTargets++; continue; }
+    if (row.target_ids.length > 1000) result.excessiveTargetRows++;
+    result.targetsTotal = Math.min(10001, result.targetsTotal + row.target_ids.length);
+    const ids = new Set();
+    for (const target of row.target_ids.slice(0, 1001)) { if (!graphId(target)) result.badTargetIds++; if (ids.has(target)) result.duplicateTargetIds++; ids.add(target); }
+  }
+  return result;
+}
 function verifyCredential(raw, binding, now) {
   return inspectCredential(raw, bindingFor(binding), now);
 }
@@ -82,12 +108,15 @@ function inspectCredential(raw, expected, now) {
   let targets = 0;
   if (!Array.isArray(granular) || granular.length > 64 || new Set(granular.map(row => row?.scope)).size !== granular.length
     || granular.some(row => !row || Object.getPrototypeOf(row) !== Object.prototype
-      || Object.keys(row).sort().join(',') !== 'scope,target_ids' || !observedScope(row.scope) || !data.scopes.includes(row.scope)
-      || !Array.isArray(row.target_ids) || row.target_ids.length > 1000 || !row.target_ids.every(graphId)
-      || new Set(row.target_ids).size !== row.target_ids.length || (targets += row.target_ids.length) > 10000)) credentialFailure('debug_granular_shape');
+      || !['scope', 'scope,target_ids'].includes(Object.keys(row).sort().join(',')) || !observedScope(row.scope)
+      || Object.hasOwn(row, 'target_ids') && (!Array.isArray(row.target_ids) || row.target_ids.length > 1000 || !row.target_ids.every(graphId)
+        || new Set(row.target_ids).size !== row.target_ids.length || (targets += row.target_ids.length) > 10000))) credentialFailure('debug_granular_shape', granularDimensions(data.granular_scopes, data.scopes, expected.scopes));
+  // Internal normalization: a row without target evidence has the same local
+  // meaning as an omitted row, which was already accepted. It does not attest
+  // unrestricted provider access. Explicit [] remains evidence denying assets.
   const metadata = { appId: expected.appId, subjectId: expected.subjectId, tokenType: data.type,
     scopes: [...expected.scopes].sort(), expiresAt: expiry(data.expires_at, now),
-    dataAccessExpiresAt: expiry(data.data_access_expires_at, now), granularScopes: granular.filter(row => expected.scopes.includes(row.scope))
+    dataAccessExpiresAt: expiry(data.data_access_expires_at, now), granularScopes: granular.filter(row => expected.scopes.includes(row.scope) && Object.hasOwn(row, 'target_ids'))
       .map(row => ({ scope: row.scope, targetIds: [...row.target_ids] })), verifiedAt: now };
   const ignoredScopeCount = data.scopes.length - expected.scopes.length;
   if (ignoredScopeCount > 0) {
