@@ -87,16 +87,25 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   const authority=require('../../services/metaMarketingEnrollmentAuthority.service').createAuthority({models,sessions,oauth,now,enabled:()=>true,recoveryGuard:guard});
   const bindings=require('../../services/metaMarketingEnrollmentBinding.service').createBindings({models,sessions,authority,now,recoveryGuard:guard});
   const review=require('../../services/metaMarketingEnrollmentReview.service').createReview({models,sessions,now,recoveryGuard:guard});
-  const refs=i=>inventories.get(flows[i].flow_id).assets.filter(asset=>asset.id!=='303').map(asset=>asset.assetRef);
+  const refs=i=>inventories.get(flows[i].flow_id).assets.filter(asset=>i===1||asset.id!=='303').map(asset=>asset.assetRef);
   mfa=false;await assert.rejects(authority.reserve(actors[0],flows[0].flow_id,refs(0)),{code:'auth_email_verification_required'});mfa=true;
   await assert.rejects(authority.reserve(actors[0],flows[0].flow_id,['meta-ad_account:301']),{code:'meta_recovery_selection_changed'});
   for(let i=0;i<2;i++){
     const r=await sql.transaction(t=>review({row:flows[i].get({plain:true}),inventory:inventories.get(flows[i].flow_id)},t));
-    assert.equal(r.scopeStatus,'clear');assert(r.assets.filter(asset=>asset.assetRef!=='meta-ad_account:303').every(asset=>asset.status==='clear'));
-    assert(r.assets.find(asset=>asset.assetRef==='meta-ad_account:303').reasons.includes('recovery_not_selected'));
+    assert.equal(r.scopeStatus,'clear');assert(r.assets.every(asset=>asset.status==='clear'));
   }
-  await assert.rejects(authority.reserve(actors[1],flows[1].flow_id,[...refs(1),'meta-ad_account:303']),{code:'meta_recovery_selection_changed'});
-  report.checks.push('Real authorize MFA fence, authenticated fresh inventory shape and V2 UI review require every legacy ref and only Root-counted newFacebookPages');
+  await assert.rejects(authority.reserve(actors[1],flows[1].flow_id,[...refs(1),'meta-ad_account:999']),{code:'meta_enrollment_invalid'});
+  const cross=await models.ClinicMetaAsset.create({metaConnectionId:158,assetType:'ad_account',metaAssetId:'act_303',assignmentScope:'group',grupoClinicaId:28,
+    clinicaId:null,isActive:true,pageAccessToken:'FICTITIOUS_FORBIDDEN_AD_CREDENTIAL'});
+  try{await assert.rejects(authority.reserve(actors[1],flows[1].flow_id,refs(1)),{code:'meta_enrollment_asset_in_use'});}
+  finally{await cross.destroy();}
+  const revoked=await models.MetaMarketingBrokerRevocation.create({tuple_hash:C.hash('FICTITIOUS_NEW_AD_REVOCATION'),connection_ref:'connection:fixture-28',asset_ref:'meta-ad_account:303',
+    tenant_clinic_id:1,meta_connection_id:159,meta_user_id:'201',app_id:'101',parent_page_id:null,scope_key:'group:28',clinic_ids:'[1,70]',mapping_ids:'[]',
+    request_id:randomUUID(),actor_user_id:1,requested_at:now(),state:'confirmed',next_attempt_at:now()});
+  try{await assert.rejects(authority.reserve(actors[1],flows[1].flow_id,refs(1)),{code:'meta_enrollment_asset_revoked'});}
+  finally{await revoked.destroy();}
+  assert.equal(await models.MetaMarketingEnrollmentRequest.count(),0);assert.equal(await models.MetaMarketingEnrollmentClaim.count(),0);
+  report.checks.push('Fresh explicitly selected Ads are selectable; unknown inventory IDs, cross-scope credential-bearing aliases and revocation history reject before reservation; every original and exact Root-counted Pages remain mandatory');
   models.PlatformAuditEvent.addHook('beforeCreate','v2-reserve-fail',row=>{if(JSON.parse(row.body).reason==='meta_enrollment_requested')throw Error('FICTITIOUS_RESERVE_AUDIT_FAILURE');});
   try{await assert.rejects(authority.reserve(actors[0],flows[0].flow_id,refs(0)),/FICTITIOUS_RESERVE_AUDIT_FAILURE/);}finally{models.PlatformAuditEvent.removeHook('beforeCreate','v2-reserve-fail');}
   assert.equal(await models.MetaMarketingEnrollmentIdentity.count(),0);assert.equal(await models.MetaMarketingEnrollmentRequest.count(),0);
@@ -124,15 +133,21 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   await assert.rejects(activate(bs));assert.equal(await models.MetaMarketingBrokerBinding.count(),2);
   await models.ClinicMetaAsset.update({additionalData:metadata},{where:{id:391},silent:true});
   await activate(bs);const activeBS=await models.MetaMarketingEnrollmentRequest.findByPk(bs.enrollment_id,{raw:true});
-  assert.equal(JSON.parse(activeBS.mapping_ids).length,3);assert(JSON.parse(activeBS.mapping_ids).includes(391));
+  assert.equal(JSON.parse(activeBS.mapping_ids).length,4);assert(JSON.parse(activeBS.mapping_ids).includes(391));
   const adopted=await models.ClinicMetaAsset.findByPk(391,{raw:true});assert.equal(adopted.additionalData,null);assert.equal(adopted.assignmentScope,'group');
   assert.equal(adopted.grupoClinicaId,29);assert.equal(adopted.clinicaId,null);assert.equal(adopted.metaConnectionId,159);
   assert.equal(G.hash(fs.readFileSync(archive)),archivePin);assert.deepEqual(JSON.parse(fs.readFileSync(archive)),metadata);
   const fresh=await models.ClinicMetaAsset.findAll({where:{assetType:'facebook_page',metaAssetId:{[Op.in]:['501','502']}},raw:true});assert.equal(fresh.length,2);
   assert(fresh.every(page=>page.metaConnectionId===159&&page.grupoClinicaId===29&&page.pageAccessToken===null&&page.waAccessToken===null&&page.additionalData===null));
+  const freshAd=await models.ClinicMetaAsset.findOne({where:{assetType:'ad_account',metaAssetId:'303'},raw:true});
+  assert(freshAd&&JSON.parse(activeBS.mapping_ids).includes(freshAd.id));
+  assert.equal(freshAd.metaConnectionId,159);assert.equal(freshAd.grupoClinicaId,29);assert.equal(freshAd.assignmentScope,'group');assert.equal(freshAd.clinicaId,null);
+  for(const key of['pageAccessToken','waAccessToken','additionalData','whatsappAuthorizationId'])assert.equal(freshAd[key],null);
+  assert.equal((await sql.transaction(t=>scope.revalidateStructure(flows[1].get({plain:true}),t))).scopeDigest,flows[1].scope_digest);
+  for(const original of records){const current=await models.MetaMarketingRecovery.findByPk(original.recovery_id);for(const key of['snapshot','snapshot_digest','prepared_at','expires_at'])assert.deepEqual(current[key],original[key]);}
   for(const id of[arriaga.enrollment_id,bs.enrollment_id]){const proof=await committed(id);assert.equal(proof.recovery.canonicalConnectionId,159);assert.equal(proof.recovery.version,2);}
   assert.equal(await models.MetaMarketingRecovery.count({where:{canonical_connection_id:null,state:'active'}}),2);assert.equal(await baseline(),untouched);
-  report.checks.push('BS adopts existing391 into group29 and exactly2 fresh discovered pages; source metadata4keys archived, SHA/shape-CAS cleanup atomic; Arriaga remains valid on same canonical ID with twoNULL SQL columns');
+  report.checks.push('BS adopts391 plus explicitly selected freshAd303 and exactly2 Pages on canonical159/group29; new alias has no credentials; ScopeDigest, immutable snapshots and TTL unchanged; Arriaga/source/WA remain valid');
   const remoteStates=new Map([[arriaga.enrollment_id,'active'],[bs.enrollment_id,'active']]),controlCalls=[];
   const worker=require('../../services/metaMarketingEnrollment.service').createService({models,sessions,oauth:{...oauth,cancelAfterEnrollment:async row=>{
     assert.equal(row.enrollment_id,bs.enrollment_id);
@@ -146,23 +161,25 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
       preparedAt:+row.prepared_at,activatedAt:+row.activated_at}};
   }}});
   await models.MetaMarketingEnrollmentRequest.update({next_attempt_at:now()},{where:{enrollment_id:arriaga.enrollment_id}});
-  assert.equal((await worker.run({enrollmentId:arriaga.enrollment_id})).failed,0);await committed(arriaga.enrollment_id);
+  const reconciledArriaga=await worker.run({enrollmentId:arriaga.enrollment_id});
+  assert.equal(reconciledArriaga.failed,0,'Arriaga active reconciliation: '+JSON.stringify(reconciledArriaga)+' '+(await models.MetaMarketingEnrollmentRequest.findByPk(arriaga.enrollment_id)).last_error);await committed(arriaga.enrollment_id);
   assert.equal((await models.MetaMarketingRecovery.findByPk(records[0].recovery_id)).canonical_connection_id,null);
   await models.MetaConnection.create({id:160,userId:null,metaUserId:'201',accessToken:null,credentials_external:true,broker_app_id:'101'});
   await assert.rejects(committed(arriaga.enrollment_id));await models.MetaConnection.destroy({where:{id:160}});await committed(arriaga.enrollment_id);
   const retired=await sql.transaction(t=>guard.retireForScope({scope:{assignmentScope:'group',groupId:29},clinicIds:[66,72]},t));assert.equal(retired.retired,1);
-  assert.equal(retired.blockedBindings,3);assert.equal(retired.deactivatedMappings,3);assert.equal((await models.MetaMarketingEnrollmentRequest.findByPk(bs.enrollment_id)).state,'revoke_pending');
+  assert.equal(retired.blockedBindings,4);assert.equal(retired.deactivatedMappings,4);assert.equal((await models.MetaMarketingEnrollmentRequest.findByPk(bs.enrollment_id)).state,'revoke_pending');
   await committed(arriaga.enrollment_id);assert.equal((await models.MetaMarketingRecovery.findByPk(records[0].recovery_id)).state,'active');
   assert.equal((await models.ClinicMetaAsset.findByPk(361)).isActive,true);assert.equal(await baseline(),untouched);
   await assert.rejects(sql.transaction(t=>guard.assertActive({enrollmentId:bs.enrollment_id},t)),{code:'meta_recovery_retired'});
-  assert.equal((await worker.run({enrollmentId:bs.enrollment_id})).failed,0);
+  const reconciledBS=await worker.run({enrollmentId:bs.enrollment_id});
+  assert.equal(reconciledBS.failed,0,'BS withdrawal reconciliation: '+JSON.stringify(reconciledBS)+' '+(await models.MetaMarketingEnrollmentRequest.findByPk(bs.enrollment_id)).last_error);
   assert.equal((await models.MetaMarketingEnrollmentRequest.findByPk(bs.enrollment_id)).state,'revoked');
   assert.equal(controlCalls.filter(call=>call.operation===E.E.OPERATIONS.revoke).length,1);
   assert.equal(controlCalls.find(call=>call.operation===E.E.OPERATIONS.revoke).id,bs.enrollment_id);
   await committed(arriaga.enrollment_id);assert.equal(await baseline(),untouched);
-  report.checks.push('Unreviewed extra canonical rejected; withdrawal/reconcile of BS affects only its3 assets and outbox, preserves Arriaga/source158/WA/grants/primaryrefs/shares/tombstones and immutable snapshots');
+  report.checks.push('Unreviewed extra canonical rejected; withdrawal/reconcile of BS affects only its4 assets and outbox, preserves Arriaga/source158/WA/grants/primaryrefs/shares/tombstones and immutable snapshots');
   report.checks.push('Actual unchanged enrollment worker reconciles active Arriaga with SQL canonicalNULL and completes BS-only status/revoke/control settlement without treating NULL as inactive or revoking the shared connection');
   const serialized=JSON.stringify(await models.MetaMarketingRecovery.findAll({raw:true}));for(const token of[LEGACY,PAGE,WA])assert(!serialized.includes(token));
-  report.v2={sharedCanonical:159,sqlCanonicalNullGenerations:2,legacyMappingsAdopted:3,newPages:2,realProvider:false,sourceAndWhatsappUnchanged:true};
+  report.v2={sharedCanonical:159,sqlCanonicalNullGenerations:2,legacyMappingsAdopted:3,newPages:2,newAds:1,realProvider:false,sourceAndWhatsappUnchanged:true};
   report.pool={inUse:sql.connectionManager.pool.using,waiting:sql.connectionManager.pool.waiting};assert.deepEqual(report.pool,{inUse:0,waiting:0});
 }).catch(error=>{process.stderr.write('META_RECOVERY_V2_OWNED_MYSQL_FAILED '+String(error.code||error.name)+'\n');process.exitCode=1;});

@@ -38,14 +38,22 @@ test('V2 snapshots require exact clean canonical metadata and archived source me
   for(let i=0;i<cases.length;i++)await t.test(String(i),()=>{const s=snapshot(29);cases[i](s);assert.throws(()=>G.validateSnapshot(s),{code:'meta_recovery_invalid'});});
   const s=snapshot();const row=record(s);row.canonical_connection_id=159;assert.throws(()=>G.snapshotRecord(row),{code:'meta_recovery_invalid'});
 });
-test('required legacy Ads/Page cannot be omitted, and only the Root-counted fresh Facebook pages may be added',()=>{
+test('required legacy Ads/Page cannot be omitted; explicit fresh Ads preserve the exact Root-counted pages and total limit',()=>{
   const asset=(kind,id)=>({kind,id,assetRef:'meta-'+kind+':'+id,parentPageId:null});
   const a=snapshot(),proofA={version:2,newPageCount:0,aliases:a.inventory.aliases.filter(x=>a.mappingIds.includes(x.id))};
   assert.equal(G.selection(proofA,[asset('ad_account','301'),asset('facebook_page','401')]).added.length,0);
   assert.throws(()=>G.selection(proofA,[asset('ad_account','301')]),{code:'meta_recovery_selection_changed'});
   const b=snapshot(29),proofB={version:2,newPageCount:2,aliases:b.inventory.aliases.filter(x=>b.mappingIds.includes(x.id))};
   const selected=[asset('ad_account','302'),asset('facebook_page','501'),asset('facebook_page','502')];assert.equal(G.selection(proofB,selected).added.length,2);
+  const newAds=[asset('ad_account','303'),asset('ad_account','304')],fresh=[...selected,...newAds];
+  assert.equal(G.selection(proofB,fresh).added.length,4);
+  assert(newAds.every(value=>G.selectable(proofB,value,fresh)));
+  assert(selected.every(value=>G.selectable(proofB,value,fresh)));
+  const maximum=[...selected,...Array.from({length:97},(_,i)=>asset('ad_account',String(1000+i)))];
+  assert.equal(G.selection(proofB,maximum).added.length,99);
+  assert.throws(()=>G.selection(proofB,[...maximum,asset('ad_account','2000')]),{code:'meta_recovery_selection_changed'});
   for(const value of[selected.slice(0,2),[...selected,asset('facebook_page','503')],[selected[0],selected[1],asset('instagram_business','502')],
     [selected[0],selected[1],asset('ad_account','303')],
+    [...selected.slice(1),...newAds],[...selected,{...newAds[0],parentPageId:'501'}],
     [selected[0],selected[1],selected[1]]])assert.throws(()=>G.selection(proofB,value),{code:'meta_recovery_selection_changed'});
 });

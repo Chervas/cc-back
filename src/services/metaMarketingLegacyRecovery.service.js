@@ -146,12 +146,12 @@ const canonicalId = row => row.snapshot.version === 2 ? row.snapshot.canonicalCo
   : row.canonical_connection_id === null ? null : Number(row.canonical_connection_id);
 function selection(proof, selected) {
   const original = proof.aliases.map(alias => 'meta-' + alias.assetType + ':' + String(alias.metaAssetId).replace(/^act_/, ''));
-  if (!Array.isArray(selected) || new Set(selected.map(asset => asset.assetRef)).size !== selected.length
+  if (!Array.isArray(selected) || selected.length > 100 || new Set(selected.map(asset => asset.assetRef)).size !== selected.length
     || original.some(ref => !selected.some(asset => asset.assetRef === ref))) fail('meta_recovery_selection_changed');
   const added = selected.filter(asset => !original.includes(asset.assetRef));
   if (proof.version !== 2 ? added.length || selected.length !== original.length || selected.some(asset => asset.kind !== 'ad_account')
-    : selected.length !== original.length + proof.newPageCount || added.length !== proof.newPageCount
-      || added.some(asset => asset.kind !== 'facebook_page' || asset.parentPageId !== null)) fail('meta_recovery_selection_changed');
+    : added.filter(asset => asset.kind === 'facebook_page').length !== proof.newPageCount
+      || added.some(asset => !['facebook_page', 'ad_account'].includes(asset.kind) || asset.parentPageId !== null)) fail('meta_recovery_selection_changed');
   return { original, added };
 }
 function selectable(proof, asset, inventory) {
@@ -160,6 +160,7 @@ function selectable(proof, asset, inventory) {
   const originals = inventory.filter(value => refs.includes(value.assetRef));
   const pages = inventory.filter(value => !refs.includes(value.assetRef) && value.kind === 'facebook_page' && value.parentPageId === null);
   const extra = refs.includes(asset.assetRef) ? pages.slice(0, proof.newPageCount)
+    : asset.kind === 'ad_account' ? [asset, ...pages.slice(0, proof.newPageCount)]
     : [asset, ...pages.filter(value => value.assetRef !== asset.assetRef).slice(0, Math.max(0, proof.newPageCount - 1))];
   try { selection(proof, [...originals, ...extra]); return refs.includes(asset.assetRef) || extra.some(value => value.assetRef === asset.assetRef); }
   catch { return false; }
@@ -313,8 +314,8 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
       const original = row.snapshot.inventory.aliases.find(alias => row.mappingIds.includes(Number(alias.id))
         && 'meta-' + alias.assetType + ':' + String(alias.metaAssetId).replace(/^act_/, '') === asset.assetRef);
       if (original) { if (Number(bound[0].mapping_id) !== Number(original.id)) fail(); continue; }
-      if (row.mappingIds.includes(Number(bound[0].mapping_id)) || asset.kind !== 'facebook_page') fail();
-      createdAliases.push({ id: Number(bound[0].mapping_id), metaConnectionId: canonicalId(row), assetType: 'facebook_page', metaAssetId: asset.id,
+      if (row.mappingIds.includes(Number(bound[0].mapping_id)) || !['facebook_page', 'ad_account'].includes(asset.kind)) fail();
+      createdAliases.push({ id: Number(bound[0].mapping_id), metaConnectionId: canonicalId(row), assetType: asset.kind, metaAssetId: asset.id,
         assignmentScope: row.scope_key.split(':')[0], clinicaId: row.scope_key.startsWith('clinic:') ? Number(row.scope_key.split(':')[1]) : null,
         grupoClinicaId: row.scope_key.startsWith('group:') ? Number(row.scope_key.split(':')[1]) : null, isActive: 1, whatsappAuthorizationId: null,
         page_credential_present: 0, page_credential_sha256: null, wa_credential_present: 0, wa_credential_sha256: null,
