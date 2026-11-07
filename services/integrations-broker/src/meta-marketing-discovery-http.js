@@ -1,20 +1,20 @@
 'use strict';
 const https=require('node:https'),{createHmac}=require('node:crypto'),{BrokerError,fail}=require('./errors');
 const C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),M=require('./meta-marketing-contract'),{tokenText}=require('./whatsapp-secrets');
-function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,now=()=>Date.now()}={}){
+function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,now=()=>Date.now(),pacer}={}){
   if(!Number.isInteger(timeoutMs)||timeoutMs<1||timeoutMs>10000)fail('invalid_request');
-  const inspect=require('./meta-marketing-http').createMetaMarketingHttp({request,timeoutMs});
-  async function page({subjectId,edge,fields,after,token,proof,signal,budget}){
+  async function page({subjectId,edge,fields,after,token,proof,signal,budget,appId,authorize}){
     if(signal.aborted)fail('provider_timeout');
     if(++budget.pages>D.MAX_PAGES)fail('provider_failed');
     const params=new URLSearchParams({fields,limit:'100',appsecret_proof:proof});if(after)params.set('after',after);
-    return new Promise((resolve,reject)=>{
+    const pacing=require('./meta-marketing-graph-pacing').scoped({pacer,request,now},appId);
+    return pacing.run(signal,()=>new Promise((resolve,reject)=>{
       let req,res,timer,settled=false,bytes=0;const chunks=[];
       const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);signal.removeEventListener('abort',abort);for(const c of chunks)c.fill(0);chunks.length=0;error?reject(error):resolve(value);};
       const abort=()=>{finish(new BrokerError('provider_timeout'));res?.destroy();req?.destroy();};
       timer=setTimeout(abort,timeoutMs);timer.unref?.();
       try{
-        req=request({protocol:'https:',hostname:'graph.facebook.com',port:443,method:'GET',path:`/${M.GRAPH_VERSION}/${subjectId}/${edge}?${params}`,
+        req=pacing.request({protocol:'https:',hostname:'graph.facebook.com',port:443,method:'GET',path:`/${M.GRAPH_VERSION}/${subjectId}/${edge}?${params}`,
           agent:false,rejectUnauthorized:true,minVersion:'TLSv1.2',headers:{authorization:'Bearer '+token.toString('utf8'),accept:'application/json','accept-encoding':'identity'}},response=>{
           res=response;if(settled){res.destroy();return;}
           if(String(res.headers['content-type']||'').split(';')[0].trim().toLowerCase()!=='application/json'||!['','identity'].includes(String(res.headers['content-encoding']||'').toLowerCase())
@@ -46,12 +46,13 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
         });
         req.on('error',()=>finish(new BrokerError('provider_failed')));signal.addEventListener('abort',abort,{once:true});if(signal.aborted||settled)abort();else req.end();
       }catch{finish(new BrokerError('provider_failed'));req?.destroy();}
-    });
+    }),authorize);
   }
   return async({binding,metadata,token,appSecret,signal,authorize})=>{
     if(!Buffer.isBuffer(token)||!tokenText(token.toString('utf8'))||!Buffer.isBuffer(appSecret)||!/^[a-f0-9]{32}$/.test(appSecret.toString('ascii'))||!(signal instanceof AbortSignal))fail('invalid_request');
     if(typeof authorize!=='function')fail('invalid_request');
     C.metadata(metadata,binding);const ownToken=Buffer.from(token),ownApp=Buffer.from(appSecret),appToken=Buffer.concat([Buffer.from(metadata.appId+'|'),ownApp]);
+    const inspect=require('./meta-marketing-http').createMetaMarketingHttp({request,timeoutMs,pacer,appId:metadata.appId,now,authorize});
     const wipe=()=>{ownToken.fill(0);ownApp.fill(0);appToken.fill(0);};signal.addEventListener('abort',wipe,{once:true});
     try{
       const verify=async()=>{authorize();if(signal.aborted)fail('provider_timeout');const raw=await inspect({action:'inspect',id:metadata.appId,token:appToken,candidate:ownToken,signal});authorize();if(signal.aborted)fail('provider_timeout');D.fresh(raw,binding,metadata,now());};
@@ -66,7 +67,7 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
         let after=null;const cursors=new Set();
         do{
           authorize();
-          const r=await page({subjectId:metadata.subjectId,edge,fields,after,token:ownToken,proof,signal,budget});if(signal.aborted)fail('provider_timeout');
+          const r=await page({subjectId:metadata.subjectId,edge,fields,after,token:ownToken,proof,signal,budget,appId:metadata.appId,authorize});if(signal.aborted)fail('provider_timeout');
           authorize();
           for(const raw of r.rows){
             if(edge==='adaccounts'){
@@ -81,7 +82,7 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
         }while(after);
       }
       await verify();return assets;
-    }catch(e){throw new BrokerError(e instanceof BrokerError?e.code:'provider_failed');}
+    }catch(e){throw require('./meta-marketing-graph-pacing').safeError(e);}
     finally{signal.removeEventListener('abort',wipe);wipe();}
   };
 }

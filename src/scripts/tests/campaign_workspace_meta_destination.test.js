@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { campaignReference, creativeDestinations, detectDestinations, graphList, revision, refreshMetaCampaignDestinations } = require('../../services/campaignWorkspaceMetaDestination.service');
+const { campaignReference, creativeDestinations, detectDestinations, graphList, revision, refreshMetaCampaignDestinations, metaCampaignContext, campaignPagePairs } = require('../../services/campaignWorkspaceMetaDestination.service');
 
 const now = new Date('2026-09-10T15:00:00Z');
 const ad = (id = '10', patch = {}) => ({ id, account_id: '20', campaign_id: '30', effective_status: 'ACTIVE',
@@ -20,6 +20,22 @@ test('a native CTA website link is not classified as a second reception destinat
   const result = creativeDestinations(ad());
   assert.deepEqual(result.forms, [{ form_id: '50', page_id: '40', ad_ids: ['10'] }]);
   assert.deepEqual(result.urls, []);
+});
+test('different cohorts sharing one canonical connection do not enter each other\'s Page/account discovery', async () => {
+  const prepared = [], requested = [];
+  const owner = { enrollment_id: '11111111-1111-4111-8111-111111111111', scope_key: 'group:28', connection_ref: 'meta:shared' };
+  const rows = [{ mapping_id: 8, ...owner }, { mapping_id: 99, enrollment_id: '22222222-2222-4222-8222-222222222222', scope_key: 'group:29', connection_ref: 'meta:shared' }];
+  const models = { MetaMarketingBrokerBinding: { findAll: async ({ where }) => {
+    requested.push(where); return where.mapping_id ? [owner] : rows.filter(row => ['enrollment_id', 'scope_key', 'connection_ref'].every(key => row[key] === where[key]));
+  } } };
+  const context = { accountAssetId: 11, accountContext: {}, connection: { id: 1 }, campaign: { clinicId: 1 }, reader: {
+    assertAccount: async () => ({ scopeKey: 'group:28', connectionRef: 'meta:shared' }),
+    preparePair: async pageId => { prepared.push(pageId); assert.equal(pageId, 8); return {}; },
+    assertPair: async () => ({ page: { clinicIds: [1, 70] } }),
+  } };
+  assert.equal((await campaignPagePairs({ models, context })).length, 1);
+  assert.deepEqual(prepared, [8]); assert.equal(requested[1].enrollment_id, owner.enrollment_id);
+  assert.equal(requested[1].scope_key, 'group:28');
 });
 test('video, template and carousel CTA form references are detected and deduplicated across ads', () => {
   for (const block of ['video_data', 'template_data']) {
@@ -71,7 +87,9 @@ function harness() {
   const models = {
     Clinica: { findByPk: async () => ({ id_clinica: 1 }) },
     CampaignWorkspaceSetting: { findOne: async () => structuredClone(state.setting) },
-    ClinicMetaAsset: { findAll: async () => [{ assignmentScope: 'clinic', clinicaId: 1, metaConnectionId: 7 }] },
+    ClinicMetaAsset: { findAll: async () => [{ id: 11, assignmentScope: 'clinic', clinicaId: 1, metaConnectionId: 7 }] },
+    MetaMarketingBrokerBinding: { findAll: async ({ where }) => where.mapping_id ? [{ enrollment_id: '11111111-1111-4111-8111-111111111111',
+      scope_key: 'clinic:1', connection_ref: 'meta:fixture' }] : [{ mapping_id: 8 }] },
     MetaConnectionAssignment: { findAll: async () => state.assignments },
     MetaConnection: { findByPk: async () => structuredClone(state.connection) },
     ExternalCampaignInventory: { findAll: async () => state.cached ? [state.cached] : [],
@@ -88,8 +106,21 @@ function harness() {
     return path === '30/ads' ? { data: { data: state.graphRows } }
       : { data: { id: '50', page_id: '40', name: 'First visit', status: 'ACTIVE', ...state.form } };
   };
-  return { state, models, loadInventory, read, run: (options = {}) => refreshMetaCampaignDestinations({ models, scope: { clinicIds: [1] },
-    input: { account_id: '20', campaign_id: '30', revision: revision(state.cached?.destination_detection) }, loadInventory, now: () => state.now, read, ...options }) };
+  const account = () => {
+    if (!state.assignments.length || !state.connection.expiresAt || !Number.isFinite(+new Date(state.connection.expiresAt))
+      || +new Date(state.connection.expiresAt) < Date.now()) throw Object.assign(Error('revoked'), { code: 'asset_revoked' });
+    return { id: '20', mappingId: 11, connectionId: 7, clinicIds: [1], scopeKey: 'clinic:1', connectionRef: 'meta:fixture', generation: revision(state.connection) };
+  };
+  const reader = { prepareAccount: async () => ({}), assertAccount: async () => account(), preparePair: async () => ({}),
+    assertPair: async () => ({ page: { id: '40', clinicIds: [1] }, account: account(), fingerprint: 'binding' }),
+    read: async (_pair, family, payload, budget) => {
+      const response = await read(family === 'destinations' ? '30/ads' : payload.formId, { timeout: budget.timeoutMs, maxRetries: 0 });
+      if (family === 'form') return { form: response.data };
+      return { results: response.data.data.map(row => ({ ...row, adset_id: '25', creative: { id: '99', page_id: row.creative?.object_story_spec?.page_id || null,
+        lead_gen_form_id: creativeDestinations(row).forms[0]?.form_id || null } })), nextCursor: null };
+    } };
+  return { state, models, loadInventory, read, reader, run: (options = {}) => refreshMetaCampaignDestinations({ models, scope: { clinicIds: [1] },
+    input: { account_id: '20', campaign_id: '30', revision: revision(state.cached?.destination_detection) }, loadInventory, now: () => state.now, reader, ...options }) };
 }
 test('nightly Meta worker invokes the real scoped detector, saves the cache and makes no publication or lead request', async () => {
   const { JOB_TYPE, ORIGIN, runDestinationRefresh } = require('../../services/campaignWorkspaceDestinationRefresh.service');
@@ -101,7 +132,8 @@ test('nightly Meta worker invokes the real scoped detector, saves the cache and 
   h.models.Clinica.findByPk = async () => ({ id_clinica: 1, estado_clinica: true });
   const deps = { models: h.models, loadInventory: h.loadInventory, hasAccess: async () => true, now: () => now,
     env: { CAMPAIGN_WORKSPACE_DESTINATION_REFRESH_ENABLED: 'true', CAMPAIGN_WORKSPACE_META_DESTINATION_REFRESH_ENABLED: 'true' },
-    refreshMeta: args => refreshMetaCampaignDestinations({ ...args, read: h.read }),
+    refreshMeta: args => refreshMetaCampaignDestinations({ ...args, reader: h.reader }),
+    metaContext: args => metaCampaignContext({ ...args, reader: h.reader }),
     enqueue: async () => { throw new Error('only_one_campaign'); } };
   const payload = { schema_version: 1, setting_id: h.state.setting.id, provider: 'meta_ads', account_id: '20', cycle_at: now.toISOString() };
   const request = { type: JOB_TYPE, origin: ORIGIN, requested_by: null };
@@ -137,7 +169,7 @@ test('a scoped check persists only destination metadata, with no asset, subscrip
   assert.equal(detection.kind, 'lead_form'); assert.equal(detection.forms[0].name, 'First visit');
   assert.ok(!JSON.stringify(h.state.writes).includes('private-token'));
   assert.ok(h.state.calls.every(call => !/leads|subscribed_apps/.test(call.path)));
-  assert.ok(h.state.calls.every(call => call.options.maxRetries === 0 && call.options.timeout <= 10000));
+  assert.ok(h.state.calls.every(call => call.options.maxRetries === 0 && call.options.timeout <= 30000));
 });
 test('unknown, unassigned, excluded and unauthorized campaigns cannot trigger provider queries', async () => {
   for (const mutate of [h => { h.state.campaigns = []; }, h => { h.state.campaigns[0].assigned = false; },

@@ -6,7 +6,13 @@ function createScope({models,sessions,now=()=>new Date(),recoveryGuard}){
   async function authorize({scopeKey,actorId,sessionRef,sessionExpiresAt},transaction){
     if(!transaction||typeof scopeKey!=='string'||!/^(clinic|group):[1-9][0-9]{0,9}$/.test(scopeKey)||!C.positive(actorId))C.fail('meta_oauth_scope_invalid',400);
     try{await sessions.verifyReference({userId:actorId,sessionRef,expiresAt:sessionExpiresAt},{transaction,requireEmail:true});}
-    catch(e){C.fail(e.code==='auth_email_verification_required'?e.code:'meta_oauth_session_required',e.code==='auth_email_verification_required'?403:401);}
+    catch(e){
+      if(e?.code==='auth_email_verification_required')C.fail(e.code,403);
+      // Storage/audit failure denies the operation without invalidating login.
+      const invalid=['JsonWebTokenError','TokenExpiredError','NotBeforeError'].includes(e?.name)||e?.code==='auth_invalid';
+      const denied=e?.status===403||e?.httpStatus===403;
+      C.fail(invalid?'meta_oauth_session_required':denied?'meta_oauth_scope_forbidden':'meta_oauth_unavailable',invalid?401:denied?403:503);
+    }
     const [type,value]=scopeKey.split(':'),id=Number(value);if(!C.positive(id))C.fail('meta_oauth_scope_invalid',400);
     const options={transaction,lock:transaction.LOCK.UPDATE,raw:true,logging:false};
     const clinics=await models.Clinica.findAll({...options,attributes:['id_clinica'],where:type==='group'?{grupoClinicaId:id}:{id_clinica:id},order:[['id_clinica','ASC']],limit:1001});

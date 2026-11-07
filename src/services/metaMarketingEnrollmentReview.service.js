@@ -89,10 +89,13 @@ function createReview({models,sessions,now=()=>new Date(),recoveryGuard}) {
     return {version:1,checkedAt,reservationMade:false,scopeStatus:scopeReasons.length?'review_required':'clear',scopeReasons:scopeReasons.sort(),
       assets:inventory.assets.map(asset=>{
         const identities=[asset.assetRef,...(asset.parentPageId?['meta-facebook_page:'+asset.parentPageId]:[])],reasons=[];
-        const adopted=proof&&asset.kind==='ad_account'&&proof.aliases.some(alias=>proof.mappingIds.includes(Number(alias.id))
-          &&alias.assetType==='ad_account'&&'meta-ad_account:'+String(alias.metaAssetId).replace(/^act_/,'')===asset.assetRef&&Number(alias.credentials_absent)===1);
+        const reviewed=proof?.version===2&&require('./metaMarketingLegacyRecovery.service').selectable(proof,asset,inventory.assets);
+        const adopted=proof&&(proof.version===2?reviewed&&proof.aliases.some(alias=>proof.legacyMappingIds.includes(Number(alias.id))
+          &&'meta-'+alias.assetType+':'+String(alias.metaAssetId).replace(/^act_/,'')===asset.assetRef)
+          :asset.kind==='ad_account'&&proof.aliases.some(alias=>proof.mappingIds.includes(Number(alias.id))
+            &&alias.assetType==='ad_account'&&'meta-ad_account:'+String(alias.metaAssetId).replace(/^act_/,'')===asset.assetRef&&Number(alias.credentials_absent)===1));
         if(identities.some(ref=>assigned.has(ref))&&!adopted)reasons.push('asset_assigned');
-        if(proof&&!adopted)reasons.push('recovery_not_selected');
+        if(proof&&!adopted&&!reviewed)reasons.push('recovery_not_selected');
         if(identities.some(ref=>registered.has(ref)))reasons.push('asset_registered');
         if(identities.some(ref=>revoked.has(ref)))reasons.push('asset_revoked');
         return {assetRef:asset.assetRef,status:scopeReasons.length||reasons.length?'review_required':'clear',reasons};

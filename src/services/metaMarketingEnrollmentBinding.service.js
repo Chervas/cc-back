@@ -1,5 +1,5 @@
 'use strict';
-const {Op,literal}=require('sequelize'),C=require('./metaMarketingEnrollment.contract');
+const {Op,literal,where}=require('sequelize'),C=require('./metaMarketingEnrollment.contract');
 const {fromEnrollment}=require('../../services/platform-audit/src/meta-enrollment-event');
 const plain=v=>v?.get?v.get({plain:true}):v;
 const fail=(code='meta_enrollment_scope_changed')=>C.fail(code,409);
@@ -130,23 +130,49 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
       await models.MetaConnectionAssignment.create({scopeKey:row.scope_key,assignmentScope:scope.assignmentScope,clinicaId:scope.clinicId,grupoClinicaId:scope.groupId,
         metaConnectionId:row.meta_connection_id,status:'active',authorizedByUserId:row.actor_user_id,connectedAt:now(),lastValidatedAt:now()},{transaction,logging:false});
     }
-    const mappings=[];
+    const mappings=[],newMappings=[];
+    const recoveredSelection=proof?.version===2?require('./metaMarketingLegacyRecovery.service').selection(proof,row.selected):null;
     for(const asset of row.selected){
       let mapping;
       if(proof){
         const original=proof.aliases.find(v=>proof.mappingIds.includes(Number(v.id))&&v.assetType===asset.kind&&String(v.metaAssetId).replace(/^act_/,'')===asset.id);
-        if(!original||asset.kind!=='ad_account'||Number(original.credentials_absent)!==1)fail('meta_enrollment_asset_in_use');
-        const [changed]=await models.ClinicMetaAsset.update({metaConnectionId:row.meta_connection_id,assignmentScope:scope.assignmentScope,clinicaId:scope.clinicId,
-          grupoClinicaId:scope.groupId,isActive:true,pageAccessToken:null,waAccessToken:null,additionalData:null},{where:{id:Number(original.id),
+        if(!original&&recoveredSelection?.added.some(value=>value.assetRef===asset.assetRef)){
+          mapping=await models.ClinicMetaAsset.create({metaConnectionId:row.meta_connection_id,assignmentScope:scope.assignmentScope,clinicaId:scope.clinicId,
+            grupoClinicaId:scope.groupId,assetType:asset.kind,metaAssetId:asset.id,metaAssetName:null,isActive:true,pageAccessToken:null,waAccessToken:null,additionalData:null},{transaction,logging:false});
+          newMappings.push({id:Number(mapping.id),assetType:asset.kind});
+        }else{
+        if(!original||proof.version!==2&&(asset.kind!=='ad_account'||Number(original.credentials_absent)!==1))fail('meta_enrollment_asset_in_use');
+        const predicates=[],archived=proof.version===2?proof.legacyAliases.find(value=>Number(value.id)===Number(original.id)):null;
+        if(proof.version===2){
+          if(!archived||archived.wa_credential_present!==0||archived.whatsappAuthorizationId!==null)fail('meta_enrollment_asset_in_use');
+          for(const [field,prefix] of [['pageAccessToken','page_credential'],['additionalData','additional_data']]){
+            if(archived[prefix+'_present'])predicates.push(where(literal('SHA2(CAST(`'+field+'` AS CHAR),256)'),archived[prefix+'_sha256']));
+          }
+          if(archived.additional_data_present){
+            const cleanup=proof.cleanup.find(item=>item.mappingId===Number(original.id));
+            if(!cleanup||cleanup.metadataDisposition!=='archived'||cleanup.additionalDataSha256!==archived.additional_data_sha256)fail('meta_enrollment_asset_in_use');
+            predicates.push(where(literal('JSON_TYPE(`additionalData`)'),'OBJECT'),where(literal('JSON_LENGTH(`additionalData`)'),4),
+              where(literal("JSON_CONTAINS_PATH(`additionalData`,'all','$.account_status','$.business_name','$.currency','$.timezone_name')"),1));
+          }
+        }
+        const sourceWhere={id:Number(original.id),
             metaConnectionId:Number(proof.sourceConnectionId),assetType:original.assetType,metaAssetId:original.metaAssetId,assignmentScope:original.assignmentScope,
-            clinicaId:original.clinicaId,grupoClinicaId:original.grupoClinicaId,isActive:original.isActive,pageAccessToken:null,waAccessToken:null,additionalData:null},transaction,logging:false});
+            clinicaId:original.clinicaId,grupoClinicaId:original.grupoClinicaId,isActive:original.isActive,waAccessToken:null,
+            pageAccessToken:archived?.page_credential_present?{[Op.ne]:null}:null,additionalData:archived?.additional_data_present?{[Op.ne]:null}:null,
+            ...(proof.version===2?{whatsappAuthorizationId:null,...(predicates.length?{[Op.and]:predicates}:{})}:{})};
+        // No SQL credential is hydrated. Source SHA/shape and mapping identity
+        // share this transaction/CAS with activation and its existing audit event.
+        const [changed]=await models.ClinicMetaAsset.update({metaConnectionId:row.meta_connection_id,assignmentScope:scope.assignmentScope,clinicaId:scope.clinicId,
+          grupoClinicaId:scope.groupId,isActive:true,pageAccessToken:null,additionalData:null},{where:sourceWhere,transaction,logging:false});
         if(changed!==1)fail('meta_enrollment_asset_in_use');mapping={id:Number(original.id)};
+        }
       }else mapping=await models.ClinicMetaAsset.create({metaConnectionId:row.meta_connection_id,assignmentScope:scope.assignmentScope,clinicaId:scope.clinicId,
         grupoClinicaId:scope.groupId,assetType:asset.kind,metaAssetId:asset.id,metaAssetName:null,isActive:true,pageAccessToken:null,waAccessToken:null,additionalData:null},{transaction,logging:false});
       mappings.push({id:Number(mapping.id),assetType:asset.kind});
       await B.create({mapping_id:Number(mapping.id),enrollment_id:row.enrollment_id,asset_ref:asset.assetRef,meta_connection_id:row.meta_connection_id,meta_user_id:row.meta_user_id,
         app_id:row.app_id,connection_ref:row.connection_ref,scope_key:row.scope_key,tenant_clinic_id:row.clinicIds[0],parent_page_id:asset.parentPageId,state:'active'},{transaction,logging:false});
     }
+    if(newMappings.length)await references(row,newMappings,transaction,{newlyAllocated:true});
     await references(row,mappings,transaction,{newlyAllocated:!proof});
     const current=C.request({...row,mapping_ids:JSON.stringify(mappings.map(v=>v.id).sort((a,b)=>a-b)),state:'active',activated_at:now(),updated_at:now(),last_error:null,
       lease_token:null,lease_until:null,next_attempt_at:new Date(+now()+300000)});

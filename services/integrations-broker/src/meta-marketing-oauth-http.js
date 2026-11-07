@@ -2,12 +2,12 @@
 const https = require('node:https');
 const { BrokerError, fail } = require('./errors'), { tokenText } = require('./whatsapp-secrets');
 const C = require('./meta-marketing-oauth-contract'), M = require('./meta-marketing-contract');
-function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 8000, now = () => Date.now() } = {}) {
+function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 8000, now = () => Date.now(),pacer } = {}) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000) fail('invalid_request');
-  const inspect = require('./meta-marketing-http').createMetaMarketingHttp({ request, timeoutMs });
   async function exchange(params, signal) {
     if (signal.aborted) fail('provider_timeout');
-    return new Promise((resolve, reject) => {
+    const pacing=require('./meta-marketing-graph-pacing').scoped({pacer,request,now},params.client_id);
+    return pacing.run(signal,()=>new Promise((resolve, reject) => {
       let req, response, timer, settled = false, bytes = 0; const chunks = [];
       const finish = (error, value) => {
         if (settled) return; settled = true; clearTimeout(timer); signal.removeEventListener('abort', abort);
@@ -16,7 +16,7 @@ function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 800
       const abort = () => { finish(new BrokerError('provider_timeout')); response?.destroy(); req?.destroy(); };
       timer = setTimeout(abort, timeoutMs); timer.unref?.();
       try {
-        req = request({ protocol: 'https:', hostname: 'graph.facebook.com', port: 443, method: 'GET',
+        req = pacing.request({ protocol: 'https:', hostname: 'graph.facebook.com', port: 443, method: 'GET',
           path: `/${M.GRAPH_VERSION}/oauth/access_token?${new URLSearchParams(params)}`, agent: false,
           rejectUnauthorized: true, minVersion: 'TLSv1.2', headers: { accept: 'application/json', 'accept-encoding': 'identity' } }, res => {
           response = res;
@@ -34,6 +34,7 @@ function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 800
             if (settled) return; let raw;
             try {
               raw = Buffer.concat(chunks); const value = JSON.parse(raw.toString('utf8'));
+              if(pacer&&[4,17,32,613].includes(value?.error?.code))fail('rate_limited');
               if (!value || value.error || !tokenText(value.access_token) || value.token_type !== undefined && value.token_type.toLowerCase?.() !== 'bearer') fail('oauth_credentials_incomplete');
               const expiries = [value.expires_in, value.expires].filter(v => v !== undefined);
               if (expiries.some(v => !Number.isSafeInteger(v) || v <= 0 || v > 366 * 86400)) fail('oauth_credentials_incomplete');
@@ -46,11 +47,11 @@ function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 800
         req.on('error', () => finish(new BrokerError('provider_failed'))); signal.addEventListener('abort', abort, { once: true });
         if (signal.aborted || settled) abort(); else req.end();
       } catch { finish(new BrokerError('provider_failed')); req?.destroy(); }
-    });
+    }));
   }
   return {
-    discover: require('./meta-marketing-discovery-http').createMetaMarketingDiscoveryHttp({ request, timeoutMs, now }),
-    readCandidate: require('./meta-marketing-candidate-read-http').createMetaMarketingCandidateReadHttp({ request, timeoutMs, now }),
+    discover: require('./meta-marketing-discovery-http').createMetaMarketingDiscoveryHttp({ request, timeoutMs, now,pacer }),
+    readCandidate: require('./meta-marketing-candidate-read-http').createMetaMarketingCandidateReadHttp({ request, timeoutMs, now,pacer }),
     async withExchangedToken({ binding, code, appSecret, signal: callerSignal }, work) {
       const b = C.bindingFor(binding);
       if (!Buffer.isBuffer(code) || !/^[\x21-\x7e]{1,4096}$/.test(code.toString('latin1'))
@@ -62,6 +63,7 @@ function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 800
       const wipe = () => { ownCode.fill(0); ownApp.fill(0); short?.token.fill(0); long?.token.fill(0); applicationToken?.fill(0); borrowed?.fill(0); };
       signal.addEventListener('abort', wipe, { once: true });
       try {
+        const inspect=require('./meta-marketing-http').createMetaMarketingHttp({request,timeoutMs,pacer,appId:b.appId,now});
         short = await exchange({ client_id: b.appId, client_secret: ownApp.toString('ascii'), redirect_uri: b.redirectUri, code: ownCode.toString('ascii') }, signal);
         if (signal.aborted) fail('provider_timeout');
         long = await exchange({ client_id: b.appId, client_secret: ownApp.toString('ascii'), grant_type: 'fb_exchange_token', fb_exchange_token: short.token.toString('utf8') }, signal);
@@ -81,7 +83,7 @@ function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 800
         assertFresh(); const encoded = JSON.stringify(result);
         if (typeof encoded !== 'string' || [ownCode, ownApp, short.token, long.token].some(v => encoded.includes(v.toString('utf8')))) fail('provider_failed');
         return result;
-      } catch (e) { throw new BrokerError(e instanceof BrokerError ? new BrokerError(e.code).code : 'provider_failed'); }
+      } catch (e) { throw require('./meta-marketing-graph-pacing').safeError(e); }
       finally { if (abortWork) signal.removeEventListener('abort', abortWork); signal.removeEventListener('abort', wipe); wipe(); }
     },
   };

@@ -15,7 +15,8 @@ const { canonical } = require('./canonical');
 const { canonicalDigest } = require('./canonical-digest');
 class Broker {
   constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, policyResolver, admission, now = () => Date.now(), timeoutMs = 10000, transportProfile = 'default' }) {
-    if (!['default', 'ai', 'email', 'public-media', 'whatsapp-authorized'].includes(transportProfile)
+    if (!['default', 'ai', 'email', 'public-media', 'whatsapp-authorized','meta-marketing'].includes(transportProfile)
+      || transportProfile==='meta-marketing'&&Object.keys(operations).some(op=>!op.startsWith('meta.marketing.'))
       || transportProfile === 'whatsapp-authorized' && Object.keys(operations).some(op => !op.startsWith('meta.whatsapp.authorized.'))
       || transportProfile === 'ai' && Object.keys(operations).some(op => !aiLimits.isAiOperation(op))
       || transportProfile === 'email' && Object.keys(operations).some(op => !emailLimits.isEmailOperation(op))
@@ -25,7 +26,7 @@ class Broker {
     this.maxRequestBytes = transportProfile === 'ai' ? aiLimits.MAX_REQUEST_BYTES
       : transportProfile === 'email' ? emailLimits.MAX_REQUEST_BYTES
         : transportProfile === 'public-media' ? publicMediaLimits.MAX_REQUEST_BYTES
-          : transportProfile === 'whatsapp-authorized' ? require('./whatsapp-image').MAX_REQUEST_BYTES : 32768;
+          : transportProfile === 'whatsapp-authorized' ? require('./whatsapp-image').MAX_REQUEST_BYTES : transportProfile==='meta-marketing'?131072:32768;
     this.operations = operations; this.adsEnrollment = adsEnrollment; this.policyResolver = policyResolver; this.admission = admission; this.now = now;
     this.timeoutMs = Math.min(transportProfile === 'ai' ? aiLimits.MAX_TIMEOUT_MS : 30000, Math.max(1, timeoutMs));
     this.active = new Map(); this.activeAssets = new Map();

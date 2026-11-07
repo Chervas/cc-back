@@ -55,6 +55,13 @@ test('selecting signals in a draft cannot authorize their delivery', async () =>
   assert.equal(workspaceSignalDecision({ setting: h.state.row, provider: 'google_ads', accountId: '20', campaignId: '30',
     eventName: 'QualifiedLead', crmEventSource: CRM_MILESTONE_SOURCE }).allowed, false);
 });
+test('ordinary preference edits preserve independently reviewed Meta lead routes and reject caller overrides', async () => {
+  const h = harness();
+  const route = { pageAssetRef: 'meta-facebook_page:401', adAccountAssetRef: 'meta-ad_account:301', recipientClinicId: 1 };
+  h.state.row.preferences = { meta_lead_routes: [route] };
+  await h.run(); assert.deepEqual(h.state.row.preferences.meta_lead_routes, [route]);
+  assert.throws(() => preferenceDraft({ ...input(), preferences: { ...input().preferences, meta_lead_routes: [] } }), /invalid_workspace_preferences/);
+});
 test('identical preferences are idempotent, and stale versions or revoked accounts cannot overwrite them', async () => {
   const h = harness(); await h.run();
   const again = await h.run({ ...input(), expected_version: 2 }); assert.equal(again.changed, false); assert.equal(h.state.writes.length, 1);

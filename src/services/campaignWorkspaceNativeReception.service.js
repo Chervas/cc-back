@@ -19,28 +19,37 @@ function nativeForms(detection) {
   }));
 }
 
-async function loadNativeFormEvidence({ models, campaigns, selectedClinics, scope = null, now = new Date(), transaction = null }) {
+async function loadNativeFormEvidence({ models, campaigns, selectedClinics, scope = null, now = new Date(), transaction = null, reader }) {
   const eligible = campaigns.filter(campaign => campaign.provider === 'meta_ads' && campaign.assigned && campaign.nativeForms?.length);
   if (!eligible.length) return new Map();
   const clinicIds = [...new Set(eligible.map(campaign => campaign.clinicId))];
   const pages = await models.ClinicMetaAsset.findAll({ where: { isActive: true, assetType: 'facebook_page',
     metaAssetId: { [Op.in]: [...new Set(eligible.flatMap(campaign => campaign.nativeForms.map(form => form.pageId).filter(Boolean)))] },
-  }, attributes: ['id', 'metaAssetId', 'metaAssetName', 'metaConnectionId', 'assignmentScope', 'clinicaId', 'grupoClinicaId',
-    'pageAccessToken', 'additionalData'], raw: true, transaction });
+  }, attributes: ['id', 'metaAssetId', 'metaAssetName', 'metaConnectionId', 'assignmentScope', 'clinicaId', 'grupoClinicaId'], raw: true, transaction });
   const accounts = await models.ClinicMetaAsset.findAll({ where: { isActive: true, assetType: 'ad_account',
     metaAssetId: { [Op.in]: [...new Set(eligible.flatMap(campaign => [campaign.account_id, `act_${campaign.account_id}`]))] } },
-  attributes: ['metaAssetId', 'metaConnectionId', 'assignmentScope', 'clinicaId', 'grupoClinicaId'], raw: true, transaction });
-  const assets = [...pages, ...accounts];
-  const assignments = assets.length ? await models.MetaConnectionAssignment.findAll({ where: { status: 'active',
-    scopeKey: { [Op.in]: [...new Set(assets.map(scopeKey))] } },
-  attributes: ['scopeKey', 'metaConnectionId'], raw: true, transaction }) : [];
-  const connections = assets.length ? await models.MetaConnection.findAll({ where: { id: { [Op.in]: [...new Set(assets.map(row => row.metaConnectionId))] } },
-    attributes: ['id', 'expiresAt'], raw: true, transaction }) : [];
-  const authorized = page => assignments.some(row => row.scopeKey === scopeKey(page)
-    && Number(row.metaConnectionId) === Number(page.metaConnectionId)) && connections.some(row => Number(row.id) === Number(page.metaConnectionId)
-      && Number.isFinite(+new Date(row.expiresAt)) && +new Date(row.expiresAt) > +now);
-  const activePages = pages.filter(authorized);
-  const activeAccounts = accounts.filter(authorized);
+  attributes: ['id', 'metaAssetId', 'metaConnectionId', 'assignmentScope', 'clinicaId', 'grupoClinicaId'], raw: true, transaction });
+  const source = reader || require('./metaMarketingLeadReader.service').forModels(models);
+  const pairs = new Map();
+  for (const page of pages) for (const account of accounts) {
+    if (Number(page.metaConnectionId) !== Number(account.metaConnectionId)) continue;
+    try {
+      const pair = await source.preparePair(Number(page.id), Number(account.id), { transaction });
+      const authority = await source.assertPair(pair, { transaction });
+      pairs.set(`${page.id}:${account.id}`, { page: { ...page, bindingFingerprint: authority.fingerprint,
+        accountAssetId: Number(account.id) }, account, authority });
+    } catch { /* A disabled or revoked capability never proves readiness. */ }
+  }
+  // Store proofs in the existing durable job result, never in credential-free
+  // ClinicMetaAsset.additionalData. The newest failure supersedes old success.
+  const jobs = pairs.size ? await models.JobRequest.findAll({ where: { type: 'campaign_meta_page_reception',
+    updated_at: { [Op.gte]: new Date(+now - DESTINATION_WINDOW) } }, attributes: ['id', 'payload', 'status', 'result_summary'],
+    raw: true, transaction, order: [['id', 'DESC']], limit: 1001 }) : [];
+  const latest = new Map();
+  if (jobs.length <= 1000) for (const job of jobs) {
+    const key = `${job.payload?.asset_id}:${job.payload?.account_asset_id}`;
+    if (!latest.has(key)) latest.set(key, job);
+  }
   const since = new Date(+now - RECEIPT_WINDOW);
   // The required CRM join enforces clinic ownership. Never retrieve contact fields or custom form answers.
   const audits = await models.LeadAttributionAudit.findAll({ where: { created_at: { [Op.between]: [since, now] } },
@@ -73,22 +82,31 @@ async function loadNativeFormEvidence({ models, campaigns, selectedClinics, scop
     const checkPending = !!campaign.destinationCheck?.status;
     const accessRequired = campaign.destinationCheck?.error === 'workspace_meta_permissions_required';
     const forms = campaign.nativeForms.map(form => {
-      const matches = clinic ? activePages.filter(row => row.metaAssetId === form.pageId && covers(row, clinic)) : [];
+      const matches = clinic ? [...pairs.values()].filter(value => value.page.metaAssetId === form.pageId && covers(value.page, clinic)
+        && [campaign.account_id, `act_${campaign.account_id}`].includes(value.account.metaAssetId) && covers(value.account, clinic)
+        && value.authority.page.clinicIds.includes(Number(clinic.id_clinica))) : [];
       const ownerKey = scope?.groupId ? `group:${scope.groupId}` : `clinic:${campaign.clinicId}`;
-      const preferred = matches.filter(row => scopeKey(row) === ownerKey);
+      const preferred = matches.filter(row => scopeKey(row.page) === ownerKey);
       const candidates = preferred.length ? preferred : matches;
-      const page = candidates.length === 1 ? candidates[0] : null;
-      const proof = !checkPending && page && pageProof(page, now);
+      const selected = candidates.length === 1 ? candidates[0] : null;
+      const page = selected?.page || null;
+      const job = page && latest.get(`${page.id}:${selected.account.id}`);
+      const proof = !checkPending && page && job?.status === 'completed'
+        && job.result_summary?.proof?.job_id === Number(job.id)
+        && pageProof({ ...page, brokerProof: job.result_summary.proof }, now, selected.authority.page.appId);
+      const pageWaiting = !!job && job.status !== 'completed';
       const received = receipts.get([campaign.clinicId, campaign.account_id, campaign.campaign_id, form.pageId, form.id].join(':'));
       return { ...form, pageName: page?.metaAssetName || null, connected: !!page, receivedAt: received ? new Date(received).toISOString() : null,
-        pageScope: page ? scopeKey(page) : null, canCheckPage: !checkPending && !!page?.pageAccessToken, subscription: proof || null,
+        pageScope: page ? scopeKey(page) : null, canCheckPage: !checkPending && !!page, subscription: proof || null,
         state: accessRequired || !form.metadataAccessible || proof?.state === 'access_required' ? 'access_required'
           : !form.pageId ? 'page_unknown' : !page ? 'page_required' : proof?.state === 'subscription_required' ? 'subscription_required'
-          : checkPending ? 'waiting' : received ? 'receiving' : proof?.state === 'verified' ? 'prepared' : 'waiting' };
+          : checkPending || pageWaiting ? 'waiting' : received && proof?.state === 'verified' ? 'receiving'
+          : proof?.state === 'verified' ? 'prepared' : 'waiting' };
     });
     const age = +now - +new Date(campaign.destinationCheckedAt);
     const fresh = !checkPending && campaign.destinationComplete === true && Number.isFinite(age) && age >= 0 && age < DESTINATION_WINDOW;
-    const accountReady = clinic && activeAccounts.some(row => [campaign.account_id, `act_${campaign.account_id}`].includes(row.metaAssetId) && covers(row, clinic));
+    const accountReady = clinic && [...pairs.values()].some(value => [campaign.account_id, `act_${campaign.account_id}`].includes(value.account.metaAssetId)
+      && covers(value.account, clinic) && value.authority.account.clinicIds.includes(Number(clinic.id_clinica)));
     const ready = !!accountReady && fresh && forms.length > 0 && forms.every(form => form.state === 'receiving');
     const configured = !!accountReady && fresh && forms.length > 0 && forms.every(form => ['prepared', 'receiving'].includes(form.state));
     const actionRequired = !accountReady || forms.some(form => ['access_required', 'page_required', 'page_unknown', 'subscription_required'].includes(form.state));

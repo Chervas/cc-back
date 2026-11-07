@@ -498,13 +498,13 @@ function runningClaimWhere(jobId, expectedAttempt) {
   if (expectedAttempt != null && (!Number.isSafeInteger(expectedAttempt) || expectedAttempt < 1)) throw Error('invalid_job_claim_attempt');
   return { id: jobId, status: 'running', ...(expectedAttempt != null ? { attempts: expectedAttempt } : {}) };
 }
-async function settleRunningJob(jobId, patch = {}, expectedAttempt = null) {
+async function settleRunningJob(jobId, patch = {}, expectedAttempt = null, extraWhere = {}) {
   const [updated] = await JobRequest.update(
     {
       ...patch,
       updated_at: new Date(),
     },
-    { where: runningClaimWhere(jobId, expectedAttempt) }
+    { where: { ...runningClaimWhere(jobId, expectedAttempt), ...extraWhere } }
   );
 
   if (updated > 0) {
@@ -666,6 +666,7 @@ async function markWaiting(jobId, {
   errorMessage = null,
   resultSummary = null,
   syncLogId = null,
+  metaLeadCooldownProof = null,
 } = {}) {
   const patch = {
     status: 'waiting',
@@ -676,7 +677,10 @@ async function markWaiting(jobId, {
   if (syncLogId !== null && syncLogId !== undefined) {
     patch.sync_log_id = syncLogId;
   }
-  return settleRunningJob(jobId, patch, expectedAttempt);
+  const budget = metaLeadCooldownProof ? require('../lib/metaLeadBrokerCooldown')
+    .inspectRetryBudgetProof(metaLeadCooldownProof, jobId, expectedAttempt, nextRunAt) : null;
+  if (budget) patch.max_attempts = sequelize.literal('max_attempts + 1');
+  return settleRunningJob(jobId, patch, expectedAttempt, budget ? { type: budget.type, max_attempts: budget.maxAttempts } : {});
 }
 
 async function markCompleted(jobId, { syncLogId = null, resultSummary = null, expectedAttempt = null } = {}) {
@@ -735,6 +739,7 @@ async function recoverRunningJobAfterSettlementFailure(jobId, {
   errorMessage,
   resultSummary = null,
   syncLogId = null,
+  metaLeadCooldownProof = null,
 } = {}) {
   const recoveryStatus = ['completed', 'failed', 'waiting'].includes(status)
     ? status
@@ -753,8 +758,12 @@ async function recoverRunningJobAfterSettlementFailure(jobId, {
     patch.sync_log_id = syncLogId;
   }
 
+  const budget = metaLeadCooldownProof ? require('../lib/metaLeadBrokerCooldown')
+    .inspectRetryBudgetProof(metaLeadCooldownProof, jobId, expectedAttempt, nextRunAt) : null;
+  if (budget && recoveryStatus !== 'waiting') throw Error('meta_lead_cooldown_invalid');
+  if (budget) patch.max_attempts = sequelize.literal('max_attempts + 1');
   const [updated] = await JobRequest.update(patch, {
-    where: runningClaimWhere(jobId, expectedAttempt),
+    where: { ...runningClaimWhere(jobId, expectedAttempt), ...(budget ? { type: budget.type, max_attempts: budget.maxAttempts } : {}) },
   });
   const job = await JobRequest.findByPk(jobId);
   return {

@@ -14,14 +14,23 @@ function harness() {
     assigned: true, destination: 'native', destinationComplete: true, destinationCheckedAt: '2026-09-10T14:00:00Z',
     nativeForms: [{ id: '50', pageId: '40', name: 'Visit', metadataAccessible: true }, { id: '51', pageId: '40', name: 'Contact', metadataAccessible: true }] };
   const state = { campaign, queries: [], audits: [receipt(), receipt('51')],
-    pages: [{ metaAssetId: '40', metaAssetName: 'Page', assignmentScope: 'group', grupoClinicaId: 28, metaConnectionId: 7 }],
-    accounts: [{ metaAssetId: 'act_20', assignmentScope: 'group', grupoClinicaId: 28, metaConnectionId: 7 }],
+    pages: [{ id: 8, metaAssetId: '40', metaAssetName: 'Page', assignmentScope: 'group', grupoClinicaId: 28, metaConnectionId: 7 }],
+    accounts: [{ id: 11, metaAssetId: 'act_20', assignmentScope: 'group', grupoClinicaId: 28, metaConnectionId: 7 }],
     assignments: [{ scopeKey: 'group:28', metaConnectionId: 7 }], connections: [{ id: 7, expiresAt: '2099-01-01' }] };
   const models = { ClinicMetaAsset: { findAll: async ({ where }) => where.assetType === 'facebook_page' ? state.pages : state.accounts },
     MetaConnectionAssignment: { findAll: async () => state.assignments }, MetaConnection: { findAll: async () => state.connections },
-    LeadAttributionAudit: { findAll: async query => { state.queries.push(query); return state.audits; } }, LeadIntake: {} };
+    LeadAttributionAudit: { findAll: async query => { state.queries.push(query); return state.audits; } }, LeadIntake: {},
+    JobRequest: { findAll: async () => state.jobs } };
+  state.jobs = [{ id: 3, status: 'completed', payload: { asset_id: 8, account_asset_id: 11 }, result_summary: { proof: {
+    version: 2, app_id: '9', fingerprint: pageFingerprint({ ...state.pages[0], bindingFingerprint: 'bound' }),
+    checked_at: '2026-09-10T14:59:00Z', state: 'verified', job_id: 3, page_asset_id: 8, account_asset_id: 11 } } }];
+  const reader = { preparePair: async () => ({}), assertPair: async () => {
+    if (!state.assignments.length || !state.connections[0]?.expiresAt || !Number.isFinite(+new Date(state.connections[0].expiresAt))
+      || +new Date(state.connections[0].expiresAt) < Date.now()) throw Error('unavailable');
+    return { page: { appId: '9', clinicIds: [1] }, account: { clinicIds: [1] }, fingerprint: 'bound' };
+  } };
   return { state, read: () => loadNativeFormEvidence({ models, campaigns: [state.campaign],
-    selectedClinics: [{ id_clinica: 1, grupoClinicaId: 28 }], now }) };
+    selectedClinics: [{ id_clinica: 1, grupoClinicaId: 28 }], now, reader }) };
 }
 test('only a versioned exhaustive detector supplies native form IDs; legacy single-form guesses are not proof', () => {
   assert.deepEqual(nativeForms({ kind: 'lead_form', instant_form: { id: '50' } }), []);
@@ -85,20 +94,17 @@ test('native checks never query form evidence for unassigned or non-native campa
   assert.equal((await h.read()).size, 0); assert.equal(h.state.queries.length, 0);
 });
 test('duplicate effective page connections are not resolved arbitrarily', async () => {
-  const h = harness(); h.state.pages.push({ ...h.state.pages[0] });
+  const h = harness(); h.state.pages.push({ ...h.state.pages[0], id: 9 });
   assert.equal((await h.read()).get(h.state.campaign.id).reception.ready, false);
 });
 test('verified setup does not invent a received lead, and missing subscription overrides earlier receipts', async () => {
   const previous = process.env.META_APP_ID; process.env.META_APP_ID = '9';
   try {
-    const h = harness(); h.state.pages[0].pageAccessToken = 'private'; h.state.audits = [];
-    const page = h.state.pages[0];
-    page.additionalData = { campaign_lead_reception: { version: 1, fingerprint: pageFingerprint(page), app_id: '9',
-      checked_at: '2026-09-10T14:59:00Z', state: 'verified' } };
+    const h = harness(); h.state.audits = [];
     let result = (await h.read()).get(h.state.campaign.id);
     assert.equal(result.reception.ready, false); assert.ok(result.forms.every(form => form.state === 'prepared'));
     assert.ok(result.forms.every(form => form.receivedAt === null)); assert.ok(!JSON.stringify(result).includes('private'));
-    h.state.audits = [receipt(), receipt('51')]; page.additionalData.campaign_lead_reception.state = 'subscription_required';
+    h.state.audits = [receipt(), receipt('51')]; h.state.jobs[0].result_summary.proof.state = 'subscription_required';
     result = (await h.read()).get(h.state.campaign.id);
     assert.equal(result.reception.ready, false); assert.ok(result.forms.every(form => form.state === 'subscription_required'));
   } finally { if (previous === undefined) delete process.env.META_APP_ID; else process.env.META_APP_ID = previous; }

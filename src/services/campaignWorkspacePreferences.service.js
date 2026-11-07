@@ -51,6 +51,10 @@ async function saveWorkspacePreferences({ models, scope, actorId, input, loadInv
     }
     const setting = await models.CampaignWorkspaceSetting.findOne({ where: owner, transaction, lock: transaction.LOCK.UPDATE });
     if (!setting || Number(setting.version) !== input.expected_version) fail('workspace_version_conflict');
+    // Lead delivery routes are reviewed independently. Saving the ordinary
+    // measurement draft must preserve them and cannot accept route overrides.
+    if (setting.preferences?.meta_lead_routes !== undefined) preferences.meta_lead_routes =
+      require('./metaLeadRoutes.service').routes(setting.preferences.meta_lead_routes);
     if (!setting.accounts?.length) fail('workspace_accounts_required');
     const inventory = await loadInventory({ models, scope, transaction });
     validateAccountSelection({ expected_version: setting.version, accounts: setting.accounts }, inventory, setting);

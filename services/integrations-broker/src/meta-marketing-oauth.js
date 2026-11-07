@@ -183,7 +183,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
           append(request,principal,'integration.failed','unknown','oauth_exchange_unconfirmed');
           store.db.prepare("UPDATE meta_marketing_oauth_flows SET state='interrupted',updated_at=? WHERE id=?").run(now(),id);
         });
-        throw new BrokerError(e instanceof BrokerError ? new BrokerError(e.code).code : 'internal_error');
+        throw require('./meta-marketing-graph-pacing').safeError(e,'internal_error');
       } finally { clearTimeout(timer);running.delete(id); }
     },
   };

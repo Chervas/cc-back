@@ -8,6 +8,7 @@ const C=require('./meta-marketing-oauth-contract');
 const D=require('./meta-marketing-discovery-contract');
 const E=require('./meta-marketing-enrollment-contract');
 const A=require('./meta-marketing-ads-contract');
+const L=require('./meta-marketing-leads-contract');
 const {createMetaMarketingEnrollment}=require('./meta-marketing-enrollment');
 const {createMetaMarketingOAuthSecrets}=require('./meta-marketing-oauth-secrets');
 const {createMetaMarketingOAuthHttp}=require('./meta-marketing-oauth-http');
@@ -19,6 +20,7 @@ function validateConfig(config) {
   if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetEnrollment')) { fields.push('assetEnrollment'); if(typeof config.assetEnrollment!=='boolean'||config.assetEnrollment&&!config.assetDiscovery)fail('invalid_request'); }
   if (config && Object.hasOwn(config,'adsRead')) {fields.push('adsRead');A.config(config.adsRead);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
+  if (config && Object.hasOwn(config,'leadAds')) {fields.push('leadAds');L.config(config.leadAds);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if (config?.tlsRenewal) { fields.push('tlsRenewal');tlsReload.validateSettings(config.tlsRenewal); }
   if (!config || Object.keys(config).sort().join(',')!==fields.sort().join(',') || config.enabled!==true || config.cohort!==C.COHORT
     || !['dev','staging'].includes(config.environment) || !net.isIP(config.listenAddress) || !Number.isInteger(config.port)
@@ -51,11 +53,16 @@ function validateConfig(config) {
     }
   }
   if ([...slots].some(arn=>apps.has(arn))) fail('invalid_request');
+  if(config.leadAds){
+    const ref=config.leadAds.verifyTokenRef;if(!ref.secretArn.startsWith(`arn:aws:secretsmanager:eu-west-3:${ACCOUNT}:secret:${prefix(config.environment)}`)||slots.has(ref.secretArn)||apps.has(ref.secretArn))fail('invalid_request');
+    const enabled=policy.connections.filter(binding=>L.REQUIRED_SCOPES.every(s=>C.bindingFor(binding).scopes.includes(s)));
+    if(!enabled.length||new Set(enabled.map(binding=>C.bindingFor(binding).appId)).size!==1)fail('invalid_request');
+  }
   return config;
 }
-async function main(filename,{awsFactory=connectAws,http=createMetaMarketingOAuthHttp(),adsRequest,adsNow=Date.now,adsWait}={}) {
+async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest,leadsRequest,adsNow=Date.now,adsWait}={}) {
   const config=validateConfig(JSON.parse(privateFile(filename))),cert=privateFile(config.tlsCertFile,65536),key=privateFile(config.tlsKeyFile,65536);
-  const store=new BrokerStore(config.stateFile);let aws,oauth,enrollment,server,timer,draining,adsHttp,cursorKey;
+  const store=new BrokerStore(config.stateFile);let aws,oauth,enrollment,server,timer,draining,adsHttp,leadsHttp,cursorKey;
   try {
     if(config.standby) {
       // This is installation before the first cohort, never a way to hide
@@ -67,16 +74,21 @@ async function main(filename,{awsFactory=connectAws,http=createMetaMarketingOAut
     }
     aws=await awsFactory();
     const secrets=createMetaMarketingOAuthSecrets({client:aws.secrets,accountId:ACCOUNT,prefix:prefix(config.environment),kmsKeyArn:SECRET_KEY});
-    oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id)});
-    if(config.adsRead){
+    let pacer;
+    if(!config.standby){
       const {createPacing,sqliteState}=require('./meta-marketing-ads-pacing');
-      const pacer=createPacing({state:sqliteState(store.db),now:adsNow,...(adsWait?{wait:adsWait}:{})});
+      pacer=createPacing({state:sqliteState(store.db),now:adsNow,...(adsWait?{wait:adsWait}:{})});
+    }
+    http??=createMetaMarketingOAuthHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
+    oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id)});
+    if(config.adsRead||config.leadAds){
       cursorKey=require('node:crypto').randomBytes(32);
       const cursor=require('./provider-cursor').cursorCodec(cursorKey,adsNow);
-      adsHttp=require('./meta-marketing-ads-http').createMetaMarketingAdsHttp({pacer,cursor,now:adsNow,...(adsRequest?{request:adsRequest}:{})});
+      if(config.adsRead)adsHttp=require('./meta-marketing-ads-http').createMetaMarketingAdsHttp({pacer,cursor,now:adsNow,...(adsRequest?{request:adsRequest}:{})});
+      if(config.leadAds)leadsHttp=require('./meta-marketing-leads-http').createMetaMarketingLeadsHttp({pacer,cursor,now:adsNow,...(leadsRequest?{request:leadsRequest}:{})});
     }
-    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{})});
-    const broker=new Broker({store,policy:config.policy,secrets,policyResolver:enrollment,operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations}});
+    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{})});
+    const broker=new Broker({store,policy:config.policy,secrets,policyResolver:enrollment,...(config.leadAds?{transportProfile:'meta-marketing'}:{}),operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations}});
     const controlKeys=new Set(config.policy.principals.filter(p=>p.id.startsWith('control:')).map(p=>p.keyId));
     let ordinary=0,controls=0;
     server=createServer({async execute(...args) {
@@ -84,7 +96,7 @@ async function main(filename,{awsFactory=connectAws,http=createMetaMarketingOAut
       if (control?controls>=1:ordinary>=2) fail('rate_limited');
       if (control) controls++;else ordinary++;
       try {return await broker.execute(...args);} finally {if(control) controls--;else ordinary--;}
-    }},{cert,key});
+    }},{cert,key},config.leadAds?{transportProfile:'meta-marketing'}:{});
     server.maxConnections=16;server.timeout=35000;tlsReload.install(server,config,{cert,key});
     await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(config.port,config.listenAddress,resolve);});
     const tick=()=>{if(!draining)draining=drainAudit(store,aws.sink,{limit:20}).catch(()=>null).finally(()=>{draining=null;});};

@@ -162,7 +162,6 @@ const {
 } = require('../services/webEffectiveIntakeConfig.service');
 const {
   authenticatePublicIntakeRequest,
-  createMetaSignatureValidator,
   pickMatchingIntakeConfig,
 } = require('../lib/intakePublicAuthentication');
 
@@ -2953,10 +2952,7 @@ const isConsentModeEnabledForRecord = (record) => {
   return cfg.features?.consent_mode_enabled === true;
 };
 
-const META_VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN || process.env.META_VERIFY_TOKEN;
-const validateMetaSignature = createMetaSignatureValidator({
-  appSecret: process.env.META_APP_SECRET,
-});
+const metaLeadWebhook = require('../services/metaLeadWebhook.service').createMetaLeadWebhookHandlers();
 
 async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionSteps = {}, options = {}) {
   const normalizedEmail = normalizeEmail(leadPayload.email);
@@ -6543,28 +6539,11 @@ exports.receiveIntakeEvent = asyncHandler(async (req, res) => {
 });
 
 exports.verifyMetaWebhook = asyncHandler(async (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode === 'subscribe' && token && token === META_VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
-  }
-  return res.sendStatus(403);
+  return metaLeadWebhook.verify(req, res);
 });
 
 exports.receiveMetaWebhook = asyncHandler(async (req, res) => {
-  if (!validateMetaSignature(req)) {
-    return res.status(401).json({ message: 'Firma Meta inválida' });
-  }
-  try {
-    await require('../services/metaLeadReception.service').enqueueMetaLeadNotifications(req.body);
-    return res.status(200).json({ success: true });
-  } catch (error) {
-    // Acknowledge only durable receipts. Meta can redeliver a notification after a queue failure.
-    console.error('Meta lead receipt could not be queued:', error.code?.startsWith('meta_lead_') ? error.code : 'queue_unavailable');
-    return res.status(503).json({ success: false, code: 'meta_lead_receipt_unavailable' });
-  }
+  return metaLeadWebhook.receive(req, res);
 });
 
 const LEAD_LIST_SORT_FIELDS = new Set(['created_at', 'channel', 'source', 'status_lead', 'campana_id']);

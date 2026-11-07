@@ -43,6 +43,7 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
     if(proof){
       if(proof.scopeKey!==row.scope_key||proof.appId!==metadata.appId||proof.subjectId!==metadata.subjectId)conflict('meta_enrollment_identity_review');
       const canonicalId=proof.canonicalConnectionId===null?null:Number(proof.canonicalConnectionId);
+      if(proof.version===2&&canonicalId===null)conflict('meta_enrollment_identity_review');
       const original=rows.filter(v=>Number(v.id)===Number(proof.sourceConnectionId));
       if(original.length!==1||original[0].metaUserId!==metadata.subjectId
         ||rows.some(v=>Number(v.id)!==Number(proof.sourceConnectionId)&&Number(v.id)!==canonicalId))conflict('meta_enrollment_identity_review');
@@ -50,6 +51,7 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
       if(canonicalId!==null&&(!canonical||canonical.userId!==null||canonical.metaUserId!==metadata.subjectId||canonical.broker_app_id!==metadata.appId
         ||Number(canonical.credentials_external)!==1||Number(canonical.credentials_absent)!==1))conflict('meta_enrollment_identity_review');
       if(!canonical){
+        if(proof.version===2)conflict('meta_enrollment_identity_review');
         if(!create||owner)conflict('meta_enrollment_identity_review');
         const created=await models.MetaConnection.create({userId:null,metaUserId:metadata.subjectId,credentials_external:true,broker_app_id:metadata.appId,
           accessToken:null,expiresAt:metadata.expiresAt===null?null:new Date(metadata.expiresAt)},{transaction,logging:false});
@@ -60,6 +62,7 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
         ||owner&&(Number(owner.meta_connection_id)!==Number(canonical.id)||owner.app_id!==metadata.appId))conflict('meta_enrollment_identity_review');
       if(!create&&!owner)conflict('meta_enrollment_identity_review');
       if(!owner)await models.MetaMarketingEnrollmentIdentity.create({meta_user_id:metadata.subjectId,app_id:metadata.appId,meta_connection_id:Number(canonical.id),created_at:now()},{transaction,logging:false});
+      if(proof.version===2)await recovery.bindCanonical({flow:row,canonicalConnectionId:Number(canonical.id)},transaction);
       return Number(canonical.id);
     }
     if(rows.length>1)conflict('meta_enrollment_identity_review');
@@ -126,15 +129,18 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
     }
     if(proof){
       if(!Array.isArray(proof.mappingIds)||!proof.mappingIds.length||!Array.isArray(proof.aliases)
-        ||selected.some(v=>v.kind!=='ad_account')||selected.length!==proof.mappingIds.length)conflict('meta_enrollment_asset_in_use');
+        ||proof.version!==2&&(selected.some(v=>v.kind!=='ad_account')||selected.length!==proof.mappingIds.length))conflict('meta_enrollment_asset_in_use');
+      if(proof.version===2)require('./metaMarketingLegacyRecovery.service').selection(proof,selected);
       const expected=proof.aliases.filter(v=>proof.mappingIds.includes(Number(v.id)));
-      const current=await models.ClinicMetaAsset.findAll({...opts,attributes:['id','metaConnectionId','assetType','metaAssetId','assignmentScope','clinicaId','grupoClinicaId','isActive',
+      const current=await models.ClinicMetaAsset.findAll({...opts,attributes:proof.version===2?require('./metaMarketingLegacyRecovery.service').ALIAS_ATTRIBUTES:['id','metaConnectionId','assetType','metaAssetId','assignmentScope','clinicaId','grupoClinicaId','isActive',
         [literal('(pageAccessToken IS NULL AND waAccessToken IS NULL AND additionalData IS NULL)'),'credentials_absent']],where:{[Op.or]:aliases},order:[['id','ASC']],limit:201});
-      if(expected.length!==selected.length||current.length!==expected.length)conflict('meta_enrollment_asset_in_use');
+      if(proof.version!==2&&expected.length!==selected.length||current.length!==expected.length)conflict('meta_enrollment_asset_in_use');
+      if(proof.version===2&&require('./metaMarketingLegacyRecovery.service').encode(require('./metaMarketingLegacyRecovery.service').normalizeAliases(current))
+        !==require('./metaMarketingLegacyRecovery.service').encode(proof.legacyAliases))conflict('meta_enrollment_asset_in_use');
       for(const original of expected){
         const found=current.find(v=>Number(v.id)===Number(original.id));
         const ref='meta-'+original.assetType+':'+String(original.metaAssetId).replace(/^act_/,'');
-        if(!found||!selected.some(v=>v.assetRef===ref)||Number(found.credentials_absent)!==1
+        if(!found||!selected.some(v=>v.assetRef===ref)||proof.version!==2&&Number(found.credentials_absent)!==1
           ||Number(found.metaConnectionId)!==Number(proof.sourceConnectionId)
           ||['assetType','metaAssetId','assignmentScope','clinicaId','grupoClinicaId'].some(key=>found[key]!==original[key])
           ||Number(found.isActive)!==Number(original.isActive))conflict('meta_enrollment_asset_in_use');

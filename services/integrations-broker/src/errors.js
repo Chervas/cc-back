@@ -8,6 +8,7 @@ const STATUS = Object.freeze({
   optimization_reviewed: 409, optimization_review_pending: 409,
   business_profile_mutation_busy: 409, business_profile_regular_hours_required: 409,
   idempotency_conflict: 409, outcome_unknown: 409, rate_limited: 429,
+  meta_lead_receipt_review_required:409,
   whatsapp_capacity_concurrency: 429, whatsapp_capacity_minute: 429, whatsapp_capacity_fairness: 429, whatsapp_broker_draining: 503,
   provider_disabled: 503, provider_failed: 502, provider_timeout: 504,
   provider_unauthorized: 502, credential_revoked: 423, whatsapp_authorized_phone_unavailable: 423,
@@ -23,6 +24,8 @@ class BrokerError extends Error {
 const fail = code => { throw new BrokerError(code); };
 function publicError(error) {
   const code = error instanceof BrokerError ? error.code : 'internal_error';
-  return { status: STATUS[code], body: { error: { code } } };
+  const detail={code};
+  if(code==='rate_limited'&&Number.isSafeInteger(error.retryAfterMs)&&error.retryAfterMs>0&&error.retryAfterMs<=86400000)detail.retryAfterMs=error.retryAfterMs;
+  return { status: STATUS[code], body: { error: detail } };
 }
 module.exports = { BrokerError, fail, publicError };

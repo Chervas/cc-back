@@ -243,12 +243,14 @@ async function settleJobResult(job, result, options = {}) {
   }
 
   if (result.status === 'waiting') {
+    const metaLeadCooldownProof = require('../lib/metaLeadBrokerCooldown').retryBudgetProof(job, result, +(options.now || new Date()));
     await jobRequestsService.markWaiting(job.id, {
       expectedAttempt,
       nextRunAt: result.nextRunAt,
       errorMessage: result?.error?.message || null,
       resultSummary: result.result || null,
       syncLogId: result?.syncLogId || null,
+      ...(metaLeadCooldownProof ? { metaLeadCooldownProof } : {}),
     });
     return;
   }
@@ -284,10 +286,12 @@ async function settleJobResult(job, result, options = {}) {
 
 function buildSettlementRecovery(job, result, now = new Date()) {
   if (result?.status === 'waiting') {
+    const metaLeadCooldownProof = require('../lib/metaLeadBrokerCooldown').retryBudgetProof(job, result, +now);
     return {
       status: 'waiting',
       nextRunAt: result.nextRunAt,
       errorMessage: result?.error?.message || null,
+      ...(metaLeadCooldownProof ? { metaLeadCooldownProof } : {}),
     };
   }
 
@@ -350,6 +354,7 @@ async function processJob(job) {
             : null,
           resultSummary: result?.result || null,
           syncLogId: result?.syncLogId || null,
+          ...(recoveryState.metaLeadCooldownProof ? { metaLeadCooldownProof: recoveryState.metaLeadCooldownProof } : {}),
         });
         if (!recovery?.resolved) {
           recoveryError = new Error('El JobRequest sigue en running tras la recuperación inmediata');

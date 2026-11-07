@@ -185,8 +185,9 @@ test('los tres handlers públicos aplican el gate y el webhook Meta usa el valid
       `${startMarker} debe fallar cerrado con el gate común`
     );
   }
-  assert.match(source, /const validateMetaSignature = createMetaSignatureValidator\(\{\s*appSecret: process\.env\.META_APP_SECRET,\s*\}\);/);
+  assert.match(source, /const metaLeadWebhook = require\('\.\.\/services\/metaLeadWebhook\.service'\)\.createMetaLeadWebhookHandlers\(\)/);
+  assert.doesNotMatch(source, /process\.env\.META_APP_SECRET|META_WEBHOOK_VERIFY_TOKEN|META_VERIFY_TOKEN/);
   assert.doesNotMatch(source, /allowUnsignedForTests/,
     'el controller real no debe activar el bypass reservado para dependencias de test');
-  assert.match(source, /exports\.receiveMetaWebhook[\s\S]*?if \(!validateMetaSignature\(req\)\) \{\s*return res\.status\(401\)/);
+  assert.match(source, /exports\.receiveMetaWebhook[\s\S]*?return metaLeadWebhook\.receive\(req, res\)/);
 });

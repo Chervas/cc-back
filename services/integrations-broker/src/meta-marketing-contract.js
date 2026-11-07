@@ -9,7 +9,7 @@ const STATUS = 'meta.marketing.connection.read.v1';
 const ASSET = 'meta.marketing.asset.read.v1';
 const REVOKE = 'meta.marketing.asset.revoke.v1';
 const OPERATIONS = Object.freeze([STATUS, ASSET]);
-const SCOPES = Object.freeze(['public_profile', 'ads_read', 'pages_show_list', 'pages_read_engagement', 'instagram_basic']);
+const SCOPES = Object.freeze(['public_profile', 'ads_read', 'pages_show_list', 'pages_read_engagement', 'instagram_basic', 'leads_retrieval', 'pages_manage_ads', 'pages_manage_metadata']);
 const graphId = value => typeof value === 'string' && /^[1-9][0-9]{0,29}$/.test(value);
 const id = { type: 'string', pattern: '^[1-9][0-9]{0,29}$' };
 const pin = { type: 'string', pattern: '^[A-Za-z0-9-]{32,64}$' };

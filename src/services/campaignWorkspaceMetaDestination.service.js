@@ -103,7 +103,7 @@ async function graphList(path, fields, token, read, maxPages = 20) {
   return { rows, complete: false };
 }
 
-async function metaCampaignContext({ models, scope, reference, loadInventory, transaction = null, now = new Date() }) {
+async function metaCampaignContext({ models, scope, reference, loadInventory, transaction = null, now = new Date(), reader }) {
   const owner = settingScope(scope);
   if (transaction) {
     const record = await (scope.groupId ? models.GrupoClinica : models.Clinica).findByPk(owner.scope_id, query(transaction));
@@ -125,23 +125,48 @@ async function metaCampaignContext({ models, scope, reference, loadInventory, tr
     metaAssetId: { [Op.in]: [reference.account_id, `act_${reference.account_id}`] }, [Op.or]: [
       { assignmentScope: 'clinic', clinicaId: campaign.clinicId },
       ...(clinic.grupoClinicaId ? [{ assignmentScope: 'group', grupoClinicaId: clinic.grupoClinicaId }] : []),
-    ] }, ...query(transaction) });
-  const assignments = mappings.length ? await models.MetaConnectionAssignment.findAll({ where: { status: 'active',
-    scopeKey: { [Op.in]: mappings.map(mappingScopeKey) } }, ...query(transaction) }) : [];
-  const authorized = mappings.filter(row => assignments.some(assignment => assignment.scopeKey === mappingScopeKey(row)
-    && Number(assignment.metaConnectionId) === Number(row.metaConnectionId)));
+    ] }, attributes: ['id', 'metaConnectionId', 'metaAssetId', 'assignmentScope', 'clinicaId', 'grupoClinicaId'], ...query(transaction) });
+  const authorized = mappings;
   const preferred = authorized.filter(row => row.assignmentScope === owner.scope_type
     && Number(owner.scope_type === 'group' ? row.grupoClinicaId : row.clinicaId) === owner.scope_id);
   const eligible = preferred.length ? preferred : authorized;
   if (!eligible.length) fail('workspace_meta_permissions_required');
   if (new Set(eligible.map(row => Number(row.metaConnectionId))).size !== 1) fail('workspace_meta_connection_ambiguous');
-  const connection = await models.MetaConnection.findByPk(eligible[0].metaConnectionId, query(transaction));
-  if (!connection?.accessToken || !Number.isFinite(+new Date(connection.expiresAt))
-    || +new Date(connection.expiresAt) <= +now) fail('workspace_meta_permissions_required');
+  const source = reader || require('./metaMarketingLeadReader.service').forModels(models);
+  let accountContext, account;
+  try {
+    accountContext = await source.prepareAccount(Number(eligible[0].id), { transaction });
+    account = await source.assertAccount(accountContext, { transaction });
+  } catch { fail('workspace_meta_permissions_required'); }
+  if (account.id !== reference.account_id || !account.clinicIds.includes(Number(campaign.clinicId))) fail('workspace_meta_permissions_required');
   const cached = await models.ExternalCampaignInventory.findAll({ where: { provider: 'meta_ads',
     customer_id: { [Op.in]: [reference.account_id, `act_${reference.account_id}`] }, campaign_id: reference.campaign_id }, ...query(transaction) });
   if (cached.length > 1) fail('workspace_meta_inventory_ambiguous');
-  return { campaign, connection, setting, cached: cached[0] || null, revision: revision(cached[0]?.destination_detection) };
+  return { campaign, connection: { id: account.connectionId }, accountAssetId: Number(eligible[0].id), accountContext,
+    reader: source, authorityFingerprint: revision(account), setting, cached: cached[0] || null, revision: revision(cached[0]?.destination_detection) };
+}
+
+async function campaignPagePairs({ models, context, transaction = null }) {
+  const { Op } = require('sequelize');
+  const account = await context.reader.assertAccount(context.accountContext, { transaction });
+  const owners = await models.MetaMarketingBrokerBinding.findAll({ where: { mapping_id: context.accountAssetId, state: 'active' },
+    attributes: ['enrollment_id', 'scope_key', 'connection_ref'], ...query(transaction), limit: 2 });
+  if (owners.length !== 1 || !owners[0].enrollment_id || owners[0].scope_key !== account.scopeKey
+    || owners[0].connection_ref !== account.connectionRef) fail('workspace_meta_permissions_required');
+  // A canonical identity can legitimately serve different reviewed cohorts.
+  // Page discovery must retain the account's enrollment boundary.
+  const bindings = await models.MetaMarketingBrokerBinding.findAll({ where: { meta_connection_id: context.connection.id,
+    enrollment_id: owners[0].enrollment_id, scope_key: owners[0].scope_key, connection_ref: owners[0].connection_ref,
+    state: 'active', asset_ref: { [Op.like]: 'meta-facebook_page:%' } }, attributes: ['mapping_id'], ...query(transaction), limit: 101 });
+  if (bindings.length > 100) fail('workspace_meta_page_ambiguous');
+  const pairs = [];
+  for (const binding of bindings) {
+    const pair = await context.reader.preparePair(Number(binding.mapping_id), context.accountAssetId, { transaction });
+    const authority = await context.reader.assertPair(pair, { transaction });
+    if (authority.page.clinicIds.includes(Number(context.campaign.clinicId))) pairs.push({ pair, authority });
+  }
+  if (!pairs.length) fail('workspace_meta_page_connection_required');
+  return pairs;
 }
 
 async function saveDetection({ models, context, reference, detection, transaction, now }) {
@@ -154,14 +179,14 @@ async function saveDetection({ models, context, reference, detection, transactio
     last_seen_at: context.campaign.lastSeenAt || now }, { transaction });
 }
 
-async function refreshMetaCampaignDestinations({ models, scope, input, loadInventory, now = () => new Date(), read, authorize }) {
+async function refreshMetaCampaignDestinations({ models, scope, input, loadInventory, now = () => new Date(), reader, authorize }) {
   const reference = campaignReference(input, true);
   const clock = typeof now === 'function' ? now : () => now;
   const runId = crypto.randomUUID();
   // Invalidate the old proof before I/O. A rejected token, timeout or worker crash must not retain an old green check.
   const { context, pending } = await models.sequelize.transaction(async transaction => {
     if (authorize) await authorize({ transaction });
-    const context = await metaCampaignContext({ models, scope, reference, loadInventory, transaction, now: clock() });
+    const context = await metaCampaignContext({ models, scope, reference, loadInventory, transaction, now: clock(), reader });
     if (context.revision !== input.revision) fail('workspace_meta_check_conflict');
     const previous = context.cached?.destination_detection;
     const started = +new Date(previous?.check_started_at);
@@ -172,18 +197,24 @@ async function refreshMetaCampaignDestinations({ models, scope, input, loadInven
     await saveDetection({ models, context, reference, detection: pending, transaction, now: clock() });
     return { context, pending };
   });
-  const sourceRead = read || require('../lib/metaClient').metaGet;
   const deadline = Date.now() + 45000;
-  const graphRead = (path, options) => {
+  const brokerRead = (pair, operation, payload) => {
     const remaining = deadline - Date.now();
     if (remaining < 1000) fail('workspace_meta_check_timeout');
-    return sourceRead(path, { ...options, timeout: Math.min(10000, remaining), maxRetries: 0 });
+    return context.reader.read(pair, operation, payload, { timeoutMs: Math.min(30000, remaining) });
   };
   let detection; let failure;
   try {
-    const list = await graphList(`${reference.campaign_id}/ads`,
-      'id,account_id,campaign_id,effective_status,creative{actor_id,object_story_spec,link_url,call_to_action,call_to_action_type,asset_feed_spec}',
-      context.connection.accessToken, graphRead);
+    const pairs = await campaignPagePairs({ models, context });
+    const list = { rows: [], complete: false }; let cursor = null; const cursors = new Set();
+    for (let page = 0; page < 20; page++) {
+      const result = await brokerRead(pairs[0].pair, 'destinations', { campaignId: reference.campaign_id, cursor });
+      list.rows.push(...result.results.map(row => ({ ...row, creative: { object_story_spec: { page_id: row.creative.page_id,
+        ...(row.creative.lead_gen_form_id ? { link_data: { call_to_action: { value: { lead_gen_form_id: row.creative.lead_gen_form_id } } } } : {}) } } })));
+      if (result.nextCursor === null) { list.complete = true; break; }
+      if (cursors.has(result.nextCursor)) fail('workspace_meta_unavailable');
+      cursors.add(result.nextCursor); cursor = result.nextCursor;
+    }
     if (list.rows.some(row => !graphId(row.id) || row.account_id !== reference.account_id || row.campaign_id !== reference.campaign_id)) {
       fail('workspace_meta_identity_mismatch');
     }
@@ -196,9 +227,9 @@ async function refreshMetaCampaignDestinations({ models, scope, input, loadInven
     // Only form metadata is inspected here; neither contact answers nor test leads are requested.
     for (const form of detection.forms) {
       try {
-        const response = await graphRead(form.form_id, { accessToken: context.connection.accessToken,
-          params: { fields: 'id,name,page_id,status' }, timeout: 15000, source: 'campaign_workspace', operation: 'meta_form_check' });
-        const data = response.data;
+        const selected = pairs.filter(item => item.authority.page.id === form.page_id);
+        if (selected.length !== 1) fail('workspace_meta_page_connection_required');
+        const { form: data } = await brokerRead(selected[0].pair, 'form', { formId: form.form_id });
         if (data?.id !== form.form_id || !graphId(data?.page_id) || form.page_id && form.page_id !== data.page_id) fail('workspace_meta_identity_mismatch');
         form.page_id = data.page_id; form.name = typeof data.name === 'string' ? data.name.slice(0, 255) : null;
         form.status = typeof data.status === 'string' ? data.status.slice(0, 32) : null; form.metadata_accessible = true;
@@ -216,9 +247,9 @@ async function refreshMetaCampaignDestinations({ models, scope, input, loadInven
   }
   try { await models.sequelize.transaction(async transaction => {
     if (authorize) await authorize({ transaction });
-    const latest = await metaCampaignContext({ models, scope, reference, loadInventory, transaction, now: clock() });
+    const latest = await metaCampaignContext({ models, scope, reference, loadInventory, transaction, now: clock(), reader });
     if (latest.revision !== revision(pending) || Number(latest.connection.id) !== Number(context.connection.id)
-      || latest.connection.accessToken !== context.connection.accessToken
+      || latest.authorityFingerprint !== context.authorityFingerprint
       || latest.campaign.clinicId !== context.campaign.clinicId || revision(latest.setting) !== revision(context.setting)) fail('workspace_meta_check_conflict');
     // Update only the destination cache. No campaign, asset assignment, subscription or advertising setting changes.
     await saveDetection({ models, context: latest, reference, detection, transaction, now: clock() });
@@ -231,4 +262,4 @@ async function refreshMetaCampaignDestinations({ models, scope, input, loadInven
 }
 
 module.exports = { CHECK_LEASE_MS, destinationCheck, graphId, revision, campaignReference, webUrl, creativeDestinations, detectDestinations, graphList,
-  metaCampaignContext, refreshMetaCampaignDestinations };
+  metaCampaignContext, refreshMetaCampaignDestinations, campaignPagePairs };

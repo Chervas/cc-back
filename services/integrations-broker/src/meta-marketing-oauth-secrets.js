@@ -6,7 +6,8 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
   if (!/^\d{12}$/.test(accountId) || !/^\/clinicaclick\/integrations\/prod\/meta-marketing\/(dev|staging)\/$/.test(prefix)
     || !new RegExp(`^arn:aws:kms:eu-west-3:${accountId}:key/[a-f0-9-]+$`).test(kmsKeyArn)) fail('invalid_request');
   const base = `arn:aws:secretsmanager:eu-west-3:${accountId}:secret:${prefix}`;
-  const cleanError = e => new BrokerError(e instanceof BrokerError ? new BrokerError(e.code).code : 'secret_unavailable');
+  const cleanError = e => {const safe=new BrokerError(e instanceof BrokerError ? new BrokerError(e.code).code : 'secret_unavailable');
+    if(safe.code==='rate_limited'&&Number.isSafeInteger(e.retryAfterMs)&&e.retryAfterMs>0&&e.retryAfterMs<=86400000)safe.retryAfterMs=e.retryAfterMs;return safe;};
   const check = signal => { if (signal?.aborted) fail('provider_timeout'); };
   function arn(value) {
     if (typeof value !== 'string' || !value.startsWith(base) || value.length > 2048 || !/^[A-Za-z0-9/_+=.@-]+$/.test(value.slice(base.length))) fail('secret_unavailable');
@@ -107,6 +108,20 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
   return {
     encode: envelope,
     withApplication: (binding, work, signal) => application(binding, work, signal, true),
+    async withLeadVerification(binding, reference, work, signal) {
+      let body,borrowed,abort;
+      try {
+        const b=await slot(binding,signal);
+        if(!C.exact(reference,'secretArn,versionId')||reference.secretArn===binding.secretArn||reference.secretArn===binding.clientSecretArn||!/^[A-Za-z0-9-]{32,64}$/.test(reference.versionId)||typeof work!=='function')fail('invalid_request');
+        const result=await read(reference.secretArn,reference.versionId,'AWSCURRENT',signal);body=Buffer.from(result.SecretString);
+        const value=JSON.parse(body.toString('utf8'));
+        if(!C.exact(value,'version,kind,appId,verifyToken')||value.version!==1||value.kind!=='meta-marketing-leads-webhook-verify'||value.appId!==b.appId||typeof value.verifyToken!=='string'||!/^[A-Za-z0-9_-]{43,128}$/.test(value.verifyToken))fail('secret_unavailable');
+        borrowed=Buffer.from(value.verifyToken);delete value.verifyToken;abort=()=>borrowed.fill(0);signal?.addEventListener('abort',abort,{once:true});check(signal);
+        const output=await work(borrowed);check(signal);await slot(binding,signal);
+        const current=await describe(reference.secretArn,signal);if(!current.VersionIdsToStages[reference.versionId]?.includes('AWSCURRENT'))fail('secret_version_changed');
+        if(JSON.stringify(output)?.includes(borrowed.toString('utf8')))fail('secret_unavailable');return output;
+      }catch(e){throw cleanError(e);}finally{if(abort)signal?.removeEventListener('abort',abort);borrowed?.fill(0);body?.fill(0);}
+    },
     async withCandidate(binding, flow, digest, work, signal, options) {
       try { return await application(binding, appSecret => candidate(binding, flow, digest, signal,
         (token, metadata) => work({ token, appSecret, metadata }),options), signal, false); }

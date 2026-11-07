@@ -2,10 +2,14 @@
 const {BrokerError,fail}=require('./errors'),{eventFor}=require('./audit'),{canonical}=require('./canonical');
 const C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),M=require('./meta-marketing-contract'),E=require('./meta-marketing-enrollment-contract');
 const A=require('./meta-marketing-ads-contract');
-function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp}){
+const L=require('./meta-marketing-leads-contract'),{timingSafeEqual}=require('node:crypto');
+function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp}){
   if(adsRead!==undefined){A.config(adsRead);if(typeof adsHttp?.read!=='function')fail('invalid_request');}
+  if(leadAds!==undefined){L.config(leadAds);if(typeof leadsHttp?.read!=='function'||typeof secrets?.withLeadVerification!=='function')fail('invalid_request');}
+  const leadReceipts=leadAds?require('./meta-marketing-leads-receipts').createMetaMarketingLeadReceipts({store,now}):null;
   const adsOperation=operation=>Object.values(A.OPERATIONS).includes(operation);
-  const validateRead=(operation,payload)=>adsOperation(operation)?A.validate(operation,payload):M.validate(operation,payload);
+  const leadOperation=operation=>Object.values(L.OPERATIONS).includes(operation);
+  const validateRead=(operation,payload)=>leadOperation(operation)?L.validate(operation,payload):adsOperation(operation)?A.validate(operation,payload):M.validate(operation,payload);
   const roles=E.roles(environment),running=new Map();let closed=false;
   // One owner and one journal with OAuth. Claims/history survive cancellation.
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_enrollments (
@@ -67,16 +71,24 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     const asset=selected(row).find(a=>a.assetRef===request.assetRef);if(!asset)fail('scope_denied');
     const control=request.operation===M.REVOKE&&principal.id===roles.assetControl;
     if(!control){
-      if(principal.id!==roles.reader||![...M.OPERATIONS,...Object.values(A.OPERATIONS)].includes(request.operation))fail('scope_denied');
+      if(principal.id!==roles.reader||![...M.OPERATIONS,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS)].includes(request.operation))fail('scope_denied');
       // Metrics are a distinct, explicitly reviewed cohort. Merely adding an
       // operation to source or enrolling an account does not grant these reads.
       if(adsOperation(request.operation)&&(!adsRead||!adsRead.assetRefs.includes(request.assetRef)||asset.kind!=='ad_account'||!b.scopes.includes('ads_read')))fail('scope_denied');
       enrollmentActive(row,binding,{requireActive:true});
+      if(leadOperation(request.operation)){
+        L.validate(request.operation,request.payload);
+        if(!leadAds||asset.kind!=='facebook_page'||!leadAds.pairs.some(p=>p.pageAssetRef===asset.assetRef&&p.adAccountAssetRef===request.payload.adAccountAssetRef)||!L.REQUIRED_SCOPES.every(s=>b.scopes.includes(s)))fail('scope_denied');
+        const pair=leadAds.pairs.find(p=>p.pageAssetRef===asset.assetRef&&p.adAccountAssetRef===request.payload.adAccountAssetRef);if(pair.recipientClinicId!=null&&!b.clinicIds.includes(pair.recipientClinicId))fail('scope_denied');
+        const account=selected(row).find(a=>a.assetRef===request.payload.adAccountAssetRef&&a.kind==='ad_account');if(!account)fail('scope_denied');
+        if(request.operation===L.OPERATIONS.receiptRead)leadReceipts.read(request.payload.receiptRef,leadContext(row,binding,asset,account));
+        return {row,binding,asset,account,control};
+      }
     }
     return {row,binding,asset,control};
   }
   function resolve(request,principal,policy){
-    if(![...M.OPERATIONS,M.REVOKE,...Object.values(A.OPERATIONS)].includes(request.operation))return policy;
+    if(![...M.OPERATIONS,M.REVOKE,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS)].includes(request.operation))return policy;
     assetOwner(request,principal,policy);
     return {...policy,grants:[...policy.grants,{principalId:principal.id,tenantRef:request.tenantRef,
       connectionRef:request.connectionRef,assetRef:request.assetRef,operations:[request.operation]}]};
@@ -90,9 +102,14 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   const stop=predicate=>{for(const task of running.values())if(predicate(task))task.controller.abort();};
   const abortFlow=flowId=>stop(task=>task.flowId===flowId);
   const abortAsset=assetRef=>stop(task=>task.assets.flatMap(physical).includes(assetRef));
+  const leadContext=(row,binding,asset,account)=>{
+    const recipientClinicId=leadAds.pairs.find(p=>p.pageAssetRef===asset.assetRef&&p.adAccountAssetRef===account.assetRef)?.recipientClinicId??null;
+    return {app:C.bindingFor(binding).appId,subject:JSON.parse(flowFor(row.flow).credential_metadata).subjectId,
+      tenant:row.tenant,connection:row.connection,enrollment:row.id,generation:C.hash(JSON.stringify([row.selection_digest,asset.assetRef,account.assetRef,recipientClinicId])),page:asset.id,account:account.id,recipientClinicId};
+  };
   async function execute({request,principal,binding,policy}){
     if(closed)fail('connection_blocked');
-    const name=Object.keys(E.OPERATIONS).find(k=>E.OPERATIONS[k]===request.operation),isRead=M.OPERATIONS.includes(request.operation)||adsOperation(request.operation);
+    const name=Object.keys(E.OPERATIONS).find(k=>E.OPERATIONS[k]===request.operation),isRead=M.OPERATIONS.includes(request.operation)||adsOperation(request.operation)||leadOperation(request.operation);
     if(!name&&!isRead)fail('operation_denied');
     if(name){E.validators[name](request.payload);E.authorize({request,principal,binding},environment);}else validateRead(request.operation,request.payload);
     const authority=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey])),configDigest=C.fingerprint(binding);
@@ -135,7 +152,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       if(signal.aborted)fail('provider_timeout');authorityNow();
       const current=store.connection(binding.connectionRef,now());if(revision!==undefined&&current.revision!==revision)fail('connection_blocked');revision=current.revision;
       const flow=flowFor(flowId),metadata=flowActive(binding,flow);
-      if(isRead){const v=assetOwner(request,principal,policy);row=v.row;task.assets=selected(row);return {flow,metadata,assets:task.assets,asset:v.asset};}
+      if(isRead){const v=assetOwner(request,principal,policy);row=v.row;task.assets=selected(row);return {flow,metadata,assets:task.assets,asset:v.asset,account:v.account};}
       row=owned(request,rowFor(enrollmentId));
       if(row){
         const value=enrollmentActive(row,binding);
@@ -158,10 +175,20 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       // Successful prepare replay uses its immutable selection; activate and every
       // read verify the provider again. No code exchange or Secrets mutation here.
       let assets=context.assets,data;
-      if(!row||name==='activate'||isRead){
+      if(leadOperation(request.operation)&&[L.OPERATIONS.receiptAccept,L.OPERATIONS.challenge].includes(request.operation)){
+        if(request.operation===L.OPERATIONS.receiptAccept){
+          const raw=Buffer.from(request.payload.rawBase64,'base64');try{data=await secrets.withApplication(binding,appSecret=>{context=check();return leadReceipts.accept({raw,signature:request.payload.signature,appSecret,
+            context:leadContext(row,binding,context.asset,context.account),authorize:check});},signal);}finally{raw.fill(0);}
+        }else data=await secrets.withLeadVerification(binding,leadAds.verifyTokenRef,verifyToken=>{
+          check();const supplied=Buffer.from(request.payload.token);try{if(supplied.length!==verifyToken.length||!timingSafeEqual(supplied,verifyToken))fail('invalid_signature');return {challenge:request.payload.challenge};}finally{supplied.fill(0);}
+        },signal);
+        L.validateResponse(request.operation,data,request.payload);
+      }else if(!row||name==='activate'||isRead){
         data=await secrets.withCandidate(binding,context.flow,context.flow.secret_digest,async borrowed=>{
           context=check();if(JSON.stringify(borrowed.metadata)!==context.flow.credential_metadata)fail('secret_unavailable');
           if(isRead){
+            if(leadOperation(request.operation))return leadsHttp.read({binding,...borrowed,asset:context.asset,account:context.account,operation:request.operation,payload:request.payload,signal,authorize:check,
+              context:{principalId:principal.id,tenantRef:request.tenantRef,policyVersion:policy.version},...(request.operation===L.OPERATIONS.receiptRead?(()=>{const r=leadReceipts.read(request.payload.receiptRef,leadContext(row,binding,context.asset,context.account));return {receipt:r.event,recipientClinicId:r.recipientClinicId};})():{})});
             if(adsOperation(request.operation))return adsHttp.read({binding,...borrowed,asset:context.asset,operation:request.operation,payload:request.payload,signal,authorize:check,
               context:{principalId:principal.id,tenantRef:request.tenantRef,policyVersion:policy.version}});
             return http.readCandidate({binding,...borrowed,asset:context.asset,operation:request.operation,signal,authorize:check});
@@ -203,6 +230,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     authorize:context=>E.authorize(context,environment),execute}]));
   for(const op of M.OPERATIONS)operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>M.validate(op,payload),execute};
   if(adsRead)for(const op of Object.values(A.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>A.validate(op,payload),execute};
+  if(leadAds)for(const op of Object.values(L.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>L.validate(op,payload),persistResult:false,execute};
   operations[M.REVOKE]={provider:C.PROVIDER,control:'revoke_asset',validate:payload=>M.validate(M.REVOKE,payload),onRevoked:request=>abortAsset(request.assetRef)};
   return {operations,resolve,abortFlow,close(){closed=true;stop(()=>true);}};
 }
