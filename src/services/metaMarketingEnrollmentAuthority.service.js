@@ -116,10 +116,11 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
       const type=grant.assignmentScope,id=Number(type==='clinic'?grant.clinicaId:grant.grupoClinicaId);
       // Preserve an exact, Root-pinned V2 legacy grant with a redundant group
       // FK only when the current clinic actually belongs to that same group.
+      // A pinned disconnected grant stays disconnected; V2 grants no legacy access.
       // This is metadata compatibility, never a repair or a new generic grant.
       const pinnedClinicGroup=type==='clinic'&&proof?.version===2&&proof.scopeKey===row.scope_key
         &&JSON.stringify(proof.clinicIds)===row.clinic_ids&&C.positive(Number(proof.sourceConnectionId))
-        &&Number(grant.metaConnectionId)===Number(proof.sourceConnectionId)&&grant.status==='active'
+        &&Number(grant.metaConnectionId)===Number(proof.sourceConnectionId)&&['active','disconnected'].includes(grant.status)
         &&C.positive(Number(grant.grupoClinicaId))&&grants.filter(value=>value.scopeKey===grant.scopeKey).length===1
         &&clinics.some(clinic=>Number(clinic.id_clinica)===id&&Number(clinic.grupoClinicaId)===Number(grant.grupoClinicaId));
       if(!['clinic','group'].includes(type)||!C.positive(id)||grant.scopeKey!==type+':'+id

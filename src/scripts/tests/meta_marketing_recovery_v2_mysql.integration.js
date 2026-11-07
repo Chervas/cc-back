@@ -30,12 +30,13 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
     {id:392,metaConnectionId:158,assetType:'whatsapp_phone_number',metaAssetId:'901',assignmentScope:'clinic',clinicaId:72,isActive:true,waAccessToken:WA,whatsappAuthorizationId:randomUUID()},
   ]);
   await models.GrupoClinica.update({facebook_primary_asset_id:361},{where:{id_grupo:28}});
-  await models.MetaConnectionAssignment.bulkCreate([{scopeKey:'group:28',assignmentScope:'group',grupoClinicaId:28,clinicaId:null,metaConnectionId:158,status:'active'},
-    {scopeKey:'clinic:1',assignmentScope:'clinic',clinicaId:1,grupoClinicaId:null,metaConnectionId:158,status:'disconnected'},
+  await models.MetaConnectionAssignment.bulkCreate([{id:17,scopeKey:'group:28',assignmentScope:'group',grupoClinicaId:28,clinicaId:null,metaConnectionId:158,status:'active'},
+    {id:11,scopeKey:'clinic:1',assignmentScope:'clinic',clinicaId:1,grupoClinicaId:28,metaConnectionId:158,status:'disconnected'},
     {id:13,scopeKey:'clinic:66',assignmentScope:'clinic',clinicaId:66,grupoClinicaId:null,metaConnectionId:158,status:'active'},
     {id:18,scopeKey:'group:29',assignmentScope:'group',grupoClinicaId:29,clinicaId:null,metaConnectionId:158,status:'active'},
     {id:29,scopeKey:'clinic:72',assignmentScope:'clinic',clinicaId:72,grupoClinicaId:29,metaConnectionId:158,status:'active'}]);
   const grant29Before=G.encode(await models.MetaConnectionAssignment.findByPk(29,{raw:true}));
+  const grant11Before=G.encode(await models.MetaConnectionAssignment.findByPk(11,{raw:true}));
   await models.MetaScopeBlock.create({scope_key:'clinic:1',reason:'scope_disconnected',connection_id:158,actor_user_id:1,created_at:now()});
   const baseline=async()=>G.encode({source:await models.MetaConnection.findByPk(158,{raw:true}),wa:await models.ClinicMetaAsset.findByPk(392,{raw:true}),
     grants:await models.MetaConnectionAssignment.findAll({raw:true,order:[['id','ASC']]}),groups:await models.GrupoClinica.findAll({raw:true,order:[['id_grupo','ASC']]}),
@@ -129,8 +130,10 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   await activate(arriaga);
   assert.equal((await models.ClinicMetaAsset.findByPk(361)).pageAccessToken,null);assert.equal((await models.ClinicMetaAsset.findByPk(359)).metaConnectionId,159);
   const committed=id=>sql.transaction(t=>bindings.committed(id,t));await committed(arriaga.enrollment_id);
+  assert.equal(G.encode(await models.MetaConnectionAssignment.findByPk(11,{raw:true})),grant11Before);
+  assert.equal((await models.MetaConnectionAssignment.findByPk(11,{raw:true})).status,'disconnected');
   assert.equal(await baseline(),untouched);
-  report.checks.push('Actual SQL audit failures roll back reservation and activation; selected Page361 token cleared only with SHA-CAS+fresh grant in successful atomic audited commit');
+  report.checks.push('Actual SQL audit failures roll back reservation and activation; selected Page361 token cleared only with SHA-CAS+fresh grant; exact Arriaga clinic1/group28/source158 grant11 stays fully unchanged and disconnected after reserve/activate');
   const boundBS=await models.MetaMarketingRecovery.findByPk(records[1].recovery_id,{raw:true});
   assert.equal(boundBS.state,'flow_bound');assert(+boundBS.bound_at>=+boundBS.prepared_at&&+boundBS.bound_at<+boundBS.expires_at);
   const auditRepository=require('../../services/platformAudit.repository'),auditEvent=require('../../../services/platform-audit/src/event');
