@@ -1,5 +1,6 @@
 'use strict';
-const { DescribeSecretCommand, GetSecretValueCommand, PutSecretValueCommand, ListSecretVersionIdsCommand } = require('@aws-sdk/client-secrets-manager');
+const K=require('./meta-marketing-credential-shape');
+const { DescribeSecretCommand, GetSecretValueCommand, PutSecretValueCommand, ListSecretVersionIdsCommand, UpdateSecretVersionStageCommand } = require('@aws-sdk/client-secrets-manager');
 const { BrokerError, fail } = require('./errors'); const C = require('./meta-marketing-oauth-contract');
 const { tokenText } = require('./whatsapp-secrets');
 function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn }) {
@@ -7,6 +8,7 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
     || !new RegExp(`^arn:aws:kms:eu-west-3:${accountId}:key/[a-f0-9-]+$`).test(kmsKeyArn)) fail('invalid_request');
   const base = `arn:aws:secretsmanager:eu-west-3:${accountId}:secret:${prefix}`;
   const cleanError = e => {const safe=new BrokerError(e instanceof BrokerError ? new BrokerError(e.code).code : 'secret_unavailable');
+    if(e instanceof BrokerError&&e.knownNotApplied===true)Object.defineProperty(safe,'knownNotApplied',{value:true});
     if(safe.code==='rate_limited'&&Number.isSafeInteger(e.retryAfterMs)&&e.retryAfterMs>0&&e.retryAfterMs<=86400000)safe.retryAfterMs=e.retryAfterMs;return safe;};
   const check = signal => { if (signal?.aborted) fail('provider_timeout'); };
   function arn(value) {
@@ -28,7 +30,7 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
     return { ...value, VersionStages: stages };
   }
   async function slot(binding, signal) {
-    const b = C.bindingFor(binding); arn(binding.clientSecretArn); const r = await read(binding.secretArn, b.slotVersionId, 'AWSCURRENT', signal);
+    const b = K.bindingFor(binding); arn(binding.clientSecretArn); const r = await read(binding.secretArn, b.slotVersionId, 'AWSCURRENT', signal);
     const v = JSON.parse(r.SecretString);
     if (!C.exact(v, 'version,provider,connectionRef,scopeKey,clinicSetDigest,appId') || v.version !== 1 || v.provider !== 'meta-marketing-oauth-slot'
       || v.connectionRef !== binding.connectionRef || v.scopeKey !== b.scopeKey || v.clinicSetDigest !== C.clinicDigest(b) || v.appId !== b.appId) fail('secret_unavailable');
@@ -39,7 +41,7 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
     if (r.ARN !== binding.secretArn || !Array.isArray(r.Versions) || r.NextToken || r.Versions.length >= 90) fail('rate_limited');
   }
   function envelope(binding, flow, value, token) {
-    const b = C.bindingFor(binding), metadata = C.metadata(value, binding);
+    const b = K.bindingFor(binding), metadata = K.metadata(value, binding);
     if (!C.uuid(flow.id) || !/^[a-f0-9]{64}$/.test(flow.scope_digest) || flow.clinic_digest !== C.clinicDigest(b)
       || !Number.isSafeInteger(flow.expires_at) || flow.expires_at <= 0
       || !Buffer.isBuffer(token) || !tokenText(token.toString('utf8'))) fail('invalid_request');
@@ -53,17 +55,19 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
     let parsed, token;
     try {
       parsed = JSON.parse(body.toString('utf8')); token = Buffer.from(parsed.accessToken || '');
-      const metadata = Object.fromEntries(['appId','subjectId','tokenType','scopes','expiresAt','dataAccessExpiresAt','granularScopes'].map(k => [k, parsed[k]]));
+      const metadata = Object.fromEntries(K.keys(binding).map(k => [k, parsed[k]]));
       const encoded = envelope(binding, flow, metadata, token);
       try { if (!body.equals(encoded.body)) fail('secret_unavailable'); return encoded.metadata; } finally { encoded.body.fill(0); }
     } finally { token?.fill(0); if (parsed && typeof parsed === 'object') delete parsed.accessToken; }
   }
-  async function candidate(binding, flow, expectedDigest, signal, work, {requirePending=false}={}) {
-    if(typeof requirePending!=='boolean')fail('invalid_request');
+  async function candidate(binding, flow, expectedDigest, signal, work, {requirePending=false,retentionStage=null}={}) {
+    if(typeof requirePending!=='boolean'||retentionStage!==null&&!/^CC_META_CREDENTIAL_[a-f0-9]{32}$/.test(retentionStage)
+      ||requirePending&&retentionStage!==null)fail('invalid_request');
     const b = await slot(binding, signal);
     const app = await describe(binding.clientSecretArn, signal);
     if (!app.VersionIdsToStages[b.appVersionId]?.includes('AWSCURRENT')) fail('secret_version_changed');
-    const r = await read(binding.secretArn, flow.id, requirePending?'AWSPENDING':null, signal);
+    const requiredStage=retentionStage||(requirePending?'AWSPENDING':null);
+    const r = await read(binding.secretArn, flow.id, requiredStage, signal);
     // AWSPENDING is a convenience label, never the candidate identity: another
     // attempt may move it. Only the immutable version, digest and flow count.
     if (r.VersionStages.includes('AWSCURRENT') || r.VersionStages.includes('AWSPREVIOUS')) fail('secret_version_changed');
@@ -83,8 +87,8 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
       // An active enrollment must not depend on an unlabelled version which AWS
       // may garbage-collect. Version/digest remain its identity; this label pins
       // retention and is never moved by enrollment.
-      if(requirePending){const current=await describe(binding.secretArn,signal);
-        if(!current.VersionIdsToStages[flow.id]?.includes('AWSPENDING'))fail('secret_version_changed');}
+      if(requiredStage){const current=await describe(binding.secretArn,signal);
+        if(!current.VersionIdsToStages[flow.id]?.includes(requiredStage))fail('secret_version_changed');}
       return work ? result : { versionId: flow.id, digest: expectedDigest, metadata };
     } finally { if (abort) signal?.removeEventListener('abort', abort); borrowed?.fill(0); body.fill(0); }
   }
@@ -128,9 +132,33 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
       catch (e) { throw cleanError(e); }
     },
     async preflight(binding, signal) {
-      try { await slot(binding, signal); await capacity(binding, signal); const b = C.bindingFor(binding);
+      try { await slot(binding, signal); await capacity(binding, signal); const b = K.bindingFor(binding);
         const r = await describe(binding.clientSecretArn, signal); if (!r.VersionIdsToStages[b.appVersionId]?.includes('AWSCURRENT')) fail('secret_version_changed');
       } catch (e) { throw cleanError(e); }
+    },
+    async retentionCapacity(binding, reserve, signal) {
+      try {
+        await slot(binding,signal);await capacity(binding,signal);
+        if(!Number.isSafeInteger(reserve)||reserve<0||reserve>2)fail('invalid_request');
+        const info=await describe(binding.secretArn,signal),labels=new Set(Object.values(info.VersionIdsToStages).flat());
+        if(labels.size+reserve>20)fail('rate_limited');
+      }catch(e){throw cleanError(e);}
+    },
+    async retainCandidate(binding,flow,digest,label,signal) {
+      try {
+        if(!/^CC_META_CREDENTIAL_[a-f0-9]{32}$/.test(label)||!C.uuid(flow?.id))fail('invalid_request');
+        await candidate(binding,flow,digest,signal);
+        const before=await describe(binding.secretArn,signal),owners=Object.entries(before.VersionIdsToStages).filter(([,stages])=>stages.includes(label));
+        if(owners.length&&!(owners.length===1&&owners[0][0]===flow.id))fail('secret_version_changed');
+        if(!owners.length){
+          if(new Set(Object.values(before.VersionIdsToStages).flat()).size>=20)fail('rate_limited');
+          // Only the token slot, one immutable candidate version and our custom
+          // label. Never move AWSCURRENT/AWSPREVIOUS or touch the app secret.
+          const result=await client.send(new UpdateSecretVersionStageCommand({SecretId:binding.secretArn,VersionStage:label,MoveToVersionId:flow.id}),{abortSignal:signal});check(signal);
+          if(result.ARN!==binding.secretArn)fail('secret_unavailable');
+        }
+        await candidate(binding,flow,digest,signal,undefined,{retentionStage:label});
+      }catch(e){throw cleanError(e);}
     },
     async stage(binding, flow, encoded, signal) {
       let body;

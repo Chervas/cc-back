@@ -28,6 +28,36 @@ const WHATSAPP_PROVIDER_STATUSES = new Set(['sent', 'delivered', 'read', 'failed
 
 const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
   {
+    key: 'meta.credentials_expiring', category: 'system', severity: 'warning',
+    label: 'Meta: renovación no confirmada en el margen de seguridad',
+    description: 'Quedan tres días de validez real y el mantenimiento automático no ha confirmado la sustitución.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
+    key: 'meta.credentials_expired', category: 'system', severity: 'critical',
+    label: 'Meta: credenciales caducadas',
+    description: 'La fecha de validez de la versión actual o de su acceso a datos ha vencido.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
+    key: 'meta.permissions_lost', category: 'system', severity: 'critical',
+    label: 'Meta: autorización actual retirada',
+    description: 'Se ha confirmado una pérdida de permisos de la versión actualmente utilizada.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
+    key: 'meta.authorization_required', category: 'system', severity: 'warning',
+    label: 'Meta: se necesita una autorización',
+    description: 'Se requiere una acción de una persona autorizada para conservar o recuperar este acceso.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
+    key: 'meta.supervision_unknown', category: 'system', severity: 'warning',
+    label: 'Meta: supervisión sin confirmar durante seis horas',
+    description: 'La supervisión no puede confirmar el estado durante un periodo sostenido. No significa revocación.',
+    defaults: { panel: true, email: true, whatsapp: false },
+  },
+  {
     key: 'infrastructure.rds_event', category: 'system', severity: 'info',
     label: 'AWS RDS: evento operativo significativo',
     description: 'Eventos de disponibilidad, failover, errores, almacenamiento o mantenimiento; se omite ruido de backups.',
@@ -1142,7 +1172,9 @@ async function createPanelNotification(delivery) {
       icon: 'heroicons_outline:bell-alert',
       level: delivery.severity === 'critical' ? 'error' : delivery.severity,
       data: {
-        link: '/ajustes?panel=jobs-monitoring&tab=notifications',
+        link: require('../lib/metaMarketingCredentialAlerts').MANAGED.has(delivery.event_key)
+          ? require('../lib/metaMarketingCredentialAlerts').actionPath(delivery.metadata?.action_scope)
+          : '/ajustes?panel=jobs-monitoring&tab=notifications',
         useRouter: true,
         systemNotificationDeliveryId: delivery.id,
         source: delivery.metadata?.source || 'system_monitoring',
@@ -1178,6 +1210,8 @@ async function sendEmailDelivery(delivery) {
       incident_phase: delivery.metadata?.incident_phase || null,
       operational_summary: delivery.metadata?.operational_summary || null,
       event_key: delivery.event_key,
+      action_scope: require('../lib/metaMarketingCredentialAlerts').MANAGED.has(delivery.event_key)
+        ? delivery.metadata?.action_scope : null,
     },
     metadata: {
       contains_clinical_data: false,
@@ -1487,6 +1521,18 @@ async function runActiveChecks({ force = false } = {}) {
   const overview = await emailMonitoring.getOverview();
   const alerts = Array.isArray(overview?.alerts) ? overview.alerts : [];
   const queued = [];
+  let credentialAlertCount = 0;
+  try {
+    const checked = await require('./metaMarketingCredentialNotifications.service').runChecks({ models: db,
+      queue: queueNotification, channels: alert => enabledChannelsForEvent(setting, alert.eventKey),
+      namespace: jobRequestsService.getCurrentRuntimeNamespace() });
+    credentialAlertCount = checked.alerts;
+    queued.push(...checked.queued);
+  } catch {
+    // A failed observation neither invents permission loss nor closes an old
+    // incident. Other operational checks retain their normal behavior.
+    console.warn('[meta-credential-notifications] Check unavailable');
+  }
   const inboxHealth = require('../lib/whatsappInboxHealth');
   const snapshot = inboxHealth.read();
   const bindings = require('../lib/whatsappAuthorizedBrokerClient').configuration()?.bindings || [];
@@ -1552,7 +1598,7 @@ async function runActiveChecks({ force = false } = {}) {
   return {
     status: 'completed',
     checkedAt: new Date().toISOString(),
-    alertCount: alerts.length + receptionAlerts.length,
+    alertCount: alerts.length + receptionAlerts.length + credentialAlertCount,
     queued,
   };
 }

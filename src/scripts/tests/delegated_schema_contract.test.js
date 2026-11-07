@@ -33,3 +33,11 @@ test('grant preflight performs only metadata reads and returns no raw account or
   assert.deepEqual(sql, ['SELECT DATABASE() AS database_name', 'SHOW GRANTS FOR CURRENT_USER']);
   assert(!JSON.stringify(report).includes('FICTITIOUS_ACCOUNT'));
 });
+test('versioned Meta tables need independent metadata-only privilege proofs',async()=>{
+  const tables=require('../../lib/metaMarketingCredentialSchema').TABLES,queries=[];
+  const report=await P.checkTables(async sql=>{queries.push(sql);return sql.startsWith('SELECT')?[{database_name:'fixture'}]:
+    [{Grant:'GRANT SELECT, INSERT, UPDATE ON `fixture`.`'+tables[0]+'` TO FICTITIOUS_PRIVATE_ACCOUNT'}];},tables);
+  assert.equal(report[0].compatible,true);assert.equal(report[1].compatible,false);assert.deepEqual(report[1].missing,P.REQUIRED);
+  assert.deepEqual(queries,['SELECT DATABASE() AS database_name','SHOW GRANTS FOR CURRENT_USER']);
+  assert(!JSON.stringify(report).includes('FICTITIOUS_PRIVATE_ACCOUNT'));
+});

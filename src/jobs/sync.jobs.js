@@ -391,6 +391,9 @@ class MetaSyncJobs {
       metaMarketingRevocations: 'Confirma bloqueos Meta Ads/páginas/Instagram ya solicitados; no llama al proveedor ni afecta WhatsApp.',
       metaMarketingOAuth: 'Concilia candidatos OAuth Meta y cancelaciones aceptadas, sin recanjear códigos ni activar activos.',
       metaMarketingEnrollment: 'Concilia selecciones Meta confirmadas y retiradas mediante su diario, sin reactivar campañas ni repetir activaciones inciertas.',
+      metaMarketingBusiness: 'Concilia la autorización empresarial y la transferencia confirmada de sus mismos activos.',
+      metaMarketingCredentialMaintenance: 'Mantiene credenciales empresariales antes de su vencimiento con versiones y reintentos limitados.',
+      metaMarketingCredentialRenewal: 'Concilia renovaciones de credenciales solicitadas por el usuario, sin cambiar activos ni repetir códigos OAuth.',
       googleAdsRevocations: 'Confirma bloqueos Ads solicitados mediante el broker; no llama a Google ni modifica campañas.',
       googlePropertyRevocations: 'Confirma bloqueos SC/GA ya solicitados mediante el broker; no llama a Google ni envía conversiones.',
       googleOAuthReconciliation: 'Concilia reautorizaciones Google solicitadas y confirma su activación mediante el broker.',
@@ -448,6 +451,9 @@ class MetaSyncJobs {
         metaMarketingRevocations: '* * * * *',
         metaMarketingOAuth: '* * * * *',
         metaMarketingEnrollment: '* * * * *',
+        metaMarketingBusiness: '* * * * *',
+        metaMarketingCredentialMaintenance: '* * * * *',
+        metaMarketingCredentialRenewal: '* * * * *',
         googleAdsRevocations: '* * * * *',
         googlePropertyRevocations: '* * * * *',
         googleOAuthReconciliation: '* * * * *',
@@ -4597,6 +4603,15 @@ try {
   }
   async executeMetaMarketingEnrollment() {
     return require('../services/metaMarketingEnrollment.service').run();
+  }
+  async executeMetaMarketingCredentialRenewal() {
+    return require('../services/metaMarketingCredentialRenewal.service').run();
+  }
+  async executeMetaMarketingBusiness() {
+    return require('../services/metaMarketingBusiness.service').run();
+  }
+  async executeMetaMarketingCredentialMaintenance() {
+    return require('../services/metaMarketingCredentialMaintenance.service').run();
   }
   async executeGoogleAdsRevocations() {
     return require('../services/googleAdsRevocation.service').run();

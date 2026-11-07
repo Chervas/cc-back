@@ -1,9 +1,10 @@
 'use strict';
+const K=require('./meta-marketing-credential-shape'),B=require('./meta-marketing-business-issuer');
 const {BrokerError,fail}=require('./errors'),{eventFor}=require('./audit'),{canonical}=require('./canonical');
 const C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),M=require('./meta-marketing-contract'),E=require('./meta-marketing-enrollment-contract');
 const A=require('./meta-marketing-ads-contract');
 const L=require('./meta-marketing-leads-contract'),{timingSafeEqual}=require('node:crypto');
-function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp}){
+function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,credentialEpochs,businessConfig}){
   if(adsRead!==undefined){A.config(adsRead);if(typeof adsHttp?.read!=='function')fail('invalid_request');}
   if(leadAds!==undefined){L.config(leadAds);if(typeof leadsHttp?.read!=='function'||typeof secrets?.withLeadVerification!=='function')fail('invalid_request');}
   const leadReceipts=leadAds?require('./meta-marketing-leads-receipts').createMetaMarketingLeadReceipts({store,now}):null;
@@ -20,11 +21,18 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     CREATE TABLE IF NOT EXISTS meta_marketing_enrollment_assets (asset TEXT PRIMARY KEY,enrollment TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS meta_marketing_enrollment_claims (asset TEXT PRIMARY KEY,enrollment TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS meta_marketing_revoked_asset ON asset_revocations(asset);`);
+  if(businessConfig){B.config(businessConfig);store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_enrollment_successions(old_enrollment TEXT PRIMARY KEY,new_enrollment TEXT NOT NULL UNIQUE,handover TEXT NOT NULL,receipt_refs TEXT NOT NULL,activated_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS meta_marketing_business_receipt_lineage(receipt TEXT NOT NULL,new_enrollment TEXT NOT NULL,handover TEXT NOT NULL,old_enrollment TEXT NOT NULL,PRIMARY KEY(receipt,new_enrollment));
+    CREATE TABLE IF NOT EXISTS meta_marketing_business_barriers(enrollment TEXT PRIMARY KEY,handover TEXT NOT NULL,state TEXT NOT NULL,receipt_refs TEXT NOT NULL,receipt_digest TEXT NOT NULL,updated_at INTEGER NOT NULL);`);}
   const get=(sql,...args)=>store.db.prepare(sql).get(...args),rowFor=id=>get('SELECT * FROM meta_marketing_enrollments WHERE id=?',id);
   const flowFor=id=>get('SELECT * FROM meta_marketing_oauth_flows WHERE id=?',id);
-  const source=(policy,ref)=>{const b=policy.connections.find(v=>v.connectionRef===ref);C.bindingFor(b);return b;};
+  const source=(policy,ref)=>{const b=policy.connections.find(v=>v.connectionRef===ref);K.bindingFor(b);return b;};
   const physical=a=>[a.assetRef,...(a.parentPageId?['meta-facebook_page:'+a.parentPageId]:[])];
   const selected=row=>E.assets(JSON.parse(row.assets));
+  const succession=id=>businessConfig?get('SELECT * FROM meta_marketing_enrollment_successions WHERE old_enrollment=?',id):null;
+  function grantBinding(row,binding){const f=row?.flow&&flowFor(row.flow),m=f?.credential_metadata&&JSON.parse(f.credential_metadata);if(m?.tokenType!=='SYSTEM_USER')return B.baseBinding(binding);const candidates=B.configs(businessConfig).filter(c=>(m.issuerKind==='AGENCY_SYSTEM_USER')===(c.cohort===require('./meta-marketing-agency-contract').COHORT)&&c.configId===m.configId);if(candidates.length!==1)fail('scope_denied');return B.derive(B.baseBinding(binding),candidates[0],selected(row));}
+  function barrier(row){return businessConfig?get("SELECT * FROM meta_marketing_business_barriers WHERE enrollment=? AND state='closed'",row.id):null;}
+  function settledDuplicate(row,context,digest,event){if(!businessConfig)return false;const next=get('SELECT * FROM meta_marketing_business_receipt_lineage WHERE receipt=? AND new_enrollment=?',row.id,context.enrollment);return !!next&&row.app===context.app&&row.tenant===context.tenant&&row.connection===context.connection&&row.page===context.page&&row.account===context.account&&row.recipient_clinic===context.recipientClinicId&&row.form===event.form_id&&row.ad===event.ad_id&&row.body_digest===digest;}
   function owned(request,row){
     if(row&&(row.tenant!==request.tenantRef||row.connection!==request.connectionRef||row.scope!==request.assetRef||row.principal!==roles.gateway))fail('scope_denied');
     return row;
@@ -33,14 +41,14 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     const p=policy.principals.find(v=>v.id===principal.id);
     if(!p?.enabled||C.hash(JSON.stringify([p.id,p.keyId,p.publicKey]))!==authority)fail('scope_denied');return p;
   }
-  function flowActive(binding,flow){
-    const b=C.bindingFor(binding);
+  function flowActive(binding,flow,{allowExpired=false}={}){
+    const b=K.bindingFor(binding);
     if(closed)fail('connection_blocked');store.connection(binding.connectionRef,now());
     store.assertAssetActive({tenantRef:'clinic:'+b.clinicIds[0],connectionRef:binding.connectionRef,assetRef:'meta-enroll:'+b.scopeKey});
     if(!flow||flow.state!=='staged'||flow.connection!==binding.connectionRef||flow.tenant!=='clinic:'+b.clinicIds[0]
-      ||flow.asset!=='meta-enroll:'+b.scopeKey||flow.principal!==roles.gateway||flow.config_digest!==C.fingerprint(binding)||flow.clinic_digest!==C.clinicDigest(b))fail('scope_denied');
-    const metadata=C.metadata(JSON.parse(flow.credential_metadata),binding);
-    if([metadata.expiresAt,metadata.dataAccessExpiresAt].some(v=>v!==null&&v<=now()))fail('credential_revoked');
+      ||flow.asset!=='meta-enroll:'+b.scopeKey||flow.principal!==roles.gateway||flow.config_digest!==K.fingerprint(binding)||flow.clinic_digest!==C.clinicDigest(b))fail('scope_denied');
+    const metadata=K.metadata(JSON.parse(flow.credential_metadata),binding);
+    if(!allowExpired&&[metadata.expiresAt,metadata.dataAccessExpiresAt].some(v=>v!==null&&v<=now()))fail('credential_revoked');
     return metadata;
   }
   function exclusions(assets,id,requireClaims=false){
@@ -53,19 +61,22 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       if(rows.length!==chosen.length||rows.some(r=>r.enrollment!==id))fail('scope_denied');
     }
   }
-  function enrollmentActive(row,binding,{requireActive=false}={}){
-    if(!row||row.state==='revoked')fail('asset_revoked');
+  function enrollmentActive(row,binding,{requireActive=false,allowExpired=false}={}){
+    if(!row||row.state==='revoked')fail('asset_revoked');if(succession(row.id))fail('connection_blocked');
     if(requireActive&&row.state!=='active')fail('scope_denied');
-    const flow=flowFor(row.flow),metadata=flowActive(binding,flow),assets=selected(row);
+    const flow=flowFor(row.flow),originalMetadata=flowActive(binding,flow,{allowExpired:allowExpired||!!credentialEpochs}),assets=selected(row);
     if(row.tenant!==flow.tenant||row.connection!==flow.connection||row.scope!==flow.asset||row.principal!==flow.principal
-      ||row.config_digest!==C.fingerprint(binding)||row.scope_digest!==flow.scope_digest||row.candidate_digest!==flow.secret_digest
+      ||row.config_digest!==K.fingerprint(binding)||row.scope_digest!==flow.scope_digest||row.candidate_digest!==flow.secret_digest
       ||row.selection_digest!==E.selectionDigest(flow,binding,assets))fail('scope_denied');
-    exclusions(assets,row.id,true);return {flow,metadata,assets};
+    exclusions(assets,row.id,true);
+    const credential=credentialEpochs?credentialEpochs.current(row,binding):null,metadata=credential?.metadata||originalMetadata;
+    if(!allowExpired&&[metadata.expiresAt,metadata.dataAccessExpiresAt].some(v=>v!==null&&v<=now()))fail('credential_revoked');
+    return {flow:credential?.flow||flow,metadata,assets,credential};
   }
   function assetOwner(request,principal,policy){
     const lookup=get('SELECT enrollment FROM meta_marketing_enrollment_assets WHERE asset=?',request.assetRef);
-    if(!lookup)fail('scope_denied');const row=rowFor(lookup.enrollment),binding=source(policy,request.connectionRef);
-    const b=C.bindingFor(binding);
+    if(!lookup)fail('scope_denied');const row=rowFor(lookup.enrollment),binding=grantBinding(row,source(policy,request.connectionRef));
+    const b=K.bindingFor(binding);
     if(!row||row.tenant!==request.tenantRef||row.connection!==request.connectionRef||row.principal!==roles.gateway
       ||row.tenant!=='clinic:'+b.clinicIds[0]||row.scope!=='meta-enroll:'+b.scopeKey)fail('scope_denied');
     const asset=selected(row).find(a=>a.assetRef===request.assetRef);if(!asset)fail('scope_denied');
@@ -96,37 +107,40 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   }
   function receipt(row,binding){
     let accessBlocked=true;try{enrollmentActive(row,binding,{requireActive:true});accessBlocked=false;}catch{}
-    return {enrollmentId:row.id,flowId:row.flow,scopeKey:C.bindingFor(binding).scopeKey,scopeDigest:row.scope_digest,
-      candidateDigest:row.candidate_digest,selectionDigest:row.selection_digest,clinicSetDigest:C.clinicDigest(C.bindingFor(binding)),
-      assets:row.flow?selected(row):[],status:row.state,accessBlocked,preparedAt:row.prepared_at,activatedAt:row.activated_at};
+    return {enrollmentId:row.id,flowId:row.flow,scopeKey:K.bindingFor(binding).scopeKey,scopeDigest:row.scope_digest,
+      candidateDigest:row.candidate_digest,selectionDigest:row.selection_digest,clinicSetDigest:C.clinicDigest(K.bindingFor(binding)),
+      assets:row.flow?selected(row):[],status:succession(row.id)?'superseded':row.state,accessBlocked,preparedAt:row.prepared_at,activatedAt:row.activated_at};
   }
   const stop=predicate=>{for(const task of running.values())if(predicate(task))task.controller.abort();};
   const abortFlow=flowId=>stop(task=>task.flowId===flowId);
   const abortAsset=assetRef=>stop(task=>task.assets.flatMap(physical).includes(assetRef));
   const leadContext=(row,binding,asset,account)=>{
     const recipientClinicId=leadAds.pairs.find(p=>p.pageAssetRef===asset.assetRef&&p.adAccountAssetRef===account.assetRef)?.recipientClinicId??null;
-    return {app:C.bindingFor(binding).appId,subject:JSON.parse(flowFor(row.flow).credential_metadata).subjectId,
+    return {app:K.bindingFor(binding).appId,subject:JSON.parse(flowFor(row.flow).credential_metadata).subjectId,
       tenant:row.tenant,connection:row.connection,enrollment:row.id,generation:C.hash(JSON.stringify([row.selection_digest,asset.assetRef,account.assetRef,recipientClinicId])),page:asset.id,account:account.id,recipientClinicId};
   };
   async function execute({request,principal,binding,policy}){
     if(closed)fail('connection_blocked');
+    const initialRow=E.OPERATIONS.status===request.operation||E.OPERATIONS.revoke===request.operation?rowFor(request.payload.enrollmentId):[...M.OPERATIONS,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS)].includes(request.operation)?rowFor(get('SELECT enrollment FROM meta_marketing_enrollment_assets WHERE asset=?',request.assetRef)?.enrollment):null;
+    if(initialRow)binding=grantBinding(initialRow,binding);
     const name=Object.keys(E.OPERATIONS).find(k=>E.OPERATIONS[k]===request.operation),isRead=M.OPERATIONS.includes(request.operation)||adsOperation(request.operation)||leadOperation(request.operation);
     if(!name&&!isRead)fail('operation_denied');
     if(name){E.validators[name](request.payload);E.authorize({request,principal,binding},environment);}else validateRead(request.operation,request.payload);
-    const authority=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey])),configDigest=C.fingerprint(binding);
+    const authority=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey])),configDigest=K.fingerprint(binding);
     const commandDigest=C.hash(canonical({operation:request.operation,tenantRef:request.tenantRef,connectionRef:request.connectionRef,assetRef:request.assetRef,payload:request.payload}));
     const auditPolicy=leadOperation(request.operation)&&principal.id===L.ingressPrincipal(environment)?resolve(request,principal,policy):policy;
     const event=(action,result,reason)=>eventFor(request,principal,auditPolicy,action,result,reason,now());
     function authorityNow(){
       currentPrincipal(principal,policy,authority);
-      const fresh=source(policy,request.connectionRef);
-      if(C.fingerprint(fresh)!==configDigest)fail('scope_denied');
+      const fresh=grantBinding(initialRow,source(policy,request.connectionRef));
+      if(K.fingerprint(fresh)!==configDigest)fail('scope_denied');
       require('./auth').authorize(principal,request,isRead?resolve(request,principal,policy):policy);return fresh;
     }
     let row=name?owned(request,rowFor(request.payload.enrollmentId)):assetOwner(request,principal,policy).row;
     if(name==='status'){
       authorityNow();return {requestId:request.requestId,data:row?receipt(row,binding):{enrollmentId:request.payload.enrollmentId,status:'not_found',accessBlocked:true},replayed:false};
     }
+    if(name==='revoke'&&row&&succession(row.id)){authorityNow();return {requestId:request.requestId,data:receipt(row,binding),replayed:false};}
     if(name==='revoke'){
       const result=store.transaction(()=>{
         authorityNow();row=owned(request,rowFor(request.payload.enrollmentId));
@@ -150,11 +164,20 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     if(running.has(enrollmentId)||running.size>=2)fail('oauth_flow_busy');
     const task={enrollmentId,flowId,assets:row?.flow?selected(row):[],controller:new AbortController()};running.set(enrollmentId,task);
     const signal=task.controller.signal,timer=setTimeout(()=>task.controller.abort(),25000);timer.unref?.();let reserved=false,revision;
+    let credentialEpoch;
     const check=()=>{
       if(signal.aborted)fail('provider_timeout');authorityNow();
       const current=store.connection(binding.connectionRef,now());if(revision!==undefined&&current.revision!==revision)fail('connection_blocked');revision=current.revision;
+      if(isRead){
+        const v=assetOwner(request,principal,policy);row=v.row;const active=enrollmentActive(row,binding,{requireActive:true});task.assets=active.assets;
+        // HMAC acceptance/challenge do not borrow a user credential. Their
+        // stable grant/receipt generation survives a concurrent token renewal.
+        if(credentialEpochs&&![L.OPERATIONS.receiptAccept,L.OPERATIONS.challenge].includes(request.operation)){
+          if(credentialEpoch!==undefined&&credentialEpoch!==active.credential.epoch)fail('secret_version_changed');credentialEpoch=active.credential.epoch;
+        }
+        return {...active,assets:task.assets,asset:v.asset,account:v.account};
+      }
       const flow=flowFor(flowId),metadata=flowActive(binding,flow);
-      if(isRead){const v=assetOwner(request,principal,policy);row=v.row;task.assets=selected(row);return {flow,metadata,assets:task.assets,asset:v.asset,account:v.account};}
       row=owned(request,rowFor(enrollmentId));
       if(row){
         const value=enrollmentActive(row,binding);
@@ -180,7 +203,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       if(leadOperation(request.operation)&&[L.OPERATIONS.receiptAccept,L.OPERATIONS.challenge].includes(request.operation)){
         if(request.operation===L.OPERATIONS.receiptAccept){
           const raw=Buffer.from(request.payload.rawBase64,'base64');try{data=await secrets.withApplication(binding,appSecret=>{context=check();return leadReceipts.accept({raw,signature:request.payload.signature,appSecret,
-            context:leadContext(row,binding,context.asset,context.account),authorize:check});},signal);}finally{raw.fill(0);}
+            context:leadContext(row,binding,context.asset,context.account),authorize:check,allowNew:()=>!barrier(row),settledDuplicate});},signal);}finally{raw.fill(0);}
         }else data=await secrets.withLeadVerification(binding,leadAds.verifyTokenRef,verifyToken=>{
           check();const supplied=Buffer.from(request.payload.token);try{if(supplied.length!==verifyToken.length||!timingSafeEqual(supplied,verifyToken))fail('invalid_signature');return {challenge:request.payload.challenge};}finally{supplied.fill(0);}
         },signal);
@@ -200,7 +223,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
           const result=E.assets(refs.map(ref=>{const value=inventory.find(a=>a.assetRef===ref);if(!value)fail('scope_denied');return E.identity(value);}));
           if(row&&JSON.stringify(result)!==JSON.stringify(context.assets))fail('scope_denied');
           return result;
-        },signal,{requirePending:true});
+        },signal,context.credential?.retentionStage?{retentionStage:context.credential.retentionStage}:{requirePending:true});
         if(!isRead)assets=data;
       }
       context=check();if(!isRead)exclusions(assets,enrollmentId);task.assets=assets;
@@ -234,6 +257,42 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   if(adsRead)for(const op of Object.values(A.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>A.validate(op,payload),execute};
   if(leadAds)for(const op of Object.values(L.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>L.validate(op,payload),persistResult:false,execute};
   operations[M.REVOKE]={provider:C.PROVIDER,control:'revoke_asset',validate:payload=>M.validate(M.REVOKE,payload),onRevoked:request=>abortAsset(request.assetRef)};
-  return {operations,resolve,abortFlow,close(){closed=true;stop(()=>true);}};
+  return {operations,resolve,abortFlow,
+    bindingForEnrollment:grantBinding,
+    receiptForEnrollment(id,binding){const row=rowFor(id);if(!row)fail('scope_denied');return receipt(row,grantBinding(row,binding));},
+    activeOperations(id){return [...running.values()].filter(t=>t.enrollmentId===id).length;},
+    commitBusinessHandover({oldEnrollmentId,newEnrollmentId,flow,binding,assets,handoverId,receiptRefs}){
+      const old=rowFor(oldEnrollmentId);if(!old||old.state!=='active'||succession(old.id)||rowFor(newEnrollmentId)||!K.business(binding))fail('scope_denied');
+      const original=E.assets(JSON.parse(old.assets));if(JSON.stringify(original)!==JSON.stringify(E.assets(assets)))fail('scope_denied');exclusions(original,old.id,true);
+      if([...running.values()].some(t=>t.enrollmentId===old.id))fail('oauth_flow_busy');
+      const selectionDigest=E.selectionDigest(flow,binding,assets);
+      store.db.prepare("INSERT INTO meta_marketing_enrollments VALUES (?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?)").run(newEnrollmentId,flow.id,old.principal,old.tenant,old.connection,old.scope,K.fingerprint(binding),flow.scope_digest,flow.secret_digest,selectionDigest,JSON.stringify(assets),now(),now(),now());
+      const chosen=assets.map(a=>a.assetRef),physicalRefs=[...new Set(assets.flatMap(physical))];
+      for(const ref of chosen)if(store.db.prepare('UPDATE meta_marketing_enrollment_assets SET enrollment=? WHERE asset=? AND enrollment=?').run(newEnrollmentId,ref,old.id).changes!==1)fail('scope_denied');
+      for(const ref of physicalRefs)if(store.db.prepare('UPDATE meta_marketing_enrollment_claims SET enrollment=? WHERE asset=? AND enrollment=?').run(newEnrollmentId,ref,old.id).changes!==1)fail('scope_denied');
+      store.db.prepare('INSERT INTO meta_marketing_enrollment_successions VALUES (?,?,?,?,?)').run(old.id,newEnrollmentId,handoverId,JSON.stringify(receiptRefs),now());
+      for(const receiptRef of receiptRefs){const receiptRow=get('SELECT * FROM meta_marketing_lead_receipts WHERE id=?',receiptRef);if(!receiptRow||receiptRow.enrollment!==old.id&&!get('SELECT 1 FROM meta_marketing_business_receipt_lineage WHERE receipt=? AND new_enrollment=?',receiptRef,old.id))fail('scope_denied');store.db.prepare('INSERT INTO meta_marketing_business_receipt_lineage VALUES (?,?,?,?)').run(receiptRef,newEnrollmentId,handoverId,old.id);}
+      return receipt(rowFor(newEnrollmentId),binding);
+    },
+    renewalAuthority(enrollmentId,binding){
+      if(!credentialEpochs||!C.uuid(enrollmentId))fail('operation_denied');
+      const row=rowFor(enrollmentId);if(!row||row.state!=='active'||succession(row.id))fail('scope_denied');binding=grantBinding(row,binding);
+      const authority=enrollmentActive(row,binding,{requireActive:true,allowExpired:true});
+      return {row,binding,assets:authority.assets,credential:authority.credential};
+    },
+    assertRenewalCredential(enrollmentId,binding,metadata){
+      if(!credentialEpochs||!C.uuid(enrollmentId))fail('operation_denied');
+      const row=rowFor(enrollmentId),authority=enrollmentActive(row,grantBinding(row,B.baseBinding(binding)),{requireActive:true,allowExpired:true});
+      for(const asset of authority.assets)M.assertAssetCredential(metadata,asset);
+      for(const pair of leadAds?.pairs||[]){
+        const page=authority.assets.find(a=>a.assetRef===pair.pageAssetRef),account=authority.assets.find(a=>a.assetRef===pair.adAccountAssetRef);
+        if(!page||!account)continue;
+        for(const scope of L.REQUIRED_SCOPES){
+          if(!metadata.scopes.includes(scope))fail('oauth_credentials_incomplete');
+          const granular=metadata.granularScopes.find(value=>value.scope===scope);
+          if(granular&&!granular.targetIds.includes(scope==='ads_read'?account.id:page.id))fail('scope_denied');
+        }
+      }
+    },close(){closed=true;stop(()=>true);}};
 }
 module.exports={createMetaMarketingEnrollment};

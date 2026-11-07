@@ -1,4 +1,5 @@
 'use strict';
+const K=require('./meta-marketing-credential-shape');
 const https=require('node:https'),{createHmac}=require('node:crypto'),{BrokerError,fail}=require('./errors');
 const C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),M=require('./meta-marketing-contract'),E=require('./meta-marketing-enrollment-contract');
 const {tokenText}=require('./whatsapp-secrets');
@@ -6,8 +7,8 @@ function createMetaMarketingCandidateReadHttp({request=https.request,timeoutMs=8
   return async({binding,metadata,token,appSecret,asset,operation,signal,authorize})=>{
     if(!M.OPERATIONS.includes(operation)||typeof authorize!=='function'||!(signal instanceof AbortSignal)
       ||!Buffer.isBuffer(token)||!tokenText(token.toString('utf8'))||!Buffer.isBuffer(appSecret)||!/^[a-f0-9]{32}$/.test(appSecret.toString('ascii')))fail('invalid_request');
-    E.assets([asset]);C.metadata(metadata,binding);M.assertAssetCredential(metadata,asset);
-    const http=require('./meta-marketing-http').createMetaMarketingHttp({request,timeoutMs,pacer,appId:metadata.appId,now,authorize});
+    E.assets([asset]);K.metadata(metadata,binding);M.assertAssetCredential(metadata,asset);
+    const http=require('./meta-marketing-http').createMetaMarketingHttp({request,timeoutMs,pacer,appId:metadata.appId,now,authorize,graphVersion:metadata.graphVersion});
     const ownToken=Buffer.from(token),ownApp=Buffer.from(appSecret),appToken=Buffer.concat([Buffer.from(metadata.appId+'|'),ownApp]);
     const wipe=()=>{ownToken.fill(0);ownApp.fill(0);appToken.fill(0);};signal.addEventListener('abort',wipe,{once:true});
     const check=()=>{if(signal.aborted)fail('provider_timeout');authorize();};

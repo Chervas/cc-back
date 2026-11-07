@@ -3,13 +3,13 @@ const {randomUUID}=require('node:crypto'),{Op}=require('sequelize'),C=require('.
 const plain=v=>v?.get?v.get({plain:true}):v;
 const CLOSING=new Set(['meta_enrollment_disabled','meta_enrollment_scope_changed','meta_enrollment_scope_blocked','meta_enrollment_asset_revoked',
   'meta_enrollment_asset_in_use','meta_enrollment_assignment_review','meta_enrollment_identity_review','meta_oauth_scope_changed','meta_oauth_scope_forbidden',
-  'meta_oauth_scope_blocked','meta_oauth_session_required','auth_email_verification_required','asset_revoked','scope_denied','credential_revoked','connection_blocked','secret_version_changed']);
+  'meta_oauth_scope_blocked','meta_oauth_session_required','auth_email_verification_required','asset_revoked','scope_denied','credential_revoked','connection_blocked']);
 const SAFE=new Set([...CLOSING,'meta_enrollment_lease_lost','meta_enrollment_prepare_uncertain','meta_enrollment_activation_uncertain','meta_enrollment_not_active',
   'meta_enrollment_invalid','meta_enrollment_scope_forbidden','meta_enrollment_busy','meta_enrollment_unavailable',
-  'broker_response_invalid','broker_configuration_invalid','broker_timeout','broker_unavailable','rate_limited','audit_unavailable','outcome_unknown','provider_timeout']);
+    'broker_response_invalid','broker_configuration_invalid','broker_timeout','broker_unavailable','rate_limited','audit_unavailable','outcome_unknown','provider_timeout','meta_credential_renewal_required','secret_version_changed','meta_business_activation_uncertain']);
 const safe=error=>SAFE.has(error?.code)?error.code:'meta_enrollment_unavailable';
 const claimSql=id=>`SELECT enrollment_id FROM MetaMarketingEnrollmentRequests
-  WHERE delivery_due_at <= $now AND (lease_until IS NULL OR lease_until <= $now)
+  WHERE delivery_due_at <= $now AND state <> 'superseded' AND (lease_until IS NULL OR lease_until <= $now)
   ${id?'AND enrollment_id = $id':''} ORDER BY delivery_due_at,enrollment_id LIMIT 1 FOR UPDATE SKIP LOCKED`;
 function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_ENROLLMENT_ENABLED==='true',
   workerEnabled=()=>process.env.META_MARKETING_ENROLLMENT_WORKER_ENABLED==='true'}){
@@ -37,6 +37,7 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
     return row;
   }
   async function cancelLocked(row,transaction,actor){
+    if(row.state==='superseded')C.fail('meta_enrollment_not_active',409);
     if(['revoke_pending','revoked'].includes(row.state))return row;
     await bindings.record(row,'meta_enrollment_cancel_requested',transaction,actor);
     await models.MetaMarketingBrokerBinding.update({state:'blocked'},{where:{enrollment_id:row.enrollment_id},transaction,logging:false});
@@ -170,7 +171,9 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
           catch(error){
             failed++;const code=safe(error);if(code==='meta_enrollment_lease_lost')continue;
             try{
-              if(row.state!=='revoke_pending'&&(CLOSING.has(code)||[401,403,409].includes(error.httpStatus))){
+              if(row.state==='active'&&['meta_credential_renewal_required','credential_revoked','permissions_lost'].includes(error.code)){
+                await release(row,300000,'meta_credential_renewal_required');
+              }else if(row.state!=='revoke_pending'&&(CLOSING.has(code)||[401,403,409].includes(error.httpStatus))){
                 const pending=await tx(async transaction=>cancelLocked(await owned(row,transaction),transaction));cancelled++;
                 await release(pending,0,code);
               }else await release(row,Math.min(3600000,1000*2**Math.min(Number(row.attempts),12)),code);

@@ -6,7 +6,7 @@ const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerCli
 const SAFE = new Set(['meta_broker_binding_invalid','meta_broker_scope_changed','meta_broker_not_active','broker_cohort_disabled',
   'meta_broker_scope_forbidden','meta_broker_session_required','broker_response_invalid','broker_configuration_invalid',
   'broker_timeout','broker_unavailable','connection_blocked','asset_revoked','scope_denied','operation_denied','invalid_request',
-  'secret_unavailable','credential_revoked','provider_failed','provider_timeout','provider_unauthorized','rate_limited','audit_unavailable']);
+    'secret_unavailable','secret_version_changed','credential_revoked','provider_failed','provider_timeout','provider_unauthorized','rate_limited','audit_unavailable','meta_credential_renewal_required','meta_business_activation_uncertain']);
 const fail = code => { throw Object.assign(Error(code),{code}); };
 const exact = (value, keys) => value && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).sort().join(',') === keys.slice().sort().join(',');
 function projection(data, operation, expected, now) {
@@ -23,20 +23,24 @@ function projection(data, operation, expected, now) {
   for (const field of ['expiresAt','dataAccessExpiresAt']) if (data[field] !== null && (!Number.isSafeInteger(data[field]) || data[field] <= now)) fail('broker_response_invalid');
   return structuredClone(data);
 }
-function createMetaMarketingBrokerReader({ client, assertContext, now=Date.now }) {
+function createMetaMarketingBrokerReader({ client, assertContext, recordCredentialFailure, now=Date.now }) {
   if (typeof client?.execute !== 'function' || typeof assertContext !== 'function') fail('broker_configuration_invalid');
   return { async read(context,operation,{authorize,timeoutMs=30000,requestId=randomUUID()}={}) {
+    let observed;
     try {
       if (!C.OPERATIONS.includes(operation) || typeof authorize !== 'function' || !Number.isInteger(timeoutMs) || timeoutMs<1 || timeoutMs>30000 || typeof requestId!=='string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(requestId)) fail('invalid_request');
       const deadline=now()+timeoutMs;
-      const before=await assertContext(context);await authorize(structuredClone(before));
+      const before=await assertContext(context);observed=before;await authorize(structuredClone(before));
       if(now()>=deadline)fail('broker_timeout');
       const response=await client.execute({requestId,operation,connectionRef:before.connectionRef,assetRef:before.assetRef,tenantRef:before.tenantRef,payload:{}},{timeoutMs:deadline-now()});
       const after=await assertContext(context);await authorize(structuredClone(after));
       if(now()>=deadline)fail('broker_timeout');
       if(response?.requestId!==requestId)fail('broker_response_invalid');
       return projection(response.data,operation,after,now());
-    } catch(error) {fail(SAFE.has(error?.code)?error.code:'meta_broker_binding_invalid');}
+    } catch(error) {
+      if(observed&&typeof recordCredentialFailure==='function')try{await recordCredentialFailure(observed,error);}catch{}
+      fail(SAFE.has(error?.code)?error.code:'meta_broker_binding_invalid');
+    }
   } };
 }
 function createConfiguredMetaMarketingClient({env=process.env,createClient=createIntegrationsBrokerClient,transportProfile='default'}={}) {
@@ -62,13 +66,16 @@ function createConfiguredMetaMarketingClient({env=process.env,createClient=creat
 }
 function createMetaMarketingBroker(options) {
   const scope=createMetaMarketingBrokerScope(options);
-  return {...scope,...createMetaMarketingBrokerReader({client:options.client,assertContext:scope.assertContext,...(options.now?{now:options.now}:{})})};
+  return {...scope,recordCredentialFailure:options.recordCredentialFailure,
+    ...createMetaMarketingBrokerReader({client:options.client,assertContext:scope.assertContext,recordCredentialFailure:options.recordCredentialFailure,...(options.now?{now:options.now}:{})})};
 }
 const client=createConfiguredMetaMarketingClient();
 const modelServices=new WeakMap();
 function forModels(models) {
   if(!models||typeof models!=='object')fail('broker_configuration_invalid');
-  if(!modelServices.has(models))modelServices.set(models,createMetaMarketingBroker({client,...createMetaMarketingScopeRepository(()=>models)}));
+  if(!modelServices.has(models))modelServices.set(models,createMetaMarketingBroker({client,...createMetaMarketingScopeRepository(()=>models),
+    recordCredentialFailure:(state,error)=>require('./metaMarketingEffectiveCredential.service').createEffectiveCredentials({models})
+      .recordFailure({enrollmentId:state.enrollmentId,epoch:state.credentialEpoch,versionId:state.credentialVersionId},error)}));
   return modelServices.get(models);
 }
 module.exports={createMetaMarketingBrokerReader,createMetaMarketingBroker,createConfiguredMetaMarketingClient,forModels,projection};

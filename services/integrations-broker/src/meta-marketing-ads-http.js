@@ -1,4 +1,5 @@
 'use strict';
+const K=require('./meta-marketing-credential-shape');
 const https=require('node:https'),{createHmac}=require('node:crypto');
 const {BrokerError,fail}=require('./errors'),{tokenText}=require('./whatsapp-secrets');
 const A=require('./meta-marketing-ads-contract'),M=require('./meta-marketing-contract'),D=require('./meta-marketing-discovery-contract'),C=require('./meta-marketing-oauth-contract'),E=require('./meta-marketing-enrollment-contract');
@@ -16,7 +17,7 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
     if(Object.keys(input).some(k=>!['binding','metadata','token','appSecret','asset','operation','payload','signal','authorize','context'].includes(k))
       ||asset?.kind!=='ad_account'||!M.graphId(asset.id)||asset.assetRef!==`meta-ad_account:${asset.id}`||typeof authorize!=='function'||!(signal instanceof AbortSignal)
       ||!Buffer.isBuffer(token)||!tokenText(token.toString('utf8'))||!Buffer.isBuffer(appSecret)||!/^[a-f0-9]{32}$/.test(appSecret.toString('ascii')))fail('invalid_request');
-    E.assets([asset]);C.metadata(metadata,binding);M.assertAssetCredential(metadata,asset);
+    E.assets([asset]);K.metadata(metadata,binding);M.assertAssetCredential(metadata,asset);
     const codecScope={principalId:context?.principalId,tenantRef:context?.tenantRef,binding,assetRef:asset.assetRef,operation,policyVersion:context?.policyVersion};
     if(typeof codecScope.principalId!=='string'||!codecScope.principalId||typeof codecScope.tenantRef!=='string'||!codecScope.tenantRef||typeof codecScope.policyVersion!=='string'||!codecScope.policyVersion)fail('invalid_request');
     let after=null,pages=0;
@@ -29,7 +30,7 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
     const check=()=>{if(signal.aborted||now()>=deadline)fail('provider_timeout');authorize();};
     const pacedRequest=(work)=>pacer.run(scope,{signal,deadline},async()=>{check();const result=await work();check();return result;});
     const transport=(settings,callback)=>request(settings,res=>{const pct=usage(res.headers);observed=Math.max(observed,pct);pacer.observe(scope,pct);callback(res);});
-    const path=`/${M.GRAPH_VERSION}/act_${asset.id}/${['insights','actions'].includes(name)?'insights':name}`;
+    const path=`/${metadata.graphVersion||M.GRAPH_VERSION}/act_${asset.id}/${['insights','actions'].includes(name)?'insights':name}`;
     const fetchGraph=(targetPath,bearer)=>pacedRequest(()=>new Promise((resolve,reject)=>{
         let req,res,timer,settled=false,bytes=0;const chunks=[];
         const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);signal.removeEventListener('abort',abort);for(const b of chunks)b.fill(0);chunks.length=0;error?reject(error):resolve(value);};
@@ -50,7 +51,7 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
         }catch{finish(new BrokerError('provider_failed'));req?.destroy();}
       }));
     try{
-      const verify=async()=>{const raw=await fetchGraph(`/${M.GRAPH_VERSION}/debug_token?${new URLSearchParams({input_token:ownToken.toString('utf8')})}`,appToken);
+      const verify=async()=>{const raw=await fetchGraph(`/${metadata.graphVersion||M.GRAPH_VERSION}/debug_token?${new URLSearchParams({input_token:ownToken.toString('utf8')})}`,appToken);
         const fresh=D.fresh(raw,binding,metadata,now());M.assertAssetCredential(fresh,asset);return fresh;};
       await verify();const proof=createHmac('sha256',ownApp).update(ownToken).digest('hex');
       const query=new URLSearchParams({fields:A.FIELDS[name],limit:'50',appsecret_proof:proof});

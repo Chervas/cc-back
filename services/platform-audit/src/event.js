@@ -11,6 +11,8 @@ function exact(value, keys) {
     || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) fail();
 }
 function event(value) {
+  if ([29,30].includes(value?.version)) return require('./meta-business-continuity-event').metaBusinessContinuityEvent(value);
+  if (value?.version === 28) return require('./meta-credential-renewal-event').metaCredentialRenewalEvent(value);
   if (value?.version === 27) return require('./delegation-event').delegationEvent(value);
   if (value?.version === 26) return require('./whatsapp-connection-event').whatsappConnectionEvent(value);
   if (value?.version === 25) return require('./business-profile-mutation-event').businessProfileMutationEvent(value);

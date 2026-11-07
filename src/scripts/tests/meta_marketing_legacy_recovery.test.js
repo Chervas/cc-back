@@ -80,6 +80,7 @@ function fixture({ version = 1 } = {}) {
     await prepare(); flow(); const pending = await guard.forFlow(state.flow, tx); await canonical();
     const enrollmentId = randomUUID(); await guard.attachEnrollment({ flow: state.flow, enrollmentId }, tx);
     state.enrollment = { enrollment_id: enrollmentId, state: 'active', flow_id: state.flow.flow_id, scope_key: 'group:28', meta_connection_id: 159,
+      app_id: APP, meta_user_id: SUBJECT,
       mapping_ids: '[359]', candidate_digest: state.recovery.candidate_digest, lease_token: randomUUID(), attempts: 7 };
     state.bindings = [{ enrollment_id: enrollmentId, mapping_id: 359, meta_connection_id: 159, state: 'active' }];
     Object.assign(state.aliases[0], { metaConnectionId: 159, clinicaId: null, isActive: 1 });

@@ -1,8 +1,9 @@
 'use strict';
+const K=require('./meta-marketing-credential-shape');
 const https = require('node:https');
 const { BrokerError, fail } = require('./errors'), { tokenText } = require('./whatsapp-secrets');
 const C = require('./meta-marketing-oauth-contract'), M = require('./meta-marketing-contract');
-function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 8000, now = () => Date.now(),pacer } = {}) {
+function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 8000, now = () => Date.now(),pacer,agencyBootstrap } = {}) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000) fail('invalid_request');
   async function exchange(params, signal) {
     if (signal.aborted) fail('provider_timeout');
@@ -50,9 +51,12 @@ function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 800
     }));
   }
   return {
+    verifyBusiness:input=>require('./meta-marketing-agency-contract').isBinding(input.binding)?require('./meta-marketing-agency-http').createMetaMarketingAgencyHttp({request,timeoutMs,now,pacer,bootstrap:agencyBootstrap}).verifyPages(input):Promise.resolve(true),
     discover: require('./meta-marketing-discovery-http').createMetaMarketingDiscoveryHttp({ request, timeoutMs, now,pacer }),
     readCandidate: require('./meta-marketing-candidate-read-http').createMetaMarketingCandidateReadHttp({ request, timeoutMs, now,pacer }),
-    async withExchangedToken({ binding, code, appSecret, signal: callerSignal }, work) {
+    async withExchangedToken({ binding, flowId, code, appSecret, signal: callerSignal,authorize=()=>{} }, work) {
+      if(require('./meta-marketing-agency-contract').isBinding(binding))return require('./meta-marketing-agency-http').createMetaMarketingAgencyHttp({request,timeoutMs,now,pacer,bootstrap:agencyBootstrap}).withExchangedToken({binding,flowId,code,appSecret,signal:callerSignal||AbortSignal.timeout(25000),authorize},work);
+      if(K.business(binding))return require('./meta-marketing-business-http').createMetaMarketingBusinessHttp({request,timeoutMs,now,pacer}).withExchangedToken({binding,code,appSecret,signal:callerSignal||AbortSignal.timeout(25000),authorize},work);
       const b = C.bindingFor(binding);
       if (!Buffer.isBuffer(code) || !/^[\x21-\x7e]{1,4096}$/.test(code.toString('latin1'))
         || !Buffer.isBuffer(appSecret) || !/^[a-f0-9]{32}$/.test(appSecret.toString('latin1'))

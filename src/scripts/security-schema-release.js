@@ -147,10 +147,15 @@ async function run(argv) {
         const delegationGrants = env.AUTH_DELEGATION_ENABLED === 'true' || requireDelegation
           ? await delegationPreflight.check(query) : null;
         if (delegationGrants && !delegationGrants.compatible) compatibility.compatible = false;
+        const credentialGroup=info.contract.featureGroups?.meta_marketing_credentials;
+        const credentialGrants=credentialGroup?.required===true
+          ?await delegationPreflight.checkTables(query,credentialGroup.tables):null;
+        if(credentialGrants?.some(row=>!row.compatible))compatibility.compatible=false;
         const report = { status: compatibility.compatible ? 'compatible' : 'incompatible', runtime: options.runtime,
           revision: info.revision, contractDigest: info.contractDigest, snapshotDigest: digest(before),
           settings: settings(env), checkedTables: Object.keys(info.contract.tables).length,
           disabledFeatureGroups: info.contract.disabledFeatureGroups || [], ...(delegationGrants ? { delegationGrants } : {}),
+          ...(credentialGrants?{credentialGrants}:{}),
           ...(opened ? { transportProof: opened.proof } : {}), ...compatibility };
         writeJson(options.out, report); if (binding) publicDatabase.validateBinding(binding, options.runtime); return report;
       }

@@ -32,6 +32,12 @@ function metaLeadCooldownError(value, status, headers = {}) {
     || Number(header) !== Math.ceil(delay / 1000))) throw error('broker_response_invalid');
   return Object.assign(error('rate_limited'), { retryAfterMs: delay });
 }
+function metaMaintenanceCooldownError(value,status,headers={}){
+  if(status!==429||value?.error?.code!=='rate_limited')return null;
+  if(value&&Object.getPrototypeOf(value)===Object.prototype&&Object.keys(value).join(',')==='error'
+    &&value.error&&Object.getPrototypeOf(value.error)===Object.prototype&&Object.keys(value.error).join(',')==='code')return error('rate_limited');
+  return metaLeadCooldownError(value,status,headers);
+}
 function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, ca, timeoutMs = 15000, transportProfile = 'default' }) {
   const ai = transportProfile === 'ai';
   const email = transportProfile === 'email';
@@ -84,6 +90,9 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
                 const cooldown = metaLeadCooldownError(value, res.statusCode, res.headers);
                 if (cooldown) return finish(cooldown);
               }
+              if(command.operation?.startsWith('meta.marketing.credential.maintenance.')&&res.statusCode!==200){
+                const cooldown=metaMaintenanceCooldownError(value,res.statusCode,res.headers);if(cooldown)return finish(cooldown);
+              }
               if (res.statusCode !== 200) return finish(error(SAFE_CODES.has(value?.error?.code) ? value.error.code : 'broker_unavailable'));
               if (value.requestId !== requestId || typeof value.replayed !== 'boolean' || !value.data || typeof value.data !== 'object' || Array.isArray(value.data)) throw Error();
               finish(null, value);
@@ -107,4 +116,4 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
     },
   };
 }
-module.exports = { createIntegrationsBrokerClient, metaLeadCooldownError };
+module.exports = { createIntegrationsBrokerClient, metaLeadCooldownError, metaMaintenanceCooldownError };

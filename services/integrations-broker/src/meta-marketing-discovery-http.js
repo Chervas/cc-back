@@ -1,9 +1,10 @@
 'use strict';
+const K=require('./meta-marketing-credential-shape');
 const https=require('node:https'),{createHmac}=require('node:crypto'),{BrokerError,fail}=require('./errors');
 const C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),M=require('./meta-marketing-contract'),{tokenText}=require('./whatsapp-secrets');
 function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,now=()=>Date.now(),pacer}={}){
   if(!Number.isInteger(timeoutMs)||timeoutMs<1||timeoutMs>10000)fail('invalid_request');
-  async function page({subjectId,edge,fields,after,token,proof,signal,budget,appId,authorize}){
+  async function page({subjectId,edge,fields,after,token,proof,signal,budget,appId,authorize,graphVersion}){
     if(signal.aborted)fail('provider_timeout');
     if(++budget.pages>D.MAX_PAGES)fail('provider_failed');
     const params=new URLSearchParams({fields,limit:'100',appsecret_proof:proof});if(after)params.set('after',after);
@@ -14,7 +15,7 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
       const abort=()=>{finish(new BrokerError('provider_timeout'));res?.destroy();req?.destroy();};
       timer=setTimeout(abort,timeoutMs);timer.unref?.();
       try{
-        req=pacing.request({protocol:'https:',hostname:'graph.facebook.com',port:443,method:'GET',path:`/${M.GRAPH_VERSION}/${subjectId}/${edge}?${params}`,
+        req=pacing.request({protocol:'https:',hostname:'graph.facebook.com',port:443,method:'GET',path:`/${graphVersion||M.GRAPH_VERSION}/${subjectId}/${edge}?${params}`,
           agent:false,rejectUnauthorized:true,minVersion:'TLSv1.2',headers:{authorization:'Bearer '+token.toString('utf8'),accept:'application/json','accept-encoding':'identity'}},response=>{
           res=response;if(settled){res.destroy();return;}
           if(String(res.headers['content-type']||'').split(';')[0].trim().toLowerCase()!=='application/json'||!['','identity'].includes(String(res.headers['content-encoding']||'').toLowerCase())
@@ -51,26 +52,26 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
   return async({binding,metadata,token,appSecret,signal,authorize})=>{
     if(!Buffer.isBuffer(token)||!tokenText(token.toString('utf8'))||!Buffer.isBuffer(appSecret)||!/^[a-f0-9]{32}$/.test(appSecret.toString('ascii'))||!(signal instanceof AbortSignal))fail('invalid_request');
     if(typeof authorize!=='function')fail('invalid_request');
-    C.metadata(metadata,binding);const ownToken=Buffer.from(token),ownApp=Buffer.from(appSecret),appToken=Buffer.concat([Buffer.from(metadata.appId+'|'),ownApp]);
-    const inspect=require('./meta-marketing-http').createMetaMarketingHttp({request,timeoutMs,pacer,appId:metadata.appId,now,authorize});
+    K.metadata(metadata,binding);const ownToken=Buffer.from(token),ownApp=Buffer.from(appSecret),appToken=Buffer.concat([Buffer.from(metadata.appId+'|'),ownApp]);
+    const inspect=require('./meta-marketing-http').createMetaMarketingHttp({request,timeoutMs,pacer,appId:metadata.appId,now,authorize,graphVersion:metadata.graphVersion});
     const wipe=()=>{ownToken.fill(0);ownApp.fill(0);appToken.fill(0);};signal.addEventListener('abort',wipe,{once:true});
     try{
       const verify=async()=>{authorize();if(signal.aborted)fail('provider_timeout');const raw=await inspect({action:'inspect',id:metadata.appId,token:appToken,candidate:ownToken,signal});authorize();if(signal.aborted)fail('provider_timeout');D.fresh(raw,binding,metadata,now());};
       await verify();const available=D.kinds(metadata),assets=[],seen=new Set(),budget={pages:0,bytes:0};
       const proof=createHmac('sha256',ownApp).update(ownToken).digest('hex');
-      const push=a=>{M.assertAssetCredential(metadata,a);if(seen.has(a.assetRef)||assets.length>=D.MAX_ASSETS)fail('provider_failed');seen.add(a.assetRef);assets.push(a);};
+      const push=a=>{if(seen.has(a.assetRef)||seen.size>=D.MAX_ASSETS)fail('provider_failed');seen.add(a.assetRef);if(K.business(binding)&&!K.bindingFor(binding).credentialAssetRefs?.includes(a.assetRef))return;M.assertAssetCredential(metadata,a);assets.push(a);};
       const edges=[];
-      if(available.includes('ad_account'))edges.push(['adaccounts','id,account_id,name,account_status,currency,timezone_name']);
-      if(available.includes('facebook_page'))edges.push(['accounts','id,name'+(available.includes('instagram_business')?',instagram_business_account{id,name,username}':'')]);
+      if(available.includes('ad_account'))edges.push([K.business(binding)?'assigned_ad_accounts':'adaccounts','id,account_id,name,account_status,currency,timezone_name']);
+      if(available.includes('facebook_page'))edges.push([K.business(binding)?'assigned_pages':'accounts','id,name'+(available.includes('instagram_business')?',instagram_business_account{id,name,username}':'')]);
       if(!edges.length)fail('scope_denied');
       for(const [edge,fields]of edges){
         let after=null;const cursors=new Set();
         do{
           authorize();
-          const r=await page({subjectId:metadata.subjectId,edge,fields,after,token:ownToken,proof,signal,budget,appId:metadata.appId,authorize});if(signal.aborted)fail('provider_timeout');
+          const r=await page({subjectId:metadata.subjectId,edge,fields,after,token:ownToken,proof,signal,budget,appId:metadata.appId,authorize,graphVersion:K.graphVersion(binding)});if(signal.aborted)fail('provider_timeout');
           authorize();
           for(const raw of r.rows){
-            if(edge==='adaccounts'){
+            if(['adaccounts','assigned_ad_accounts'].includes(edge)){
               if(!C.exact(raw,'id,account_id,name,account_status,currency,timezone_name'))fail('provider_failed');push(D.project(raw,'ad_account'));
             }else{
               if(!raw||Object.getPrototypeOf(raw)!==Object.prototype||Object.keys(raw).some(k=>!['id','name',...(available.includes('instagram_business')?['instagram_business_account']:[])].includes(k)))fail('provider_failed');

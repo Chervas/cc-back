@@ -160,6 +160,16 @@ function renderOpsSystemAlert(context = {}) {
   const occurredAt = cleanString(context.occurred_at) || '';
   let subject = '[Clinicaclick] Alerta operativa';
   const managed = ['whatsapp.reception_attention', 'whatsapp.template_reconciliation_delayed'].includes(context.event_key);
+  const credentialPolicy = require('../lib/metaMarketingCredentialAlerts');
+  const metaCredential = credentialPolicy.MANAGED.has(context.event_key);
+  let credentialUrl = null;
+  if (metaCredential) {
+    // The only allowed action is our own scoped Settings route. Never accept
+    // provider consent URLs, OAuth state, nonces or caller-supplied hrefs.
+    credentialUrl = credentialPolicy.actionUrl(context.action_scope);
+    try { subject = assertSafeSubject('[Clinicaclick] ' + (context.incident_phase === 'closed' ? 'Renovación confirmada de Meta' : title)); }
+    catch { subject = '[Clinicaclick] Revisar conexión de Meta'; }
+  }
   if (managed) {
     const phase = context.incident_phase === 'closed' ? 'Resuelto' : 'Revisar';
     try { subject = assertSafeSubject(`[Clinicaclick] ${phase}: ${title}`); }
@@ -174,12 +184,13 @@ function renderOpsSystemAlert(context = {}) {
     message,
     occurredAt ? `Hora: ${occurredAt}` : null,
     `Acción: ${action}`,
+    metaCredential ? `Enlace: ${credentialUrl}` : null,
   ].filter(Boolean).join('\n');
   let html = layout({
       title: subject,
       intro: body,
-      ctaLabel: null,
-      ctaUrl: null,
+      ctaLabel: metaCredential ? 'Revisar conexión de Meta' : null,
+      ctaUrl: credentialUrl,
       footer: 'Notificación técnica para administradores. No incluye datos clínicos sensibles.',
     });
   if (managed) {

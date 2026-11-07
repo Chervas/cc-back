@@ -5,14 +5,16 @@ const { tokenText } = require('./whatsapp-secrets');
 const C = require('./meta-marketing-contract');
 const FIELDS = Object.freeze({ ad_account: 'id,account_id,name,account_status,currency,timezone_name',
   facebook_page: 'id,name', instagram_business: 'id,name,username', instagram_parent: 'id,instagram_business_account' });
-function createMetaMarketingHttp({ request = https.request, timeoutMs = 8000,pacer,appId,now=Date.now,authorize=()=>{} } = {}) {
+function createMetaMarketingHttp({ request = https.request, timeoutMs = 8000,pacer,appId,now=Date.now,authorize=()=>{},graphVersion } = {}) {
+  if(graphVersion!==undefined&&!/^v(?:24|25|26|27)\.0$/.test(graphVersion))fail('invalid_request');
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000) fail('invalid_request');
   const pacing=require('./meta-marketing-graph-pacing').scoped({pacer,request,now},appId);request=pacing.request;
   // Reuse only the fixed inspection protocol; no WhatsApp send action is exposed.
   const inspect = require('./whatsapp-http').createWhatsappHttp({ request, timeoutMs });
   const execute=async input => {
     if (!input || Object.keys(input).some(key => !['action', 'id', 'token', 'proof', 'candidate', 'signal'].includes(key))) fail('invalid_request');
-    if (input.action === 'inspect') return inspect(input);
+    if (input.action === 'inspect' && !graphVersion) return inspect(input);
+    if(input.action==='inspect')return require('./meta-marketing-business-inspect-http').inspect({input,request,timeoutMs,graphVersion});
     const { action, id, token, proof, signal } = input;
     if (!Object.hasOwn(FIELDS, action) || !C.graphId(id) || input.candidate !== undefined || !Buffer.isBuffer(token)
       || !tokenText(token.toString('utf8')) || typeof proof !== 'string' || !/^[a-f0-9]{64}$/.test(proof)) fail('invalid_request');
@@ -25,7 +27,7 @@ function createMetaMarketingHttp({ request = https.request, timeoutMs = 8000,pac
       timer = setTimeout(abort, timeoutMs); timer.unref?.();
       try {
         req = request({ protocol: 'https:', hostname: 'graph.facebook.com', port: 443, method: 'GET',
-          path: `/${C.GRAPH_VERSION}/${action === 'ad_account' ? 'act_' : ''}${id}?${query}`, agent: false,
+          path: `/${graphVersion||C.GRAPH_VERSION}/${action === 'ad_account' ? 'act_' : ''}${id}?${query}`, agent: false,
           rejectUnauthorized: true, minVersion: 'TLSv1.2', headers: { authorization: 'Bearer ' + token.toString('utf8'),
             accept: 'application/json', 'accept-encoding': 'identity' } }, res => {
           if (String(res.headers['content-type'] || '').split(';')[0].trim().toLowerCase() !== 'application/json'

@@ -55,11 +55,12 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
       enrollment=await inspectEnrollment(selected.enrollment_id);
       if(enrollment?.enrollmentId!==selected.enrollment_id||!Array.isArray(enrollment.mappingIds)||!enrollment.mappingIds.includes(Number(mappingId)))fail();
     }
-    const recovery=enrollment?.recovery||null;
-    if(recovery&&(recovery.enrollmentId!==selected.enrollment_id||recovery.flowId!==enrollment.flowId
-      ||Number(recovery.canonicalConnectionId)!==selected.meta_connection_id||recovery.appId!==selected.app_id
-      ||recovery.subjectId!==selected.meta_user_id||recovery.scopeKey!==selected.scope_key
-      ||!Array.isArray(recovery.mappingIds)||!recovery.mappingIds.includes(Number(mappingId))))fail('scope_denied');
+    const recovery=enrollment?.recovery||null,business=enrollment?.business||null,authority=recovery||business;
+    if(recovery&&business)fail('scope_denied');
+    if(authority&&(authority.enrollmentId!==selected.enrollment_id||authority.flowId!==enrollment.flowId
+      ||Number(authority.canonicalConnectionId)!==selected.meta_connection_id||authority.appId!==selected.app_id
+      ||authority.subjectId!==selected.meta_user_id||authority.scopeKey!==selected.scope_key
+      ||!Array.isArray(authority.mappingIds)||!authority.mappingIds.includes(Number(mappingId))))fail('scope_denied');
     if (!current) fail(); const requested = mapping(current);
     if (!requested.active || requested.assetRef !== selected.asset_ref || requested.connectionId !== selected.meta_connection_id) fail();
     const [scopeType, rawScopeId] = selected.scope_key.split(':'), scopeId = Number(rawScopeId);
@@ -70,8 +71,8 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
       || scopeType === 'clinic' && (clinicIds.length !== 1 || clinicIds[0] !== scopeId)
       || scopeType === 'group' && clinics.some(row => Number(row.grupoClinicaId) !== scopeId)) fail();
     if(enrollment&&JSON.stringify(enrollment.clinicIds)!==JSON.stringify(clinicIds))fail('scope_denied');
-    if(recovery&&JSON.stringify(recovery.clinicIds)!==JSON.stringify(clinicIds))fail('scope_denied');
-    if (await blocked(scope)&&!recovery) fail('asset_revoked');
+    if(authority&&JSON.stringify(authority.clinicIds)!==JSON.stringify(clinicIds))fail('scope_denied');
+    if (await blocked(scope)&&!authority) fail('asset_revoked');
     const records = bounded(await loadBindings(selected.asset_ref, null)).map(binding);
     const aliases = bounded(await loadMappings(requested));
     const all = aliases.map(mapping), active = all.filter(row => row.active);
@@ -108,10 +109,10 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
         || scopeType === 'group' && Number(group.id_grupo) !== scopeId) fail('scope_denied');
     }
     const groupIds = ids(clinics.map(row => row.grupoClinicaId).filter(value => value !== null));
-    const grants = recovery?[]:bounded(await loadGrants(clinicIds, groupIds));
+    const grants = authority?[]:bounded(await loadGrants(clinicIds, groupIds));
     const match = (type,id) => grants.filter(row => row.assignmentScope === type && Number(type === 'clinic' ? row.clinicaId : row.grupoClinicaId) === id);
     const assertGrant = rows => { if (rows.length !== 1 || rows[0].status !== 'active' || Number(rows[0].metaConnectionId) !== requested.connectionId) fail('scope_denied'); };
-    if(!recovery){
+    if(!authority){
       if (scopeType === 'group') assertGrant(match('group',scopeId));
       for (const id of clinicIds) {
         const direct = match('clinic',id);
@@ -119,12 +120,13 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
         else assertGrant(match('group',Number(clinics.find(row => Number(row.id_clinica) === id).grupoClinicaId)));
       }
     }
-    const connection = await loadConnection(selected.meta_connection_id, selected.meta_user_id,recovery);
+    const connection = await loadConnection(selected.meta_connection_id, selected.meta_user_id,authority);
     if (!connection || Number(connection.id) !== selected.meta_connection_id || connection.metaUserId !== selected.meta_user_id
       || connection.broker_app_id !== selected.app_id || Number(connection.credentials_external) !== 1 || Number(connection.credentials_absent) !== 1) fail();
     const captured = { mappingId:requested.mappingId, ...asset(selected.asset_ref), parentPageId:selected.parent_page_id,
       connectionId:selected.meta_connection_id, connectionRef:selected.connection_ref, appId:selected.app_id, subjectId:selected.meta_user_id,
       tenantRef:`clinic:${selected.tenant_clinic_id}`, scopeKey:selected.scope_key, clinicIds,
+      enrollmentId:selected.enrollment_id,credentialEpoch:enrollment?.credential?.epoch??0,credentialVersionId:enrollment?.credential?.versionId??null,
       enrollmentHash:enrollment?.digest??null,
       registryHash:digest(records.sort((a,b) => a.mapping_id-b.mapping_id)), mappingsHash:digest(active.sort((a,b) => a.mappingId-b.mappingId)),
       sharedHash:digest(shared), primaryHash:digest(primary), grantsHash:digest(grants), clinicsHash:digest(clinics) };
@@ -132,7 +134,7 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
     if (!enabled()) fail('broker_cohort_disabled'); return captured;
   }
   const guard = fn => async (...args) => { try { return await fn(...args); } catch (error) {
-    fail(['meta_broker_binding_invalid','broker_cohort_disabled','asset_revoked','meta_broker_not_active','scope_denied','meta_broker_scope_changed'].includes(error?.code) ? error.code : 'meta_broker_binding_invalid');
+    fail(['meta_broker_binding_invalid','broker_cohort_disabled','asset_revoked','meta_broker_not_active','scope_denied','meta_broker_scope_changed','meta_credential_renewal_required','meta_business_activation_uncertain','secret_version_changed'].includes(error?.code) ? error.code : 'meta_broker_binding_invalid');
   } };
   return { describe:context => { // Metadata from preparation, never a replacement for assertContext.
       const captured=contexts.get(context);if(!captured)fail();return structuredClone(captured);

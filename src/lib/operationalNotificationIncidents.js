@@ -6,8 +6,8 @@ const hash = value => createHash('sha256').update(JSON.stringify(value)).digest(
 const json = value => typeof value === 'string' ? JSON.parse(value) : value;
 const millis = value => new Date(value).getTime();
 
-function identity(alert, namespace) {
-  if (!MANAGED.has(alert.eventKey) || !/^[a-z0-9:_-]{1,128}$/i.test(alert.metadata?.incident_scope || '')) {
+function identity(alert, namespace, managedEvents = MANAGED) {
+  if (!managedEvents.has(alert.eventKey) || !/^[a-z0-9:_-]{1,128}$/i.test(alert.metadata?.incident_scope || '')) {
     throw Error('operational_incident_scope_required');
   }
   return hash([namespace, alert.eventKey, alert.metadata.incident_scope]);
@@ -24,9 +24,10 @@ function notificationDecision(previous, observation, phase, now, { criticalMinut
 
 // State and notification jobs commit together. A restart or concurrent sweep
 // cannot turn an unchanged incident into a new hourly email.
-function createIncidentNotifier({ sequelize, Incident, queue, channels, namespace, now = () => Date.now(), reminderMinutes }) {
+function createIncidentNotifier({ sequelize, Incident, queue, channels, namespace, now = () => Date.now(), reminderMinutes,
+  managedEvents = MANAGED, once = false, beforeObserve }) {
   async function observe(alert, closing = false, expectedObservedAt = null) {
-    const key = identity(alert, namespace);
+    const key = identity(alert, namespace, managedEvents);
     // Acquire the unique incident row without overwriting an existing clock.
     // An atomic insert avoids findOrCreate's concurrent lock-upgrade race.
     return sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
@@ -43,6 +44,7 @@ function createIncidentNotifier({ sequelize, Incident, queue, channels, namespac
       const row = await Incident.findByPk(key, { transaction, lock: transaction.LOCK.UPDATE });
       if (closing && row.state !== 'open') return { created: [], skipped: [], incidentKey: key };
       if (closing && millis(row.observed_at) !== expectedObservedAt) return { created: [], skipped: [], incidentKey: key };
+      if (beforeObserve) await beforeObserve({ alert, closing, transaction, previous: json(row.snapshot) });
       const phase = closing ? 'closed' : 'open';
       const reopened = !closing && row.state === 'closed';
       const channelState = reopened ? {} : { ...json(row.channel_state) };
@@ -63,8 +65,11 @@ function createIncidentNotifier({ sequelize, Incident, queue, channels, namespac
           WHERE incident_key IN (:keys) AND state='open'`, { transaction,
           replacements: { observed: new Date(time), keys: legacy.map(previous => previous.incident_key) } });
       }
-      const selected = channels(alert).filter(channel => notificationDecision(channelState[channel], alert,
-        phase, time, reminderMinutes).notify);
+      const selected = channels(alert).filter(channel => {
+        const previous = channelState[channel];
+        const decision = notificationDecision(previous, alert, phase, time, reminderMinutes);
+        return decision.notify && (!once || !previous || previous.signature !== decision.signature);
+      });
       const deliveryAlert = { ...alert, payload: { ...alert.payload,
         occurredAt: new Date(closing ? time : reopened ? opened : openedAt).toISOString() },
       metadata: { ...alert.metadata, incident_key: key, incident_phase: phase,
@@ -85,14 +90,17 @@ function createIncidentNotifier({ sequelize, Incident, queue, channels, namespac
   async function sync(alerts, { resolution } = {}) {
     const result = [];
     const seen = new Set();
-    for (const alert of alerts.filter(alert => MANAGED.has(alert.eventKey))) {
-      seen.add(identity(alert, namespace)); result.push(await observe(alert));
+    for (const alert of alerts.filter(alert => managedEvents.has(alert.eventKey))) {
+      seen.add(identity(alert, namespace, managedEvents)); result.push(await observe(alert));
     }
     if (!resolution) return result;
     const open = await Incident.findAll({ where: { namespace, state: 'open' } });
     for (const row of open) {
       if (seen.has(row.incident_key)) continue;
       const original = json(row.snapshot);
+      // Different opt-in consumers share this table, never each other's
+      // recovery policy. Existing WhatsApp defaults remain unchanged.
+      if (!managedEvents.has(original.eventKey)) continue;
       const recovered = await resolution(original);
       if (!recovered) continue;
       result.push(await observe({ ...original, payload: recovered,

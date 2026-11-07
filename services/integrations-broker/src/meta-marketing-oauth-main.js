@@ -9,6 +9,11 @@ const D=require('./meta-marketing-discovery-contract');
 const E=require('./meta-marketing-enrollment-contract');
 const A=require('./meta-marketing-ads-contract');
 const L=require('./meta-marketing-leads-contract');
+const R=require('./meta-marketing-credential-renewal-contract'),B=require('./meta-marketing-business-contract'),T=require('./meta-marketing-credential-maintenance-contract'),AG=require('./meta-marketing-agency-contract'),I=require('./meta-marketing-business-issuer');
+const businessConfigs=config=>[config.businessLogin,config.agencySystemUser].filter(Boolean);
+const businessScope=(config,key)=>businessConfigs(config).some(c=>c.scopeKeys.includes(key));
+const {createMetaMarketingCredentialEpochs}=require('./meta-marketing-credential-epochs');
+const {createMetaMarketingCredentialRenewal}=require('./meta-marketing-credential-renewal');
 const {createMetaMarketingEnrollment}=require('./meta-marketing-enrollment');
 const {createMetaMarketingOAuthSecrets}=require('./meta-marketing-oauth-secrets');
 const {createMetaMarketingOAuthHttp}=require('./meta-marketing-oauth-http');
@@ -19,6 +24,10 @@ function validateConfig(config) {
   if (config && Object.hasOwn(config,'standby')) { fields.push('standby'); if(typeof config.standby!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetEnrollment')) { fields.push('assetEnrollment'); if(typeof config.assetEnrollment!=='boolean'||config.assetEnrollment&&!config.assetDiscovery)fail('invalid_request'); }
+  if (config && Object.hasOwn(config,'credentialRenewal')) {fields.push('credentialRenewal');if(typeof config.credentialRenewal!=='boolean'||config.credentialRenewal&&config.assetEnrollment!==true)fail('invalid_request');}
+  if(config&&Object.hasOwn(config,'businessLogin')){fields.push('businessLogin');B.config(config.businessLogin);if(config.credentialRenewal!==true||config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
+  if(config&&Object.hasOwn(config,'agencySystemUser')){fields.push('agencySystemUser');AG.config(config.agencySystemUser);if(config.credentialRenewal!==true||config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
+  if(businessConfigs(config||{}).length)I.config(businessConfigs(config));
   if (config && Object.hasOwn(config,'adsRead')) {fields.push('adsRead');A.config(config.adsRead);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if (config && Object.hasOwn(config,'leadAds')) {fields.push('leadAds');L.config(config.leadAds);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if (config?.tlsRenewal) { fields.push('tlsRenewal');tlsReload.validateSettings(config.tlsRenewal); }
@@ -49,7 +58,7 @@ function validateConfig(config) {
     const grants=policy.grants.filter(g=>g.connectionRef===binding.connectionRef);
     if (grants.length!==2) fail('invalid_request');
     for (const principal of [gateway,control]) {
-      const grant=grants.find(g=>g.principalId===principal),operations=principal===gateway?[...Object.values(C.OPERATIONS),...(config.assetDiscovery?[D.OPERATION]:[]),...(config.assetEnrollment?Object.values(E.OPERATIONS):[])]:[C.OPERATIONS.status,C.OPERATIONS.abort,...(config.assetEnrollment?[E.OPERATIONS.status,E.OPERATIONS.revoke]:[])];
+      const grant=grants.find(g=>g.principalId===principal),operations=principal===gateway?[...Object.values(C.OPERATIONS),...(config.assetDiscovery?[D.OPERATION]:[]),...(config.assetEnrollment?Object.values(E.OPERATIONS):[]),...(config.credentialRenewal?Object.values(R.OPERATIONS):[]),...(businessScope(config,b.scopeKey)?Object.values(B.OPERATIONS):[])]:[C.OPERATIONS.status,C.OPERATIONS.abort,...(config.assetEnrollment?[E.OPERATIONS.status,E.OPERATIONS.revoke]:[]),...(config.credentialRenewal?[R.OPERATIONS.status,R.OPERATIONS.abort]:[]),...(businessScope(config,b.scopeKey)?[B.OPERATIONS.status,B.OPERATIONS.abort,B.OPERATIONS.drain,...Object.values(T.OPERATIONS)]:[])];
       if (!grant || grant.tenantRef!=='clinic:'+b.clinicIds[0] || grant.assetRef!=='meta-enroll:'+b.scopeKey
         || JSON.stringify([...grant.operations].sort())!==JSON.stringify(operations.sort())) fail('invalid_request');
     }
@@ -64,8 +73,11 @@ function validateConfig(config) {
 }
 async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest,leadsRequest,adsNow=Date.now,adsWait}={}) {
   const config=validateConfig(JSON.parse(privateFile(filename))),cert=privateFile(config.tlsCertFile,65536),key=privateFile(config.tlsKeyFile,65536);
-  const store=new BrokerStore(config.stateFile);let aws,oauth,enrollment,server,timer,draining,adsHttp,leadsHttp,cursorKey;
+  const store=new BrokerStore(config.stateFile);let aws,oauth,enrollment,renewal,business,maintenance,server,timer,draining,adsHttp,leadsHttp,cursorKey;
   try {
+    if(!config.credentialRenewal&&store.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='meta_marketing_credential_renewals'").get()
+      &&store.db.prepare('SELECT 1 FROM meta_marketing_credential_renewals LIMIT 1').get())fail('invalid_request');
+    if(!businessConfigs(config).length&&store.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='meta_marketing_business_handovers'").get()&&store.db.prepare('SELECT 1 FROM meta_marketing_business_handovers LIMIT 1').get())fail('invalid_request');
     if(config.standby) {
       // This is installation before the first cohort, never a way to hide
       // existing authority, revocations, uncertain commands or undelivered audit.
@@ -81,7 +93,8 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
       const {createPacing,sqliteState}=require('./meta-marketing-ads-pacing');
       pacer=createPacing({state:sqliteState(store.db),now:adsNow,...(adsWait?{wait:adsWait}:{})});
     }
-    http??=createMetaMarketingOAuthHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
+    const agencyBootstrap=config.agencySystemUser?require('./meta-marketing-agency-bootstrap').createAgencyBootstrap({store,policy:config.policy,now:adsNow}):undefined;
+    http??=createMetaMarketingOAuthHttp({pacer,agencyBootstrap,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
     oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id)});
     if(config.adsRead||config.leadAds){
       cursorKey=require('node:crypto').randomBytes(32);
@@ -89,8 +102,13 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
       if(config.adsRead)adsHttp=require('./meta-marketing-ads-http').createMetaMarketingAdsHttp({pacer,cursor,now:adsNow,...(adsRequest?{request:adsRequest}:{})});
       if(config.leadAds)leadsHttp=require('./meta-marketing-leads-http').createMetaMarketingLeadsHttp({pacer,cursor,now:adsNow,...(leadsRequest?{request:leadsRequest}:{})});
     }
-    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{})});
-    const broker=new Broker({store,policy:config.policy,secrets,policyResolver:enrollment,...(config.leadAds?{transportProfile:'meta-marketing'}:{}),operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations}});
+    const credentialEpochs=config.credentialRenewal?createMetaMarketingCredentialEpochs({store}):null;
+    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessConfigs(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{})});
+    if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment});
+    if(businessConfigs(config).length){const businessHttp=require('./meta-marketing-business-issuer-http').createIssuerHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
+      business=require('./meta-marketing-business').createMetaMarketingBusiness({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,config:businessConfigs(config)});
+      maintenance=require('./meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({store,epochs:credentialEpochs,enrollment,secrets,http,businessHttp,environment:config.environment,config:businessConfigs(config)});}
+    const broker=new Broker({store,policy:config.policy,secrets,policyResolver:enrollment,...(config.leadAds?{transportProfile:'meta-marketing'}:{}),operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations,...renewal?.operations,...business?.operations,...maintenance?.operations}});
     const controlKeys=new Set(config.policy.principals.filter(p=>p.id.startsWith('control:')).map(p=>p.keyId));
     let ordinary=0,controls=0;
     server=createServer({async execute(...args) {
@@ -103,9 +121,9 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(config.port,config.listenAddress,resolve);});
     const tick=()=>{if(!draining)draining=drainAudit(store,aws.sink,{limit:20}).catch(()=>null).finally(()=>{draining=null;});};
     tick();timer=setInterval(tick,1000);timer.unref();let closing;
-    const close=()=>closing||=(async()=>{clearInterval(timer);enrollment?.close();oauth.close();await new Promise(resolve=>{server.close(resolve);server.closeIdleConnections?.();});await draining;aws.close();key.fill(0);cursorKey?.fill(0);store.close();})();
+    const close=()=>closing||=(async()=>{clearInterval(timer);maintenance?.close();business?.close();renewal?.close();enrollment?.close();oauth.close();await new Promise(resolve=>{server.close(resolve);server.closeIdleConnections?.();});await draining;aws.close();key.fill(0);cursorKey?.fill(0);store.close();})();
     return {server,store,broker,close};
-  } catch(error) {clearInterval(timer);enrollment?.close();oauth?.close();server?.close();aws?.close();key.fill(0);cursorKey?.fill(0);store.close();throw error;}
+  } catch(error) {clearInterval(timer);maintenance?.close();business?.close();renewal?.close();enrollment?.close();oauth?.close();server?.close();aws?.close();key.fill(0);cursorKey?.fill(0);store.close();throw error;}
 }
 if(require.main===module)main(process.argv[2]).then(runtime=>{
   const stop=()=>runtime.close().catch(()=>{process.exitCode=1;});process.once('SIGTERM',stop);process.once('SIGINT',stop);

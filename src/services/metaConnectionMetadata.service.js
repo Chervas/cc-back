@@ -97,12 +97,27 @@ function createMetaConnectionMetadata({ authorize, resolve, session, loadMapping
 const DATA_RECOVERY_FIELDS = Object.freeze(['recovery_id', 'scope_key', 'state', 'canonical_connection_id', 'mapping_ids', 'flow_id', 'enrollment_id', 'app_id', 'meta_user_id', 'snapshot_digest', 'candidate_digest',
   'clinic_ids', 'source_connection_id', 'snapshot', 'prepared_by_user_id', 'prepared_at', 'expires_at', 'bound_at', 'activated_at', 'retired_at']);
 const DATA_BINDING_FIELDS = Object.freeze(['mapping_id', 'enrollment_id', 'meta_connection_id', 'scope_key', 'asset_ref', 'state']);
-function createMetaDataAccessRepository(models, { broker, enabled = () => process.env.META_MARKETING_BROKER_ENABLED === 'true'
-  && process.env.META_MARKETING_ADS_SYNC_ENABLED === 'true' && process.env.META_MARKETING_LEGACY_RECOVERY_ENABLED === 'true' } = {}) {
+function createMetaDataAccessRepository(models, { broker, now = () => new Date(), enabled = () => process.env.META_MARKETING_BROKER_ENABLED === 'true'
+  && process.env.META_MARKETING_ADS_SYNC_ENABLED === 'true' && (process.env.META_MARKETING_LEGACY_RECOVERY_ENABLED === 'true'
+    ||process.env.META_MARKETING_BUSINESS_ENABLED==='true'||process.env.META_MARKETING_BUSINESS_MAINTENANCE_ENABLED==='true') } = {}) {
   const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 && Number(value) <= 2147483647;
   const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value);
   const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
   async function capture(scopeKey) {
+    if(models.MetaMarketingBusinessHandover){
+      const business=await models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},async transaction=>{
+        const options={transaction,lock:transaction.LOCK.UPDATE,raw:true,logging:false};
+        const enrollment=await models.MetaMarketingEnrollmentRequest.findOne({...options,where:{scope_key:scopeKey},order:[['requested_at','DESC'],['enrollment_id','DESC']]});
+        if(!enrollment)return undefined;
+        if(!await models.MetaMarketingBusinessHandover.findByPk(enrollment.enrollment_id,options))return undefined;
+        if(enrollment.state!=='active')return null;
+        const authority=await require('./metaMarketingEnrollmentBinding.service').createBindings({models,now}).committed(enrollment.enrollment_id,transaction,{allowExpiredCredential:true});
+        if(!authority.business)fail('meta_metadata_data_access_unavailable',503);
+        const records=await models.MetaMarketingBrokerBinding.findAll({...options,attributes:DATA_BINDING_FIELDS,where:{enrollment_id:enrollment.enrollment_id,state:'active'},order:[['mapping_id','ASC']],limit:101});
+        if(records.length!==authority.mappingIds.length||records.some((binding,i)=>Number(binding.mapping_id)!==authority.mappingIds[i]))fail('meta_metadata_data_access_unavailable',503);
+        return {row:{enrollment_id:enrollment.enrollment_id,app_id:enrollment.app_id,meta_user_id:enrollment.meta_user_id,scope_key:scopeKey,clinic_ids:enrollment.clinic_ids,business_digest:authority.business.immutableDigest},canonicalConnectionId:Number(enrollment.meta_connection_id),mappingIds:authority.mappingIds,bindings:records.map(binding=>Object.fromEntries(DATA_BINDING_FIELDS.map(key=>[key,binding[key]])))};
+      });if(business!==undefined)return business;
+    }
     const rows = await models.MetaMarketingRecovery.findAll({ attributes: DATA_RECOVERY_FIELDS, raw: true, logging: false,
       where: { scope_key: scopeKey, state: 'active' }, order: [['recovery_id', 'ASC']], limit: 2 });
     if (!Array.isArray(rows) || rows.length > 1) fail('meta_metadata_data_access_unavailable', 503);
@@ -121,7 +136,7 @@ function createMetaDataAccessRepository(models, { broker, enabled = () => proces
       const recovery = require('./metaMarketingLegacyRecovery.service');
       try { recovery.snapshotRecord(row); } catch { fail('meta_metadata_data_access_unavailable', 503); }
       const proof = await models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, transaction =>
-        recovery.createRecovery({ models }).assertActive({ enrollmentId: row.enrollment_id }, transaction));
+        recovery.createRecovery({ models, now }).assertActive({ enrollmentId: row.enrollment_id, allowExpiredCredential: true }, transaction));
       if (!proof || proof.version !== 2 || proof.recoveryId !== row.recovery_id || proof.flowId !== row.flow_id
         || proof.enrollmentId !== row.enrollment_id || proof.scopeKey !== scopeKey || proof.snapshotDigest !== row.snapshot_digest
         || proof.appId !== row.app_id || proof.subjectId !== row.meta_user_id || !positive(proof.canonicalConnectionId)
@@ -146,6 +161,14 @@ function createMetaDataAccessRepository(models, { broker, enabled = () => proces
     if (!/^(clinic|group):[1-9][0-9]{0,9}$/.test(scopeKey || '') || !positive(scopeKey.split(':')[1]) || !Array.isArray(clinicIds)
       || !clinicIds.length || clinicIds.length > 1000 || clinicIds.some((id, i) => !positive(id) || i > 0 && id <= clinicIds[i - 1])) fail('meta_metadata_data_access_unavailable', 503);
     const before = await capture(scopeKey); if (!before) return null;
+    if (models.MetaMarketingEffectiveCredential) {
+      const enrollment = await models.MetaMarketingEnrollmentRequest.findByPk(before.row.enrollment_id, { raw: true, logging: false });
+      if (!enrollment) fail('meta_metadata_data_access_unavailable', 503);
+      const status = await require('./metaMarketingEffectiveCredential.service').createEffectiveCredentials({models,now}).getCredentialStatus(enrollment, {});
+      // Expiry is represented by the separate renewal status. Keep Settings
+      // metadata available without claiming the existing read capability works.
+      if (status.requiresRenewal) return null;
+    }
     const reader = broker || require('./metaMarketingBrokerReader.service').forModels(models);
     const contexts = [];
     function matches(value, binding) {

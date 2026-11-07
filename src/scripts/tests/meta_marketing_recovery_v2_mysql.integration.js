@@ -71,7 +71,7 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   for(let i=0;i<2;i++){
     const a=actors[i],group=i===0?28:29,clinicIds=i===0?[1,70]:[66,72],scopes=['ads_read','pages_read_engagement','pages_show_list','public_profile'];
     const slot={scope_key:a.scopeKey,connection_ref:'connection:fixture-'+group,asset_ref:'meta-enroll:'+a.scopeKey,app_id:'101',clinic_ids:JSON.stringify(clinicIds),
-      scopes:JSON.stringify(scopes),redirect_uri:'https://app.example.invalid/oauth/meta/marketing/callback',expires_at:new Date(clock+7200000),state:'active'};
+      scopes:JSON.stringify(scopes),redirect_uri:'https://app.example.invalid/oauth/meta/marketing/callback',expires_at:new Date(clock+86400000),state:'active'};
     await models.MetaMarketingOAuthSlot.create(slot);
     const captured=await sql.transaction(t=>scope.capture(a,t)),flowId=randomUUID();
     const candidate={versionId:flowId,digest:C.hash('FICTITIOUS_CANDIDATE_'+group),appId:'101',subjectId:'201',tokenType:'USER',scopes,
@@ -170,6 +170,10 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   for(const id of[arriaga.enrollment_id,bs.enrollment_id]){const proof=await committed(id);assert.equal(proof.recovery.canonicalConnectionId,159);assert.equal(proof.recovery.version,2);}
   assert.equal(await models.MetaMarketingRecovery.count({where:{canonical_connection_id:null,state:'active'}}),2);assert.equal(await baseline(),untouched);
   report.checks.push('BS bound before claim expiry completes reservation/activation after deadline; original MFA and candidate expiry remain enforced; freshAd303 plus exact2Pages have no credentials; ScopeDigest/snapshots/TTL and Arriaga/WA unchanged');
+  const renewalProbe=await require('./fixtures/meta_credential_renewal_mysql.fixture')({models,sql,actors,flows,now,advance:value=>{clock+=value;},report,baseline,untouched,sessions});
+  if(process.env.META_BUSINESS_CONTINUITY_TEST==='1'){
+    await require('./fixtures/meta_business_continuity_mysql.fixture')({models,sql,now,advance:value=>{clock+=value;},report,baseline,untouched});return;
+  }
   // The real Settings metadata factory must consume the same V2 authority as
   // jobs, rather than treating SQL canonicalNULL or legacy mapping_ids as V1.
   const metadataContract=require('../../services/metaConnectionMetadata.service');
@@ -230,6 +234,9 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   await committed(arriaga.enrollment_id);assert.equal((await models.MetaMarketingRecovery.findByPk(records[0].recovery_id)).state,'active');
   assert.equal((await models.ClinicMetaAsset.findByPk(361)).isActive,true);assert.equal(await baseline(),untouched);
   await assert.rejects(sql.transaction(t=>guard.assertActive({enrollmentId:bs.enrollment_id},t)),{code:'meta_recovery_retired'});
+  const retiredOverview=await renewalProbe.service.overview(renewalProbe.actorForGroup(29));
+  assert.equal(retiredOverview.canRenew,false);assert.equal(retiredOverview.credential,null);assert.equal(retiredOverview.pending,null);
+  await assert.rejects(renewalProbe.service.begin(renewalProbe.actorForGroup(29)),{code:'meta_renewal_scope_forbidden'});
   const reconciledBS=await worker.run({enrollmentId:bs.enrollment_id});
   assert.equal(reconciledBS.failed,0,'BS withdrawal reconciliation: '+JSON.stringify(reconciledBS)+' '+(await models.MetaMarketingEnrollmentRequest.findByPk(bs.enrollment_id)).last_error);
   assert.equal((await models.MetaMarketingEnrollmentRequest.findByPk(bs.enrollment_id)).state,'revoked');

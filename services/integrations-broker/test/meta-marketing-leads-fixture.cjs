@@ -26,7 +26,7 @@ async function ready(t,{optin=true,recipientClinicId=71}={}){
         if(url.pathname.endsWith('/debug_token'))raw={data:{app_id:'101',type:'PAGE',profile_id:'401',is_valid:true,expires_at:0,data_access_expires_at:0,scopes:L.REQUIRED_SCOPES}};
         else if(url.pathname==='/v24.0/401'&&url.searchParams.get('fields')==='id,access_token'){assert.equal(options.headers.authorization,'Bearer '+TOKEN);raw={id:'401',access_token:PAGE_TOKEN};}
         else if(url.pathname==='/v24.0/me'){assert.equal(options.headers.authorization,'Bearer '+PAGE_TOKEN);raw={id:'401'};}
-        else if(url.pathname==='/v24.0/401')raw={id:'401',has_lead_access:true};
+        else if(url.pathname==='/v24.0/401')raw={id:'401',has_lead_access:{can_access_lead:true,app_has_leads_permission:true,user_has_leads_permission:true,enabled_lead_access_manager:true,page_id:'401'}};
         else if(url.pathname==='/v24.0/401/subscribed_apps'){
           assert.equal(options.headers.authorization,'Bearer '+PAGE_TOKEN);
           if(options.method==='POST'){const b=new URLSearchParams(body);assert.equal(b.get('appsecret_proof'),createHmac('sha256',APP).update(PAGE_TOKEN).digest('hex'));state.fields=b.get('subscribed_fields').split(',');raw={success:true};}

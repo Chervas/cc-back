@@ -7,6 +7,19 @@
  * reintentos y la recuperación tras reinicio pertenecen al scheduler durable.
  */
 const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
+  metaMarketingBusiness: Object.freeze({
+    type:'meta_marketing_business_reconciliation',priority:'high',executorMethod:'executeMetaMarketingBusiness',
+    enabledEnv:'META_MARKETING_BUSINESS_ENABLED',timezone:'Europe/Madrid',usesIntegrationLease:false,reportedFailureRetryable:false,maxAttempts:1,
+  }),
+  metaMarketingCredentialMaintenance: Object.freeze({
+    type:'meta_marketing_credential_maintenance',priority:'high',executorMethod:'executeMetaMarketingCredentialMaintenance',
+    enabledEnv:'META_MARKETING_BUSINESS_MAINTENANCE_ENABLED',timezone:'Europe/Madrid',usesIntegrationLease:false,reportedFailureRetryable:false,maxAttempts:1,
+  }),
+  metaMarketingCredentialRenewal: Object.freeze({
+    type: 'meta_marketing_credential_renewal_reconciliation', priority: 'high', executorMethod: 'executeMetaMarketingCredentialRenewal',
+    enabledEnv: 'META_MARKETING_CREDENTIAL_RENEWAL_ENABLED', timezone: 'Europe/Madrid',
+    usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
+  }),
   metaMarketingEnrollment: Object.freeze({
     type: 'meta_marketing_enrollment_reconciliation', priority: 'high', executorMethod: 'executeMetaMarketingEnrollment',
     enabledEnv: 'META_MARKETING_ENROLLMENT_WORKER_ENABLED', timezone: 'Europe/Madrid',

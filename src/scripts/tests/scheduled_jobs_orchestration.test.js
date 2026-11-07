@@ -34,7 +34,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 55, 'the canonical scheduler retains existing jobs, infrastructure notification ingest and monthly SC retention');
+  assert.equal(definitions.length, 58, 'the canonical scheduler retains existing jobs and adds Meta continuity reconciliation and expiring-business maintenance');
   assert.equal(SCHEDULED_JOB_DEFINITIONS.searchConsoleRetention.type, 'search_console_retention');
   assert.deepEqual(SCHEDULED_JOB_DEFINITIONS.searchConsoleRetention.runtimeNamespaces, ['staging']);
   assert.deepEqual(SCHEDULED_JOB_DEFINITIONS.infrastructureNotifications.runtimeNamespaces, ['staging']);
@@ -1470,7 +1470,10 @@ async function testPlatformAuditJobsRespectGates() {
       ['businessProfileRevocations', 'business_profile_broker_revocations', 'GOOGLE_BUSINESS_PROFILE_REVOCATION_WORKER_ENABLED', '../../services/businessProfileRevocation.service', 'executeBusinessProfileRevocations', '* * * * *'],
       ['metaMarketingRevocations', 'meta_marketing_broker_revocations', 'META_MARKETING_REVOCATION_WORKER_ENABLED', '../../services/metaMarketingRevocation.service', 'executeMetaMarketingRevocations', '* * * * *'],
       ['metaMarketingOAuth', 'meta_marketing_oauth_reconciliation', 'META_MARKETING_OAUTH_WORKER_ENABLED', '../../services/metaMarketingOAuth.service', 'executeMetaMarketingOAuth', '* * * * *'],
+      ['metaMarketingBusiness', 'meta_marketing_business_reconciliation', 'META_MARKETING_BUSINESS_ENABLED', '../../services/metaMarketingBusiness.service', 'executeMetaMarketingBusiness', '* * * * *'],
+      ['metaMarketingCredentialMaintenance', 'meta_marketing_credential_maintenance', 'META_MARKETING_BUSINESS_MAINTENANCE_ENABLED', '../../services/metaMarketingCredentialMaintenance.service', 'executeMetaMarketingCredentialMaintenance', '* * * * *'],
       ['metaMarketingEnrollment', 'meta_marketing_enrollment_reconciliation', 'META_MARKETING_ENROLLMENT_WORKER_ENABLED', '../../services/metaMarketingEnrollment.service', 'executeMetaMarketingEnrollment', '* * * * *'],
+      ['metaMarketingCredentialRenewal', 'meta_marketing_credential_renewal_reconciliation', 'META_MARKETING_CREDENTIAL_RENEWAL_ENABLED', '../../services/metaMarketingCredentialRenewal.service', 'executeMetaMarketingCredentialRenewal', '* * * * *'],
       ['googleAdsRevocations', 'google_ads_broker_revocations', 'GOOGLE_ADS_REVOCATION_WORKER_ENABLED', '../../services/googleAdsRevocation.service', 'executeGoogleAdsRevocations', '* * * * *'],
       ['googlePropertyRevocations', 'google_property_broker_revocations', 'GOOGLE_PROPERTY_REVOCATION_WORKER_ENABLED', '../../services/googlePropertyRevocation.service', 'executeGooglePropertyRevocations', '* * * * *'],
       ['platformAuditDelivery', 'platform_audit_delivery', 'PLATFORM_AUDIT_DELIVERY_ENABLED', '../../services/platformAudit.delivery', 'executePlatformAuditDelivery', '* * * * *'],

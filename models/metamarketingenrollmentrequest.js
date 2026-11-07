@@ -12,7 +12,7 @@ module.exports=(sequelize,D)=>{
   for(const key of ['prepared_at','activated_at','revoked_at','lease_until','prepare_sent_at','activate_sent_at'])fields[key]={type:D.DATE(3),allowNull:true};
   fields.selection_digest={type:D.CHAR(64),allowNull:true};fields.lease_token={type:D.CHAR(36),allowNull:true};fields.last_error={type:D.STRING(64),allowNull:true};
   fields.attempts={type:D.INTEGER.UNSIGNED,allowNull:false,defaultValue:0};
-  fields.state={type:D.ENUM('prepare_pending','prepared','activate_pending','active','revoke_pending','revoked'),allowNull:false};
+  fields.state={type:D.ENUM('prepare_pending','prepared','activate_pending','active','revoke_pending','revoked','superseded'),allowNull:false};
   return sequelize.define('MetaMarketingEnrollmentRequest',fields,{tableName:'MetaMarketingEnrollmentRequests',timestamps:false,charset:'ascii',collate:'ascii_bin',indexes:[
     {name:'cc_meta_enroll_delivery',fields:['state','next_attempt_at','lease_until']},{name:'cc_meta_enroll_scope',fields:['scope_key','state']},
     {name:'cc_meta_enroll_latest',fields:['scope_key','requested_at','enrollment_id']},{name:'cc_meta_enroll_subject',fields:['meta_user_id']}]});

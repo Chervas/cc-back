@@ -64,7 +64,16 @@ test('clinical Meta cut rejects changed rows, source, target, backup or active w
     const raw = await sql.connectionManager.getConnection(), connection = raw.promise();
     const query = async (q,v=[]) => (await connection.query(q,v))[0];
     const selected = migration.MIGRATIONS.map(name => ({name,sha256:createHash('sha256').update(fs.readFileSync(path.join(source,'migrations',name))).digest('hex')}));
-    const contract = {version:1,tables:Object.fromEntries([...migration.TABLES,...migration.NEW_TABLES].map(n=>[n,schema.tables[n]])),migrations:selected};
+    // Historical nine-DDL bootstrap contract only. The current continuity
+    // dependency is separately selected and proven by its five-table suite.
+    const tables=Object.fromEntries([...migration.TABLES,...migration.NEW_TABLES].map(n=>[n,structuredClone(schema.tables[n])]));
+    tables.MetaMarketingEnrollmentRequests.columns.find(row=>row.COLUMN_NAME==='state').COLUMN_TYPE="enum('prepare_pending','prepared','activate_pending','active','revoke_pending','revoked')";
+    // Keep this historical bootstrap separate from the later WA authorization
+    // column/index and nullable parent connection in the current contract.
+    tables.ClinicMetaAssets.columns=tables.ClinicMetaAssets.columns.filter(row=>row.COLUMN_NAME!=='whatsappAuthorizationId');
+    tables.ClinicMetaAssets.columns.find(row=>row.COLUMN_NAME==='metaConnectionId').IS_NULLABLE='NO';
+    tables.ClinicMetaAssets.indexes=tables.ClinicMetaAssets.indexes.filter(row=>row.name!=='uniq_whatsapp_authorization_asset');
+    const contract = {version:1,tables,migrations:selected};
     const info={revision:'owned-clinical-fixture',contractDigest:digest(contract),contract,migrations:Object.fromEntries(selected.map(m=>[m.name,m.sha256]))};
     const database='campaign_optimization_qa';
     try {

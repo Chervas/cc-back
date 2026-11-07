@@ -8,8 +8,8 @@ const { createBrokerCooldownWait } = require('../lib/metaLeadBrokerCooldown');
 const SAFE = new Set(['broker_cohort_disabled', 'meta_leads_disabled', 'meta_broker_binding_invalid', 'meta_broker_scope_changed',
   'meta_broker_not_active', 'broker_response_invalid', 'broker_configuration_invalid', 'broker_timeout', 'broker_unavailable',
   'connection_blocked', 'asset_revoked', 'scope_denied', 'operation_denied', 'invalid_request', 'invalid_signature',
-  'secret_unavailable', 'credential_revoked', 'provider_failed', 'provider_timeout', 'provider_unauthorized', 'rate_limited', 'audit_unavailable',
-  'meta_lead_receipt_review_required']);
+  'secret_unavailable', 'secret_version_changed', 'credential_revoked', 'provider_failed', 'provider_timeout', 'provider_unauthorized', 'rate_limited', 'audit_unavailable',
+  'meta_lead_receipt_review_required', 'meta_credential_renewal_required','meta_business_activation_uncertain']);
 const fail = code => { throw Object.assign(Error(code), { code }); };
 const cooldowns = new WeakMap();
 function safeError(error) {
@@ -85,11 +85,12 @@ function createMetaMarketingLeadReader({ scope, client, transactionStates = asyn
     return state;
   }
   async function read(pair, family, payload = {}, { timeoutMs = 30000, requestId = randomUUID() } = {}) {
+    let observed;
     try {
       const operation = L.OPERATIONS[family];
       if (!operation || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) fail('invalid_request');
       const deadline = now() + timeoutMs;
-      const before = await assertPair(pair);
+      const before = await assertPair(pair); observed = before.page;
       const full = { ...payload, adAccountAssetRef: before.account.assetRef };
       // Callers may not supply authority, even when it happens to match.
       if (Object.hasOwn(payload, 'adAccountAssetRef')) fail('invalid_request');
@@ -112,7 +113,10 @@ function createMetaMarketingLeadReader({ scope, client, transactionStates = asyn
           || response.data.recipientClinicId !== before.route.recipientClinicId) fail('broker_response_invalid');
       }
       return structuredClone(response.data);
-    } catch (error) { throw safeError(error); }
+    } catch (error) {
+      if (observed && typeof scope.recordCredentialFailure === 'function') try { await scope.recordCredentialFailure(observed, error); } catch {}
+      throw safeError(error);
+    }
   }
   return { preparePair, assertPair, prepareAccount, assertAccount, read };
 }

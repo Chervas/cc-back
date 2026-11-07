@@ -38,7 +38,17 @@ test('complete Meta migration chain preserves legacy rows, independent history a
     const query=async(q,v=[])=>(await connection.query(q,v))[0];
     const exportFile=process.env.META_SCHEMA_EXPORT;
     if(exportFile)assert(path.isAbsolute(exportFile)&&exportFile.startsWith('/home/ubuntu/qa-evidence/'));
-    const contract=exportFile?{version:1,tables:{},migrations}:{version:1,tables:Object.fromEntries(names.map(n=>{assert(schema.tables[n],n);return[n,schema.tables[n]];})),migrations};
+    // This fixture proves the historical nine-DDL bootstrap, not admission for
+    // the current continuity release. Its later explicit ENUM append is tested
+    // with both selected continuity migrations in the dedicated native suite.
+    const bootstrapTables=Object.fromEntries(names.map(n=>{assert(schema.tables[n],n);return[n,structuredClone(schema.tables[n])];}));
+    bootstrapTables.MetaMarketingEnrollmentRequests.columns.find(row=>row.COLUMN_NAME==='state').COLUMN_TYPE="enum('prepare_pending','prepared','activate_pending','active','revoke_pending','revoked')";
+    // WhatsApp's later independent authorization migration is outside these
+    // nine historical files; current-release preflight still requires it.
+    bootstrapTables.ClinicMetaAssets.columns=bootstrapTables.ClinicMetaAssets.columns.filter(row=>row.COLUMN_NAME!=='whatsappAuthorizationId');
+    bootstrapTables.ClinicMetaAssets.columns.find(row=>row.COLUMN_NAME==='metaConnectionId').IS_NULLABLE='NO';
+    bootstrapTables.ClinicMetaAssets.indexes=bootstrapTables.ClinicMetaAssets.indexes.filter(row=>row.name!=='uniq_whatsapp_authorization_asset');
+    const contract=exportFile?{version:1,tables:{},migrations}:{version:1,tables:bootstrapTables,migrations};
     const info={revision:'owned-mysql-meta-fixture',contractDigest:digest(contract),contract,migrations:Object.fromEntries(migrations.map(m=>[m.name,m.sha256]))};
     const journal=[];
     try{

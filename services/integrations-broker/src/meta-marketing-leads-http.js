@@ -1,4 +1,5 @@
 'use strict';
+const K=require('./meta-marketing-credential-shape');
 const https=require('node:https'),{createHmac}=require('node:crypto'),{BrokerError,fail}=require('./errors'),{tokenText}=require('./whatsapp-secrets');
 const L=require('./meta-marketing-leads-contract'),M=require('./meta-marketing-contract'),C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),{usage}=require('./meta-marketing-ads-http');
 const AD_FIELDS='id,account_id,campaign_id,adset_id,effective_status,creative{id,call_to_action,object_story_spec}';
@@ -9,7 +10,7 @@ function createMetaMarketingLeadsHttp({request=https.request,pacer,cursor,now=Da
     if(['receiptAccept','challenge'].includes(name)||Object.keys(input).some(k=>!['binding','metadata','token','appSecret','asset','account','operation','payload','signal','authorize','context','receipt','recipientClinicId'].includes(k))
       ||asset?.kind!=='facebook_page'||asset.assetRef!==`meta-facebook_page:${asset.id}`||!M.graphId(asset.id)||account?.kind!=='ad_account'||account.assetRef!==payload.adAccountAssetRef||account.assetRef!==`meta-ad_account:${account.id}`||!M.graphId(account.id)
       ||typeof authorize!=='function'||!(signal instanceof AbortSignal)||!Buffer.isBuffer(token)||!tokenText(token.toString('utf8'))||!Buffer.isBuffer(appSecret)||!/^[a-f0-9]{32}$/.test(appSecret.toString('ascii')))fail('invalid_request');
-    C.metadata(metadata,binding);for(const a of [asset,account])M.assertAssetCredential(metadata,a);
+    K.metadata(metadata,binding);for(const a of [asset,account])M.assertAssetCredential(metadata,a);
     for(const scope of L.REQUIRED_SCOPES){if(!metadata.scopes.includes(scope))fail('scope_denied');const granular=metadata.granularScopes.find(r=>r.scope===scope);if(granular&&!granular.targetIds.includes(scope==='ads_read'?account.id:asset.id))fail('scope_denied');}
     const codecScope={principalId:context?.principalId,tenantRef:context?.tenantRef,binding,assetRef:asset.assetRef,operation,policyVersion:context?.policyVersion};
     if(['principalId','tenantRef','policyVersion'].some(k=>typeof codecScope[k]!=='string'||!codecScope[k]))fail('invalid_request');
@@ -40,23 +41,23 @@ function createMetaMarketingLeadsHttp({request=https.request,pacer,cursor,now=Da
         }catch{finish(new BrokerError('provider_failed'));req?.destroy();}
       });check();return result;
     });
-    const get=(node,fields,bearer=ownToken,extra={})=>fetchGraph(`/${M.GRAPH_VERSION}/${node}?`+new URLSearchParams({fields,appsecret_proof:proof(bearer),...extra}),bearer);
-    const verifyUser=async()=>{const raw=await fetchGraph(`/${M.GRAPH_VERSION}/debug_token?`+new URLSearchParams({input_token:ownToken.toString('utf8')}),appToken);const fresh=D.fresh(raw,binding,metadata,now());for(const a of [asset,account])M.assertAssetCredential(fresh,a);};
+    const get=(node,fields,bearer=ownToken,extra={})=>fetchGraph(`/${metadata.graphVersion||M.GRAPH_VERSION}/${node}?`+new URLSearchParams({fields,appsecret_proof:proof(bearer),...extra}),bearer);
+    const verifyUser=async()=>{const raw=await fetchGraph(`/${metadata.graphVersion||M.GRAPH_VERSION}/debug_token?`+new URLSearchParams({input_token:ownToken.toString('utf8')}),appToken);const fresh=D.fresh(raw,binding,metadata,now());for(const a of [asset,account])M.assertAssetCredential(fresh,a);};
     const derivePage=async()=>{const raw=await get(asset.id,'id,access_token');if(raw.id!==asset.id||!tokenText(raw.access_token))fail('scope_denied');pageToken=Buffer.from(raw.access_token);delete raw.access_token;
-      const debug=await fetchGraph(`/${M.GRAPH_VERSION}/debug_token?`+new URLSearchParams({input_token:pageToken.toString('utf8')}),appToken),d=debug.data;
+      const debug=await fetchGraph(`/${metadata.graphVersion||M.GRAPH_VERSION}/debug_token?`+new URLSearchParams({input_token:pageToken.toString('utf8')}),appToken),d=debug.data;
       if(!d||d.is_valid!==true||d.app_id!==metadata.appId||d.type!=='PAGE'||d.profile_id!=null&&d.profile_id!==asset.id||!Array.isArray(d.scopes)||!d.scopes.includes('leads_retrieval'))fail('scope_denied');
       if([d.expires_at,d.data_access_expires_at].some(v=>!Number.isSafeInteger(v)||v<0||v!==0&&v*1000<=now()))fail('credential_revoked');
       const me=await get('me','id',pageToken);if(me.id!==asset.id)fail('scope_denied');};
     const form=async id=>{const f=await get(id,'id,name,page_id,status',pageToken);if(f.id!==id||f.page_id!==asset.id)fail('scope_denied');return {id:f.id,name:f.name,page_id:f.page_id,status:f.status};};
-    const reception=async()=>{const page=await get(asset.id,'id,has_lead_access',pageToken);if(page.id!==asset.id||typeof page.has_lead_access!=='boolean')fail('provider_failed');
+    const reception=async()=>{const page=await get(asset.id,'id,has_lead_access',pageToken);if(page.id!==asset.id)fail('provider_failed');const access=require('./meta-marketing-page-lead-access').hasLeadAccess(page.has_lead_access,asset.id);
       const raw=await get(asset.id+'/subscribed_apps','id,subscribed_fields',pageToken,{limit:'100'});if(!Array.isArray(raw.data)||raw.data.length>100||raw.paging?.next)fail('provider_failed');
       const mine=raw.data.filter(r=>r?.id===metadata.appId);if(mine.length>1)fail('provider_failed');const fields=mine.length?mine[0].subscribed_fields:[];
       if(!Array.isArray(fields)||fields.length>100||new Set(fields).size!==fields.length||fields.some(v=>typeof v!=='string'||!/^[a-z][a-z0-9_]{0,63}$/.test(v)))fail('provider_failed');fields.sort();
-      return {page:{id:page.id,has_lead_access:page.has_lead_access},subscription:{subscribed:mine.length===1,fields,revision:L.subscription(metadata.appId,asset.id,account.id,fields)}};};
+      return {page:{id:page.id,has_lead_access:access},subscription:{subscribed:mine.length===1,fields,revision:L.subscription(metadata.appId,asset.id,account.id,fields)}};};
     try{
       check();await verifyUser();let result;
       if(name==='destinations'){
-        const path=`/${M.GRAPH_VERSION}/act_${account.id}/ads`,q=new URLSearchParams({fields:AD_FIELDS,limit:'50',appsecret_proof:proof(ownToken),filtering:JSON.stringify([{field:'campaign.id',operator:'EQUAL',value:payload.campaignId}])});if(after)q.set('after',after);
+        const path=`/${metadata.graphVersion||M.GRAPH_VERSION}/act_${account.id}/ads`,q=new URLSearchParams({fields:AD_FIELDS,limit:'50',appsecret_proof:proof(ownToken),filtering:JSON.stringify([{field:'campaign.id',operator:'EQUAL',value:payload.campaignId}])});if(after)q.set('after',after);
         const raw=await fetchGraph(path+'?'+q,ownToken);if(!Array.isArray(raw.data)||raw.data.length>50)fail('provider_failed');const results=raw.data.map(L.projectAd);let nextCursor=null;
         if(raw.paging?.next){let u;try{u=new URL(raw.paging.next);}catch{fail('provider_failed');}const next=raw.paging?.cursors?.after;if(u.protocol!=='https:'||u.hostname!=='graph.facebook.com'||u.port||u.username||u.password||u.hash||u.pathname!==path||typeof next!=='string'||!/^[\x21-\x7e]{1,1024}$/.test(next)||u.searchParams.get('after')!==next||next===after||!results.length||pages>=1999)fail('provider_failed');rejectReflections(next);nextCursor=cursor.seal(JSON.stringify({after:next,pages:pages+1,campaignId:payload.campaignId,adAccountAssetRef:account.assetRef}),codecScope);}
         result={results,nextCursor};
@@ -71,7 +72,7 @@ function createMetaMarketingLeadsHttp({request=https.request,pacer,cursor,now=Da
               const body=new URLSearchParams({subscribed_fields:fields.join(','),appsecret_proof:proof(pageToken)}).toString();
               // An uncertain POST is never retried. The next readiness GET is
               // the reconciliation mechanism; this operation only sends once.
-              const ack=await fetchGraph(`/${M.GRAPH_VERSION}/${asset.id}/subscribed_apps`,pageToken,'POST',body);if(ack.success!==true)fail('provider_failed');result=await reception();if(!result.subscription.subscribed||fields.some(f=>!result.subscription.fields.includes(f)))fail('provider_failed');
+              const ack=await fetchGraph(`/${metadata.graphVersion||M.GRAPH_VERSION}/${asset.id}/subscribed_apps`,pageToken,'POST',body);if(ack.success!==true)fail('provider_failed');result=await reception();if(!result.subscription.subscribed||fields.some(f=>!result.subscription.fields.includes(f)))fail('provider_failed');
             }
           }
         }else if(name==='receiptRead'){

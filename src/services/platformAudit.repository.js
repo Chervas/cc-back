@@ -17,7 +17,9 @@ function createRepository(model, { delegationAudit } = {}) {
           result_part: row.event.version === 6 ? row.event.batchIndex : row.event.version === 12 ? Number(row.event.mappingId)
             : row.event.version === 16 ? require('../../services/platform-audit/src/google-ads-enrollment-event').PHASES[row.event.reason][1]
               : row.event.version === 22 ? require('../../services/platform-audit/src/meta-oauth-event').PHASES[row.event.reason]
-                : row.event.version === 24 ? require('../../services/platform-audit/src/meta-enrollment-event').PHASES[row.event.reason][1] : 0,
+                : row.event.version === 24 ? require('../../services/platform-audit/src/meta-enrollment-event').PHASES[row.event.reason][1]
+                  : row.event.version === 28 ? require('../../services/platform-audit/src/meta-credential-renewal-event').PHASES[row.event.reason][0]
+                    : [29,30].includes(row.event.version) ? require('../../services/platform-audit/src/meta-business-continuity-event').PHASES[row.event.reason][1] : 0,
           occurred_at: new Date(row.event.occurredAt), body: row.body, digest: row.digest,
           next_attempt_at: new Date(row.event.occurredAt) }, { transaction });
       } catch (error) {

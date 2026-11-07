@@ -71,13 +71,17 @@ test('gated schema requirements are omitted only while every declared gate is cl
     assert.equal(Object.hasOwn(disabled.tables, table), false);
   }
   assert.equal(disabled.migrations.some(m => m.name.startsWith('202609192')), false);
-  assert.deepEqual(disabled.disabledFeatureGroups, ['delegated_sessions','whatsapp_inbox_routing_reviews','google_business_profile_writes','infrastructure_notifications','search_console_analytics']);
+  assert.deepEqual(disabled.disabledFeatureGroups, ['meta_marketing_recovery','google_ads_goal_policy_writes','delegated_sessions','whatsapp_inbox_routing_reviews','google_business_profile_writes','infrastructure_notifications','search_console_analytics']);
+  assert(Object.hasOwn(disabled.tables,'MetaMarketingCredentialRenewals'));
+  assert(Object.hasOwn(disabled.tables,'MetaMarketingEffectiveCredentials'));
   assert.equal(Object.hasOwn(disabled.tables, 'WhatsappInboxRoutingReviews'), false);
 
   const partiallyEnabled = effectiveContract(schema, { GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED: 'true' });
   assert.equal(Object.hasOwn(partiallyEnabled.tables, 'BusinessProfileMutations'), false);
 
   const enabled = effectiveContract(schema, {
+    META_MARKETING_LEGACY_RECOVERY_ENABLED:'true',
+    GOOGLE_ADS_GOAL_POLICY_BROKER_ENABLED:'true',
     GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED: 'true',
     GOOGLE_BUSINESS_PROFILE_WRITES_ENABLED: 'true',
     WHATSAPP_INBOX_ROUTING_REVIEW_ENABLED: 'true',

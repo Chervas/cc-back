@@ -10,7 +10,9 @@ function effectiveContract(contract, env = {}) {
       .every(([key, value]) => String(env[key] ?? '') === String(value));
     const anyMatch = !group.enabledWhenAny || Object.entries(group.enabledWhenAny)
       .some(([key, value]) => String(env[key] ?? '') === String(value));
-    const required = hasConditions && allMatch && anyMatch;
+    // Some version pointers remain read even when new admission is disabled.
+    // Their schema is a release dependency, independent of feature flags.
+    const required = group.required === true || hasConditions && allMatch && anyMatch;
     if (required) continue;
     for (const table of group.tables || []) delete selected.tables[table];
     const migrations = new Set(group.migrations || []);

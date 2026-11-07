@@ -366,9 +366,9 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     }
     pendingTime(row); return validateCurrent(row, transaction);
   }
-  async function forFlow(flowInput, transaction, { phase = 'pending' } = {}) {
+  async function forFlow(flowInput, transaction, { phase = 'pending', allowExpiredCredential = false } = {}) {
     if (!model || !enabled()) return null;
-    if (!['pending', 'active'].includes(phase)) fail('meta_recovery_invalid');
+    if (!['pending', 'active'].includes(phase) || typeof allowExpiredCredential !== 'boolean' || allowExpiredCredential && phase !== 'active') fail('meta_recovery_invalid');
     const input = plain(flowInput);
     if (!input || !C.UUID.test(input.flow_id)) fail('meta_recovery_invalid');
     const flow = plain(await models.MetaMarketingOAuthRequest.findByPk(input.flow_id, options(transaction)));
@@ -391,7 +391,7 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     }
     let candidate; try { candidate = C.candidate(JSON.parse(flow.candidate_metadata), flow); } catch { fail(); }
     if (candidate.subjectId !== row.meta_user_id || candidate.appId !== row.app_id
-      || [candidate.expiresAt, candidate.dataAccessExpiresAt].some(value => value !== null && value <= +now())
+      || phase !== 'active' && [candidate.expiresAt, candidate.dataAccessExpiresAt].some(value => value !== null && value <= +now())
       || !(flow.completed_at instanceof Date) || +flow.completed_at < +row.prepared_at) fail();
     if (row.state === 'prepared') {
       await validateCurrent(row, transaction);
@@ -401,6 +401,8 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
       const enrollment = plain(await models.MetaMarketingEnrollmentRequest.findByPk(row.enrollment_id, options(transaction)));
       if (!enrollment || enrollment.state !== 'active' || enrollment.flow_id !== row.flow_id || Number(enrollment.meta_connection_id) !== canonicalId(row)
         || row.snapshot.version !== 2 && enrollment.mapping_ids !== row.mapping_ids || enrollment.candidate_digest !== row.candidate_digest) fail();
+      await require('./metaMarketingEffectiveCredential.service').createEffectiveCredentials({models,now})
+        .resolve(enrollment,flow,transaction,{allowExpired:allowExpiredCredential});
       row = await withActiveMappings(row, enrollment, transaction);
     }
     return validateCurrent(row, transaction, { phase });
@@ -451,13 +453,13 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     else if (row.state !== 'active') fail();
     return validateCurrent(row, transaction, { phase: 'active' });
   }
-  async function assertActive({ flow, enrollmentId }, transaction) {
+  async function assertActive({ flow, enrollmentId, allowExpiredCredential = false }, transaction) {
     if (!model || !enabled()) return null;
     if (!C.UUID.test(enrollmentId)) fail('meta_recovery_invalid');
     const row = await model.findOne({ ...options(transaction), where: { enrollment_id: enrollmentId } });
     if (!row) return null;
     if (!flow) flow = await models.MetaMarketingOAuthRequest.findByPk(plain(row).flow_id, options(transaction));
-    if (!flow) fail(); const proof = await forFlow(flow, transaction, { phase: 'active' });
+    if (!flow) fail(); const proof = await forFlow(flow, transaction, { phase: 'active', allowExpiredCredential });
     if (!proof || proof.enrollmentId !== enrollmentId) fail(); return proof;
   }
   async function retire(enrollmentId, transaction) {
@@ -500,6 +502,17 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
       if (row.enrollment_id !== null) {
         if (!C.UUID.test(row.enrollment_id) || !C.UUID.test(row.flow_id) || !POSITIVE(effectiveId)) fail('meta_recovery_invalid');
         const enrollment = plain(await models.MetaMarketingEnrollmentRequest.findByPk(row.enrollment_id, o));
+        if(enrollment?.state==='superseded'){
+          // A confirmed Business handover retains this original grant and its
+          // recovery snapshot as history. Withdrawal retires the history here;
+          // the independent Business authority closes the current generation.
+          const H=models.MetaMarketingBusinessHandover;
+          const handover=H&&plain(await H.findOne({...o,where:{old_enrollment_id:enrollment.enrollment_id,state:'active'}}));
+          const B=require('./metaMarketingBusiness.contract');let receipt;
+          try{const saved=B.request(handover);if(saved.source_snapshot!==JSON.stringify(B.freeze(enrollment)))fail();receipt=B.receipt(JSON.parse(saved.owner_receipt),saved);}catch{fail('meta_recovery_changed');}
+          if(!receipt.handoverApplied)fail('meta_recovery_changed');
+          const [changed]=await model.update({state:'retired',retired_at:now()},{...o,where:{recovery_id:row.recovery_id,state:row.state,snapshot_digest:row.snapshot_digest}});if(changed!==1)fail('meta_recovery_conflict');result.retired++;continue;
+        }
         if (!enrollment || enrollment.flow_id !== row.flow_id || enrollment.scope_key !== row.scope_key
           || Number(enrollment.meta_connection_id) !== effectiveId
           || !['prepare_pending', 'prepared', 'activate_pending', 'active', 'revoke_pending', 'revoked'].includes(enrollment.state)) fail('meta_recovery_changed');
