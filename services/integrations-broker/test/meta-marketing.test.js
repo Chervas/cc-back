@@ -40,7 +40,7 @@ test('malformed, foreign and changed secrets never reach Meta or silently select
 test('live app/subject/scopes/expiry and granular target evidence are checked; invalid credentials durably block', async t => {
   for (const [mutate, code] of [
     [d => d.app_id = '999', 'oauth_identity_mismatch'], [d => d.user_id = '999', 'oauth_identity_mismatch'],
-    [d => d.type = 'PAGE', 'oauth_identity_mismatch'], [d => d.scopes.push('ads_management'), 'oauth_credentials_incomplete'],
+    [d => d.type = 'PAGE', 'oauth_identity_mismatch'], [d => d.scopes.pop(), 'oauth_credentials_incomplete'],
     [d => delete d.data_access_expires_at, 'oauth_credentials_incomplete'], [d => d.granular_scopes[0].target_ids = ['999'], 'scope_denied'],
     [d => d.is_valid = false, 'credential_revoked'], [d => d.expires_at = 1, 'credential_revoked'],
   ]) {
