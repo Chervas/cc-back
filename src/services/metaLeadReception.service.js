@@ -70,29 +70,45 @@ async function enqueueMetaLeadNotifications(body, overrides = {}) {
   const signature = overrides.signature;
   if (!Buffer.isBuffer(raw) || raw.length < 1 || raw.length > 65536 || typeof signature !== 'string'
     || !/^sha256=[a-f0-9]{64}$/.test(signature)) fail('meta_lead_invalid_notification');
-  let queued = 0;
+  const acceptedJobs = [];
+  let failure = null, queued = 0;
   for (const pageId of [...new Set(events.map(event => event.page_id))]) {
-    const pairs = await brokerPairsForPage(models, pageId, reader);
-    if (!pairs.length) fail('meta_lead_page_access_required');
-    for (const selected of pairs) {
-      // The owner verifies the original signed bytes and commits a durable
-      // receipt before the application can acknowledge or enqueue anything.
-      const accepted = await reader.read(selected.pair, 'receiptAccept', { rawBase64: raw.toString('base64'), signature });
-      const expected = new Map(events.filter(event => event.page_id === pageId).map(event => [event.lead_id, event]));
-      const seen = new Set();
-      for (const receipt of accepted.receipts) {
-        const event = expected.get(receipt.event.lead_id);
-        if (!event || !sameEvent(receipt.event, event) || !UUID.test(receipt.receiptRef) || seen.has(event.lead_id)) fail('meta_lead_identity_mismatch');
-        seen.add(event.lead_id);
-        await enqueue({ type: JOB_TYPE, payload: { ...event, receipt_ref: receipt.receiptRef,
-          page_asset_id: selected.pageAssetId, account_asset_id: selected.accountAssetId,
-          ...(namespace ? { __runtime_namespace: namespace } : {}) }, priority: 'high', origin: 'meta_leadgen_webhook',
-        dedupeScope: `meta_leadgen:${event.lead_id}`, maxAttempts: 8 });
-        queued++;
+    try {
+      const pairs = await brokerPairsForPage(models, pageId, reader);
+      if (!pairs.length) fail('meta_lead_page_access_required');
+      for (const selected of pairs) {
+        // Every eligible Page receives the same original signed bytes. Owner
+        // receipts commit independently, so one unconfigured Page must not
+        // prevent another eligible Page in this delivery from being accepted.
+        const accepted = await reader.read(selected.pair, 'receiptAccept', { rawBase64: raw.toString('base64'), signature });
+        if (accepted?.persisted !== true || !Array.isArray(accepted.receipts)) fail('meta_lead_identity_mismatch');
+        const expected = new Map(events.filter(event => event.page_id === pageId).map(event => [event.lead_id, event]));
+        const seen = new Set(), pageJobs = [];
+        for (const receipt of accepted.receipts) {
+          const event = expected.get(receipt.event?.lead_id);
+          if (!event || !sameEvent(receipt.event, event) || !UUID.test(receipt.receiptRef) || seen.has(event.lead_id)) fail('meta_lead_identity_mismatch');
+          seen.add(event.lead_id);
+          pageJobs.push({ type: JOB_TYPE, payload: { ...event, receipt_ref: receipt.receiptRef,
+            page_asset_id: selected.pageAssetId, account_asset_id: selected.accountAssetId,
+            ...(namespace ? { __runtime_namespace: namespace } : {}) }, priority: 'high', origin: 'meta_leadgen_webhook',
+          dedupeScope: `meta_leadgen:${event.lead_id}`, maxAttempts: 8 });
+        }
+        if (accepted.receipts.length !== expected.size) fail('meta_lead_identity_mismatch');
+        acceptedJobs.push(...pageJobs);
       }
-      if (accepted.receipts.length !== expected.size) fail('meta_lead_identity_mismatch');
+    } catch (error) {
+      // A global HMAC failure must never create new jobs for this request,
+      // including when another Page already committed an owner receipt.
+      if (error?.code === 'invalid_signature') throw error;
+      failure ||= error || new Error('meta_lead_receipt_unavailable');
     }
   }
+  for (const job of acceptedJobs) {
+    try { await enqueue(job); queued++; } catch (error) { failure ||= error || new Error('meta_lead_receipt_unavailable'); }
+  }
+  // Preserve successful receipts/jobs, but require redelivery for every Page
+  // that was not accepted. Existing per-lead dedupe handles accepted repeats.
+  if (failure) throw failure;
   return { queued };
 }
 

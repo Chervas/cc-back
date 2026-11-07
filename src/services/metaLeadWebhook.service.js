@@ -1,13 +1,16 @@
 'use strict';
 
-const { Op } = require('sequelize');
-const { brokerPairsForPage, enqueueMetaLeadNotifications } = require('./metaLeadReception.service');
+const { enqueueMetaLeadNotifications } = require('./metaLeadReception.service');
 const fail = code => { throw Object.assign(Error(code), { code }); };
 function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqueue,
   receive = enqueueMetaLeadNotifications } = {}) {
   const dependencies = () => {
+    const factory = require('./metaMarketingLeadWebhookReader.service');
+    // Disabled/missing ingress configuration closes public aliases before any
+    // model bootstrap or query. Injected offline readers own their test gate.
+    if (!reader) factory.receiverConfiguration(env);
     const db = models || require('../../models');
-    return { models: db, reader: reader || require('./metaMarketingLeadReader.service').forModels(db) };
+    return { models: db, reader: reader || factory.forWebhookModels(db, { env }) };
   };
   const errorResponse = (res, error) => {
     const status = error?.code === 'invalid_signature' ? 401
@@ -20,15 +23,9 @@ function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqu
   return {
     async verify(req, res) {
       try {
-        const { models: db, reader: source } = dependencies();
-        const appId = env.META_APP_ID;
-        if (typeof appId !== 'string' || !/^[1-9][0-9]{0,29}$/.test(appId)) fail('meta_lead_page_access_required');
-        const rows = await db.MetaMarketingBrokerBinding.findAll({ where: { app_id: appId, state: 'active',
-          asset_ref: { [Op.like]: 'meta-facebook_page:%' } }, attributes: ['asset_ref'], raw: true, limit: 101, order: [['mapping_id', 'ASC']] });
-        if (!rows.length || rows.length > 100) fail('meta_lead_page_access_required');
-        const selected = await brokerPairsForPage(db, rows[0].asset_ref.split(':')[1], source);
-        if (selected.length !== 1) fail('meta_lead_page_access_required');
-        const result = await source.read(selected[0].pair, 'challenge', { mode: req.query['hub.mode'],
+        const { reader: source } = dependencies();
+        const pair = await source.verificationPair();
+        const result = await source.read(pair, 'challenge', { mode: req.query['hub.mode'],
           token: req.query['hub.verify_token'], challenge: req.query['hub.challenge'] });
         res.set('Cache-Control', 'no-store');
         return res.status(200).type('text/plain').send(result.challenge);

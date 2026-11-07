@@ -2,6 +2,8 @@
 const {schema}=require('./contracts'),{fail}=require('./errors'),M=require('./meta-marketing-contract'),{createHash}=require('node:crypto');
 const COHORT='meta-marketing-lead-ads-v1';
 const OPERATIONS=Object.freeze({destinations:'meta.marketing.leads.destinations.read.v1',form:'meta.marketing.leads.form.read.v1',pageStatus:'meta.marketing.leads.page.status.v1',pageEnable:'meta.marketing.leads.page.enable.v1',receiptAccept:'meta.marketing.leads.receipt.accept.v1',receiptRead:'meta.marketing.leads.receipt.read.v1',challenge:'meta.marketing.leads.challenge.verify.v1'});
+const RECEPTION_OPERATIONS=Object.freeze([OPERATIONS.receiptAccept,OPERATIONS.challenge]);
+function ingressPrincipal(environment){if(!['dev','staging'].includes(environment))fail('invalid_request');return `gateway:${environment}:meta-marketing-leads`;}
 // No campaign-management permission: this capability reads Ads, receives leads,
 // and adds leadgen to this application's existing Page subscription only.
 const REQUIRED_SCOPES=Object.freeze(['ads_read','leads_retrieval','pages_show_list','pages_read_engagement','pages_manage_ads','pages_manage_metadata']);
@@ -56,4 +58,4 @@ function validateResponse(op,data,payload){
   }else bad();
   if(Buffer.byteLength(JSON.stringify(data))>110000)bad();return structuredClone(data);
 }
-module.exports={COHORT,OPERATIONS,REQUIRED_SCOPES,validate,validateRequest:validate,validateResponse,config,family,event,projectAd,subscription};
+module.exports={COHORT,OPERATIONS,REQUIRED_SCOPES,RECEPTION_OPERATIONS,ingressPrincipal,validate,validateRequest:validate,validateResponse,config,family,event,projectAd,subscription};
