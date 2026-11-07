@@ -5,7 +5,7 @@ const { randomUUID } = require('node:crypto');
 const { Op } = require('sequelize');
 const { createRecovery, encode, hash, ALIAS_ATTRIBUTES, CONNECTION_ATTRIBUTES } = require('../../services/metaMarketingLegacyRecovery.service');
 const APP = '1807844546609897', SUBJECT = '24532330033025968';
-function fixture() {
+function fixture({ version = 1 } = {}) {
   const preparedAt = new Date('2026-11-04T12:00:00Z'); let clock = +preparedAt + 5000;
   const state = { enabled: true, mfa: true, updates: 0, bindings: [], selections: [], connections: [{ id: 158, userId: 1, metaUserId: SUBJECT, broker_app_id: null,
     credentials_external: 0, credential_present: 1, credential_sha256: 'a'.repeat(64) }],
@@ -50,6 +50,10 @@ function fixture() {
   const sessions = { verifyReference: async (_actor, options) => { assert.equal(options.requireEmail, true); if (!state.mfa) throw Error('mfa_required'); } };
   const guard = createRecovery({ models, sessions, enabled: () => state.enabled, now: () => new Date(clock) });
   const input = { scopeKey: 'group:28', clinicIds: [1, 70], sourceConnectionId: 158, appId: APP, subjectId: SUBJECT, actorId: 1, mappingIds: [359] };
+  if (version === 2) {
+    Object.assign(input, { version: 2, canonicalConnectionId: 159, newPageCount: 0, cleanup: [] });
+    state.connections.push({ id: 159, userId: null, metaUserId: SUBJECT, broker_app_id: APP, credentials_external: 1, credential_present: 0, credential_sha256: null });
+  }
   const actor = { ...input, sessionRef: randomUUID(), sessionExpiresAt: new Date(+preparedAt + 86400000) };
   async function prepare() {
     const snapshot = await guard.captureSnapshot(input, tx);
@@ -69,7 +73,7 @@ function fixture() {
     return state.flow;
   }
   async function canonical() {
-    state.connections.push({ id: 159, userId: null, metaUserId: SUBJECT, broker_app_id: APP, credentials_external: 1, credential_present: 0, credential_sha256: null });
+    if (!state.connections.some(row => row.id === 159)) state.connections.push({ id: 159, userId: null, metaUserId: SUBJECT, broker_app_id: APP, credentials_external: 1, credential_present: 0, credential_sha256: null });
     return guard.bindCanonical({ flow: state.flow, canonicalConnectionId: 159 }, tx);
   }
   async function activate() {
@@ -125,6 +129,26 @@ test('a second flow, changed subject or expired initial claim cannot acquire the
   const g = fixture(); await g.prepare(); g.flow(); const candidate = JSON.parse(g.state.flow.candidate_metadata); candidate.subjectId = '999'; g.state.flow.candidate_metadata = JSON.stringify(candidate);
   await assert.rejects(() => g.guard.forFlow(g.state.flow, g.tx));
   const h = fixture(); await h.prepare(); h.flow(); h.tick(3600000); await assert.rejects(() => h.guard.forFlow(h.state.flow, h.tx), { code: 'meta_recovery_expired' });
+});
+test('V2 bound within its preparation window continues the same flow after expiry with unchanged immutable authority', async () => {
+  const f=fixture({version:2});await f.prepare();f.flow();const before=await f.guard.forFlow(f.state.flow,f.tx);
+  const immutable={snapshot:f.state.recovery.snapshot,digest:f.state.recovery.snapshot_digest,prepared:+f.state.recovery.prepared_at,expires:+f.state.recovery.expires_at,bound:+f.state.recovery.bound_at};
+  f.tick(3600001);const after=await f.guard.forFlow(f.state.flow,f.tx);assert.equal(after.immutableDigest,before.immutableDigest);
+  await f.canonical();await f.guard.attachEnrollment({flow:f.state.flow,enrollmentId:randomUUID()},f.tx);
+  assert.deepEqual({snapshot:f.state.recovery.snapshot,digest:f.state.recovery.snapshot_digest,prepared:+f.state.recovery.prepared_at,expires:+f.state.recovery.expires_at,bound:+f.state.recovery.bound_at},immutable);
+});
+test('continuity does not admit unbound, V1, late or invalid bindings, another flow, expired session/candidate or changed pins', async () => {
+  const unbound=fixture({version:2});await unbound.prepare();unbound.flow();unbound.tick(3600001);
+  await assert.rejects(unbound.guard.forFlow(unbound.state.flow,unbound.tx),{code:'meta_recovery_expired'});
+  const old=fixture();await old.prepare();old.flow();await old.guard.forFlow(old.state.flow,old.tx);old.tick(3600001);
+  await assert.rejects(old.guard.forFlow(old.state.flow,old.tx),{code:'meta_recovery_expired'});
+  for(const mutate of [f=>f.state.recovery.bound_at=new Date(+f.state.recovery.prepared_at-1),f=>f.state.recovery.bound_at=new Date(+f.state.recovery.expires_at),
+    f=>f.state.recovery.bound_at=new Date(NaN),f=>f.state.mfa=false,f=>f.state.flow.session_expires_at=new Date(0),
+    f=>{const value=JSON.parse(f.state.flow.candidate_metadata);value.expiresAt=+f.state.recovery.expires_at;f.state.flow.candidate_metadata=JSON.stringify(value);},
+    f=>f.flow(),f=>f.state.connections[0].credential_sha256='f'.repeat(64)]){
+    const f=fixture({version:2});await f.prepare();f.flow();await f.guard.forFlow(f.state.flow,f.tx);f.tick(3600001);mutate(f);
+    await assert.rejects(f.guard.forFlow(f.state.flow,f.tx));
+  }
 });
 
 test('a raw block, shared assignment or legacy secret changed after preparation invalidates the exact pinned generation', async () => {

@@ -333,7 +333,16 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
   async function rowsForScope(scopeKey, transaction) {
     return model.findAll({ ...options(transaction), where: { scope_key: scopeKey, state: { [Op.in]: ['prepared', 'flow_bound', 'active'] } }, order: [['prepared_at', 'DESC']], limit: 2 });
   }
-  function pendingTime(row) { if (+now() < +row.prepared_at || +now() >= +row.expires_at) fail('meta_recovery_expired'); }
+  function pendingTime(row) {
+    // V2's preparation window bounds acquiring authority, not completing an
+    // already bound flow. Every continuation still checks its original actor,
+    // candidate expiry, identity and current snapshot through the normal path.
+    const boundInWindow = row.snapshot.version === 2 && row.state === 'flow_bound'
+      && C.UUID.test(row.flow_id) && HASH.test(row.candidate_digest)
+      && row.bound_at instanceof Date && Number.isFinite(+row.bound_at)
+      && +row.bound_at >= +row.prepared_at && +row.bound_at < +row.expires_at;
+    if (+now() < +row.prepared_at || +now() >= +row.expires_at && !boundInWindow) fail('meta_recovery_expired');
+  }
   async function update(row, patch, transaction) {
     const [changed] = await model.update(patch, { ...options(transaction), where: { recovery_id: row.recovery_id, state: row.state,
       flow_id: row.flow_id, enrollment_id: row.enrollment_id, canonical_connection_id: row.canonical_connection_id, snapshot_digest: row.snapshot_digest } });

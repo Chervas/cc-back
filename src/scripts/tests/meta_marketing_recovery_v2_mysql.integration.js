@@ -67,11 +67,11 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   for(let i=0;i<2;i++){
     const a=actors[i],group=i===0?28:29,clinicIds=i===0?[1,70]:[66,72],scopes=['ads_read','pages_read_engagement','pages_show_list','public_profile'];
     const slot={scope_key:a.scopeKey,connection_ref:'connection:fixture-'+group,asset_ref:'meta-enroll:'+a.scopeKey,app_id:'101',clinic_ids:JSON.stringify(clinicIds),
-      scopes:JSON.stringify(scopes),redirect_uri:'https://app.example.invalid/oauth/meta/marketing/callback',expires_at:new Date(clock+3600000),state:'active'};
+      scopes:JSON.stringify(scopes),redirect_uri:'https://app.example.invalid/oauth/meta/marketing/callback',expires_at:new Date(clock+7200000),state:'active'};
     await models.MetaMarketingOAuthSlot.create(slot);
     const captured=await sql.transaction(t=>scope.capture(a,t)),flowId=randomUUID();
     const candidate={versionId:flowId,digest:C.hash('FICTITIOUS_CANDIDATE_'+group),appId:'101',subjectId:'201',tokenType:'USER',scopes,
-      expiresAt:clock+3600000,dataAccessExpiresAt:null,granularScopes:[]};
+      expiresAt:clock+7200000,dataAccessExpiresAt:null,granularScopes:[]};
     const flow=await models.MetaMarketingOAuthRequest.create({flow_id:flowId,state_hash:C.hash(flowId),scope_key:a.scopeKey,connection_ref:slot.connection_ref,asset_ref:slot.asset_ref,
       app_id:'101',clinic_ids:slot.clinic_ids,scopes:slot.scopes,redirect_uri:slot.redirect_uri,slot_digest:captured.slotDigest,scope_digest:captured.scopeDigest,
       actor_user_id:1,session_ref:a.sessionRef,session_expires_at:a.sessionExpiresAt,return_origin:'https://app.example.invalid',requested_at:now(),expires_at:new Date(clock+600000),
@@ -128,6 +128,21 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   const committed=id=>sql.transaction(t=>bindings.committed(id,t));await committed(arriaga.enrollment_id);
   assert.equal(await baseline(),untouched);
   report.checks.push('Actual SQL audit failures roll back reservation and activation; selected Page361 token cleared only with SHA-CAS+fresh grant in successful atomic audited commit');
+  const boundBS=await models.MetaMarketingRecovery.findByPk(records[1].recovery_id,{raw:true});
+  assert.equal(boundBS.state,'flow_bound');assert(+boundBS.bound_at>=+boundBS.prepared_at&&+boundBS.bound_at<+boundBS.expires_at);
+  const auditRepository=require('../../services/platformAudit.repository'),auditEvent=require('../../../services/platform-audit/src/event');
+  const delivered=await auditRepository.drain(auditRepository.createRepository(models.PlatformAuditEvent),{
+    write:async row=>({key:auditEvent.keyFor(row),digest:row.digest,versionId:'FICTITIOUS_DELIVERY_ACK'})},{now,limit:100});
+  assert.equal(delivered.failed,0);assert.equal(delivered.pending,0);
+  clock+=3600001;
+  for(const inventory of inventories.values()){inventory.observedAt=clock;inventory.expiresAt=clock+300000;}
+  mfa=false;await assert.rejects(authority.reserve(actors[1],flows[1].flow_id,refs(1)),{code:'auth_email_verification_required'});mfa=true;
+  const originalCandidate=flows[1].candidate_metadata,expiredCandidate=JSON.parse(originalCandidate);expiredCandidate.expiresAt=clock-1;
+  await flows[1].update({candidate_metadata:JSON.stringify(expiredCandidate)});
+  try{await assert.rejects(authority.reserve(actors[1],flows[1].flow_id,refs(1)));}finally{await flows[1].update({candidate_metadata:originalCandidate});}
+  const continued=await sql.transaction(t=>guard.forFlow(flows[1].get({plain:true}),t));
+  assert.equal(continued.recoveryId,boundBS.recovery_id);
+  assert.equal((await sql.transaction(t=>scope.revalidate(flows[1].get({plain:true}),t))).scopeDigest,flows[1].scope_digest);
   const bs=await ready(await reserve(1));assert.equal(bs.meta_connection_id,159);assert.equal(await models.MetaMarketingEnrollmentIdentity.count(),1);
   await models.ClinicMetaAsset.update({additionalData:{...metadata,currency:'USD'}},{where:{id:391},silent:true});
   await assert.rejects(activate(bs));assert.equal(await models.MetaMarketingBrokerBinding.count(),2);
@@ -147,7 +162,7 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   for(const original of records){const current=await models.MetaMarketingRecovery.findByPk(original.recovery_id);for(const key of['snapshot','snapshot_digest','prepared_at','expires_at'])assert.deepEqual(current[key],original[key]);}
   for(const id of[arriaga.enrollment_id,bs.enrollment_id]){const proof=await committed(id);assert.equal(proof.recovery.canonicalConnectionId,159);assert.equal(proof.recovery.version,2);}
   assert.equal(await models.MetaMarketingRecovery.count({where:{canonical_connection_id:null,state:'active'}}),2);assert.equal(await baseline(),untouched);
-  report.checks.push('BS adopts391 plus explicitly selected freshAd303 and exactly2 Pages on canonical159/group29; new alias has no credentials; ScopeDigest, immutable snapshots and TTL unchanged; Arriaga/source/WA remain valid');
+  report.checks.push('BS bound before claim expiry completes reservation/activation after deadline; original MFA and candidate expiry remain enforced; freshAd303 plus exact2Pages have no credentials; ScopeDigest/snapshots/TTL and Arriaga/WA unchanged');
   const remoteStates=new Map([[arriaga.enrollment_id,'active'],[bs.enrollment_id,'active']]),controlCalls=[];
   const worker=require('../../services/metaMarketingEnrollment.service').createService({models,sessions,oauth:{...oauth,cancelAfterEnrollment:async row=>{
     assert.equal(row.enrollment_id,bs.enrollment_id);
