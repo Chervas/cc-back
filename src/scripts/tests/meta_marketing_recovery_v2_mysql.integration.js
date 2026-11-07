@@ -167,6 +167,43 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   for(const id of[arriaga.enrollment_id,bs.enrollment_id]){const proof=await committed(id);assert.equal(proof.recovery.canonicalConnectionId,159);assert.equal(proof.recovery.version,2);}
   assert.equal(await models.MetaMarketingRecovery.count({where:{canonical_connection_id:null,state:'active'}}),2);assert.equal(await baseline(),untouched);
   report.checks.push('BS bound before claim expiry completes reservation/activation after deadline; original MFA and candidate expiry remain enforced; freshAd303 plus exact2Pages have no credentials; ScopeDigest/snapshots/TTL and Arriaga/WA unchanged');
+  // The real Settings metadata factory must consume the same V2 authority as
+  // jobs, rather than treating SQL canonicalNULL or legacy mapping_ids as V1.
+  const metadataContract=require('../../services/metaConnectionMetadata.service');
+  const normalMetadataReader=require('../../services/metaMarketingBrokerReader.service').forModels(models);
+  const preparedMetadata=[],assertedMetadata=[];let providerReads=0;
+  const metadataReader={prepare:async id=>{preparedMetadata.push(id);return normalMetadataReader.prepare(id);},
+    describe:context=>normalMetadataReader.describe(context),assertContext:async context=>{assertedMetadata.push(normalMetadataReader.describe(context).mappingId);return normalMetadataReader.assertContext(context);},
+    read:()=>{providerReads++;assert.fail('Settings metadata must not contact the provider');}};
+  const loadMetadataAccess=metadataContract.createMetaDataAccessRepository(models,{broker:metadataReader});
+  const dataAccess=await loadMetadataAccess({scopeKey:'group:29',clinicIds:[66,72]});
+  assert.deepEqual(dataAccess.value,{version:1,configured:true,readOnly:true,sources:['meta_ads'],scope:{type:'group',id:29,key:'group:29',clinicCount:2}});
+  await dataAccess.assert();
+  assert.deepEqual(preparedMetadata,JSON.parse(activeBS.mapping_ids));assert.deepEqual(assertedMetadata,preparedMetadata);
+  assert.equal(preparedMetadata.length,4);assert.equal(fresh.filter(page=>preparedMetadata.includes(page.id)).length,2);
+  for(const sentinel of[LEGACY,PAGE,WA])assert(!JSON.stringify(dataAccess.value).includes(sentinel));
+  assert.equal(await loadMetadataAccess({scopeKey:'group:30',clinicIds:[66,72]}),null);
+  await assert.rejects(loadMetadataAccess({scopeKey:'group:29',clinicIds:[1,70]}));
+  const pageBinding=await models.MetaMarketingBrokerBinding.findByPk(fresh[0].id,{raw:true});
+  await models.MetaMarketingBrokerBinding.update({scope_key:'group:28'},{where:{mapping_id:pageBinding.mapping_id}});
+  try{await assert.rejects(loadMetadataAccess({scopeKey:'group:29',clinicIds:[66,72]}));}
+  finally{await models.MetaMarketingBrokerBinding.update({scope_key:pageBinding.scope_key},{where:{mapping_id:pageBinding.mapping_id}});}
+  const fencedDataAccess=await loadMetadataAccess({scopeKey:'group:29',clinicIds:[66,72]});
+  await models.MetaMarketingBrokerBinding.update({state:'blocked'},{where:{mapping_id:pageBinding.mapping_id}});
+  try{await assert.rejects(fencedDataAccess.assert());}
+  finally{await models.MetaMarketingBrokerBinding.update({state:'active'},{where:{mapping_id:pageBinding.mapping_id}});}
+  const revokeHash=G.hash('FICTITIOUS_METADATA_PAGE_REVOCATION');
+  await models.MetaMarketingBrokerRevocation.create({tuple_hash:revokeHash,connection_ref:pageBinding.connection_ref,asset_ref:pageBinding.asset_ref,
+    tenant_clinic_id:pageBinding.tenant_clinic_id,meta_connection_id:159,meta_user_id:'201',app_id:'101',parent_page_id:null,scope_key:'group:29',
+    clinic_ids:'[66,72]',mapping_ids:JSON.stringify([pageBinding.mapping_id]),request_id:randomUUID(),actor_user_id:1,requested_at:now(),next_attempt_at:now(),state:'pending'});
+  try{await assert.rejects(loadMetadataAccess({scopeKey:'group:29',clinicIds:[66,72]}));}
+  finally{await models.MetaMarketingBrokerRevocation.destroy({where:{tuple_hash:revokeHash}});}
+  const originalSnapshot=records[1].snapshot;
+  await models.MetaMarketingRecovery.update({snapshot:originalSnapshot+' '},{where:{recovery_id:records[1].recovery_id}});
+  try{await assert.rejects(loadMetadataAccess({scopeKey:'group:29',clinicIds:[66,72]}));}
+  finally{await models.MetaMarketingRecovery.update({snapshot:originalSnapshot},{where:{recovery_id:records[1].recovery_id}});}
+  await(await loadMetadataAccess({scopeKey:'group:29',clinicIds:[66,72]})).assert();assert.equal(providerReads,0);assert.equal(await baseline(),untouched);
+  report.checks.push('Actual Settings dataAccess factory validates V2 snapshot/canonicalJSON and all4 bindings including2Pages via normal recovery/reader; Ads-only DTO, foreign group, changed Page binding, revocation and snapshot tampering fail closed; zero provider calls');
   const remoteStates=new Map([[arriaga.enrollment_id,'active'],[bs.enrollment_id,'active']]),controlCalls=[];
   const worker=require('../../services/metaMarketingEnrollment.service').createService({models,sessions,oauth:{...oauth,cancelAfterEnrollment:async row=>{
     assert.equal(row.enrollment_id,bs.enrollment_id);

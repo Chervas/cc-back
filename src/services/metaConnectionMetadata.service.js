@@ -94,7 +94,8 @@ function createMetaConnectionMetadata({ authorize, resolve, session, loadMapping
     }
   } };
 }
-const DATA_RECOVERY_FIELDS = Object.freeze(['recovery_id', 'scope_key', 'state', 'canonical_connection_id', 'mapping_ids', 'flow_id', 'enrollment_id', 'app_id', 'meta_user_id', 'snapshot_digest', 'candidate_digest']);
+const DATA_RECOVERY_FIELDS = Object.freeze(['recovery_id', 'scope_key', 'state', 'canonical_connection_id', 'mapping_ids', 'flow_id', 'enrollment_id', 'app_id', 'meta_user_id', 'snapshot_digest', 'candidate_digest',
+  'clinic_ids', 'source_connection_id', 'snapshot', 'prepared_by_user_id', 'prepared_at', 'expires_at', 'bound_at', 'activated_at', 'retired_at']);
 const DATA_BINDING_FIELDS = Object.freeze(['mapping_id', 'enrollment_id', 'meta_connection_id', 'scope_key', 'asset_ref', 'state']);
 function createMetaDataAccessRepository(models, { broker, enabled = () => process.env.META_MARKETING_BROKER_ENABLED === 'true'
   && process.env.META_MARKETING_ADS_SYNC_ENABLED === 'true' && process.env.META_MARKETING_LEGACY_RECOVERY_ENABLED === 'true' } = {}) {
@@ -106,18 +107,39 @@ function createMetaDataAccessRepository(models, { broker, enabled = () => proces
       where: { scope_key: scopeKey, state: 'active' }, order: [['recovery_id', 'ASC']], limit: 2 });
     if (!Array.isArray(rows) || rows.length > 1) fail('meta_metadata_data_access_unavailable', 503);
     if (!rows.length) return null;
-    const row = Object.fromEntries(DATA_RECOVERY_FIELDS.map(key => [key, rows[0][key]])); let mappingIds;
-    try { mappingIds = JSON.parse(row.mapping_ids); } catch { fail('meta_metadata_data_access_unavailable', 503); }
-    if (row.scope_key !== scopeKey || row.state !== 'active' || !positive(row.canonical_connection_id)
+    const row = Object.fromEntries(DATA_RECOVERY_FIELDS.map(key => [key, rows[0][key]])); let mappingIds, snapshot;
+    try { mappingIds = JSON.parse(row.mapping_ids); snapshot = JSON.parse(row.snapshot); } catch { fail('meta_metadata_data_access_unavailable', 503); }
+    if (![1, 2].includes(snapshot?.version) || row.scope_key !== scopeKey || row.state !== 'active'
       || ![row.recovery_id, row.flow_id, row.enrollment_id].every(uuid) || ![row.snapshot_digest, row.candidate_digest].every(hash)
       || !Array.isArray(mappingIds) || !mappingIds.length || mappingIds.length > 100
       || mappingIds.some((id, i) => !positive(id) || typeof id !== 'number' || i > 0 && id <= mappingIds[i - 1])) fail('meta_metadata_data_access_unavailable', 503);
+    let canonicalConnectionId = row.canonical_connection_id;
+    if (snapshot.version === 2) {
+      // V2 keeps the historical UNIQUE SQL column NULL. Its normal recovery
+      // authority validates the immutable snapshot and the complete active
+      // enrollment, including fresh Pages/Ads rather than only legacy aliases.
+      const recovery = require('./metaMarketingLegacyRecovery.service');
+      try { recovery.snapshotRecord(row); } catch { fail('meta_metadata_data_access_unavailable', 503); }
+      const proof = await models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, transaction =>
+        recovery.createRecovery({ models }).assertActive({ enrollmentId: row.enrollment_id }, transaction));
+      if (!proof || proof.version !== 2 || proof.recoveryId !== row.recovery_id || proof.flowId !== row.flow_id
+        || proof.enrollmentId !== row.enrollment_id || proof.scopeKey !== scopeKey || proof.snapshotDigest !== row.snapshot_digest
+        || proof.appId !== row.app_id || proof.subjectId !== row.meta_user_id || !positive(proof.canonicalConnectionId)
+        || JSON.stringify(proof.legacyMappingIds) !== row.mapping_ids || JSON.stringify(proof.clinicIds) !== row.clinic_ids
+        || !Array.isArray(proof.mappingIds) || !proof.mappingIds.length || proof.mappingIds.length > 100
+        || proof.mappingIds.some((id, i) => typeof id !== 'number' || !positive(id) || i > 0 && id <= proof.mappingIds[i - 1])) fail('meta_metadata_data_access_unavailable', 503);
+      canonicalConnectionId = proof.canonicalConnectionId;
+      mappingIds = proof.mappingIds;
+    }
+    if (!positive(canonicalConnectionId)) fail('meta_metadata_data_access_unavailable', 503);
     const bindings = await models.MetaMarketingBrokerBinding.findAll({ attributes: DATA_BINDING_FIELDS, raw: true, logging: false,
-      where: { enrollment_id: row.enrollment_id, meta_connection_id: row.canonical_connection_id, scope_key: scopeKey, state: 'active' }, order: [['mapping_id', 'ASC']], limit: 101 });
+      where: { enrollment_id: row.enrollment_id, meta_connection_id: canonicalConnectionId, scope_key: scopeKey, state: 'active' }, order: [['mapping_id', 'ASC']], limit: 101 });
     if (!Array.isArray(bindings) || bindings.length !== mappingIds.length || bindings.some((binding, i) => Number(binding.mapping_id) !== mappingIds[i]
       || binding.state !== 'active' || binding.scope_key !== scopeKey || binding.enrollment_id !== row.enrollment_id
-      || Number(binding.meta_connection_id) !== Number(row.canonical_connection_id) || !/^meta-ad_account:[1-9][0-9]{0,29}$/.test(binding.asset_ref || ''))) fail('meta_metadata_data_access_unavailable', 503);
-    return { row, mappingIds, bindings: bindings.map(binding => Object.fromEntries(DATA_BINDING_FIELDS.map(key => [key, binding[key]]))) };
+      || Number(binding.meta_connection_id) !== Number(canonicalConnectionId)
+      || !(snapshot.version === 2 ? /^meta-(ad_account|facebook_page):[1-9][0-9]{0,29}$/ : /^meta-ad_account:[1-9][0-9]{0,29}$/).test(binding.asset_ref || ''))
+      || !bindings.some(binding => binding.asset_ref.startsWith('meta-ad_account:'))) fail('meta_metadata_data_access_unavailable', 503);
+    return { row, canonicalConnectionId: Number(canonicalConnectionId), mappingIds, bindings: bindings.map(binding => Object.fromEntries(DATA_BINDING_FIELDS.map(key => [key, binding[key]]))) };
   }
   return async ({ scopeKey, clinicIds }) => {
     if (!enabled()) return null;
@@ -127,8 +149,9 @@ function createMetaDataAccessRepository(models, { broker, enabled = () => proces
     const reader = broker || require('./metaMarketingBrokerReader.service').forModels(models);
     const contexts = [];
     function matches(value, binding) {
-      if (value.kind !== 'ad_account' || value.mappingId !== Number(binding.mapping_id) || value.assetRef !== binding.asset_ref
-        || value.scopeKey !== scopeKey || value.connectionId !== Number(before.row.canonical_connection_id)
+      const kind = /^meta-(ad_account|facebook_page):/.exec(binding.asset_ref)?.[1];
+      if (value.kind !== kind || value.mappingId !== Number(binding.mapping_id) || value.assetRef !== binding.asset_ref
+        || value.scopeKey !== scopeKey || value.connectionId !== before.canonicalConnectionId
         || value.appId !== before.row.app_id || value.subjectId !== before.row.meta_user_id
         || JSON.stringify(value.clinicIds) !== JSON.stringify(clinicIds)) fail('meta_metadata_scope_changed', 409);
     }

@@ -4,7 +4,7 @@ require('node:net').Socket.prototype.connect=()=>{throw Error('TEST_ONLY_no_netw
 const M=require('../../services/metaConnectionMetadata.service');
 function fixture(){
   const state={enabled:true,active:true,bindingActive:true,session:true,acl:true,reads:0,prepares:0,asserts:0,legacyMappings:0,onAssert:null,onResolve:null,scopeKey:'group:28',clinicIds:[1,70]};
-  const recovery={recovery_id:randomUUID(),scope_key:'group:28',state:'active',canonical_connection_id:198,mapping_ids:'[359]',flow_id:randomUUID(),enrollment_id:randomUUID(),app_id:'101',meta_user_id:'201',snapshot_digest:'a'.repeat(64),candidate_digest:'b'.repeat(64)};
+  const recovery={recovery_id:randomUUID(),scope_key:'group:28',state:'active',canonical_connection_id:198,mapping_ids:'[359]',flow_id:randomUUID(),enrollment_id:randomUUID(),app_id:'101',meta_user_id:'201',snapshot:'{"version":1}',snapshot_digest:'a'.repeat(64),candidate_digest:'b'.repeat(64)};
   const binding={mapping_id:359,enrollment_id:recovery.enrollment_id,meta_connection_id:198,scope_key:'group:28',asset_ref:'meta-ad_account:301',state:'active'};
   const models={MetaMarketingRecovery:{async findAll(options){if(state.failSql)throw Error('FICTITIOUS_SQL_PASSWORD_MUST_NOT_ESCAPE');state.reads++;assert.deepEqual(options.attributes,M.DATA_RECOVERY_FIELDS);assert.equal(options.raw,true);assert.equal(options.logging,false);return state.active&&options.where.scope_key===recovery.scope_key?[{...recovery,accessToken:'FICTITIOUS_NEVER_SELECTED'}]:[];}},
     MetaMarketingBrokerBinding:{async findAll(options){state.reads++;assert.deepEqual(options.attributes,M.DATA_BINDING_FIELDS);assert.equal(options.raw,true);return state.bindingActive?[{...binding,private_key:'FICTITIOUS_NEVER_SELECTED'}]:[];}}};
@@ -45,7 +45,8 @@ test('session or ACL revoked during the final canonical context fence returns no
   for(const [field,expected]of [['session',401],['acl',403]]){const f=fixture();f.state.onAssert=()=>{f.state[field]=false;};const r=await f.call();assert.equal(r.status,expected);assert.equal(r.body.dataAccess,undefined);assert.equal(r.body.mappings,undefined);}
 });
 test('invalid mappings or canonical context, and unexpected SQL failures fail closed without secret detail',async()=>{
-  for(const change of [f=>{f.recovery.mapping_ids='[359,359]';},f=>{f.state.bindingActive=false;},f=>{f.recovery.canonical_connection_id=199;},f=>{f.state.scopeKey='group:29';}]){
+  for(const change of [f=>{f.recovery.mapping_ids='[359,359]';},f=>{f.state.bindingActive=false;},f=>{f.recovery.canonical_connection_id=199;},f=>{f.state.scopeKey='group:29';},
+    f=>{f.recovery.snapshot='{"version":3}';},f=>{f.recovery.snapshot='null';},f=>{f.recovery.snapshot='{"version":2}';},f=>{f.recovery.snapshot='not-json';}]){
     const f=fixture();change(f);const r=await f.call();assert([409,503].includes(r.status));assert.equal(r.body.dataAccess,undefined);assert(!JSON.stringify(r).includes('FICTITIOUS_NEVER_SELECTED'));
   }
   const f=fixture();f.state.failSql=true;const failed=await f.call();assert.equal(failed.status,503);assert.equal(failed.body.dataAccess,undefined);assert(!JSON.stringify(failed).includes('FICTITIOUS_SQL_PASSWORD'));
