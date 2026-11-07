@@ -31,6 +31,8 @@ function validateConfig(config) {
     return config;
   }
   const expected=config.assetEnrollment?Object.values(E.roles(config.environment)):[gateway,control];
+  const ingress=L.ingressPrincipal(config.environment);
+  if(config.leadAds&&policy.principals.some(p=>p.id===ingress))expected.push(ingress);
   if (!policy.connections.length || policy.connections.length>64 || policy.principals.length!==expected.length
     || !expected.every(id=>policy.principals.some(p=>p.id===id)) || policy.principals.some(p=>p.maxPerMinute>20)) fail('invalid_request');
   const keys=policy.principals.map(p=>createPublicKey(p.publicKey).export({type:'spki',format:'der'}).toString('base64'));

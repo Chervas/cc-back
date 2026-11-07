@@ -11,7 +11,7 @@ async function fixture(t) {
   MetaMarketingBrokerBinding: { findAll: async ({ where }) => where.app_id ? [{ asset_ref: 'meta-facebook_page:401' }]
     : where.mapping_id ? [{ enrollment_id: '11111111-1111-4111-8111-111111111111', scope_key: 'group:9', connection_ref: 'meta:fixture' }]
       : [{ mapping_id: 11, asset_ref: 'meta-ad_account:301' }] } };
-  const reader = { preparePair: async () => ({}), assertPair: async () => ({}), read: async (_pair, family, payload) => {
+  const reader = { preparePair: async () => ({}), assertPair: async () => ({}), verificationPair: async () => ({}), read: async (_pair, family, payload) => {
     state.ownerCalls++;
     if (family === 'challenge') {
       if (payload.token !== token) throw Object.assign(Error('invalid_signature'), { code: 'invalid_signature' });

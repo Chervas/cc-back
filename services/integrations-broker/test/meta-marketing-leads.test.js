@@ -142,3 +142,22 @@ test('main shares one durable app clock across OAuth exchange, debug, discovery,
   assert(f.current.store.db.prepare('SELECT next_allowed_at FROM meta_marketing_ads_pacing WHERE scope=?').get('meta-ads-app:101').next_allowed_at>0);
   await app.close();app=null;
 });
+test('real TLS receiptRead tolerates over ten seconds of paced Graph latency inside the owner budget',async t=>{
+  const r=await ready(t),f=r.f,fs=require('node:fs'),path=require('node:path'),net=require('node:net'),{execFileSync}=require('node:child_process'),runtime=require('../src/meta-marketing-oauth-main');
+  const {allowPort,removePort}=require('./offline-guard.cjs'),cfg={...f.config,stateFile:f.filename,leadAds:structuredClone(r.config)};
+  const receiptRef=(await r.execute('receiptAccept',acceptPayload())).data.receipts[0].receiptRef;
+  execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',cfg.tlsKeyFile,'-out',cfg.tlsCertFile,'-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'});fs.chmodSync(cfg.tlsKeyFile,0o600);fs.chmodSync(cfg.tlsCertFile,0o600);
+  const probe=net.createServer();await new Promise(resolve=>probe.listen(0,'127.0.0.1',resolve));cfg.port=probe.address().port;await new Promise(resolve=>probe.close(resolve));allowPort(cfg.port);
+  const file=path.join(f.dir,'lead-real-latency-config.json');fs.writeFileSync(file,JSON.stringify(cfg),{mode:0o600});
+  const calls=[];r.state.before=async()=>new Promise(resolve=>setTimeout(resolve,1500));
+  const request=(options,cb)=>{calls.push(Date.now());return r.request(options,cb);};
+  let app=await runtime.main(file,{awsFactory:async()=>({secrets:f.aws,sink:{async write(){return {versionId:'FICTITIOUS_LATENCY_AUDIT',digest:'fictitious'};}},close(){}}),http:f.http,leadsRequest:request});t.after(async()=>{if(app)await app.close();removePort(cfg.port);});
+  const client=require('../../../src/lib/integrationsBrokerClient').createIntegrationsBrokerClient({origin:`https://127.0.0.1:${cfg.port}`,audience:cfg.policy.audience,keyId:'qa-reader',privateKey:f.reader.privateKey.export({type:'pkcs8',format:'pem'}),ca:fs.readFileSync(cfg.tlsCertFile),transportProfile:'meta-marketing',timeoutMs:30000});
+  const started=Date.now(),response=await client.execute(f.command(L.OPERATIONS.receiptRead,{adAccountAssetRef:ACCOUNT,receiptRef},{assetRef:PAGE})),elapsed=Date.now()-started;
+  assert(elapsed>10000,`provider latency reproduction ran only ${elapsed}ms`);assert(elapsed<25000);assert.equal(response.data.lead.id,'701');assert.equal(response.data.recipientClinicId,71);assert.equal(calls.length,9);
+  for(let i=1;i<calls.length;i++)assert(calls[i]-calls[i-1]>=990);
+  // These are meta_marketing_oauth control operations: Broker dispatches them
+  // directly. The owner's 25s AbortController remains their actual deadline;
+  // the generic 10s Broker budget is not applied to this control dispatch.
+  await app.close();app=null;
+});

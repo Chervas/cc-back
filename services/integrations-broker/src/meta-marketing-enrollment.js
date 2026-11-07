@@ -71,7 +71,8 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     const asset=selected(row).find(a=>a.assetRef===request.assetRef);if(!asset)fail('scope_denied');
     const control=request.operation===M.REVOKE&&principal.id===roles.assetControl;
     if(!control){
-      if(principal.id!==roles.reader||![...M.OPERATIONS,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS)].includes(request.operation))fail('scope_denied');
+      const ingress=leadAds&&principal.id===L.ingressPrincipal(environment)&&L.RECEPTION_OPERATIONS.includes(request.operation);
+      if(!ingress&&(principal.id!==roles.reader||![...M.OPERATIONS,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS)].includes(request.operation)))fail('scope_denied');
       // Metrics are a distinct, explicitly reviewed cohort. Merely adding an
       // operation to source or enrolling an account does not grant these reads.
       if(adsOperation(request.operation)&&(!adsRead||!adsRead.assetRefs.includes(request.assetRef)||asset.kind!=='ad_account'||!b.scopes.includes('ads_read')))fail('scope_denied');
@@ -114,7 +115,8 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     if(name){E.validators[name](request.payload);E.authorize({request,principal,binding},environment);}else validateRead(request.operation,request.payload);
     const authority=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey])),configDigest=C.fingerprint(binding);
     const commandDigest=C.hash(canonical({operation:request.operation,tenantRef:request.tenantRef,connectionRef:request.connectionRef,assetRef:request.assetRef,payload:request.payload}));
-    const event=(action,result,reason)=>eventFor(request,principal,policy,action,result,reason,now());
+    const auditPolicy=leadOperation(request.operation)&&principal.id===L.ingressPrincipal(environment)?resolve(request,principal,policy):policy;
+    const event=(action,result,reason)=>eventFor(request,principal,auditPolicy,action,result,reason,now());
     function authorityNow(){
       currentPrincipal(principal,policy,authority);
       const fresh=source(policy,request.connectionRef);
