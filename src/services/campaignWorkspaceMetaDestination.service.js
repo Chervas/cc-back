@@ -149,6 +149,8 @@ async function metaCampaignContext({ models, scope, reference, loadInventory, tr
 async function campaignPagePairs({ models, context, transaction = null }) {
   const { Op } = require('sequelize');
   const account = await context.reader.assertAccount(context.accountContext, { transaction });
+  const registry = context.setting?.preferences?.meta_lead_routes;
+  const routes = require('./metaLeadRoutes.service').routes(registry);
   const owners = await models.MetaMarketingBrokerBinding.findAll({ where: { mapping_id: context.accountAssetId, state: 'active' },
     attributes: ['enrollment_id', 'scope_key', 'connection_ref'], ...query(transaction), limit: 2 });
   if (owners.length !== 1 || !owners[0].enrollment_id || owners[0].scope_key !== account.scopeKey
@@ -157,10 +159,16 @@ async function campaignPagePairs({ models, context, transaction = null }) {
   // Page discovery must retain the account's enrollment boundary.
   const bindings = await models.MetaMarketingBrokerBinding.findAll({ where: { meta_connection_id: context.connection.id,
     enrollment_id: owners[0].enrollment_id, scope_key: owners[0].scope_key, connection_ref: owners[0].connection_ref,
-    state: 'active', asset_ref: { [Op.like]: 'meta-facebook_page:%' } }, attributes: ['mapping_id'], ...query(transaction), limit: 101 });
+    state: 'active', asset_ref: { [Op.like]: 'meta-facebook_page:%' } }, attributes: ['mapping_id', 'asset_ref'], ...query(transaction), limit: 101 });
   if (bindings.length > 100) fail('workspace_meta_page_ambiguous');
   const pairs = [];
   for (const binding of bindings) {
+    // A reviewed Page route belongs to one account. Do not attempt another
+    // account's Page just because both share the same enrollment. An absent
+    // registry retains the existing scoped destination-read behavior; an
+    // explicit registry must contain this exact Page/account pair.
+    if (registry !== undefined && !routes.some(route => route.pageAssetRef === binding.asset_ref
+      && route.adAccountAssetRef === `meta-ad_account:${account.id}`)) continue;
     const pair = await context.reader.preparePair(Number(binding.mapping_id), context.accountAssetId, { transaction });
     const authority = await context.reader.assertPair(pair, { transaction });
     if (authority.page.clinicIds.includes(Number(context.campaign.clinicId))) pairs.push({ pair, authority });
