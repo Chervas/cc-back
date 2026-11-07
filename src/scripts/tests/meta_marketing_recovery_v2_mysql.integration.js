@@ -32,7 +32,10 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   await models.GrupoClinica.update({facebook_primary_asset_id:361},{where:{id_grupo:28}});
   await models.MetaConnectionAssignment.bulkCreate([{scopeKey:'group:28',assignmentScope:'group',grupoClinicaId:28,clinicaId:null,metaConnectionId:158,status:'active'},
     {scopeKey:'clinic:1',assignmentScope:'clinic',clinicaId:1,grupoClinicaId:null,metaConnectionId:158,status:'disconnected'},
-    {scopeKey:'clinic:72',assignmentScope:'clinic',clinicaId:72,grupoClinicaId:null,metaConnectionId:158,status:'active'}]);
+    {id:13,scopeKey:'clinic:66',assignmentScope:'clinic',clinicaId:66,grupoClinicaId:null,metaConnectionId:158,status:'active'},
+    {id:18,scopeKey:'group:29',assignmentScope:'group',grupoClinicaId:29,clinicaId:null,metaConnectionId:158,status:'active'},
+    {id:29,scopeKey:'clinic:72',assignmentScope:'clinic',clinicaId:72,grupoClinicaId:29,metaConnectionId:158,status:'active'}]);
+  const grant29Before=G.encode(await models.MetaConnectionAssignment.findByPk(29,{raw:true}));
   await models.MetaScopeBlock.create({scope_key:'clinic:1',reason:'scope_disconnected',connection_id:158,actor_user_id:1,created_at:now()});
   const baseline=async()=>G.encode({source:await models.MetaConnection.findByPk(158,{raw:true}),wa:await models.ClinicMetaAsset.findByPk(392,{raw:true}),
     grants:await models.MetaConnectionAssignment.findAll({raw:true,order:[['id','ASC']]}),groups:await models.GrupoClinica.findAll({raw:true,order:[['id_grupo','ASC']]}),
@@ -151,6 +154,7 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   assert.equal(JSON.parse(activeBS.mapping_ids).length,4);assert(JSON.parse(activeBS.mapping_ids).includes(391));
   const adopted=await models.ClinicMetaAsset.findByPk(391,{raw:true});assert.equal(adopted.additionalData,null);assert.equal(adopted.assignmentScope,'group');
   assert.equal(adopted.grupoClinicaId,29);assert.equal(adopted.clinicaId,null);assert.equal(adopted.metaConnectionId,159);
+  assert.equal(G.encode(await models.MetaConnectionAssignment.findByPk(29,{raw:true})),grant29Before);
   assert.equal(G.hash(fs.readFileSync(archive)),archivePin);assert.deepEqual(JSON.parse(fs.readFileSync(archive)),metadata);
   const fresh=await models.ClinicMetaAsset.findAll({where:{assetType:'facebook_page',metaAssetId:{[Op.in]:['501','502']}},raw:true});assert.equal(fresh.length,2);
   assert(fresh.every(page=>page.metaConnectionId===159&&page.grupoClinicaId===29&&page.pageAccessToken===null&&page.waAccessToken===null&&page.additionalData===null));

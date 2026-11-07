@@ -6,6 +6,27 @@ const plain=v=>v?.get?v.get({plain:true}):v;
 const conflict=(code='meta_enrollment_scope_changed')=>C.fail(code,409);
 const actor=row=>({scopeKey:row.scope_key,actorId:Number(row.actor_user_id),sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at});
 const scopeValue=key=>{const [type,id]=key.split(':');return {assignmentScope:type,clinicId:type==='clinic'?Number(id):null,groupId:type==='group'?Number(id):null};};
+const RESERVATION_REASONS=new Set(['meta_enrollment_disabled','meta_enrollment_invalid','meta_enrollment_scope_forbidden','meta_enrollment_scope_changed',
+  'meta_enrollment_scope_blocked','meta_enrollment_identity_review','meta_enrollment_assignment_review','meta_enrollment_asset_in_use','meta_enrollment_asset_revoked',
+  'meta_enrollment_selection_fixed','meta_enrollment_conflict','meta_recovery_invalid','meta_recovery_changed','meta_recovery_selection_changed','meta_recovery_expired',
+  'meta_recovery_actor_required','meta_recovery_conflict','meta_recovery_canonical_invalid','meta_recovery_retired','meta_recovery_required',
+  'meta_oauth_scope_changed','meta_oauth_scope_forbidden','meta_oauth_session_required','meta_oauth_scope_blocked','auth_email_verification_required','audit_unavailable',
+  'broker_response_invalid','broker_unavailable','broker_timeout','rate_limited']);
+function reservationRejected(phase,reason,refs,proof){
+  // Diagnostics only: no provider/error text, identifiers or changes to the
+  // returned error, transaction, authority or API contract.
+  try{
+    const selected=Array.isArray(refs)?refs.slice(0,100):[];
+    const count=kind=>selected.filter(value=>typeof value==='string'&&new RegExp('^meta-'+kind+':[1-9][0-9]{0,29}$').test(value)).length;
+    const data={event:'meta_enrollment_reservation_rejected',phase:['source','discovery','inventory','physical','identity','assignments','request','claims','attach','audit','assert_pending'].includes(phase)?phase:'source',
+      reason:RESERVATION_REASONS.has(reason)?reason:'reservation_unavailable',selectedCount:selected.length,adCount:count('ad_account'),pageCount:count('facebook_page'),igCount:count('instagram_business')};
+    if(proof&&Array.isArray(proof.aliases)){
+      const original=new Set(proof.aliases.slice(0,100).map(alias=>'meta-'+alias.assetType+':'+String(alias.metaAssetId).replace(/^act_/,'')));
+      data.originalRequiredCount=original.size;data.selectedOriginalCount=selected.filter(ref=>original.has(ref)).length;
+    }
+    process.stderr.write(JSON.stringify(data)+'\n');
+  }catch{}
+}
 function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_ENROLLMENT_ENABLED==='true',recoveryGuard}){
   const recovery=recoveryGuard||require('./metaMarketingLegacyRecovery.service').createRecovery({models,sessions,now});
   const S=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now,recoveryGuard:recovery});
@@ -93,8 +114,16 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
     if(grants.length>keys.length)conflict();
     for(const grant of grants){
       const type=grant.assignmentScope,id=Number(type==='clinic'?grant.clinicaId:grant.grupoClinicaId);
+      // Preserve an exact, Root-pinned V2 legacy grant with a redundant group
+      // FK only when the current clinic actually belongs to that same group.
+      // This is metadata compatibility, never a repair or a new generic grant.
+      const pinnedClinicGroup=type==='clinic'&&proof?.version===2&&proof.scopeKey===row.scope_key
+        &&JSON.stringify(proof.clinicIds)===row.clinic_ids&&C.positive(Number(proof.sourceConnectionId))
+        &&Number(grant.metaConnectionId)===Number(proof.sourceConnectionId)&&grant.status==='active'
+        &&C.positive(Number(grant.grupoClinicaId))&&grants.filter(value=>value.scopeKey===grant.scopeKey).length===1
+        &&clinics.some(clinic=>Number(clinic.id_clinica)===id&&Number(clinic.grupoClinicaId)===Number(grant.grupoClinicaId));
       if(!['clinic','group'].includes(type)||!C.positive(id)||grant.scopeKey!==type+':'+id
-        ||(type==='clinic'?grant.grupoClinicaId!==null:grant.clinicaId!==null))conflict();
+        ||(type==='clinic'?grant.grupoClinicaId!==null&&!pinnedClinicGroup:grant.clinicaId!==null))conflict();
     }
     const matching=key=>grants.filter(v=>v.scopeKey===key);
     const check=rows=>{if(rows.length>1||rows.length&&(rows[0].status!=='active'||Number(rows[0].metaConnectionId)!==connectionId))conflict('meta_enrollment_assignment_review');};
@@ -162,37 +191,47 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
     await physical(saved.selected,transaction,saved.enrollment_id,proof);gate();return saved;
   }
   async function reserve(input,flowId,assetRefs){
-    gate();const refs=selectedRefs(assetRefs);if(!C.UUID.test(flowId)||typeof oauth?.assets!=='function')C.fail('meta_enrollment_invalid',400);
+    let phase='source',proof=null,refs;
+    try{gate();refs=selectedRefs(assetRefs);if(!C.UUID.test(flowId)||typeof oauth?.assets!=='function')C.fail('meta_enrollment_invalid',400);}
+    catch(error){reservationRejected(phase,error?.code,assetRefs,proof);throw error;}
     // Inventory can only enter through the authenticated OAuth consumer. The
     // caller supplies selected typed IDs, never parent/name/candidate metadata.
-    const startedAt=+now(),discovered=await oauth.assets(input,flowId);
+    const startedAt=+now();let discovered;phase='discovery';
+    try{discovered=await oauth.assets(input,flowId);}catch(error){reservationRejected(phase,error?.code,refs,proof);throw error;}
+    phase='source';
     try{return await models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},async transaction=>{
-      const {row,metadata,recovery:proof}=await source(input,flowId,transaction);
+      phase='source';const {row,metadata,recovery:currentProof}=await source(input,flowId,transaction);proof=currentProof;
+      phase='inventory';
       let inventory;try{inventory=D.validateResult(discovered.inventory,{flowId,candidateDigest:metadata.digest,scopeDigest:row.scope_digest,scopeKey:row.scope_key,
         clinicSetDigest:C.hash(row.clinic_ids),metadata,startedAt,now:+now()});}catch{conflict();}
       const chosen=inventory.assets.filter(v=>refs.includes(v.assetRef));if(chosen.length!==refs.length)C.fail('meta_enrollment_invalid',400);
       const selected=C.assets(chosen.map(C.E.identity));
-      const existing=await models.MetaMarketingEnrollmentRequest.findOne({...options(transaction),where:{flow_id:flowId}});
+      phase='request';const existing=await models.MetaMarketingEnrollmentRequest.findOne({...options(transaction),where:{flow_id:flowId}});
       if(existing){
         const saved=C.request(existing);if(saved.assets!==JSON.stringify(selected))conflict('meta_enrollment_selection_fixed');
-        await assertPending(saved,transaction);return saved;
+        phase='assert_pending';await assertPending(saved,transaction);return saved;
       }
-      const physicalRefs=await physical(selected,transaction,null,proof),connectionId=await identity(row,metadata,transaction,{create:true,recovery:proof});
-      const assignmentDigest=await assignments(row,connectionId,transaction,proof),date=now();
+      phase='physical';const physicalRefs=await physical(selected,transaction,null,proof);
+      phase='identity';const connectionId=await identity(row,metadata,transaction,{create:true,recovery:proof});
+      phase='assignments';const assignmentDigest=await assignments(row,connectionId,transaction,proof),date=now();
+      phase='request';
       const value=C.request({enrollment_id:randomUUID(),flow_id:flowId,scope_key:row.scope_key,clinic_ids:row.clinic_ids,connection_ref:row.connection_ref,scope_digest:row.scope_digest,
         flow_digest:C.sourceDigest(row),candidate_digest:metadata.digest,meta_user_id:metadata.subjectId,app_id:metadata.appId,meta_connection_id:connectionId,assignment_digest:assignmentDigest,
         assets:JSON.stringify(selected),mapping_ids:'[]',actor_user_id:Number(row.actor_user_id),session_ref:row.session_ref,session_expires_at:row.session_expires_at,
         prepare_request_id:randomUUID(),activate_request_id:randomUUID(),revoke_request_id:randomUUID(),selection_digest:null,state:'prepare_pending',requested_at:date,updated_at:date,
         prepared_at:null,activated_at:null,revoked_at:null,attempts:0,next_attempt_at:date,lease_token:null,lease_until:null,last_error:null});
       await models.MetaMarketingEnrollmentRequest.create(value,{transaction,logging:false});
-      await models.MetaMarketingEnrollmentClaim.bulkCreate(physicalRefs.map(asset_ref=>({asset_ref,enrollment_id:value.enrollment_id,created_at:date})),{transaction,logging:false});
-      if(proof)await recovery.attachEnrollment({flow:row,enrollmentId:value.enrollment_id},transaction);
+      phase='claims';await models.MetaMarketingEnrollmentClaim.bulkCreate(physicalRefs.map(asset_ref=>({asset_ref,enrollment_id:value.enrollment_id,created_at:date})),{transaction,logging:false});
+      phase='attach';if(proof)await recovery.attachEnrollment({flow:row,enrollmentId:value.enrollment_id},transaction);
+      phase='audit';
       const health=await audit.health(date,{includeUnresolved:false,transaction});
       if(!Number.isSafeInteger(health.pending)||health.pending>=10000||!Number.isFinite(health.oldestAgeSeconds)||health.oldestAgeSeconds>=3600)C.fail('audit_unavailable');
       await audit.append(fromEnrollment(value,'meta_enrollment_requested',{now:date}),{transaction});
-      await assertPending(value,transaction);return value;
+      phase='assert_pending';await assertPending(value,transaction);return value;
     });}catch(error){
-      if(error?.name==='SequelizeUniqueConstraintError'||['ER_LOCK_DEADLOCK','ER_LOCK_WAIT_TIMEOUT'].includes(error?.original?.code))conflict('meta_enrollment_conflict');throw error;
+      const normalize=error?.name==='SequelizeUniqueConstraintError'||['ER_LOCK_DEADLOCK','ER_LOCK_WAIT_TIMEOUT'].includes(error?.original?.code);
+      reservationRejected(phase,normalize?'meta_enrollment_conflict':error?.code,refs,proof);
+      if(normalize)conflict('meta_enrollment_conflict');throw error;
     }
   }
   return {reserve,assertPending};
