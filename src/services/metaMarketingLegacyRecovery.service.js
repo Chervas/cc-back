@@ -63,6 +63,7 @@ function normalizeInventory(input) {
   const key = { clinics: 'id_clinica', blocks: 'scope_key', connections: 'id', aliases: 'id', assignments: 'id', shares: 'id', groups: 'id_grupo' };
   return Object.fromEntries(Object.entries(FIELDS).map(([name, fields]) => [name, normalizeRows(input[name], fields, key[name])]));
 }
+const normalizeAliases = rows => normalizeRows(rows, ALIAS_FIELDS, 'id');
 function aliasMetadata(alias, connectionId = alias.metaConnectionId, scopeKey = null) {
   const [type, raw] = scopeKey ? scopeKey.split(':') : [];
   return { id: Number(alias.id), metaConnectionId: connectionId, assetType: alias.assetType, metaAssetId: alias.metaAssetId,
@@ -72,6 +73,7 @@ function aliasMetadata(alias, connectionId = alias.metaConnectionId, scopeKey = 
     credentials_absent: Number(!alias.page_credential_present && !alias.wa_credential_present && !alias.additional_data_present) };
 }
 function validateSnapshot(input) {
+  if (input?.version === 2) return validateSnapshotV2(input);
   if (!exact(input, ['version', 'scopeKey', 'clinicIds', 'sourceConnectionId', 'appId', 'subjectId', 'actorId', 'mappingIds', 'inventory'])
     || input.version !== 1 || !/^(clinic|group):[1-9][0-9]{0,9}$/.test(input.scopeKey) || !POSITIVE(Number(input.scopeKey.split(':')[1]))
     || !POSITIVE(input.sourceConnectionId) || !POSITIVE(input.actorId) || !/^[1-9][0-9]{0,29}$/.test(input.appId)
@@ -93,6 +95,75 @@ function validateSnapshot(input) {
   }
   return canonical({ ...input, clinicIds, mappingIds, inventory });
 }
+const METADATA_KEYS = Object.freeze(['account_status', 'business_name', 'currency', 'timezone_name']);
+function validateSnapshotV2(input) {
+  if (!exact(input, ['version', 'scopeKey', 'clinicIds', 'sourceConnectionId', 'appId', 'subjectId', 'actorId', 'mappingIds', 'inventory',
+    'canonicalConnectionId', 'newPageCount', 'cleanup']) || input.version !== 2
+    || !/^(clinic|group):[1-9][0-9]{0,9}$/.test(input.scopeKey) || !POSITIVE(Number(input.scopeKey.split(':')[1]))
+    || !POSITIVE(input.sourceConnectionId) || !POSITIVE(input.canonicalConnectionId) || input.sourceConnectionId === input.canonicalConnectionId
+    || !POSITIVE(input.actorId) || !/^[1-9][0-9]{0,29}$/.test(input.appId) || !/^[1-9][0-9]{0,29}$/.test(input.subjectId)
+    || !Number.isInteger(input.newPageCount) || input.newPageCount < 0 || input.newPageCount > 2) fail('meta_recovery_invalid');
+  const clinicIds = ids(input.clinicIds), mappingIds = ids(input.mappingIds), inventory = normalizeInventory(input.inventory);
+  if (encode(inventory.clinics.map(row => Number(row.id_clinica))) !== encode(clinicIds)
+    || input.scopeKey.startsWith('clinic:') && (clinicIds.length !== 1 || input.scopeKey !== 'clinic:' + clinicIds[0])
+    || input.scopeKey.startsWith('group:') && inventory.clinics.some(row => Number(row.grupoClinicaId) !== Number(input.scopeKey.split(':')[1]))) fail('meta_recovery_invalid');
+  const source = inventory.connections.find(row => Number(row.id) === input.sourceConnectionId);
+  const destination = inventory.connections.find(row => Number(row.id) === input.canonicalConnectionId);
+  if (inventory.connections.length !== 2 || !source || source.metaUserId !== input.subjectId || source.credentials_external !== 0
+    || source.broker_app_id !== null || source.credential_present !== 1 || !HASH.test(source.credential_sha256)
+    || !destination || destination.userId !== null || destination.metaUserId !== input.subjectId || destination.broker_app_id !== input.appId
+    || destination.credentials_external !== 1 || destination.credential_present !== 0 || destination.credential_sha256 !== null) fail('meta_recovery_invalid');
+  if (!Array.isArray(input.cleanup) || input.cleanup.length > mappingIds.length) fail('meta_recovery_invalid');
+  const cleanup = new Map();
+  for (const item of input.cleanup) {
+    if (!exact(item, ['mappingId', 'fields', 'additionalDataKeys', 'additionalDataSha256', 'archiveEvidenceSha256', 'metadataDisposition']) || !mappingIds.includes(item.mappingId)
+      || cleanup.has(item.mappingId) || !Array.isArray(item.fields) || !item.fields.length
+      || item.fields.some((field, i) => !['additionalData', 'pageAccessToken'].includes(field) || i && field <= item.fields[i - 1])) fail('meta_recovery_invalid');
+    if (item.fields.includes('additionalData')) {
+      if (encode(item.additionalDataKeys) !== encode(METADATA_KEYS) || !HASH.test(item.additionalDataSha256) || !HASH.test(item.archiveEvidenceSha256)
+        || item.metadataDisposition !== 'archived') fail('meta_recovery_invalid');
+    } else if (encode(item.additionalDataKeys) !== '[]' || item.additionalDataSha256 !== null || item.archiveEvidenceSha256 !== null || item.metadataDisposition !== null) fail('meta_recovery_invalid');
+    cleanup.set(item.mappingId, item);
+  }
+  for (const id of mappingIds) {
+    const alias = inventory.aliases.find(row => Number(row.id) === id), item = cleanup.get(id);
+    if (!alias || !['ad_account', 'facebook_page'].includes(alias.assetType)
+      || !(alias.assetType === 'ad_account' ? /^(?:act_)?[1-9][0-9]{0,29}$/ : /^[1-9][0-9]{0,29}$/).test(alias.metaAssetId)
+      || Number(alias.metaConnectionId) !== input.sourceConnectionId || alias.whatsappAuthorizationId !== null
+      || alias.wa_credential_present !== 0 || alias.wa_credential_sha256 !== null
+      || alias.clinicaId !== null && !clinicIds.includes(Number(alias.clinicaId))
+      || alias.assignmentScope === 'group' && alias.grupoClinicaId !== Number(input.scopeKey.split(':')[1])) fail('meta_recovery_invalid');
+    const fields = [...(alias.additional_data_present ? ['additionalData'] : []), ...(alias.page_credential_present ? ['pageAccessToken'] : [])];
+    if (encode(item?.fields || []) !== encode(fields) || alias.page_credential_present && alias.assetType !== 'facebook_page'
+      || alias.additional_data_present && (alias.assetType !== 'ad_account' || item.additionalDataSha256 !== alias.additional_data_sha256)) fail('meta_recovery_invalid');
+  }
+  return canonical({ ...input, clinicIds, mappingIds, inventory });
+}
+// V2 deliberately leaves the SQL canonical column NULL: its historical UNIQUE
+// index belongs to V1. The immutable snapshot pins the shared ID; the existing
+// subject Identity and Enrollment ownership remain the actual unique authority.
+const canonicalId = row => row.snapshot.version === 2 ? row.snapshot.canonicalConnectionId
+  : row.canonical_connection_id === null ? null : Number(row.canonical_connection_id);
+function selection(proof, selected) {
+  const original = proof.aliases.map(alias => 'meta-' + alias.assetType + ':' + String(alias.metaAssetId).replace(/^act_/, ''));
+  if (!Array.isArray(selected) || new Set(selected.map(asset => asset.assetRef)).size !== selected.length
+    || original.some(ref => !selected.some(asset => asset.assetRef === ref))) fail('meta_recovery_selection_changed');
+  const added = selected.filter(asset => !original.includes(asset.assetRef));
+  if (proof.version !== 2 ? added.length || selected.length !== original.length || selected.some(asset => asset.kind !== 'ad_account')
+    : selected.length !== original.length + proof.newPageCount || added.length !== proof.newPageCount
+      || added.some(asset => asset.kind !== 'facebook_page' || asset.parentPageId !== null)) fail('meta_recovery_selection_changed');
+  return { original, added };
+}
+function selectable(proof, asset, inventory) {
+  if (proof.version !== 2) return false;
+  const refs = proof.aliases.map(alias => 'meta-' + alias.assetType + ':' + String(alias.metaAssetId).replace(/^act_/, ''));
+  const originals = inventory.filter(value => refs.includes(value.assetRef));
+  const pages = inventory.filter(value => !refs.includes(value.assetRef) && value.kind === 'facebook_page' && value.parentPageId === null);
+  const extra = refs.includes(asset.assetRef) ? pages.slice(0, proof.newPageCount)
+    : [asset, ...pages.filter(value => value.assetRef !== asset.assetRef).slice(0, Math.max(0, proof.newPageCount - 1))];
+  try { selection(proof, [...originals, ...extra]); return refs.includes(asset.assetRef) || extra.some(value => value.assetRef === asset.assetRef); }
+  catch { return false; }
+}
 function snapshotRecord(row) {
   const value = plain(row); let snapshot, clinicIds, mappingIds;
   try { snapshot = validateSnapshot(JSON.parse(value.snapshot)); clinicIds = ids(JSON.parse(value.clinic_ids)); mappingIds = ids(JSON.parse(value.mapping_ids)); } catch { fail('meta_recovery_invalid'); }
@@ -107,8 +178,9 @@ function snapshotRecord(row) {
   for (const field of ['flow_id', 'enrollment_id']) if (value[field] !== null && !C.UUID.test(value[field])) fail('meta_recovery_invalid');
   if (value.candidate_digest !== null && !HASH.test(value.candidate_digest)) fail('meta_recovery_invalid');
   if (['flow_bound', 'active'].includes(value.state) && (!value.flow_id || !value.candidate_digest || !(value.bound_at instanceof Date))) fail('meta_recovery_invalid');
+  if (snapshot.version === 2 && value.canonical_connection_id !== null) fail('meta_recovery_invalid');
   if (value.state === 'prepared' && (value.flow_id || value.candidate_digest || value.enrollment_id || value.canonical_connection_id)) fail('meta_recovery_invalid');
-  if (value.state === 'active' && (!value.enrollment_id || !value.canonical_connection_id || !(value.activated_at instanceof Date))) fail('meta_recovery_invalid');
+  if (value.state === 'active' && (!value.enrollment_id || !(snapshot.version === 2 ? snapshot.canonicalConnectionId : value.canonical_connection_id) || !(value.activated_at instanceof Date))) fail('meta_recovery_invalid');
   return { ...value, snapshot, clinicIds, mappingIds };
 }
 const digestAttributes = (field, prefix) => [[literal(`(${field} IS NOT NULL)`), prefix + '_present'],
@@ -131,7 +203,8 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     const keys = [...scopeKeys, ...scopeKeys.map(key => 'meta:' + key)];
     const blocks = await models.MetaScopeBlock.findAll({ ...o, attributes: BLOCK_FIELDS, where: { scope_key: { [Op.in]: keys } }, order: [['scope_key', 'ASC']], limit: 2001 });
     const connections = await models.MetaConnection.findAll({ ...o, attributes: CONNECTION_ATTRIBUTES,
-      where: phase === 'active' ? { id: canonicalConnectionId } : { [Op.or]: [{ id: descriptor.sourceConnectionId }, { metaUserId: descriptor.subjectId }] }, order: [['id', 'ASC']], limit: 3 });
+      where: phase === 'active' && descriptor.version !== 2 ? { id: canonicalConnectionId }
+        : { [Op.or]: [{ id: descriptor.sourceConnectionId }, { metaUserId: descriptor.subjectId }] }, order: [['id', 'ASC']], limit: 3 });
     const selected = descriptor.inventory?.aliases.filter(row => descriptor.mappingIds.includes(Number(row.id)))
       || await models.ClinicMetaAsset.findAll({ ...o, attributes: ['id', 'assetType', 'metaAssetId'], where: { id: { [Op.in]: descriptor.mappingIds } }, limit: 1001 });
     const physical = selected.map(row => ({ assetType: row.assetType, metaAssetId: { [Op.in]: [String(row.metaAssetId).replace(/^act_/, ''), 'act_' + String(row.metaAssetId).replace(/^act_/, '')] } }));
@@ -150,34 +223,40 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     return normalizeInventory({ clinics, blocks, connections, aliases, assignments, shares, groups });
   }
   async function captureSnapshot(input, transaction) {
-    if (!exact(input, ['scopeKey', 'clinicIds', 'sourceConnectionId', 'appId', 'subjectId', 'actorId', 'mappingIds'])
+    const v2 = input?.version === 2;
+    if (!exact(input, ['scopeKey', 'clinicIds', 'sourceConnectionId', 'appId', 'subjectId', 'actorId', 'mappingIds',
+      ...(v2 ? ['version', 'canonicalConnectionId', 'newPageCount', 'cleanup'] : [])])
       || !/^(clinic|group):[1-9][0-9]{0,9}$/.test(input.scopeKey) || !POSITIVE(Number(input.scopeKey.split(':')[1]))
       || !POSITIVE(input.sourceConnectionId) || !POSITIVE(input.actorId) || !/^[1-9][0-9]{0,29}$/.test(input.appId)
       || !/^[1-9][0-9]{0,29}$/.test(input.subjectId)) fail('meta_recovery_invalid');
     ids(input.clinicIds); ids(input.mappingIds);
-    const descriptor = { ...input, version: 1 };
+    const descriptor = { ...input, version: v2 ? 2 : 1 };
     // Observation is read-only. The operator still owns plan/CAS/apply and the
     // private journal; this function does not prepare or activate a recovery.
-    const inventory = await inspectInventory(descriptor, transaction);
+    const inventory = await inspectInventory(descriptor, transaction, v2 ? input.canonicalConnectionId : null);
     return validateSnapshot({ ...descriptor, inventory });
   }
   function dto(row) {
     const selected = row.snapshot.inventory.aliases.filter(alias => row.mappingIds.includes(Number(alias.id)));
     const immutableDigest = hash(encode({ recoveryId: row.recovery_id, snapshotDigest: row.snapshot_digest, preparedAt: row.prepared_at, expiresAt: row.expires_at }));
     return { recoveryId: row.recovery_id, flowId: row.flow_id, enrollmentId: row.enrollment_id,
-      sourceConnectionId: Number(row.source_connection_id), canonicalConnectionId: row.canonical_connection_id === null ? null : Number(row.canonical_connection_id),
-      scopeKey: row.scope_key, clinicIds: row.clinicIds.slice(), appId: row.app_id, subjectId: row.meta_user_id, mappingIds: row.mappingIds.slice(),
+      sourceConnectionId: Number(row.source_connection_id), canonicalConnectionId: canonicalId(row),
+      scopeKey: row.scope_key, clinicIds: row.clinicIds.slice(), appId: row.app_id, subjectId: row.meta_user_id, mappingIds: (row.ownedMappingIds || row.mappingIds).slice(),
       aliases: selected.map(alias => aliasMetadata(alias)),
-      postimages: selected.map(alias => aliasMetadata(alias, row.canonical_connection_id === null ? null : Number(row.canonical_connection_id), row.scope_key)),
+      postimages: selected.map(alias => ({ ...aliasMetadata(alias, canonicalId(row), row.scope_key),
+        ...(row.snapshot.version === 2 ? { credentials_absent: 1 } : {}) })),
+      ...(row.snapshot.version === 2 ? { version: 2, legacyMappingIds: row.mappingIds.slice(), newPageCount: row.snapshot.newPageCount,
+        cleanup: row.snapshot.cleanup, legacyAliases: selected.map(alias => ({ ...alias })) } : {}),
       snapshotDigest: row.snapshot_digest, immutableDigest };
   }
   function focusedInventory(inventory, row, phase) {
     const keys = new Set([row.scope_key, ...row.clinicIds.map(id => 'clinic:' + id)]);
-    const physical = new Set(row.snapshot.inventory.aliases.filter(alias => row.mappingIds.includes(Number(alias.id)))
+    const physical = new Set([...row.snapshot.inventory.aliases.filter(alias => row.mappingIds.includes(Number(alias.id))), ...(row.createdAliases || [])]
       .map(alias => alias.assetType + ':' + String(alias.metaAssetId).replace(/^act_/, '')));
-    const aliases = inventory.aliases.filter(alias => row.mappingIds.includes(Number(alias.id))
+    const owned = row.ownedMappingIds || row.mappingIds;
+    const aliases = inventory.aliases.filter(alias => owned.includes(Number(alias.id))
       || physical.has(alias.assetType + ':' + String(alias.metaAssetId).replace(/^act_/, ''))
-      || row.canonical_connection_id !== null && Number(alias.metaConnectionId) === Number(row.canonical_connection_id));
+      || row.snapshot.version !== 2 && row.canonical_connection_id !== null && Number(alias.metaConnectionId) === Number(row.canonical_connection_id));
     const mappingIds = new Set(aliases.map(alias => Number(alias.id)));
     return { clinics: inventory.clinics, blocks: inventory.blocks,
       connections: phase === 'active' ? [] : inventory.connections,
@@ -187,24 +266,61 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
   }
   async function validateCurrent(row, transaction, { phase = 'pending' } = {}) {
     const expected = cloneInventory(row.snapshot.inventory);
+    if (phase === 'active' && row.snapshot.version === 2) {
+      expected.aliases.push(...(row.createdAliases || [])); expected.aliases.sort((a, b) => Number(a.id) - Number(b.id));
+    }
     if (phase === 'active') for (const alias of expected.aliases) if (row.mappingIds.includes(Number(alias.id))) {
-      Object.assign(alias, { metaConnectionId: Number(row.canonical_connection_id), assignmentScope: row.scope_key.split(':')[0],
+      Object.assign(alias, { metaConnectionId: canonicalId(row), assignmentScope: row.scope_key.split(':')[0],
         clinicaId: row.scope_key.startsWith('clinic:') ? Number(row.scope_key.split(':')[1]) : null,
         grupoClinicaId: row.scope_key.startsWith('group:') ? Number(row.scope_key.split(':')[1]) : null, isActive: 1 });
+      if (row.snapshot.version === 2) for (const field of row.snapshot.cleanup.find(item => item.mappingId === Number(alias.id))?.fields || []) {
+        const prefix = field === 'pageAccessToken' ? 'page_credential' : 'additional_data';
+        alias[prefix + '_present'] = 0; alias[prefix + '_sha256'] = null;
+      }
     }
-    const actual = await inspectInventory(row.snapshot, transaction, row.canonical_connection_id === null ? null : Number(row.canonical_connection_id), phase);
-    if (row.canonical_connection_id !== null) {
-      const canonicalConnection = actual.connections.find(value => Number(value.id) === Number(row.canonical_connection_id));
+    const effectiveId = canonicalId(row), actual = await inspectInventory(row.snapshot, transaction, effectiveId, phase);
+    if (effectiveId !== null) {
+      const canonicalConnection = actual.connections.find(value => Number(value.id) === effectiveId);
       if (!canonicalConnection || canonicalConnection.userId !== null || canonicalConnection.metaUserId !== row.meta_user_id
         || canonicalConnection.broker_app_id !== row.app_id || Number(canonicalConnection.credentials_external) !== 1
         || canonicalConnection.credential_present !== 0 || canonicalConnection.credential_sha256 !== null) fail('meta_recovery_canonical_invalid');
-      actual.connections = actual.connections.filter(value => Number(value.id) !== Number(row.canonical_connection_id));
+      if (row.snapshot.version === 2 && (actual.connections.length !== 2
+        || actual.connections.some(value => ![row.snapshot.sourceConnectionId, effectiveId].includes(Number(value.id))))) fail('meta_recovery_canonical_invalid');
+      actual.connections = actual.connections.filter(value => Number(value.id) !== effectiveId);
+      if (row.snapshot.version === 2) expected.connections = expected.connections.filter(value => Number(value.id) !== effectiveId);
     }
     // The complete archive is retained. Only the selected physical identity and
     // its authority are a live dependency; unrelated WhatsApp/profile activity
     // must not suspend an independently authorized canonical Meta connection.
     if (encode(focusedInventory(actual, row, phase)) !== encode(focusedInventory(expected, row, phase))) fail();
     return dto(row);
+  }
+  async function withActiveMappings(row, enrollment, transaction) {
+    if (row.snapshot.version !== 2) return row;
+    let value; try { value = require('./metaMarketingEnrollment.contract').request(plain(enrollment)); } catch { fail(); }
+    selection(dto(row), value.selected);
+    if (value.enrollment_id !== row.enrollment_id || value.flow_id !== row.flow_id || value.state !== 'active'
+      || value.scope_key !== row.scope_key || value.clinic_ids !== row.clinic_ids || value.app_id !== row.app_id
+      || value.meta_user_id !== row.meta_user_id || Number(value.meta_connection_id) !== canonicalId(row)
+      || value.mappingIds.length !== value.selected.length || row.mappingIds.some(id => !value.mappingIds.includes(id))) fail();
+    const bindings = await models.MetaMarketingBrokerBinding.findAll({ ...options(transaction), where: { enrollment_id: row.enrollment_id }, order: [['mapping_id', 'ASC']], limit: 101 });
+    if (bindings.length !== value.selected.length || encode(bindings.map(item => Number(item.mapping_id))) !== value.mapping_ids) fail();
+    const createdAliases = [];
+    for (const asset of value.selected) {
+      const bound = bindings.filter(item => item.asset_ref === asset.assetRef);
+      if (bound.length !== 1 || Number(bound[0].meta_connection_id) !== canonicalId(row) || bound[0].app_id !== row.app_id
+        || bound[0].meta_user_id !== row.meta_user_id || bound[0].scope_key !== row.scope_key || bound[0].state !== 'active') fail();
+      const original = row.snapshot.inventory.aliases.find(alias => row.mappingIds.includes(Number(alias.id))
+        && 'meta-' + alias.assetType + ':' + String(alias.metaAssetId).replace(/^act_/, '') === asset.assetRef);
+      if (original) { if (Number(bound[0].mapping_id) !== Number(original.id)) fail(); continue; }
+      if (row.mappingIds.includes(Number(bound[0].mapping_id)) || asset.kind !== 'facebook_page') fail();
+      createdAliases.push({ id: Number(bound[0].mapping_id), metaConnectionId: canonicalId(row), assetType: 'facebook_page', metaAssetId: asset.id,
+        assignmentScope: row.scope_key.split(':')[0], clinicaId: row.scope_key.startsWith('clinic:') ? Number(row.scope_key.split(':')[1]) : null,
+        grupoClinicaId: row.scope_key.startsWith('group:') ? Number(row.scope_key.split(':')[1]) : null, isActive: 1, whatsappAuthorizationId: null,
+        page_credential_present: 0, page_credential_sha256: null, wa_credential_present: 0, wa_credential_sha256: null,
+        additional_data_present: 0, additional_data_sha256: null });
+    }
+    return { ...row, ownedMappingIds: value.mappingIds, createdAliases };
   }
   async function actorCheck(row, actor, transaction) {
     if (Number(actor.actorId) !== Number(row.prepared_by_user_id) || actor.scopeKey !== row.scope_key || !C.UUID.test(actor.sessionRef)
@@ -273,8 +389,9 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     } else if (row.candidate_digest !== candidate.digest) fail();
     if (phase === 'active') {
       const enrollment = plain(await models.MetaMarketingEnrollmentRequest.findByPk(row.enrollment_id, options(transaction)));
-      if (!enrollment || enrollment.state !== 'active' || enrollment.flow_id !== row.flow_id || Number(enrollment.meta_connection_id) !== Number(row.canonical_connection_id)
-        || enrollment.mapping_ids !== row.mapping_ids || enrollment.candidate_digest !== row.candidate_digest) fail();
+      if (!enrollment || enrollment.state !== 'active' || enrollment.flow_id !== row.flow_id || Number(enrollment.meta_connection_id) !== canonicalId(row)
+        || row.snapshot.version !== 2 && enrollment.mapping_ids !== row.mapping_ids || enrollment.candidate_digest !== row.candidate_digest) fail();
+      row = await withActiveMappings(row, enrollment, transaction);
     }
     return validateCurrent(row, transaction, { phase });
   }
@@ -294,14 +411,15 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
       || currentFlow.scope_key !== row.scope_key || currentFlow.clinic_ids !== row.clinic_ids || Number(currentFlow.actor_user_id) !== Number(row.prepared_by_user_id)
       || currentFlow.session_ref !== flow.session_ref || candidate.digest !== row.candidate_digest || candidate.subjectId !== row.meta_user_id || candidate.appId !== row.app_id
       || [candidate.expiresAt, candidate.dataAccessExpiresAt].some(value => value !== null && value <= +now())) fail();
-    if (row.canonical_connection_id !== null && Number(row.canonical_connection_id) !== canonicalConnectionId) fail('meta_recovery_conflict');
+    if (canonicalId(row) !== null && canonicalId(row) !== canonicalConnectionId) fail('meta_recovery_conflict');
+    if (row.snapshot.version === 2) return validateCurrent(row, transaction);
     await validateCurrent({ ...row, canonical_connection_id: canonicalConnectionId }, transaction);
     if (row.canonical_connection_id === null) row = await update(row, { canonical_connection_id: canonicalConnectionId }, transaction);
     return validateCurrent(row, transaction);
   }
   async function attachEnrollment({ flow, enrollmentId }, transaction) {
     if (!C.UUID.test(enrollmentId)) fail('meta_recovery_invalid'); let row = await boundRow(flow, transaction);
-    if (!row.canonical_connection_id || row.enrollment_id !== null && row.enrollment_id !== enrollmentId) fail('meta_recovery_conflict');
+    if (!canonicalId(row) || row.enrollment_id !== null && row.enrollment_id !== enrollmentId) fail('meta_recovery_conflict');
     if (row.enrollment_id === null) row = await update(row, { enrollment_id: enrollmentId }, transaction);
     return validateCurrent(row, transaction);
   }
@@ -312,10 +430,12 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     if (row.state === 'active') return forFlow(flow, transaction, { phase: 'active' });
     pendingTime(row);
     await actorCheck(row, actorOf(flow), transaction);
-    if (value.enrollment_id !== row.enrollment_id || value.state !== 'active' || value.flow_id !== row.flow_id || value.mapping_ids !== row.mapping_ids
-      || Number(value.meta_connection_id) !== Number(row.canonical_connection_id) || value.candidate_digest !== row.candidate_digest) fail();
+    if (value.enrollment_id !== row.enrollment_id || value.state !== 'active' || value.flow_id !== row.flow_id
+      || row.snapshot.version !== 2 && value.mapping_ids !== row.mapping_ids
+      || Number(value.meta_connection_id) !== canonicalId(row) || value.candidate_digest !== row.candidate_digest) fail();
     const persisted = plain(await models.MetaMarketingEnrollmentRequest.findByPk(row.enrollment_id, options(transaction)));
     if (!persisted || ['enrollment_id', 'state', 'flow_id', 'mapping_ids', 'meta_connection_id', 'candidate_digest'].some(key => persisted[key] !== value[key])) fail();
+    row = await withActiveMappings(row, persisted, transaction);
     await validateCurrent(row, transaction, { phase: 'active' });
     if (row.state === 'flow_bound') row = await update(row, { state: 'active', activated_at: now() }, transaction);
     else if (row.state !== 'active') fail();
@@ -349,8 +469,7 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     if (scope.assignmentScope === 'clinic') affected.add(Number(scope.clinicId));
     const o = options(transaction); let rows;
     try {
-      rows = await model.findAll({ ...o, attributes: ['recovery_id', 'scope_key', 'clinic_ids', 'canonical_connection_id', 'mapping_ids',
-        'flow_id', 'enrollment_id', 'state', 'snapshot_digest'], where: { state: { [Op.in]: ['prepared', 'flow_bound', 'active'] } },
+      rows = await model.findAll({ ...o, where: { state: { [Op.in]: ['prepared', 'flow_bound', 'active'] } },
       order: [['recovery_id', 'ASC']], limit: 1001 });
     } catch (error) {
       // An unapplied optional DEV migration cannot contain prior authority.
@@ -361,33 +480,42 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     }
     if (!Array.isArray(rows) || rows.length > 1000) fail('meta_recovery_unavailable');
     for (const value of rows) {
-      const row = plain(value); let members, mappings;
+      let row = plain(value); let members, mappings;
       try { members = ids(JSON.parse(row.clinic_ids)); mappings = ids(JSON.parse(row.mapping_ids)); } catch { fail('meta_recovery_invalid'); }
       if (row.scope_key !== scopeKey && !members.some(id => affected.has(id))) continue;
       if (!C.UUID.test(row.recovery_id) || !HASH.test(row.snapshot_digest)) fail('meta_recovery_invalid');
+      const v2 = typeof row.snapshot === 'string' && JSON.parse(row.snapshot)?.version === 2;
+      if (v2) row = snapshotRecord(row);
+      const effectiveId = v2 ? canonicalId(row) : Number(row.canonical_connection_id);
       if (row.enrollment_id !== null) {
-        if (!C.UUID.test(row.enrollment_id) || !C.UUID.test(row.flow_id) || !POSITIVE(Number(row.canonical_connection_id))) fail('meta_recovery_invalid');
+        if (!C.UUID.test(row.enrollment_id) || !C.UUID.test(row.flow_id) || !POSITIVE(effectiveId)) fail('meta_recovery_invalid');
         const enrollment = plain(await models.MetaMarketingEnrollmentRequest.findByPk(row.enrollment_id, o));
         if (!enrollment || enrollment.flow_id !== row.flow_id || enrollment.scope_key !== row.scope_key
-          || Number(enrollment.meta_connection_id) !== Number(row.canonical_connection_id)
+          || Number(enrollment.meta_connection_id) !== effectiveId
           || !['prepare_pending', 'prepared', 'activate_pending', 'active', 'revoke_pending', 'revoked'].includes(enrollment.state)) fail('meta_recovery_changed');
         let owned;
         try { owned = JSON.parse(enrollment.mapping_ids); } catch { fail('meta_recovery_invalid'); }
-        if (!Array.isArray(owned) || owned.some(id => !mappings.includes(Number(id)))
+        if (v2) {
+          let saved; try { saved = require('./metaMarketingEnrollment.contract').request(enrollment); } catch { fail(); }
+          selection(dto(row), saved.selected);
+          if (owned.length && (owned.length !== saved.selected.length || mappings.some(id => !owned.includes(id)))) fail();
+          if (owned.length) mappings = owned;
+        } else if (!Array.isArray(owned) || owned.some(id => !mappings.includes(Number(id)))
           || enrollment.state === 'active' && encode(owned) !== row.mapping_ids) fail('meta_recovery_changed');
         const bindings = await models.MetaMarketingBrokerBinding.findAll({ ...o, attributes: ['mapping_id', 'meta_connection_id'],
           where: { enrollment_id: row.enrollment_id }, limit: mappings.length + 1 });
         if (bindings.length > mappings.length || bindings.some(binding => !mappings.includes(Number(binding.mapping_id))
-          || Number(binding.meta_connection_id) !== Number(row.canonical_connection_id))) fail('meta_recovery_changed');
+          || Number(binding.meta_connection_id) !== effectiveId)) fail('meta_recovery_changed');
         const [blocked] = await models.MetaMarketingBrokerBinding.update({ state: 'blocked' }, { ...o,
-          where: { enrollment_id: row.enrollment_id, meta_connection_id: Number(row.canonical_connection_id), mapping_id: { [Op.in]: mappings } } });
+          where: { enrollment_id: row.enrollment_id, meta_connection_id: effectiveId, mapping_id: { [Op.in]: mappings } } });
         const [deactivated] = await models.ClinicMetaAsset.update({ isActive: false }, { ...o,
-          where: { id: { [Op.in]: mappings }, metaConnectionId: Number(row.canonical_connection_id), assetType: 'ad_account' } });
+          where: { id: { [Op.in]: mappings }, metaConnectionId: effectiveId,
+            assetType: v2 ? { [Op.in]: ['ad_account', 'facebook_page'] } : 'ad_account' } });
         result.blockedBindings += blocked; result.deactivatedMappings += deactivated;
         if (!['revoke_pending', 'revoked'].includes(enrollment.state)) {
           const [queued] = await models.MetaMarketingEnrollmentRequest.update({ state: 'revoke_pending', updated_at: now(), next_attempt_at: now(), attempts: 0, last_error: null },
             { ...o, where: { enrollment_id: row.enrollment_id, state: enrollment.state, flow_id: row.flow_id,
-              meta_connection_id: Number(row.canonical_connection_id), lease_token: enrollment.lease_token ?? null } });
+              meta_connection_id: effectiveId, lease_token: enrollment.lease_token ?? null } });
           if (queued !== 1) fail('meta_recovery_conflict'); result.enrollmentsQueued++;
         }
       }
@@ -397,8 +525,8 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     }
     return result;
   }
-  return { captureSnapshot, inspectPrepared, forFlow, bindCanonical, attachEnrollment, activate, assertActive, retire, retireForScope };
+    return { captureSnapshot, inspectPrepared, forFlow, bindCanonical, attachEnrollment, activate, assertActive, retire, retireForScope, selection };
 }
 const cloneInventory = value => JSON.parse(encode(value));
 module.exports = { createRecovery, validateSnapshot, normalizeInventory, snapshotRecord, canonical, encode, hash, FIELDS,
-  ALIAS_ATTRIBUTES, CONNECTION_ATTRIBUTES, aliasMetadata };
+  ALIAS_ATTRIBUTES, CONNECTION_ATTRIBUTES, aliasMetadata, canonicalId, selection, selectable, METADATA_KEYS, normalizeAliases };

@@ -39,7 +39,8 @@ function createMetaMarketingBrokerReader({ client, assertContext, now=Date.now }
     } catch(error) {fail(SAFE.has(error?.code)?error.code:'meta_broker_binding_invalid');}
   } };
 }
-function createConfiguredMetaMarketingClient({env=process.env,createClient=createIntegrationsBrokerClient}={}) {
+function createConfiguredMetaMarketingClient({env=process.env,createClient=createIntegrationsBrokerClient,transportProfile='default'}={}) {
+  if(!['default','meta-marketing'].includes(transportProfile))fail('broker_configuration_invalid');
   let client,configuration;
   function privateFile(filename) {
     const fs=require('node:fs'),path=require('node:path');let fd;
@@ -55,7 +56,7 @@ function createConfiguredMetaMarketingClient({env=process.env,createClient=creat
       keyFile:env.META_MARKETING_BROKER_KEY_FILE,caFile:env.META_MARKETING_BROKER_CA_FILE};
     if(configuration&&JSON.stringify(configuration)!==JSON.stringify(current))fail('broker_configuration_invalid');
     if(!client){const key=privateFile(current.keyFile);try{client=createClient({origin:current.origin,audience:current.audience,keyId:current.keyId,
-      privateKey:key,ca:privateFile(current.caFile),timeoutMs:30000});configuration=current;}finally{key.fill(0);}}
+      privateKey:key,ca:privateFile(current.caFile),timeoutMs:30000,...(transportProfile==='meta-marketing'?{transportProfile}:{} )});configuration=current;}finally{key.fill(0);}}
     return client.execute(command,budget);
   }};
 }

@@ -9,10 +9,23 @@ const SAFE_CODES = new Set(['invalid_request', 'invalid_signature', 'scope_denie
   'request_replayed', 'idempotency_conflict', 'outcome_unknown', 'rate_limited', 'provider_disabled', 'provider_failed',
   'provider_timeout', 'provider_unauthorized', 'credential_revoked', 'secret_unavailable', 'audit_unavailable', 'internal_error',
   'secret_version_changed', 'oauth_state_invalid', 'oauth_identity_mismatch', 'oauth_credentials_incomplete',
-  'oauth_flow_busy', 'oauth_flow_interrupted']);
+  'oauth_flow_busy', 'oauth_flow_interrupted', 'meta_lead_receipt_review_required']);
 const error = code => Object.assign(new Error(code), { code });
+function metaLeadCooldownError(value, status, headers = {}) {
+  if (status !== 429 || value?.error?.code !== 'rate_limited') return null;
+  const exact = (object, keys) => object && Object.getPrototypeOf(object) === Object.prototype
+    && Object.keys(object).sort().join(',') === keys;
+  const delay = value.error.retryAfterMs;
+  if (!exact(value, 'error') || !exact(value.error, 'code,retryAfterMs')
+    || !Number.isSafeInteger(delay) || delay < 1 || delay > 86400000) throw error('broker_response_invalid');
+  const header = headers['retry-after'];
+  if (header !== undefined && (typeof header !== 'string' || !/^[1-9][0-9]{0,4}$/.test(header)
+    || Number(header) !== Math.ceil(delay / 1000))) throw error('broker_response_invalid');
+  return Object.assign(error('rate_limited'), { retryAfterMs: delay });
+}
 function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, ca, timeoutMs = 15000, transportProfile = 'default' }) {
   const onboarding = transportProfile === 'whatsapp-onboarding';
+  const metaMarketing = transportProfile === 'meta-marketing';
   const maxTimeout = onboarding ? activationLimits.CLIENT_TIMEOUT_MS : 30000;
   let base; let key;
   try {
@@ -20,16 +33,17 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
     if (base.protocol !== 'https:' || base.username || base.password || base.pathname !== '/' || base.search || base.hash
       || key.asymmetricKeyType !== 'ed25519' || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(keyId)
       || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(audience) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > maxTimeout
-      || !['default', 'whatsapp-onboarding'].includes(transportProfile)) throw Error();
+      || !['default', 'whatsapp-onboarding', 'meta-marketing'].includes(transportProfile)) throw Error();
   } catch { throw error('broker_configuration_invalid'); }
   const executeOriginal = (command, options = {}) => {
       const operationLimit = onboarding && command.operation !== activationLimits.ACTIVATE ? 30000 : maxTimeout;
       const budget = options.timeoutMs === undefined ? Math.min(timeoutMs, operationLimit) : options.timeoutMs;
       if (!Number.isInteger(budget) || budget < 1 || budget > operationLimit
+        || metaMarketing && !String(command.operation).startsWith('meta.marketing.')
         || onboarding && !/^meta\.whatsapp\.onboarding\.(?:prepare|begin|finish|status|abort|profile|activate|activation-status)\.v1$/.test(command.operation)) return Promise.reject(error('invalid_request'));
       const requestId = command.requestId || randomUUID();
       const body = Buffer.from(JSON.stringify({ ...command, requestId, version: 1, audience, issuedAt: Date.now(), nonce: randomUUID() }));
-      if (body.length > 32768) return Promise.reject(error('invalid_request'));
+      if (body.length > (metaMarketing ? 131072 : 32768)) return Promise.reject(error('invalid_request'));
       const message = Buffer.from(`clinicaclick-broker-v1\nPOST\n/v1/execute\n${createHash('sha256').update(body).digest('hex')}`);
       return new Promise((resolve, reject) => {
         let settled = false; let timer;
@@ -44,6 +58,10 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
           res.on('end', () => {
             try {
               const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+              if (command.operation?.startsWith('meta.marketing.leads.') && res.statusCode !== 200) {
+                const cooldown = metaLeadCooldownError(value, res.statusCode, res.headers);
+                if (cooldown) return finish(cooldown);
+              }
               if (res.statusCode !== 200) return finish(error(SAFE_CODES.has(value?.error?.code) ? value.error.code : 'broker_unavailable'));
               if (value.requestId !== requestId || typeof value.replayed !== 'boolean' || !value.data || typeof value.data !== 'object' || Array.isArray(value.data)) throw Error();
               finish(null, value);
@@ -64,4 +82,4 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
     },
   };
 }
-module.exports = { createIntegrationsBrokerClient };
+module.exports = { createIntegrationsBrokerClient, metaLeadCooldownError };

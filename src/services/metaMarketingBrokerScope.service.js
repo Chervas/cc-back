@@ -139,12 +139,16 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
     }, prepare:guard(async mappingId => { const captured=await inspect(mappingId); const context=Object.freeze({}); contexts.set(context,captured);return context; }),
     assertContext:guard(async context => { const captured=contexts.get(context);if(!captured)fail();return structuredClone(await inspect(captured.mappingId,captured)); }) };
 }
-function createMetaMarketingScopeRepository(getModels) {
-  const options = { raw:true,logging:false,limit:1001 };
+function createMetaMarketingScopeRepository(getModels, { transaction = null } = {}) {
+  if (transaction && (!transaction.LOCK?.UPDATE || transaction.finished)) fail();
+  const options = { raw:true,logging:false,limit:1001,
+    ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {}) };
   const mappingOptions = { ...options, attributes:[...MAPPING_FIELDS,[literal('(pageAccessToken IS NULL AND waAccessToken IS NULL AND additionalData IS NULL)'),'credentials_absent']] };
   return {
-    inspectEnrollment:id=>getModels().sequelize.transaction({isolationLevel:'REPEATABLE READ'},transaction=>
-      require('./metaMarketingEnrollmentBinding.service').createBindings({models:getModels()}).committed(id,transaction)),
+    inspectEnrollment:id=>transaction
+      ? require('./metaMarketingEnrollmentBinding.service').createBindings({models:getModels()}).committed(id,transaction)
+      : getModels().sequelize.transaction({isolationLevel:'REPEATABLE READ'},transaction=>
+        require('./metaMarketingEnrollmentBinding.service').createBindings({models:getModels()}).committed(id,transaction)),
     loadMapping:id => getModels().ClinicMetaAsset.findByPk(id,mappingOptions),
     loadRevocations:assetRef => getModels().MetaMarketingBrokerRevocation.findAll({ ...options,attributes:['tuple_hash'],where:{asset_ref:assetRef} }),
     loadBindings:(assetRef,mappingId) => getModels().MetaMarketingBrokerBinding.findAll({ ...options,attributes:BINDING_FIELDS,
@@ -168,7 +172,7 @@ function createMetaMarketingScopeRepository(getModels) {
       const canonical=rows.find(row=>Number(row.id)===Number(id));
       return canonical?.userId===null?canonical:null;
     },
-    blocked:scope => require('./metaScopeBlock.service').blocked(scope,{models:getModels(),purpose:'meta'}),
+    blocked:scope => require('./metaScopeBlock.service').blocked(scope,{models:getModels(),purpose:'meta',...(transaction?{transaction}:{})}),
   };
 }
 module.exports={createMetaMarketingBrokerScope,createMetaMarketingScopeRepository,BINDING_FIELDS,MAPPING_FIELDS,binding,mapping,asset,positive,reference};
