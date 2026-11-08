@@ -7,7 +7,7 @@ test('Lead readiness addresses the inspected subject and app, preserving Page id
  const r=await ready(t),v=(await r.execute('pageStatus',{adAccountAssetRef:ACCOUNT})).data;
  assert.equal(v.page.has_lead_access,true);
  const reads=r.state.calls.filter(c=>c.fields?.includes('has_lead_access'));
- assert.equal(reads.length,1);assert.equal(reads[0].path,'/v24.0/401');assert.equal(reads[0].fields,'id,has_lead_access.user_id(201).app_id(101)');
+ assert.equal(reads.length,1);assert.equal(reads[0].path,'/v24.0/401');assert.equal(reads[0].fields,'id,has_lead_access.user_id(201).app_id(101){app_has_leads_permission,can_access_lead,enabled_lead_access_manager,is_page_admin,user_has_leads_permission,page_id,user_id,failure_reason,failure_resolution}');
  assert.equal(r.state.calls.length,7);
  for(let i=1;i<r.state.calls.length;i++)assert(r.state.calls[i].at-r.state.calls[i-1].at>=1000);
 });

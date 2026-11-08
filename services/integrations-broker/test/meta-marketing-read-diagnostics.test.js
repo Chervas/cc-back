@@ -91,7 +91,7 @@ test('throwing journal observer cannot replace normal provider error or change r
 });
 test('PageStatus valid false access is successful and silent; other Leads operations never emit this event',async()=>{
  const f=fixture({lead:true,family:'pageStatus',alter:k=>k==='page_access'?{raw:{id:'401',has_lead_access:{can_access_lead:false}}}:null}),b=fixture({lead:true,family:'pageStatus',base:true,alter:k=>k==='page_access'?{raw:{id:'401',has_lead_access:{can_access_lead:false}}}:null});
- const c=await capture(f.run),original=await capture(b.run);assert.ifError(c.error);assert.equal(c.result.page.has_lead_access,false);assert.equal(c.lines.length,0);assert.deepEqual(c.result,original.result);assert.deepEqual(f.calls.map(v=>({...v,fields:v.fields==='id,has_lead_access.user_id(201).app_id(101)'?'id,has_lead_access':v.fields})),b.calls);
+ const c=await capture(f.run),original=await capture(b.run);assert.ifError(c.error);assert.equal(c.result.page.has_lead_access,false);assert.equal(c.lines.length,0);assert.deepEqual(c.result,original.result);assert.deepEqual(f.calls.map(v=>({...v,fields:v.fields==='id,has_lead_access.user_id(201).app_id(101){app_has_leads_permission,can_access_lead,enabled_lead_access_manager,is_page_admin,user_has_leads_permission,page_id,user_id,failure_reason,failure_resolution}'?'id,has_lead_access.user_id(201).app_id(101)':v.fields})),b.calls);
  const other=fixture({lead:true,family:'pageEnable',status:400}),failed=await capture(other.run);assert(failed.error);assert.equal(failed.lines.length,0);
 });
 test('observer is one-shot, bounded and ignores invalid operation/assets and unsafe error/phase/code values',async()=>{
