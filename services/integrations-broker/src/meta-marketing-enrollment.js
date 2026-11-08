@@ -2,11 +2,12 @@
 const K=require('./meta-marketing-credential-shape'),B=require('./meta-marketing-business-issuer');
 const {BrokerError,fail}=require('./errors'),{eventFor}=require('./audit'),{canonical}=require('./canonical');
 const C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),M=require('./meta-marketing-contract'),E=require('./meta-marketing-enrollment-contract');
-const A=require('./meta-marketing-ads-contract');
+const A=require('./meta-marketing-ads-contract'),X=require('./meta-marketing-enrolled-asset-access-contract');
 const L=require('./meta-marketing-leads-contract'),{timingSafeEqual}=require('node:crypto');
-function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,credentialEpochs,businessConfig}){
+function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,credentialEpochs,businessConfig,enrolledAssetAccess}){
   if(adsRead!==undefined){A.config(adsRead);if(typeof adsHttp?.read!=='function')fail('invalid_request');}
   if(leadAds!==undefined){L.config(leadAds);if(typeof leadsHttp?.read!=='function'||typeof secrets?.withLeadVerification!=='function')fail('invalid_request');}
+  if(enrolledAssetAccess!==undefined){X.config(enrolledAssetAccess);if(!adsRead||!leadAds)fail('invalid_request');}
   const leadReceipts=leadAds?require('./meta-marketing-leads-receipts').createMetaMarketingLeadReceipts({store,now}):null;
   const adsOperation=operation=>Object.values(A.OPERATIONS).includes(operation);
   const leadOperation=operation=>Object.values(L.OPERATIONS).includes(operation);
@@ -117,6 +118,22 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       return true;
     }catch{return false;}finally{checkingProviderAuthority=false;}
   }
+  function enrolledAuthority(row,binding,{allowExpired=false,metadata}={}){
+    const active=enrollmentActive(row,binding,{requireActive:true,allowExpired});
+    const effective=metadata||active.metadata;X.authorize(enrolledAssetAccess,binding,effective);
+    const paid=effective.granularScopes.find(value=>value.scope==='ads_management');
+    if(paid&&active.assets.some(asset=>asset.kind==='ad_account'&&!paid.targetIds.includes(asset.id)))fail('scope_denied');
+    return active;
+  }
+  function leadPair(row,binding,page,account,options){
+    if(!leadAds||page.kind!=='facebook_page'||account?.kind!=='ad_account')fail('scope_denied');
+    const fixed=leadAds.pairs.find(p=>p.pageAssetRef===page.assetRef);
+    // A reviewed Page route is exclusive, including when its account is denied.
+    if(fixed){if(fixed.adAccountAssetRef!==account.assetRef)fail('scope_denied');return fixed;}
+    const active=enrolledAuthority(row,binding,options),accounts=active.assets.filter(a=>a.kind==='ad_account');
+    if(!active.assets.some(a=>a.assetRef===page.assetRef&&a.kind==='facebook_page')||accounts.length!==1||accounts[0].assetRef!==account.assetRef)fail('scope_denied');
+    return {pageAssetRef:page.assetRef,adAccountAssetRef:account.assetRef,recipientClinicId:null};
+  }
   function assetOwner(request,principal,policy){
     const lookup=get('SELECT enrollment FROM meta_marketing_enrollment_assets WHERE asset=?',request.assetRef);
     if(!lookup)fail('scope_denied');const row=rowFor(lookup.enrollment),binding=grantBinding(row,source(policy,request.connectionRef));
@@ -130,13 +147,16 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       if(!ingress&&(principal.id!==roles.reader||![...M.OPERATIONS,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS)].includes(request.operation)))fail('scope_denied');
       // Metrics are a distinct, explicitly reviewed cohort. Merely adding an
       // operation to source or enrolling an account does not grant these reads.
-      if(adsOperation(request.operation)&&(!adsRead||!adsRead.assetRefs.includes(request.assetRef)||asset.kind!=='ad_account'||!b.scopes.includes('ads_read')))fail('scope_denied');
+      if(adsOperation(request.operation)){
+        if(!adsRead||asset.kind!=='ad_account'||!b.scopes.includes('ads_read'))fail('scope_denied');
+        if(!adsRead.assetRefs.includes(request.assetRef))enrolledAuthority(row,binding);
+      }
       enrollmentActive(row,binding,{requireActive:true});
       if(leadOperation(request.operation)){
         L.validate(request.operation,request.payload);
-        if(!leadAds||asset.kind!=='facebook_page'||!leadAds.pairs.some(p=>p.pageAssetRef===asset.assetRef&&p.adAccountAssetRef===request.payload.adAccountAssetRef)||!L.REQUIRED_SCOPES.every(s=>b.scopes.includes(s)))fail('scope_denied');
-        const pair=leadAds.pairs.find(p=>p.pageAssetRef===asset.assetRef&&p.adAccountAssetRef===request.payload.adAccountAssetRef);if(pair.recipientClinicId!=null&&!b.clinicIds.includes(pair.recipientClinicId))fail('scope_denied');
-        const account=selected(row).find(a=>a.assetRef===request.payload.adAccountAssetRef&&a.kind==='ad_account');if(!account)fail('scope_denied');
+        if(!leadAds||asset.kind!=='facebook_page'||!L.REQUIRED_SCOPES.every(s=>b.scopes.includes(s)))fail('scope_denied');
+        const account=selected(row).find(a=>a.assetRef===request.payload.adAccountAssetRef&&a.kind==='ad_account');
+        const pair=leadPair(row,binding,asset,account);if(pair.recipientClinicId!=null&&!b.clinicIds.includes(pair.recipientClinicId))fail('scope_denied');
         if(request.operation===L.OPERATIONS.receiptRead)leadReceipts.read(request.payload.receiptRef,leadContext(row,binding,asset,account));
         return {row,binding,asset,account,control};
       }
@@ -159,7 +179,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   const abortFlow=flowId=>stop(task=>task.flowId===flowId);
   const abortAsset=assetRef=>stop(task=>task.assets.flatMap(physical).includes(assetRef));
   const leadContext=(row,binding,asset,account)=>{
-    const recipientClinicId=leadAds.pairs.find(p=>p.pageAssetRef===asset.assetRef&&p.adAccountAssetRef===account.assetRef)?.recipientClinicId??null;
+    const recipientClinicId=leadPair(row,binding,asset,account).recipientClinicId??null;
     return {app:K.bindingFor(binding).appId,subject:JSON.parse(flowFor(row.flow).credential_metadata).subjectId,
       tenant:row.tenant,connection:row.connection,enrollment:row.id,generation:C.hash(JSON.stringify([row.selection_digest,asset.assetRef,account.assetRef,recipientClinicId])),page:asset.id,account:account.id,recipientClinicId};
   };
@@ -333,9 +353,14 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       if(!credentialEpochs||!C.uuid(enrollmentId))fail('operation_denied');
       const row=rowFor(enrollmentId),authority=enrollmentActive(row,grantBinding(row,B.baseBinding(binding)),{requireActive:true,allowExpired:true});
       for(const asset of authority.assets)M.assertAssetCredential(metadata,asset);
-      for(const pair of leadAds?.pairs||[]){
+      const pairs=(leadAds?.pairs||[]).filter(pair=>authority.assets.some(a=>a.assetRef===pair.pageAssetRef)&&authority.assets.some(a=>a.assetRef===pair.adAccountAssetRef));
+      if(X.includes(enrolledAssetAccess,binding)){
+        const active=enrolledAuthority(row,grantBinding(row,B.baseBinding(binding)),{allowExpired:true,metadata}),accounts=active.assets.filter(a=>a.kind==='ad_account');
+        if(accounts.length===1)for(const page of active.assets.filter(a=>a.kind==='facebook_page'&&!leadAds.pairs.some(p=>p.pageAssetRef===a.assetRef)))pairs.push(leadPair(row,binding,page,accounts[0],{allowExpired:true,metadata}));
+      }
+      for(const pair of pairs){
         const page=authority.assets.find(a=>a.assetRef===pair.pageAssetRef),account=authority.assets.find(a=>a.assetRef===pair.adAccountAssetRef);
-        if(!page||!account)continue;
+        leadPair(row,binding,page,account,{allowExpired:true,metadata});
         for(const scope of L.REQUIRED_SCOPES){
           if(!metadata.scopes.includes(scope))fail('oauth_credentials_incomplete');
           const granular=metadata.granularScopes.find(value=>value.scope===scope);

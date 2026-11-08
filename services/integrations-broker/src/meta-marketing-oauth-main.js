@@ -8,7 +8,7 @@ const C=require('./meta-marketing-oauth-contract');
 const D=require('./meta-marketing-discovery-contract');
 const E=require('./meta-marketing-enrollment-contract');
 const A=require('./meta-marketing-ads-contract');
-const L=require('./meta-marketing-leads-contract');
+const L=require('./meta-marketing-leads-contract'),X=require('./meta-marketing-enrolled-asset-access-contract');
 const R=require('./meta-marketing-credential-renewal-contract'),B=require('./meta-marketing-business-contract'),T=require('./meta-marketing-credential-maintenance-contract'),AG=require('./meta-marketing-agency-contract'),I=require('./meta-marketing-business-issuer');
 const businessConfigs=config=>[config.businessLogin,config.agencySystemUser].filter(Boolean);
 const businessScope=(config,key)=>businessConfigs(config).some(c=>c.scopeKeys.includes(key));
@@ -30,6 +30,7 @@ function validateConfig(config) {
   if(businessConfigs(config||{}).length)I.config(businessConfigs(config));
   if (config && Object.hasOwn(config,'adsRead')) {fields.push('adsRead');A.config(config.adsRead);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if (config && Object.hasOwn(config,'leadAds')) {fields.push('leadAds');L.config(config.leadAds);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
+  if(config&&Object.hasOwn(config,'enrolledAssetAccess')){fields.push('enrolledAssetAccess');X.config(config.enrolledAssetAccess);if(config.assetEnrollment!==true||config.assetDiscovery!==true||!config.adsRead||!config.leadAds||config.standby===true)fail('invalid_request');}
   if (config?.tlsRenewal) { fields.push('tlsRenewal');tlsReload.validateSettings(config.tlsRenewal); }
   if (!config || Object.keys(config).sort().join(',')!==fields.sort().join(',') || config.enabled!==true || config.cohort!==C.COHORT
     || !['dev','staging'].includes(config.environment) || !net.isIP(config.listenAddress) || !Number.isInteger(config.port)
@@ -62,6 +63,11 @@ function validateConfig(config) {
       if (!grant || grant.tenantRef!=='clinic:'+b.clinicIds[0] || grant.assetRef!=='meta-enroll:'+b.scopeKey
         || JSON.stringify([...grant.operations].sort())!==JSON.stringify(operations.sort())) fail('invalid_request');
     }
+  }
+  for(const scope of config.enrolledAssetAccess?.scopeKeys||[]){
+    const bindings=policy.connections.filter(binding=>C.bindingFor(binding).scopeKey===scope);
+    if(bindings.length!==1||businessScope(config,scope))fail('invalid_request');
+    const b=C.bindingFor(bindings[0]);if(b.clinicIds.length!==1||scope!=='clinic:'+b.clinicIds[0]||!X.REQUIRED_SCOPES.every(s=>b.scopes.includes(s)))fail('invalid_request');
   }
   if ([...slots].some(arn=>apps.has(arn))) fail('invalid_request');
   if(config.leadAds){
@@ -103,7 +109,7 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
       if(config.leadAds)leadsHttp=require('./meta-marketing-leads-http').createMetaMarketingLeadsHttp({pacer,cursor,now:adsNow,...(leadsRequest?{request:leadsRequest}:{})});
     }
     const credentialEpochs=config.credentialRenewal?createMetaMarketingCredentialEpochs({store}):null;
-    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessConfigs(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{})});
+    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessConfigs(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{}),...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{})});
     if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment});
     if(businessConfigs(config).length){const businessHttp=require('./meta-marketing-business-issuer-http').createIssuerHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
       business=require('./meta-marketing-business').createMetaMarketingBusiness({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,config:businessConfigs(config)});
