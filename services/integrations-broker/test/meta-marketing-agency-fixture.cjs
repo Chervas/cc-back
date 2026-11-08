@@ -42,7 +42,8 @@ function request({state,now,binding,fallback,appSecret}){
    else if(edge==='assigned_pages'&&bearer===ADMIN)response={data:[...assigned.keys()].filter(id=>['401','402'].includes(id)).map(id=>({id}))};
    else if(edge==='assigned_ad_accounts')response={data:['301',...(state.extraAssets?['302']:[])].map(id=>({id:'act_'+id,account_id:id,name:'Fictitious shared ad',account_status:1,currency:'EUR',timezone_name:'Europe/Madrid'}))};
    else if(edge==='assigned_pages')response={data:['401',...(state.extraAssets?['402']:[])].map(id=>({id,name:'Fictitious shared page'}))};
-   else if(edge==='leadgen_forms')response={data:[{id:'801',page_id:node}]};
+   else if(edge==='leadgen_forms'){assert(bearer.startsWith(PAGE));assert.equal(u.searchParams.get('fields'),'id,page_id');assert.equal(u.searchParams.get('limit'),'1');response={data:[{id:'801',page_id:node}]};}
+   else if(edge==='leads'){assert(bearer.startsWith(PAGE));assert.equal(u.searchParams.get('fields'),'id');assert.equal(u.searchParams.get('limit'),'1');response={data:[{id:'9011'}]};}
    else if(['401','402'].includes(node)&&u.searchParams.get('fields')==='id,access_token')response={id:node,access_token:PAGE+node};
    else if(['401','402'].includes(node)&&u.searchParams.get('fields')==='id,has_lead_access.user_id(601).app_id(101)')response={id:node,has_lead_access:{user_id:'601',can_access_lead:true,app_has_leads_permission:true,user_has_leads_permission:true,enabled_lead_access_manager:true,page_id:node}};
    else if(node==='act_301')response={id:'act_301',account_id:'301',name:'Fictitious shared ad',account_status:1,currency:'EUR',timezone_name:'Europe/Madrid'};

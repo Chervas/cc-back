@@ -2,29 +2,11 @@
 require('./offline-guard.cjs');
 const test=require('node:test'),assert=require('node:assert/strict');
 const {ready,ACCOUNT}=require('./meta-marketing-leads-fixture.cjs');
-const {hasLeadAccess}=require('../src/meta-marketing-page-lead-access');
-test('Lead readiness addresses the inspected subject and app, preserving Page identity and pacing',async t=>{
- const r=await ready(t),v=(await r.execute('pageStatus',{adAccountAssetRef:ACCOUNT})).data;
- assert.equal(v.page.has_lead_access,true);
- const reads=r.state.calls.filter(c=>c.fields?.includes('has_lead_access'));
- assert.equal(reads.length,1);assert.equal(reads[0].path,'/v24.0/401');assert.equal(reads[0].fields,'id,has_lead_access.user_id(201).app_id(101){app_has_leads_permission,can_access_lead,enabled_lead_access_manager,is_page_admin,user_has_leads_permission,page_id,user_id,failure_reason,failure_resolution}');
- assert.equal(r.state.calls.length,7);
- for(let i=1;i<r.state.calls.length;i++)assert(r.state.calls[i].at-r.state.calls[i-1].at>=1000);
-});
-test('a provider response for another user is rejected before reading subscriptions or performing writes',async t=>{
- const r=await ready(t);r.state.before=u=>{r.state.raw=u.searchParams.get('fields')?.includes('has_lead_access')?{id:'401',has_lead_access:{page_id:'401',user_id:'999',can_access_lead:true}}:null;};
- await assert.rejects(r.execute('pageStatus',{adAccountAssetRef:ACCOUNT}),{code:'provider_failed'});
- assert(!r.state.calls.some(c=>c.path.endsWith('/subscribed_apps')));assert(!r.state.calls.some(c=>c.method==='POST'));
-});
-test('correct identity with explicitly denied lead permission is false and does not enable the Page',async t=>{
- const r=await ready(t);r.state.before=u=>{r.state.raw=u.searchParams.get('fields')?.includes('has_lead_access')?{id:'401',has_lead_access:{page_id:'401',user_id:'201',can_access_lead:false,app_has_leads_permission:false,user_has_leads_permission:true}}:null;};
- const status=(await r.execute('pageStatus',{adAccountAssetRef:ACCOUNT})).data;
- assert.equal(status.page.has_lead_access,false);
- await assert.rejects(r.execute('pageEnable',{adAccountAssetRef:ACCOUNT,expectedSubscriptionRevision:status.subscription.revision}),{code:'scope_denied'});
- assert(!r.state.calls.some(c=>c.method==='POST'));
-});
-test('a fresh debug response for another subject cannot reach the Page-access query',async t=>{
- const r=await ready(t);r.f.state.afterGraph=(kind,raw)=>kind==='inspect'?{...raw,data:{...raw.data,user_id:'999'}}:raw;
- await assert.rejects(r.execute('pageStatus',{adAccountAssetRef:ACCOUNT}),{code:'oauth_identity_mismatch'});
- assert(!r.state.calls.some(c=>c.fields?.includes('has_lead_access')));assert(!r.state.calls.some(c=>c.method==='POST'));
-});
+function alter(r,when,response,status=200){r.state.before=u=>{const hit=when(u);r.state.raw=hit?response:null;r.state.status=hit?status:200;};}
+test('readiness uses one owned Page form and one lead ID without HasLeadAccess, contacts or extra tokens',async t=>{const r=await ready(t),v=(await r.execute('pageStatus',{adAccountAssetRef:ACCOUNT})).data;assert.equal(v.page.has_lead_access,true);const forms=r.state.calls.filter(c=>c.path.endsWith('/leadgen_forms')),leads=r.state.calls.filter(c=>c.path.endsWith('/leads'));assert.equal(forms.length,1);assert.equal(forms[0].fields,'id,page_id');assert.equal(leads.length,1);assert.equal(leads[0].fields,'id');assert(!r.state.calls.some(c=>c.fields?.includes('has_lead_access')||c.fields?.includes('field_data')));assert.equal(r.state.calls.length,8);for(let i=1;i<r.state.calls.length;i++)assert(r.state.calls[i].at-r.state.calls[i-1].at>=1000);});
+test('a Form owned by another Page fails before any lead read or subscription write',async t=>{const r=await ready(t);alter(r,u=>u.pathname.endsWith('/leadgen_forms'),{data:[{id:'702',page_id:'999'}]});await assert.rejects(r.execute('pageStatus',{adAccountAssetRef:ACCOUNT}),{code:'scope_denied'});assert(!r.state.calls.some(c=>c.path.endsWith('/leads')||c.method==='POST'));});
+test('lead endpoint denial cannot enable the Page and does not become a false positive from form visibility',async t=>{const r=await ready(t);alter(r,u=>u.pathname.endsWith('/leads'),{error:{code:200,message:'NEVER_EMIT_PROVIDER_TEXT'}},403);await assert.rejects(r.execute('pageEnable',{adAccountAssetRef:ACCOUNT,expectedSubscriptionRevision:'a'.repeat(64)}),{code:'provider_unauthorized'});assert(!r.state.calls.some(c=>c.method==='POST'));assert.equal(r.state.calls.filter(c=>c.path.endsWith('/leads')).length,1);});
+test('empty form collection is unverified false, skips lead read and prevents enable',async t=>{const r=await ready(t);alter(r,u=>u.pathname.endsWith('/leadgen_forms'),{data:[]});const v=(await r.execute('pageStatus',{adAccountAssetRef:ACCOUNT})).data;assert.equal(v.page.has_lead_access,false);await assert.rejects(r.execute('pageEnable',{adAccountAssetRef:ACCOUNT,expectedSubscriptionRevision:v.subscription.revision}),{code:'scope_denied'});assert(!r.state.calls.some(c=>c.path.endsWith('/leads')||c.method==='POST'));});
+test('an authorized empty lead-ID collection proves the read without manufacturing a contact',async t=>{const r=await ready(t);alter(r,u=>u.pathname.endsWith('/leads'),{data:[]});const v=(await r.execute('pageStatus',{adAccountAssetRef:ACCOUNT})).data;assert.equal(v.page.has_lead_access,true);assert(!Object.hasOwn(v,'lead'));assert(!r.state.calls.some(c=>c.fields?.includes('field_data')));});
+test('unexpected contact fields in the ID-only probe are rejected and never returned',async t=>{const r=await ready(t);alter(r,u=>u.pathname.endsWith('/leads'),{data:[{id:'701',email:'NEVER_EMIT@example.invalid'}]});await assert.rejects(r.execute('pageStatus',{adAccountAssetRef:ACCOUNT}),{code:'provider_failed'});assert(!r.state.calls.some(c=>c.method==='POST'));});
+test('rate limit during the ID-only probe preserves cooldown and performs no retry or subscription write',async t=>{const r=await ready(t);alter(r,u=>u.pathname.endsWith('/leads'),{error:{code:4}},429);await assert.rejects(r.execute('pageStatus',{adAccountAssetRef:ACCOUNT}),e=>e.code==='rate_limited'&&e.retryAfterMs===7200000);assert.equal(r.state.calls.filter(c=>c.path.endsWith('/leads')).length,1);assert(!r.state.calls.some(c=>c.method==='POST'));});

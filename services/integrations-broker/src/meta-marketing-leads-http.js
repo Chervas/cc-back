@@ -2,7 +2,6 @@
 const K=require('./meta-marketing-credential-shape'),R=require('./meta-marketing-read-diagnostics');
 const https=require('node:https'),{createHmac}=require('node:crypto'),{BrokerError,fail}=require('./errors'),{tokenText}=require('./whatsapp-secrets');
 const L=require('./meta-marketing-leads-contract'),M=require('./meta-marketing-contract'),C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),{usage}=require('./meta-marketing-ads-http');
-const HAS_LEAD_ACCESS_FIELDS='app_has_leads_permission,can_access_lead,enabled_lead_access_manager,is_page_admin,user_has_leads_permission,page_id,user_id,failure_reason,failure_resolution';
 const AD_FIELDS='id,account_id,campaign_id,adset_id,effective_status,creative{id,call_to_action,object_story_spec}';
 function createMetaMarketingLeadsHttp({request=https.request,pacer,cursor,now=Date.now,timeoutMs=8000}={}){
   if(typeof pacer?.run!=='function'||typeof pacer?.observe!=='function'||typeof cursor?.open!=='function'||typeof cursor?.seal!=='function'||!Number.isInteger(timeoutMs)||timeoutMs<1||timeoutMs>10000)fail('invalid_request');
@@ -51,11 +50,18 @@ function createMetaMarketingLeadsHttp({request=https.request,pacer,cursor,now=Da
       if([d.expires_at,d.data_access_expires_at].some(v=>!Number.isSafeInteger(v)||v<0||v!==0&&v*1000<=now()))fail('credential_revoked');
       diagnostic.phase('page_identity_http');const me=await get('me','id',pageToken);diagnostic.phase('page_identity_validation');if(me.id!==asset.id)fail('scope_denied');};
     const form=async id=>{const f=await get(id,'id,name,page_id,status',pageToken);if(f.id!==id||f.page_id!==asset.id)fail('scope_denied');return {id:f.id,name:f.name,page_id:f.page_id,status:f.status};};
-    const reception=async()=>{diagnostic.phase('page_access_http');const page=await get(asset.id,`id,has_lead_access.user_id(${metadata.subjectId}).app_id(${metadata.appId}){${HAS_LEAD_ACCESS_FIELDS}}`,pageToken);diagnostic.phase('page_access_projection');let access;try{if(page.id!==asset.id||page.has_lead_access&&Object.hasOwn(page.has_lead_access,'user_id')&&page.has_lead_access.user_id!==metadata.subjectId)fail('provider_failed');access=require('./meta-marketing-page-lead-access').hasLeadAccess(page.has_lead_access,asset.id);}catch(error){diagnostic.pageAccess(page);throw error;}
+    const reception=async()=>{
+      // HasLeadAccess is not available for this app. Read one owned Form and
+      // one lead identifier through the supported APIs, never contact fields.
+      diagnostic.phase('page_access_http');const forms=await get(asset.id+'/leadgen_forms','id,page_id',pageToken,{limit:'1'});
+      diagnostic.phase('page_access_projection');if(!Array.isArray(forms.data)||forms.data.length>1||forms.data.some(f=>!C.exact(f,'id,page_id')||!M.graphId(f.id)||f.page_id!==asset.id))fail('scope_denied');
+      let access=false;
+      if(forms.data.length){diagnostic.phase('data_http');const probe=await get(forms.data[0].id+'/leads','id',pageToken,{limit:'1'});diagnostic.phase('data_projection');
+        if(!Array.isArray(probe.data)||probe.data.length>1||probe.data.some(v=>!C.exact(v,'id')||!M.graphId(v.id)))fail('provider_failed');access=true;}
       diagnostic.phase('page_subscriptions_http');const raw=await get(asset.id+'/subscribed_apps','id,subscribed_fields',pageToken,{limit:'100'});diagnostic.phase('page_subscriptions_projection');if(!Array.isArray(raw.data)||raw.data.length>100||raw.paging?.next)fail('provider_failed');
       const mine=raw.data.filter(r=>r?.id===metadata.appId);if(mine.length>1)fail('provider_failed');const fields=mine.length?mine[0].subscribed_fields:[];
       if(!Array.isArray(fields)||fields.length>100||new Set(fields).size!==fields.length||fields.some(v=>typeof v!=='string'||!/^[a-z][a-z0-9_]{0,63}$/.test(v)))fail('provider_failed');fields.sort();
-      return {page:{id:page.id,has_lead_access:access},subscription:{subscribed:mine.length===1,fields,revision:L.subscription(metadata.appId,asset.id,account.id,fields)}};};
+      return {page:{id:asset.id,has_lead_access:access},subscription:{subscribed:mine.length===1,fields,revision:L.subscription(metadata.appId,asset.id,account.id,fields)}};};
     try{
       diagnostic.phase('authorization');check();await verifyUser();let result;
       if(name==='destinations'){

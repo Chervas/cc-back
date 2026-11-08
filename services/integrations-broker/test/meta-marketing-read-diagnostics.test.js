@@ -30,7 +30,8 @@ function fixture({family='insights',lead=false,alter,base=false,paused=false,sta
    else if(u.searchParams.get('fields')==='id,access_token'){kind='derive_page';raw={id:'401',access_token:PAGE_TOKEN};}
    else if(u.pathname.endsWith('/me')){kind='page_identity';raw={id:'401'};}
    else if(u.pathname.endsWith('/subscribed_apps')){kind='subscription';raw={data:[{id:'101',subscribed_fields:['leadgen']}]};}
-   else if(u.pathname==='/v24.0/401'){kind='page_access';raw={id:'401',has_lead_access:{can_access_lead:true,app_has_leads_permission:true,user_has_leads_permission:true,page_id:'401'}};}
+   else if(u.pathname==='/v24.0/401/leadgen_forms'){kind='page_access';raw={data:[{id:'702',page_id:'401'}]};}
+   else if(u.pathname==='/v24.0/702/leads'){kind='lead_probe';raw={data:[]};}
    else{kind='ads_data';raw={data:[row(family)]};}
    if(!['user_debug','page_debug'].includes(kind))code=status;
    const changed=alter?.(kind,raw,u);if(changed){raw=changed.raw??raw;code=changed.status??code;}
@@ -70,9 +71,9 @@ test('all five Ads row families produce fixed field shapes on normal-validator f
 test('page-level projection failure does not invent a rejected-row shape',async()=>{
  const f=fixture({alter:k=>k==='ads_data'?{raw:{data:Array.from({length:51},()=>row('insights'))}}:null}),c=await capture(f.run),e=closed(c);assert.equal(e.phase,'data_projection');assert.equal(e.shape,null);
 });
-test('PageStatus HasLeadAccess failure records types/presence only; no reason text or unknown names',async()=>{
- const f=fixture({lead:true,family:'pageStatus',alter:k=>k==='page_access'?{raw:{id:'401',has_lead_access:{failure_reason:CANARY,[CANARY]:TOKEN}}}:null}),c=await capture(f.run),e=closed(c);
- assert.equal(c.error.code,'provider_failed');assert.equal(e.phase,'page_access_projection');assert.equal(e.httpStatus,200);assert.equal(e.shape.kind,'page_access');assert.equal(e.shape.fields.can_access_lead,'missing');assert.equal(e.shape.fields.failure_reason,'string_ok');assert.equal(e.shape.unknownKeysPresent,true);assert(!f.calls.some(v=>v.path.endsWith('/subscribed_apps')));
+test('PageStatus foreign Form response fails before lead probe and never emits provider contact or metadata values',async()=>{
+ const f=fixture({lead:true,family:'pageStatus',alter:k=>k==='page_access'?{raw:{data:[{id:'702',page_id:'999',[CANARY]:TOKEN}]}}:null}),c=await capture(f.run),e=closed(c);
+ assert.equal(c.error.code,'scope_denied');assert.equal(e.phase,'page_access_projection');assert.equal(e.httpStatus,200);assert.equal(e.shape,null);assert(!f.calls.some(v=>v.path.endsWith('/leads')));assert(!f.calls.some(v=>v.path.endsWith('/subscribed_apps')));
 });
 test('PageStatus HTTP failure differs from shape failure; subscription is never requested after error',async()=>{
  const f=fixture({lead:true,family:'pageStatus',alter:k=>k==='page_access'?{status:400,raw:{error:{code:100,error_subcode:88,message:CANARY}}}:null}),c=await capture(f.run),e=closed(c);
@@ -89,9 +90,9 @@ test('throwing journal observer cannot replace normal provider error or change r
  const f=fixture({alter}),b=fixture({alter,base:true}),c=await capture(f.run,{throwObserver:true}),original=await capture(b.run);assert.equal(c.error.code,original.error.code);assert.equal(c.lines.length,0);assert.deepEqual(f.calls,b.calls);assert.deepEqual([...f.state],[...b.state]);
  const success=fixture(),baseline=fixture({base:true}),good=await capture(success.run,{throwObserver:true}),prior=await capture(baseline.run);assert.ifError(good.error);assert.deepEqual(good.result,prior.result);assert.equal(good.lines.length,0);assert.deepEqual(success.calls,baseline.calls);
 });
-test('PageStatus valid false access is successful and silent; other Leads operations never emit this event',async()=>{
- const f=fixture({lead:true,family:'pageStatus',alter:k=>k==='page_access'?{raw:{id:'401',has_lead_access:{can_access_lead:false}}}:null}),b=fixture({lead:true,family:'pageStatus',base:true,alter:k=>k==='page_access'?{raw:{id:'401',has_lead_access:{can_access_lead:false}}}:null});
- const c=await capture(f.run),original=await capture(b.run);assert.ifError(c.error);assert.equal(c.result.page.has_lead_access,false);assert.equal(c.lines.length,0);assert.deepEqual(c.result,original.result);assert.deepEqual(f.calls.map(v=>({...v,fields:v.fields==='id,has_lead_access.user_id(201).app_id(101){app_has_leads_permission,can_access_lead,enabled_lead_access_manager,is_page_admin,user_has_leads_permission,page_id,user_id,failure_reason,failure_resolution}'?'id,has_lead_access.user_id(201).app_id(101)':v.fields})),b.calls);
+test('PageStatus empty owned-form collection is false and silent; failed PageEnable never emits this event',async()=>{
+ const f=fixture({lead:true,family:'pageStatus',alter:k=>k==='page_access'?{raw:{data:[]}}:null});
+ const c=await capture(f.run);assert.ifError(c.error);assert.equal(c.result.page.has_lead_access,false);assert.equal(c.lines.length,0);assert(!f.calls.some(v=>v.path.endsWith('/leads')));
  const other=fixture({lead:true,family:'pageEnable',status:400}),failed=await capture(other.run);assert(failed.error);assert.equal(failed.lines.length,0);
 });
 test('observer is one-shot, bounded and ignores invalid operation/assets and unsafe error/phase/code values',async()=>{

@@ -35,7 +35,7 @@ test('quota, first-allocation eligibility and app/partner/admin proofs fail befo
  }
 });
 test('Page Lead Access and form metadata are real pre-stage evidence, not an inferred scope or task',async t=>{
- for(const kind of ['access','pageIdentity','formOwner']){const {f,oldId}=await setup(t),h=handover(f,oldId),puts=f.state.puts;f.state.afterAgency=(input,v)=>kind==='access'&&v.has_lead_access!==undefined?{...v,has_lead_access:{...v.has_lead_access,can_access_lead:false}}:kind==='pageIdentity'&&input.fields?.includes('has_lead_access')&&input.bearer.startsWith('FICTITIOUS_AGENCY_PAGE_TOKEN_')?{id:'999'}:kind==='formOwner'&&input.edge==='leadgen_forms'?{data:[{id:'801',page_id:'999'}]}:v;
+ for(const kind of ['access','pageIdentity','formOwner']){const {f,oldId}=await setup(t),h=handover(f,oldId),puts=f.state.puts;f.state.afterAgency=(input,v)=>kind==='access'&&input.edge==='leads'?{error:{code:200}}:kind==='pageIdentity'&&input.edge==='leadgen_forms'?{data:[{id:'801',page_id:'999'}]}:kind==='formOwner'&&input.edge==='leadgen_forms'?{data:[{id:'NOT_AN_ID',page_id:'401'}]}:v;
   await h.start();await h.finish();assert.equal((await h.settled()).data.status,'rejected',f.state.fixtureError?.message);assert.equal(f.state.puts,puts);assert.equal((await read(f)).data.id,'act_301');assert.equal(f.current.store.db.prepare('SELECT COUNT(*) n FROM meta_marketing_enrollment_successions').get().n,0);
  }
 });
@@ -75,8 +75,8 @@ test('cancelling a background bootstrap before provider writes leaves all old au
 test('current agency health requires real Page lead permission outside the renewal window, while malformed/provider failures remain unknown',async t=>{
  const {f,h}=await active(t),g=f.current.enrollment.renewalAuthority(h.id,f.binding),payload={enrollmentId:h.id,expectedEpoch:g.credential.epoch,expectedVersionId:g.credential.versionId,expectedCandidateDigest:g.credential.digest};
  const health=()=>f.execute(T.OPERATIONS.health,payload,{},true);assert.equal((await health()).data.healthy,true);assert.equal(f.state.agency.refreshes,0);
- f.state.afterAgency=(input,v)=>v.has_lead_access?{...v,has_lead_access:{...v.has_lead_access,can_access_lead:false}}:v;const denied=await health();assert.equal(denied.data.healthy,false);assert.equal(denied.data.reason,'permissions_lost');assert.equal(f.state.agency.refreshes,0);
- f.state.afterAgency=(input,v)=>v.has_lead_access?{...v,has_lead_access:true}:v;await assert.rejects(health(),{code:'provider_failed'});assert.equal(f.state.agency.refreshes,0);
+ f.state.afterAgency=(input,v)=>input.edge==='leads'?{error:{code:200}}:v;const denied=await health();assert.equal(denied.data.healthy,false);assert.equal(denied.data.reason,'permissions_lost');assert.equal(f.state.agency.refreshes,0);
+ f.state.afterAgency=(input,v)=>input.edge==='leads'?{data:[{id:'NOT_AN_ID'}]}:v;await assert.rejects(health(),{code:'provider_failed'});assert.equal(f.state.agency.refreshes,0);
 });
 test('lost install ACK is confirmed by a newly consented successful mint and full validation, never by fabricating the old ACK or repeating installation',async t=>{
  const {f,oldId}=await setup(t),h=handover(f,oldId);let lose=true;f.state.afterAgency=(input,v)=>{if(input.edge==='applications'&&lose){lose=false;throw Error('FICTITIOUS_INSTALL_ACK_LOST');}return v;};await h.start();await h.finish();assert.equal((await h.settled()).data.status,'interrupted');const before=f.current.store.db.prepare("SELECT * FROM meta_marketing_agency_bootstrap_steps WHERE step='install'").get();assert.equal(before.state,'pending');assert.equal(before.ack_at,null);await h.abort();
