@@ -15,7 +15,7 @@ async function ready(t,{optin=true,recipientClinicId=71}={}){
   const flow=await f.begin(),candidate=(await f.finish(flow)).data.candidate,id=randomUUID();
   const p=(await f.execute(E.OPERATIONS.prepare,{enrollmentId:id,flowId:flow.flowId,scopeDigest:flow.payload.scopeDigest,candidateDigest:candidate.digest,assetRefs:[PAGE,ACCOUNT]})).data;
   await f.execute(E.OPERATIONS.activate,{enrollmentId:id,scopeDigest:flow.payload.scopeDigest,selectionDigest:p.selectionDigest});
-  const state={calls:[],fields:['feed'],before:null,status:200,headers:{},adAccount:'301',formPage:'401',adId:'603',organic:false,raw:null};
+  const state={calls:[],fields:['feed'],before:null,status:200,headers:{},adAccount:'301',formPage:'401',adId:'603',organic:false,raw:null,formQuestions:[{key:'full_name',type:'FULL_NAME'},{key:'email',type:'EMAIL'},{key:'phone_number',type:'PHONE'},{key:'medical_condition',type:'CUSTOM'}],leadFields:[{name:'full_name',values:['FICTITIOUS_PERSON']},{name:'email',values:['qa@example.invalid']},{name:'phone_number',values:['+34600000000']},{name:'medical_condition',values:['NEVER_RETURN']}]};
   const request=(options,cb)=>{
     const url=new URL('https://graph.facebook.com'+options.path);
     state.calls.push({path:url.pathname,fields:url.searchParams.get('fields'),at:f.now(),method:options.method});
@@ -32,9 +32,9 @@ async function ready(t,{optin=true,recipientClinicId=71}={}){
           assert.equal(options.headers.authorization,'Bearer '+PAGE_TOKEN);
           if(options.method==='POST'){const b=new URLSearchParams(body);assert.equal(b.get('appsecret_proof'),createHmac('sha256',APP).update(PAGE_TOKEN).digest('hex'));state.fields=b.get('subscribed_fields').split(',');raw={success:true};}
           else raw={data:[{id:'101',subscribed_fields:[...state.fields]},{id:'999',subscribed_fields:['messages']}]};
-        }else if(url.pathname==='/v24.0/702')raw={id:'702',name:'Formulario ficticio',page_id:state.formPage,status:'ACTIVE'};
+        }else if(url.pathname==='/v24.0/702')raw={id:'702',name:'Formulario ficticio',page_id:state.formPage,status:'ACTIVE',...(url.searchParams.get('fields').includes('questions')?{questions:state.formQuestions}:{})};
         else if(url.pathname==='/v24.0/603')raw={id:'603',account_id:state.adAccount,campaign_id:'601',adset_id:'602'};
-        else if(url.pathname==='/v24.0/701')raw={id:'701',form_id:'702',ad_id:state.adId,campaign_id:state.organic?null:'601',created_time:'2026-11-07T12:00:00+0000',is_organic:state.organic,...(url.searchParams.get('fields').includes('field_data')?{field_data:[{name:'full_name',values:['FICTITIOUS_PERSON']},{name:'email',values:['qa@example.invalid']},{name:'phone_number',values:['+34600000000']},{name:'medical_condition',values:['NEVER_RETURN']}]}:{})};
+        else if(url.pathname==='/v24.0/701')raw={id:'701',form_id:'702',ad_id:state.adId,campaign_id:state.organic?null:'601',created_time:'2026-11-07T12:00:00+0000',is_organic:state.organic,...(url.searchParams.get('fields').includes('field_data')?{field_data:state.leadFields}:{})};
         else if(url.pathname==='/v24.0/act_301/ads')raw={data:[{id:'603',account_id:'301',campaign_id:'601',adset_id:'602',effective_status:'ACTIVE',creative:{id:'604',object_story_spec:{page_id:'401',link_data:{call_to_action:{value:{lead_gen_form_id:'702'}}}}}}]};
         else assert.fail('Unexpected fixed graph path '+url.pathname);
         const res=new PassThrough();res.statusCode=state.status;res.headers={'content-type':'application/json',...state.headers};cb(res);res.end(JSON.stringify(state.raw??raw));
