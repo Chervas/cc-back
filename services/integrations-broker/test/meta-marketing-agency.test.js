@@ -35,7 +35,7 @@ test('quota, first-allocation eligibility and app/partner/admin proofs fail befo
  }
 });
 test('Page Lead Access and form metadata are real pre-stage evidence, not an inferred scope or task',async t=>{
- for(const kind of ['access','pageIdentity','formOwner']){const {f,oldId}=await setup(t),h=handover(f,oldId),puts=f.state.puts;f.state.afterAgency=(input,v)=>kind==='access'&&v.has_lead_access!==undefined?{...v,has_lead_access:{...v.has_lead_access,can_access_lead:false}}:kind==='pageIdentity'&&input.node==='me'&&input.bearer.startsWith('FICTITIOUS_AGENCY_PAGE_TOKEN_')?{id:'999'}:kind==='formOwner'&&input.edge==='leadgen_forms'?{data:[{id:'801',page_id:'999'}]}:v;
+ for(const kind of ['access','pageIdentity','formOwner']){const {f,oldId}=await setup(t),h=handover(f,oldId),puts=f.state.puts;f.state.afterAgency=(input,v)=>kind==='access'&&v.has_lead_access!==undefined?{...v,has_lead_access:{...v.has_lead_access,can_access_lead:false}}:kind==='pageIdentity'&&input.fields?.includes('has_lead_access')&&input.bearer.startsWith('FICTITIOUS_AGENCY_PAGE_TOKEN_')?{id:'999'}:kind==='formOwner'&&input.edge==='leadgen_forms'?{data:[{id:'801',page_id:'999'}]}:v;
   await h.start();await h.finish();assert.equal((await h.settled()).data.status,'rejected',f.state.fixtureError?.message);assert.equal(f.state.puts,puts);assert.equal((await read(f)).data.id,'act_301');assert.equal(f.current.store.db.prepare('SELECT COUNT(*) n FROM meta_marketing_enrollment_successions').get().n,0);
  }
 });

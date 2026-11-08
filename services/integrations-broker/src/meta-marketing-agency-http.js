@@ -3,7 +3,7 @@ const https=require('node:https'),{createHmac}=require('node:crypto');
 const A=require('./meta-marketing-agency-contract'),C=require('./meta-marketing-oauth-contract'),M=require('./meta-marketing-contract'),{BrokerError,fail}=require('./errors'),{tokenText}=require('./whatsapp-secrets');
 function createMetaMarketingAgencyHttp({request=https.request,timeoutMs=8000,now=Date.now,pacer,bootstrap}={}){
  if(!Number.isInteger(timeoutMs)||timeoutMs<1||timeoutMs>10000)fail('invalid_request');
- async function call(binding,operation,{token,appSecret,code,id,tasks,name,after,signal,authorize=()=>{},beforeDispatch=()=>{}}){
+ async function call(binding,operation,{token,appSecret,code,id,subjectId,tasks,name,after,signal,authorize=()=>{},beforeDispatch=()=>{}}){
   const b=A.bindingFor(binding),c=b.businessLogin,version=c.graphVersion;
   if(!(signal instanceof AbortSignal)||!Buffer.isBuffer(appSecret)||!/^[a-f0-9]{32}$/.test(appSecret.toString('ascii'))||operation!=='exchange'&&(!Buffer.isBuffer(token)||!tokenText(token.toString('utf8'))))fail('invalid_request');
   const proof=()=>createHmac('sha256',appSecret).update(token).digest('hex');let method='GET',path,body,mutates=false;
@@ -15,7 +15,7 @@ function createMetaMarketingAgencyHttp({request=https.request,timeoutMs=8000,now
    path=`/${version}/oauth/access_token?`+new URLSearchParams({client_id:b.appId,client_secret:appSecret.toString('ascii'),code:code.toString('ascii'),redirect_uri:b.redirectUri});
   }else if(operation==='debug')path=`/${version}/debug_token?`+new URLSearchParams({input_token:token.toString('utf8')});
   else if(operation==='me')path=fields('me',null,'id');
-  else if(['pageDerive','pageLead','pageForms'].includes(operation)){if(!M.graphId(id))fail('invalid_request');path=operation==='pageDerive'?fields(id,null,'id,access_token'):operation==='pageLead'?fields('me',null,'id,has_lead_access'):fields(id,'leadgen_forms','id,page_id',{limit:'1'});}
+  else if(['pageDerive','pageLead','pageForms'].includes(operation)){if(!M.graphId(id))fail('invalid_request');path=operation==='pageDerive'?fields(id,null,'id,access_token'):operation==='pageLead'?(M.graphId(subjectId)?fields(id,null,`id,has_lead_access.user_id(${subjectId}).app_id(${b.appId})`):fail('invalid_request')):fields(id,'leadgen_forms','id,page_id',{limit:'1'});}
   else if(operation==='adminBusinesses')path=fields('me','business_users','id,role,business{id}');
   else if(operation==='ownedApps')path=fields(c.issuerBusinessId,'owned_apps','id');
   else if(operation==='systemUsers')path=fields(c.issuerBusinessId,'system_users','id,name,role');
@@ -65,7 +65,7 @@ function createMetaMarketingAgencyHttp({request=https.request,timeoutMs=8000,now
   A.metadata(metadata,binding);const refs=assets||A.bindingFor(binding).credentialAssetRefs?.map(ref=>({kind:ref.startsWith('meta-facebook_page:')?'facebook_page':'ad_account',id:ref.split(':')[1]}));if(!Array.isArray(refs))fail('scope_denied');
   for(const asset of refs.filter(a=>a.kind==='facebook_page')){let pageToken,raw;try{raw=await call(binding,'pageDerive',{id:asset.id,token,appSecret,signal,authorize});if(!C.exact(raw,'id,access_token')||raw.id!==asset.id||!tokenText(raw.access_token))fail('scope_denied');pageToken=Buffer.from(raw.access_token);delete raw.access_token;
    const debug=await call(binding,'debug',{token:pageToken,appSecret,signal,authorize}),d=debug?.data;if(!d||d.is_valid!==true||d.app_id!==metadata.appId||d.type!=='PAGE'||d.profile_id!=null&&d.profile_id!==asset.id||!Array.isArray(d.scopes)||!d.scopes.includes('leads_retrieval')||[d.expires_at,d.data_access_expires_at].some(v=>!Number.isSafeInteger(v)||v<0||v!==0&&v*1000<=now()))fail('scope_denied');
-   const access=await call(binding,'pageLead',{id:asset.id,token:pageToken,appSecret,signal,authorize});if(!C.exact(access,'id,has_lead_access')||access.id!==asset.id)fail('scope_denied');if(!require('./meta-marketing-page-lead-access').hasLeadAccess(access.has_lead_access,asset.id)){const error=new BrokerError('oauth_credentials_incomplete');Object.defineProperty(error,'credentialValidationReason',{value:'page_lead_access_denied'});throw error;}
+   const access=await call(binding,'pageLead',{id:asset.id,subjectId:metadata.subjectId,token:pageToken,appSecret,signal,authorize});if(!C.exact(access,'id,has_lead_access')||access.id!==asset.id||access.has_lead_access&&Object.hasOwn(access.has_lead_access,'user_id')&&access.has_lead_access.user_id!==metadata.subjectId)fail('scope_denied');if(!require('./meta-marketing-page-lead-access').hasLeadAccess(access.has_lead_access,asset.id)){const error=new BrokerError('oauth_credentials_incomplete');Object.defineProperty(error,'credentialValidationReason',{value:'page_lead_access_denied'});throw error;}
    const forms=await call(binding,'pageForms',{id:asset.id,token:pageToken,appSecret,signal,authorize});if(!forms||Object.getPrototypeOf(forms)!==Object.prototype||Object.keys(forms).some(k=>!['data','paging'].includes(k))||!Array.isArray(forms.data)||forms.data.length>1||forms.data.some(f=>!C.exact(f,'id,page_id')||!M.graphId(f.id)||f.page_id!==asset.id))fail('scope_denied');
   }finally{pageToken?.fill(0);if(raw)delete raw.access_token;}}return true;
  }

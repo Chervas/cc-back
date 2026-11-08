@@ -44,10 +44,10 @@ function request({state,now,binding,fallback,appSecret}){
    else if(edge==='assigned_pages')response={data:['401',...(state.extraAssets?['402']:[])].map(id=>({id,name:'Fictitious shared page'}))};
    else if(edge==='leadgen_forms')response={data:[{id:'801',page_id:node}]};
    else if(['401','402'].includes(node)&&u.searchParams.get('fields')==='id,access_token')response={id:node,access_token:PAGE+node};
-   else if(['401','402'].includes(node)&&u.searchParams.get('fields')==='id,has_lead_access')response={id:node,has_lead_access:{can_access_lead:true,app_has_leads_permission:true,user_has_leads_permission:true,enabled_lead_access_manager:true,page_id:node}};
+   else if(['401','402'].includes(node)&&u.searchParams.get('fields')==='id,has_lead_access.user_id(601).app_id(101)')response={id:node,has_lead_access:{user_id:'601',can_access_lead:true,app_has_leads_permission:true,user_has_leads_permission:true,enabled_lead_access_manager:true,page_id:node}};
    else if(node==='act_301')response={id:'act_301',account_id:'301',name:'Fictitious shared ad',account_status:1,currency:'EUR',timezone_name:'Europe/Madrid'};
    else assert.fail('Unexpected agency fixture path '+u.pathname);
-   if(state.afterAgency)response=await state.afterAgency({node,edge,method:settings.method,input,bearer,params:p},response);
+   if(state.afterAgency)response=await state.afterAgency({node,edge,fields:u.searchParams.get('fields'),method:settings.method,input,bearer,params:p},response);
    if(destroyed)return;const res=new PassThrough();res.statusCode=statusCode;res.headers={'content-type':'application/json'};callback(res);res.end(JSON.stringify(response));
   }catch(error){state.fixtureError=error;req.emit('error',error);}});return req;
  };
