@@ -108,6 +108,7 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     if(businessConfigs(config).length){const businessHttp=require('./meta-marketing-business-issuer-http').createIssuerHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
       business=require('./meta-marketing-business').createMetaMarketingBusiness({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,config:businessConfigs(config)});
       maintenance=require('./meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({store,epochs:credentialEpochs,enrollment,secrets,http,businessHttp,environment:config.environment,config:businessConfigs(config)});}
+    if(businessConfigs(config).length)store.setConnectionAuthorityResolver(ref=>enrollment.connectionAuthority(ref,config.policy));
     const broker=new Broker({store,policy:config.policy,secrets,policyResolver:enrollment,...(config.leadAds?{transportProfile:'meta-marketing'}:{}),operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations,...renewal?.operations,...business?.operations,...maintenance?.operations}});
     const controlKeys=new Set(config.policy.principals.filter(p=>p.id.startsWith('control:')).map(p=>p.keyId));
     let ordinary=0,controls=0;

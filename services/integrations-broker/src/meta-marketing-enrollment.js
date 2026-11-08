@@ -11,7 +11,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   const adsOperation=operation=>Object.values(A.OPERATIONS).includes(operation);
   const leadOperation=operation=>Object.values(L.OPERATIONS).includes(operation);
   const validateRead=(operation,payload)=>leadOperation(operation)?L.validate(operation,payload):adsOperation(operation)?A.validate(operation,payload):M.validate(operation,payload);
-  const roles=E.roles(environment),running=new Map();let closed=false;
+  const roles=E.roles(environment),running=new Map();let closed=false,checkingProviderAuthority=false;
   // One owner and one journal with OAuth. Claims/history survive cancellation.
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_enrollments (
     id TEXT PRIMARY KEY,flow TEXT UNIQUE,principal TEXT NOT NULL,tenant TEXT NOT NULL,connection TEXT NOT NULL,scope TEXT NOT NULL,
@@ -43,7 +43,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   }
   function flowActive(binding,flow,{allowExpired=false}={}){
     const b=K.bindingFor(binding);
-    if(closed)fail('connection_blocked');store.connection(binding.connectionRef,now());
+    if(closed)fail('connection_blocked');if(!checkingProviderAuthority)store.connection(binding.connectionRef,now());
     store.assertAssetActive({tenantRef:'clinic:'+b.clinicIds[0],connectionRef:binding.connectionRef,assetRef:'meta-enroll:'+b.scopeKey});
     if(!flow||flow.state!=='staged'||flow.connection!==binding.connectionRef||flow.tenant!=='clinic:'+b.clinicIds[0]
       ||flow.asset!=='meta-enroll:'+b.scopeKey||flow.principal!==roles.gateway||flow.config_digest!==K.fingerprint(binding)||flow.clinic_digest!==C.clinicDigest(b))fail('scope_denied');
@@ -72,6 +72,50 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     const credential=credentialEpochs?credentialEpochs.current(row,binding):null,metadata=credential?.metadata||originalMetadata;
     if(!allowExpired&&[metadata.expiresAt,metadata.dataAccessExpiresAt].some(v=>v!==null&&v<=now()))fail('credential_revoked');
     return {flow:credential?.flow||flow,metadata,assets,credential};
+  }
+  // The initial slot deadline remains immutable. Only a completed, locally
+  // journalled business handover can supply the separate normal grant authority.
+  // This synchronous proof deliberately ignores credential *expiry*, while all
+  // ordinary reads still run enrollmentActive without allowExpired below.
+  function providerLifecycleAuthority(connectionRef,base,enrollmentId=null){
+    if(closed||checkingProviderAuthority||!businessConfig||!credentialEpochs)return false;
+    try{
+      C.bindingFor(base);if(base.connectionRef!==connectionRef)return false;
+      const connection=get('SELECT * FROM connections WHERE ref=?',connectionRef);
+      if(!connection||connection.state!=='active'||connection.expires_at!==base.expiresAt||!Number.isSafeInteger(connection.revision)||connection.revision<1)return false;
+      const rows=store.db.prepare("SELECT e.* FROM meta_marketing_enrollments e WHERE e.connection=? AND e.state='active' AND NOT EXISTS (SELECT 1 FROM meta_marketing_enrollment_successions s WHERE s.old_enrollment=e.id)").all(connectionRef);
+      if(rows.length!==1||enrollmentId!==null&&rows[0].id!==enrollmentId)return false;
+      const row=rows[0],binding=grantBinding(row,base);if(!K.business(binding))return false;
+      const handover=get('SELECT * FROM meta_marketing_business_handovers WHERE id=?',row.id),parent=get('SELECT * FROM meta_marketing_enrollment_successions WHERE new_enrollment=?',row.id);
+      if(!handover||handover.state!=='active'||handover.id!==row.flow||!parent||parent.handover!==row.id||parent.old_enrollment!==handover.old_enrollment||!Number.isSafeInteger(parent.activated_at)||parent.activated_at<row.activated_at||parent.activated_at>handover.updated_at
+        ||handover.principal!==row.principal||handover.tenant!==row.tenant||handover.connection!==row.connection||handover.scope!==row.scope||handover.config_digest!==row.config_digest
+        ||handover.scope_digest!==row.scope_digest||handover.candidate_digest!==row.candidate_digest||handover.assets!==row.assets||handover.clinic_digest!==C.clinicDigest(K.bindingFor(binding))||!C.uuid(handover.activation_request))return false;
+      const old=rowFor(parent.old_enrollment),flow=flowFor(row.flow),refs=JSON.parse(parent.receipt_refs);
+      if(!old||old.state!=='active'||credentialEpochs.grantDigest(old)!==handover.old_grant_digest||JSON.stringify(selected(old))!==row.assets
+        ||!Array.isArray(refs)||refs.length>1000||refs.some((v,i)=>!C.uuid(v)||i>0&&v<=refs[i-1])
+        ||handover.drain_digest!==require('./meta-marketing-business-contract').drainDigest(row.id,handover.old_grant_digest,refs)
+        ||!flow||flow.credential_metadata!==handover.candidate_metadata)return false;
+      const command=get('SELECT * FROM commands WHERE principal=? AND id=?',roles.gateway,handover.activation_request),value=command?.result&&JSON.parse(command.result),receipt=value?.data;
+      if(command?.state!=='completed'||value.requestId!==handover.activation_request||receipt?.handoverApplied!==true||receipt.status!=='active'||receipt.handoverId!==row.id||receipt.flowId!==row.flow
+        ||receipt.newEnrollmentId!==row.id||receipt.oldEnrollmentId!==old.id||receipt.oldGrantDigest!==handover.old_grant_digest||receipt.assetSetDigest!==handover.asset_digest||receipt.assetSetDigest!==require('./meta-marketing-credential-renewal-contract').assetSetDigest(selected(row))
+        ||receipt.candidate?.versionId!==row.flow||receipt.candidate.digest!==row.candidate_digest||JSON.stringify(receipt.candidate.metadata)!==flow.credential_metadata
+        ||receipt.newEnrollment?.enrollmentId!==row.id||receipt.newEnrollment.flowId!==row.flow||receipt.newEnrollment.selectionDigest!==row.selection_digest||receipt.newEnrollment.scopeDigest!==row.scope_digest
+        ||receipt.newEnrollment.candidateDigest!==row.candidate_digest||receipt.newEnrollment.clinicSetDigest!==handover.clinic_digest||JSON.stringify(receipt.newEnrollment.assets)!==row.assets
+        ||receipt.newEnrollment.status!=='active'||receipt.newEnrollment.preparedAt!==row.prepared_at||receipt.newEnrollment.activatedAt!==row.activated_at
+        ||receipt.drain?.closed!==true||receipt.drain.activeOperations!==0||receipt.drain.receiptSetDigest!==handover.drain_digest||JSON.stringify(receipt.drain.receiptRefs)!==parent.receipt_refs)return false;
+      const barrier=get('SELECT * FROM meta_marketing_business_barriers WHERE enrollment=?',old.id);
+      if(!barrier||barrier.state!=='closed'||barrier.handover!==row.id||barrier.receipt_refs!==parent.receipt_refs||barrier.receipt_digest!==handover.drain_digest)return false;
+      checkingProviderAuthority=true;
+      const authority=enrollmentActive(row,binding,{requireActive:true,allowExpired:true});
+      const current=authority.credential;if(!current?.retentionStage)return false;
+      if(current.epoch>0){
+        const journals=[get('SELECT * FROM meta_marketing_credential_renewals WHERE id=?',current.versionId),get('SELECT * FROM meta_marketing_credential_maintenance WHERE id=?',current.versionId)].filter(Boolean);
+        if(journals.length!==1)return false;const journal=journals[0];
+        if(journal.state!=='active'||journal.enrollment!==row.id||journal.connection!==row.connection||journal.tenant!==row.tenant||journal.scope!==row.scope||journal.expected_epoch+1!==current.epoch
+          ||journal.grant_digest!==credentialEpochs.grantDigest(row)||journal.asset_digest!==handover.asset_digest||journal.candidate_digest!==current.digest||journal.candidate_metadata!==current.flow.credential_metadata)return false;
+      }
+      return true;
+    }catch{return false;}finally{checkingProviderAuthority=false;}
   }
   function assetOwner(request,principal,policy){
     const lookup=get('SELECT enrollment FROM meta_marketing_enrollment_assets WHERE asset=?',request.assetRef);
@@ -258,6 +302,11 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   if(leadAds)for(const op of Object.values(L.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>L.validate(op,payload),persistResult:false,execute};
   operations[M.REVOKE]={provider:C.PROVIDER,control:'revoke_asset',validate:payload=>M.validate(M.REVOKE,payload),onRevoked:request=>abortAsset(request.assetRef)};
   return {operations,resolve,abortFlow,
+    providerLifecycleAuthority,
+    connectionAuthority(connectionRef,policy){
+      const sources=policy.connections.filter(b=>b.connectionRef===connectionRef);
+      return sources.length===1&&policy.principals.some(p=>p.id===roles.gateway&&p.enabled===true)&&providerLifecycleAuthority(connectionRef,sources[0]);
+    },
     bindingForEnrollment:grantBinding,
     receiptForEnrollment(id,binding){const row=rowFor(id);if(!row)fail('scope_denied');return receipt(row,grantBinding(row,binding));},
     activeOperations(id){return [...running.values()].filter(t=>t.enrollmentId===id).length;},

@@ -5,7 +5,7 @@ const { BrokerStore } = require('../src/store'); const { Broker } = require('../
 const { createMetaMarketingOAuth, createMetaMarketingOAuthOperations } = require('../src/meta-marketing-oauth'); const { createMetaMarketingOAuthSecrets } = require('../src/meta-marketing-oauth-secrets');
 const { createMetaMarketingOAuthHttp } = require('../src/meta-marketing-oauth-http'); const C = require('../src/meta-marketing-oauth-contract'); const { ACCOUNT, SECRET_KEY } = require('../src/google-main');
 const TOKEN = 'FICTITIOUS_META_OAUTH_TOKEN'; const APP = '0123456789abcdef'.repeat(2);
-function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, business = false, agency = false } = {}) {
+function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, business = false, agency = false, migrationDays = 366 } = {}) {
   business=business||agency;
   renewal=renewal||business;leads=leads||business;
   enrollment=enrollment||renewal;
@@ -19,7 +19,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
       appId: '101', redirectUri: 'https://app.example.invalid/oauth/meta/marketing/callback', appVersionId: 'a'.repeat(32), slotVersionId: 's'.repeat(32),
       scopeKey: 'group:9', clinicIds: [71, 72], scopes: ['public_profile', 'ads_read', 'pages_read_engagement', 'instagram_basic'],
     } };
-  if(business)binding.expiresAt=Date.now()+366*86400000;
+  if(business)binding.expiresAt=Date.now()+migrationDays*86400000;
   const businessConfig=agency?require('./meta-marketing-agency-fixture.cjs').config():business?{enabled:true,cohort:'meta-marketing-business-v1',configId:'777',graphVersion:'v27.0',providerBusinessId:'901',scopeKeys:['group:9']}:undefined;
   if(discovery)binding.metaMarketingOAuth.scopes.push('pages_show_list');
   if(leads)binding.metaMarketingOAuth.scopes.push('leads_retrieval','pages_manage_ads','pages_manage_metadata');
@@ -149,6 +149,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
     if(enrollment){enroll=require('../src/meta-marketing-enrollment').createMetaMarketingEnrollment({store:target,secrets,http:activeHttp,environment:'staging',now,...(businessConfig?{businessConfig}:{}),...(epochs?{credentialEpochs:epochs}:{}),...(leadAds?{leadAds,leadsHttp:{read:()=>assert.fail('FICTITIOUS_LEAD_RPC_NOT_EXPECTED')}}:{})});engines.push(enroll);}
     if(renewal){renewer=require('../src/meta-marketing-credential-renewal').createMetaMarketingCredentialRenewal({store:target,epochs,enrollment:enroll,oauth:engine,secrets,http:activeHttp,environment:'staging',now});engines.push(renewer);}
     if(business){businessOwner=require('../src/meta-marketing-business').createMetaMarketingBusiness({store:target,epochs,enrollment:enroll,oauth:engine,secrets,http:activeHttp,environment:'staging',config:businessConfig,now});maintenance=require('../src/meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({store:target,epochs,enrollment:enroll,secrets,http:activeHttp,businessHttp:require('../src/meta-marketing-business-issuer-http').createIssuerHttp({request:chosenRequest,now}),environment:'staging',config:businessConfig,now});engines.push(businessOwner,maintenance);}
+    if(business)target.setConnectionAuthorityResolver(ref=>enroll.connectionAuthority(ref,chosenPolicy));
     return { store: target, engine,enrollment:enroll,renewal:renewer,businessOwner,maintenance,epochs, broker: new Broker({ store: target, policy: chosenPolicy, secrets,policyResolver:enroll,
       operations: {...createMetaMarketingOAuthOperations(engine,{assetDiscovery:discovery}),...enroll?.operations,...renewer?.operations,...businessOwner?.operations,...maintenance?.operations}, now }) };
   }

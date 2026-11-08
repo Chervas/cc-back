@@ -132,7 +132,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
             if (old.state !== 'awaiting' || old.expires_at <= now()) fail('oauth_flow_interrupted');
             if (old.state_hash !== C.hash(p.state) || old.scope_digest !== p.scopeDigest || old.clinic_digest !== p.clinicSetDigest || old.expires_at !== p.expiresAt) fail('idempotency_conflict');
           } else {
-            if (p.expiresAt <= now() || p.expiresAt > now()+600000 || p.expiresAt > binding.expiresAt || p.clinicSetDigest !== C.clinicDigest(b)) fail('scope_denied');
+            if (p.expiresAt <= now() || p.expiresAt > now()+600000 || p.expiresAt > binding.expiresAt && !(K.business(binding) && renewalContexts.get(id)?.providerLifecycle?.() === true) || p.clinicSetDigest !== C.clinicDigest(b)) fail('scope_denied');
             if (store.backlog().pending + 2 > policy.maxBacklog) fail('audit_unavailable');
             await secrets.preflight(binding,signal);
             store.transaction(() => {
@@ -205,7 +205,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
   // history before it can exempt those retained flows from initial onboarding.
   service.executeRenewal=async(args,context)=>{
     const id=args.request.payload.flowId||args.request.requestId;
-    if(typeof context?.guard!=='function'||typeof context?.retainedFlowIds!=='function')fail('invalid_request');
+    if(typeof context?.guard!=='function'||typeof context?.retainedFlowIds!=='function'||context.providerLifecycle!==undefined&&typeof context.providerLifecycle!=='function')fail('invalid_request');
     context.guard();const prior=renewalContexts.get(id);renewalContexts.set(id,context);
     try{return await service.execute(args);}finally{if(prior)renewalContexts.set(id,prior);else renewalContexts.delete(id);}
   };

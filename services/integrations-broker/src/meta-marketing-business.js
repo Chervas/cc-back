@@ -53,7 +53,7 @@ function createMetaMarketingBusiness({store,epochs,enrollment,oauth,secrets,http
   }
   const retained=()=>{const v=check(),ids=new Set(),seen=new Set();let current=v.row.id;for(let n=0;n<16;n++){if(seen.has(current))fail('scope_denied');seen.add(current);const e=store.db.prepare('SELECT flow FROM meta_marketing_enrollments WHERE id=?').get(current);if(!e)fail('scope_denied');ids.add(e.flow);for(const f of store.db.prepare("SELECT id FROM meta_marketing_credential_renewals WHERE enrollment=? AND state='active'").all(current))ids.add(f.id);if(store.db.prepare("SELECT 1 FROM sqlite_schema WHERE name='meta_marketing_credential_maintenance'").get())for(const f of store.db.prepare('SELECT id FROM meta_marketing_credential_maintenance WHERE enrollment=?').all(current))ids.add(f.id);const parent=store.db.prepare('SELECT old_enrollment FROM meta_marketing_enrollment_successions WHERE new_enrollment=?').get(current);if(!parent)return [...ids];current=parent.old_enrollment;}fail('scope_denied');};
   const callOAuth=(family,payload)=>oauth.executeRenewal({request:{...request,requestId:family==='begin'?id:request.requestId,operation:C.OPERATIONS[family],payload},principal,binding,policy},
-   {guard:()=>check({terminal:family==='abort',old:family!=='abort'}),retainedFlowIds:retained,signal});
+   {guard:()=>check({terminal:family==='abort',old:family!=='abort'}),retainedFlowIds:retained,providerLifecycle:()=>enrollment.providerLifecycleAuthority(base.connectionRef,base,row.old_enrollment),signal});
   function stage(value){return store.transaction(()=>{check();const flow=epochs.flowFor(id);if(flow?.state!=='staged'||!flow.secret_digest)fail('oauth_flow_interrupted');
    const metadata=I.metadata(value,binding);log('integration.completed','success','meta_business_handover_staged');
    store.db.prepare("UPDATE meta_marketing_business_handovers SET state='staged',candidate_digest=?,candidate_metadata=?,updated_at=? WHERE id=?").run(flow.secret_digest,JSON.stringify(metadata),now(),id);row=get(id);});}
@@ -72,7 +72,7 @@ function createMetaMarketingBusiness({store,epochs,enrollment,oauth,secrets,http
    if(name==='begin'){
     if(!modeConfig.enabled)fail('operation_denied');const v=enrollment.renewalAuthority(p.oldEnrollmentId,base),b=C.bindingFor(base);epochs.expected(v.credential,p);
     if(v.row.tenant!==request.tenantRef||v.row.connection!==request.connectionRef||v.row.scope!==request.assetRef||v.row.scope_digest!==p.oldScopeDigest
-     ||R.assetSetDigest(v.assets)!==p.assetSetDigest||p.clinicSetDigest!==C.clinicDigest(b)||p.expiresAt<=now()||p.expiresAt>now()+600000||p.expiresAt>base.expiresAt
+     ||R.assetSetDigest(v.assets)!==p.assetSetDigest||p.clinicSetDigest!==C.clinicDigest(b)||p.expiresAt<=now()||p.expiresAt>now()+600000||p.expiresAt>base.expiresAt&&!enrollment.providerLifecycleAuthority(base.connectionRef,base,p.oldEnrollmentId)
      ||v.assets.some(a=>!['ad_account','facebook_page'].includes(a.kind)))fail('scope_denied');
     const pin={old_enrollment:v.row.id,principal:roles.gateway,tenant:request.tenantRef,connection:request.connectionRef,scope:request.assetRef,expected_epoch:p.expectedEpoch,expected_version:p.expectedVersionId,expected_digest:p.expectedCandidateDigest,
      old_grant_digest:epochs.grantDigest(v.row),asset_digest:p.assetSetDigest,old_scope_digest:p.oldScopeDigest,scope_digest:p.scopeDigest,clinic_digest:p.clinicSetDigest,state_hash:C.hash(p.state),config_digest:configPin,assets:JSON.stringify(E.assets(v.assets)),expires_at:p.expiresAt};

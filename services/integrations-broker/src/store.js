@@ -7,6 +7,9 @@ const { createHash, randomUUID } = require('node:crypto');
 const { audit } = require('./contracts');
 const { fail } = require('./errors');
 
+// Installed only by a provider's trusted main, never by a network request.
+const connectionAuthorities = new WeakMap();
+
 class BrokerStore {
   constructor(filename) {
     if (!path.isAbsolute(filename)) throw Error('Absolute private state path required');
@@ -82,10 +85,19 @@ class BrokerStore {
     // A restart/config reload must never overwrite a durable block/revocation.
     this.db.prepare('INSERT OR IGNORE INTO connections VALUES (?,?,1,?,?)').run(ref, state, expiresAt, 'initial_policy');
   }
+  setConnectionAuthorityResolver(resolver) {
+    if (typeof resolver !== 'function' || connectionAuthorities.has(this)) fail('invalid_request');
+    connectionAuthorities.set(this, resolver);
+  }
   connection(ref, now = Date.now()) {
     if (this.db.prepare("SELECT 1 FROM google_oauth_flows WHERE connection=? AND state='activating' LIMIT 1").get(ref)) fail('connection_blocked');
     const row = this.db.prepare('SELECT * FROM connections WHERE ref=?').get(ref);
-    if (!row || row.state !== 'active' || row.expires_at !== null && row.expires_at <= now) fail('connection_blocked');
+    if (!row || row.state !== 'active') fail('connection_blocked');
+    if (row.expires_at !== null && row.expires_at <= now) {
+      let allowed = false;
+      try { allowed = connectionAuthorities.get(this)?.(ref, now) === true; } catch {}
+      if (!allowed) fail('connection_blocked');
+    }
     return row;
   }
   connectionState(ref, now = Date.now()) {
