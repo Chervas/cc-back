@@ -1,6 +1,6 @@
 'use strict';
 // Read-only observation. This is NOT a reservation or authority for a writer.
-const {Op,literal}=require('sequelize');
+const {Op}=require('sequelize');
 const C=require('./metaMarketingOAuth.contract');
 const D=require('../../services/integrations-broker/src/meta-marketing-discovery-contract');
 const REASONS=Object.freeze(['identity_review','scope_assignment_review','scope_blocked','asset_assigned','asset_registered','asset_revoked','recovery_not_selected']);
@@ -30,12 +30,12 @@ function createReview({models,sessions,now=()=>new Date(),recoveryGuard}) {
       ||JSON.stringify(proof.clinicIds)!==row.clinic_ids||!Array.isArray(proof.aliases)||!Array.isArray(proof.mappingIds)))fail();
     const scopeReasons=[];
     if(await require('./metaScopeBlock.service').blocked(scope,{models,transaction,purpose:'meta'})&&!proof)scopeReasons.push('scope_blocked');
-    // Project only a boolean about credential presence; never materialize a token.
-    const connections=await models.MetaConnection.findAll({...options,attributes:['id','broker_app_id','credentials_external',
-      [literal('(accessToken IS NULL)'),'credentials_absent']],where:{metaUserId:metadata.subjectId},order:[['id','ASC']],limit:2});
-    const connection=connections.length===1?connections[0]:null;
-    if(!proof&&(connections.length>1||connection&&(!C.positive(Number(connection.id))||Number(connection.credentials_external)!==1
-      ||Number(connection.credentials_absent)!==1||connection.broker_app_id!==metadata.appId)))scopeReasons.push('identity_review');
+    let connection=null;
+    if(!proof){
+      try{connection=(await require('./metaMarketingCanonicalIdentity.service').resolveUserIdentity({models,appId:metadata.appId,
+        subjectId:metadata.subjectId,transaction,allowHistoricalReuse:true})).connection;}
+      catch(error){if(error?.code!=='meta_enrollment_identity_review')throw error;scopeReasons.push('identity_review');}
+    }
     const keys=[...clinicIds.map(id=>'clinic:'+id),...groupIds.map(id=>'group:'+id)];
     const grants=await models.MetaConnectionAssignment.findAll({...options,attributes:['id','scopeKey','assignmentScope','clinicaId','grupoClinicaId','metaConnectionId','status'],
       where:{[Op.or]:[{scopeKey:{[Op.in]:keys}},{assignmentScope:'clinic',clinicaId:{[Op.in]:clinicIds}},{assignmentScope:'group',grupoClinicaId:{[Op.in]:groupIds}}]},

@@ -245,6 +245,7 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   await committed(arriaga.enrollment_id);assert.equal(await baseline(),untouched);
   report.checks.push('Unreviewed extra canonical rejected; withdrawal/reconcile of BS affects only its4 assets and outbox, preserves Arriaga/source158/WA/grants/primaryrefs/shares/tombstones and immutable snapshots');
   report.checks.push('Actual unchanged enrollment worker reconciles active Arriaga with SQL canonicalNULL and completes BS-only status/revoke/control settlement without treating NULL as inactive or revoking the shared connection');
+  await require('./fixtures/meta_canonical_identity_mysql.fixture')({models,sql,now,report,sessions,guard});
   const serialized=JSON.stringify(await models.MetaMarketingRecovery.findAll({raw:true}));for(const token of[LEGACY,PAGE,WA])assert(!serialized.includes(token));
   report.v2={sharedCanonical:159,sqlCanonicalNullGenerations:2,legacyMappingsAdopted:3,newPages:2,newAds:1,realProvider:false,sourceAndWhatsappUnchanged:true};
   report.pool={inUse:sql.connectionManager.pool.using,waiting:sql.connectionManager.pool.waiting};assert.deepEqual(report.pool,{inUse:0,waiting:0});

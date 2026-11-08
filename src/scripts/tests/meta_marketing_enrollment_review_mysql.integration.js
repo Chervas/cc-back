@@ -4,7 +4,7 @@ const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fi
 const C=require('../../services/metaMarketingOAuth.contract');
 withIsolatedCampaignMysql(async({sql,models,report})=>{
   for(const [name,file] of [['Clinica','clinica'],['GrupoClinica','grupoclinica'],['MetaConnection','MetaConecction'],
-    ['MetaConnectionAssignment','metaconnectionassignment'],['MetaScopeBlock','metascopeblock'],['ClinicMetaAsset','ClinicMetaAsset'],
+    ['MetaMarketingEnrollmentIdentity','metamarketingenrollmentidentity'],['MetaConnectionAssignment','metaconnectionassignment'],['MetaScopeBlock','metascopeblock'],['ClinicMetaAsset','ClinicMetaAsset'],
     ['MetaMarketingBrokerBinding','metamarketingbrokerbinding'],['MetaMarketingBrokerRevocation','metamarketingbrokerrevocation']]){
     models[name]=require('../../../models/'+file)(sql,D);for(const a of Object.values(models[name].rawAttributes))delete a.references;
     models[name].refreshAttributes();await models[name].sync();

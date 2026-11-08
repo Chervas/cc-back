@@ -58,9 +58,23 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
   }
   async function identity(row,metadata,transaction,{create=false,expectedId,recovery:proof}={}){
     const opts=options(transaction);
+    if(!proof){
+      const selected=await require('./metaMarketingCanonicalIdentity.service').resolveUserIdentity({models,appId:metadata.appId,subjectId:metadata.subjectId,
+        expectedConnectionId:expectedId,transaction,lock:true,requireRegistered:!create,allowHistoricalReuse:true});
+      let current=selected.connection;
+      if(!current){
+        if(!create)conflict('meta_enrollment_identity_review');
+        const created=await models.MetaConnection.create({userId:Number(row.actor_user_id),metaUserId:metadata.subjectId,
+          credentials_external:true,broker_app_id:metadata.appId,accessToken:null,expiresAt:metadata.expiresAt===null?null:new Date(metadata.expiresAt)},
+        {transaction,logging:false});current={id:Number(created.id)};
+      }
+      if(!selected.owner)await models.MetaMarketingEnrollmentIdentity.create({meta_user_id:metadata.subjectId,app_id:metadata.appId,
+        meta_connection_id:Number(current.id),created_at:now()},{transaction,logging:false});
+      return {connectionId:Number(current.id),provenanceDigest:selected.provenanceDigest};
+    }
     const owner=await models.MetaMarketingEnrollmentIdentity.findByPk(metadata.subjectId,opts);
     const rows=await models.MetaConnection.findAll({...opts,attributes:['id','userId','metaUserId','broker_app_id','credentials_external',
-      [literal('(accessToken IS NULL)'),'credentials_absent']],where:{[Op.or]:[{metaUserId:metadata.subjectId},...(expectedId?[{id:expectedId}]:[])]},order:[['id','ASC']],limit:proof?3:2});
+      [literal('(accessToken IS NULL)'),'credentials_absent']],where:{[Op.or]:[{metaUserId:metadata.subjectId},...(expectedId?[{id:expectedId}]:[])]},order:[['id','ASC']],limit:3});
     if(proof){
       if(proof.scopeKey!==row.scope_key||proof.appId!==metadata.appId||proof.subjectId!==metadata.subjectId)conflict('meta_enrollment_identity_review');
       const canonicalId=proof.canonicalConnectionId===null?null:Number(proof.canonicalConnectionId);
@@ -84,25 +98,10 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
       if(!create&&!owner)conflict('meta_enrollment_identity_review');
       if(!owner)await models.MetaMarketingEnrollmentIdentity.create({meta_user_id:metadata.subjectId,app_id:metadata.appId,meta_connection_id:Number(canonical.id),created_at:now()},{transaction,logging:false});
       if(proof.version===2)await recovery.bindCanonical({flow:row,canonicalConnectionId:Number(canonical.id)},transaction);
-      return Number(canonical.id);
+      return {connectionId:Number(canonical.id),provenanceDigest:null};
     }
-    if(rows.length>1)conflict('meta_enrollment_identity_review');
-    let current=rows[0];
-    if(current&&(current.metaUserId!==metadata.subjectId||current.broker_app_id!==metadata.appId||Number(current.credentials_external)!==1
-      ||Number(current.credentials_absent)!==1||!C.positive(Number(current.id))))conflict('meta_enrollment_identity_review');
-    if(owner&&(!current||Number(owner.meta_connection_id)!==Number(current.id)||owner.app_id!==metadata.appId))conflict('meta_enrollment_identity_review');
-    if(!create&&(!owner||!current||Number(current.id)!==Number(expectedId)))conflict('meta_enrollment_identity_review');
-    if(!current){
-      if(!create)conflict('meta_enrollment_identity_review');
-      const created=await models.MetaConnection.create({userId:Number(row.actor_user_id),metaUserId:metadata.subjectId,
-        credentials_external:true,broker_app_id:metadata.appId,accessToken:null,expiresAt:metadata.expiresAt===null?null:new Date(metadata.expiresAt)},
-      {transaction,logging:false});
-      current={id:Number(created.id),metaUserId:metadata.subjectId,broker_app_id:metadata.appId,credentials_external:true,credentials_absent:1};
-    }
-    if(!owner)await models.MetaMarketingEnrollmentIdentity.create({meta_user_id:metadata.subjectId,app_id:metadata.appId,meta_connection_id:Number(current.id),created_at:now()},{transaction,logging:false});
-    return Number(current.id);
   }
-  async function assignments(row,connectionId,transaction,proof=null){
+  async function assignments(row,connectionId,transaction,proof=null,identityDigest=null){
     const opts=options(transaction),scope=scopeValue(row.scope_key),ids=C.clinics(row.clinic_ids);
     const clinics=await models.Clinica.findAll({...opts,attributes:['id_clinica','grupoClinicaId'],
       where:scope.assignmentScope==='group'?{grupoClinicaId:scope.groupId}:{id_clinica:scope.clinicId},order:[['id_clinica','ASC']],limit:1001});
@@ -143,7 +142,9 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
     // Existing primary choices are preserved, never replaced by this reservation.
     // References/shares of newly allocated mapping IDs must also be checked by
     // the final assignment writer before its commit.
-    return C.hash(JSON.stringify([connectionId,clinics,grants,policies]));
+    const pieces=[connectionId,clinics,grants,policies];
+    if(identityDigest)pieces.push('canonicalIdentity',identityDigest);
+    return C.hash(JSON.stringify(pieces));
   }
   async function physical(selected,transaction,enrollmentId=null,proof=null){
     const opts=options(transaction),refs=C.physical(selected),pages=refs.filter(v=>v.startsWith('meta-facebook_page:')).map(v=>v.split(':')[1]);
@@ -187,8 +188,8 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
     const {row,metadata,recovery:proof}=await source(actor(saved),saved.flow_id,transaction);
     if(C.sourceDigest(row)!==saved.flow_digest||metadata.digest!==saved.candidate_digest||metadata.subjectId!==saved.meta_user_id||metadata.appId!==saved.app_id
       ||row.scope_digest!==saved.scope_digest||row.connection_ref!==saved.connection_ref||row.clinic_ids!==saved.clinic_ids)conflict();
-    await identity(row,metadata,transaction,{expectedId:Number(saved.meta_connection_id),recovery:proof});
-    if(await assignments(row,Number(saved.meta_connection_id),transaction,proof)!==saved.assignment_digest)conflict();
+    const selectedIdentity=await identity(row,metadata,transaction,{expectedId:Number(saved.meta_connection_id),recovery:proof});
+    if(await assignments(row,Number(saved.meta_connection_id),transaction,proof,selectedIdentity.provenanceDigest)!==saved.assignment_digest)conflict();
     await physical(saved.selected,transaction,saved.enrollment_id,proof);gate();return saved;
   }
   async function reserve(input,flowId,assetRefs){
@@ -213,8 +214,8 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
         phase='assert_pending';await assertPending(saved,transaction);return saved;
       }
       phase='physical';const physicalRefs=await physical(selected,transaction,null,proof);
-      phase='identity';const connectionId=await identity(row,metadata,transaction,{create:true,recovery:proof});
-      phase='assignments';const assignmentDigest=await assignments(row,connectionId,transaction,proof),date=now();
+      phase='identity';const {connectionId,provenanceDigest}=await identity(row,metadata,transaction,{create:true,recovery:proof});
+      phase='assignments';const assignmentDigest=await assignments(row,connectionId,transaction,proof,provenanceDigest),date=now();
       phase='request';
       const value=C.request({enrollment_id:randomUUID(),flow_id:flowId,scope_key:row.scope_key,clinic_ids:row.clinic_ids,connection_ref:row.connection_ref,scope_digest:row.scope_digest,
         flow_digest:C.sourceDigest(row),candidate_digest:metadata.digest,meta_user_id:metadata.subjectId,app_id:metadata.appId,meta_connection_id:connectionId,assignment_digest:assignmentDigest,

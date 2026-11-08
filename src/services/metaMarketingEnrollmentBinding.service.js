@@ -62,15 +62,19 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
       ||proof.scopeKey!==row.scope_key||proof.subjectId!==row.meta_user_id||proof.appId!==row.app_id
       ||JSON.stringify(proof.clinicIds)!==row.clinic_ids||JSON.stringify(proof.mappingIds)!==row.mapping_ids))fail();
     if(await require('./metaScopeBlock.service').blocked(scope,{models,transaction,purpose:'meta'})&&!proof)fail('meta_enrollment_scope_blocked');
-    const identity=await models.MetaMarketingEnrollmentIdentity.findByPk(row.meta_user_id,o);
-    if(!identity||identity.app_id!==row.app_id||Number(identity.meta_connection_id)!==Number(row.meta_connection_id))fail();
-    const connections=await models.MetaConnection.findAll({...o,attributes:['id','userId','metaUserId','broker_app_id','credentials_external',[literal('(accessToken IS NULL)'),'credentials_absent']],
-      where:proof?{id:row.meta_connection_id,metaUserId:row.meta_user_id}:{[Op.or]:[{id:row.meta_connection_id},{metaUserId:row.meta_user_id}]},limit:proof?1:2});
-    const canonical=connections.find(v=>Number(v.id)===Number(row.meta_connection_id));
-    if(!canonical||canonical.metaUserId!==row.meta_user_id||canonical.broker_app_id!==row.app_id
-      ||Number(canonical.credentials_external)!==1||Number(canonical.credentials_absent)!==1
-      ||proof&&(canonical.userId!==null||connections.length!==1)
-      ||!proof&&connections.length!==1)fail();
+    let identityDigest=null;
+    if(!proof){
+      identityDigest=(await require('./metaMarketingCanonicalIdentity.service').resolveUserIdentity({models,appId:row.app_id,subjectId:row.meta_user_id,
+        expectedConnectionId:Number(row.meta_connection_id),transaction,lock:true,requireRegistered:true,allowHistoricalReuse:true})).provenanceDigest;
+    }else{
+      const identity=await models.MetaMarketingEnrollmentIdentity.findByPk(row.meta_user_id,o);
+      if(!identity||identity.app_id!==row.app_id||Number(identity.meta_connection_id)!==Number(row.meta_connection_id))fail();
+      const connections=await models.MetaConnection.findAll({...o,attributes:['id','userId','metaUserId','broker_app_id','credentials_external',[literal('(accessToken IS NULL)'),'credentials_absent']],
+        where:{id:row.meta_connection_id,metaUserId:row.meta_user_id},limit:1});
+      const canonical=connections.find(v=>Number(v.id)===Number(row.meta_connection_id));
+      if(!canonical||canonical.metaUserId!==row.meta_user_id||canonical.broker_app_id!==row.app_id||canonical.userId!==null||connections.length!==1
+        ||Number(canonical.credentials_external)!==1||Number(canonical.credentials_absent)!==1)fail();
+    }
     const refs=C.physical(row.selected),claims=await models.MetaMarketingEnrollmentClaim.findAll({...o,attributes:['asset_ref','enrollment_id'],
       where:{[Op.or]:[{asset_ref:{[Op.in]:refs}},{enrollment_id:id}]},order:[['asset_ref','ASC']],limit:201});
     if(claims.length!==refs.length||claims.some((v,i)=>v.asset_ref!==refs[i]||v.enrollment_id!==id))fail('meta_enrollment_asset_in_use');
@@ -115,6 +119,7 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
     }
     await references(row,mappings,transaction);
     const pieces=[id,row.flow_id,row.flow_digest,row.selection_digest,row.assets,row.mapping_ids,row.clinic_ids];
+    if(identityDigest)pieces.push('canonicalIdentity',identityDigest);
     if(businessSource)pieces.push('business',proof.immutableDigest,proof.handoverId,proof.canonicalConnectionId);
     else if(proof)pieces.push(proof.snapshotDigest,proof.recoveryId,proof.canonicalConnectionId);
     return {enrollmentId:id,flowId:row.flow_id,clinicIds:row.clinicIds,mappingIds:row.mappingIds,recovery:businessSource?null:proof,business:businessSource?proof:null,
