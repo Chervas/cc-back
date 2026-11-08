@@ -75,6 +75,37 @@ test('all selected migration requirements reach the actual checker even when del
   const result = await Q.run(['--runtime', 'staging', '--require-migration', NAME, '--require-migration', delegated], f.deps);
   assert.equal(result.compatible, true); assert.deepEqual(result.requiredMigrations, [NAME, delegated]);
 });
+test('candidate proves legal append grants before first API publication even if installed checker predates legal support', async () => {
+  const legal = require('../../lib/legalAcceptanceSchemaPreflight');
+  for (const [runtime, role, grant, expected, checkCount] of [
+    ['staging', 'api', 'SELECT', false, 1],
+    ['staging', 'api', 'SELECT, INSERT', true, 1],
+    ['gateway', 'gateway', '', true, 0],
+  ]) {
+    const f = fixture(runtime);
+    f.info.contract = { featureGroups: { [legal.GROUP]: { enabledWhenAll: { RUNTIME_ROLE: 'api' }, tables: [legal.TABLE], migrations: [legal.MIGRATION] } },
+      tables: { [legal.TABLE]: {} }, migrations: [{ name: legal.MIGRATION, sha256: 'f'.repeat(64) }] };
+    const observe = f.deps.observe;
+    f.deps.observe = () => ({ env: { ...observe().env, RUNTIME_ROLE: role } });
+    const connect = f.deps.connect;
+    f.deps.connect = async options => {
+      const admin = await connect(options), query = admin.query;
+      admin.query = async (sql, values) => {
+        if (sql === 'SELECT DATABASE() AS database_name') { f.state.events.push(sql); return [{ database_name: 'fixture' }]; }
+        if (sql === 'SHOW GRANTS FOR CURRENT_USER') { f.state.events.push(sql); return [{ Grant: `GRANT ${grant} ON \`fixture\`.\`LegalDocumentAcceptances\` TO FICTITIOUS_PRIVATE_ACCOUNT` }]; }
+        return query(sql, values);
+      };
+      return admin;
+    };
+    // The installed checker only knows its previous schema and returns true.
+    const result = await Q.run(['--runtime', runtime], f.deps);
+    assert.equal(result.compatible, expected);
+    assert.equal(f.state.events.filter(sql => sql === 'SHOW GRANTS FOR CURRENT_USER').length, checkCount);
+    assert.equal(result.legalAcceptanceGrants?.required.join(','), role === 'api' ? 'SELECT,INSERT' : undefined);
+    assert.equal(f.state.events.some(sql => /^(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP|GRANT)\b/.test(sql)), false);
+    assert.equal(JSON.stringify([...f.state.files.values()]).includes('FICTITIOUS_PRIVATE_ACCOUNT'), false);
+  }
+});
 function codeTree(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-rds-check-pins-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

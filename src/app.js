@@ -236,6 +236,7 @@ console.log('Configurando rutas...');
 app.use('/api/users', userRoutes);
 console.log('Ruta /api/users configurada');
 app.use('/api/auth', authRoutes);  // ✅ CAMBIO PRINCIPAL: Añadir /api/
+app.use('/api/legal', require('./routes/legal.routes'));
 console.log('Ruta /api/auth configurada');
 app.use('/api/clinicas', clinicaRoutes);
 console.log('Ruta /api/clinicas configurada');

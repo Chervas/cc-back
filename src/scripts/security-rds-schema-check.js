@@ -12,7 +12,7 @@ const ROOTS = Object.freeze({ staging: '/home/ubuntu/wt/back-staging', gateway: 
 const CODE = ['src/scripts/security-schema-release.js', 'src/scripts/security-email-login-metadata.js',
   'src/scripts/security-database-metadata.js', 'src/lib/securitySchemaContract.js',
   'src/lib/schemaReleaseDatabase.js', 'src/lib/databaseTlsConfig.js'];
-const OPTIONAL_CODE = ['src/lib/delegatedSchemaPreflight.js'];
+const OPTIONAL_CODE = ['src/lib/delegatedSchemaPreflight.js', 'src/lib/legalAcceptanceSchemaPreflight.js', 'src/lib/legalAcceptanceSchema.js'];
 
 function parse(argv) {
   if (['check-rds', 'preflight-rds'].includes(argv[0])) argv.shift();
@@ -59,7 +59,7 @@ async function run(argv, dependencies = {}) {
     && env.DB_TLS_CA_FILE === T.CA, 'rds_schema_app_configuration');
   const aws = (dependencies.awsFactory || T.createAws)({ profile: options.profile });
   const db = await aws.inspect(); // STS/DescribeDB only; never aws.secret/backup.
-  let admin; let closure; let identity; let observedAt; let missing = [];
+  let admin; let closure; let identity; let observedAt; let missing = []; let legalAcceptanceGrants = null;
   try {
     admin = await (dependencies.connect || T.connectAdmin)({ aws, db,
       secret: { username: env.DB_USERNAME, password: env.DB_PASSWORD } });
@@ -71,6 +71,10 @@ async function run(argv, dependencies = {}) {
       P.need(Array.isArray(rows) && rows.every(row => options.required.includes(row.name)), 'rds_schema_meta_readback');
       missing = options.required.filter(name => !rows.some(row => row.name === name));
     }
+    // The installed runtime may predate this release's legal permission check.
+    // Prove its app account's append/read grants before the first publication.
+    const legalPreflight = require('../lib/legalAcceptanceSchemaPreflight');
+    if (legalPreflight.selected(info.contract, env)) legalAcceptanceGrants = await legalPreflight.check((sql, values) => admin.query(sql, values));
   } finally { if (admin) closure = await admin.close(); }
   P.need(closure?.physicalCloseObserved === true && closure.physicalStreamDestroyed === true, 'rds_schema_physical_close_unproven');
   const binding = { schema: 'clinicaclick-rds-schema-check-binding/1', rootReviewed: true, runtime: options.runtime,
@@ -93,10 +97,12 @@ async function run(argv, dependencies = {}) {
   const afterInfo = check.sourceInfo(options.source, false);
   P.need(info.revision === afterInfo.revision && info.contractDigest === afterInfo.contractDigest
     && JSON.stringify(info.migrations) === JSON.stringify(afterInfo.migrations), 'rds_schema_source_changed');
-  const report = { status: checked.compatible && missing.length === 0 ? 'rds_schema_preflight_compatible' : 'rds_schema_preflight_incompatible',
-    compatible: checked.compatible === true && missing.length === 0, runtime: options.runtime, sourceRevision: info.revision,
+  const compatible = checked.compatible === true && missing.length === 0 && (!legalAcceptanceGrants || legalAcceptanceGrants.compatible);
+  const report = { status: compatible ? 'rds_schema_preflight_compatible' : 'rds_schema_preflight_incompatible',
+    compatible, runtime: options.runtime, sourceRevision: info.revision,
     bindingRef, runtimeCheckResultRef: { path: reportPath, sha256: (dependencies.hashFile || (file => P.sha(fs.readFileSync(file))))(reportPath) },
     runtimeCheckCodeRefs: beforePins, requiredMigrations: options.required, missingRequiredMigrations: missing,
+    ...(legalAcceptanceGrants ? { legalAcceptanceGrants } : {}),
     identityObservationClosure: closure, administrationSecretRead: false, snapshotCreated: false, ddlStatements: 0,
     metadataCheckTransportClosure: 'Existing runtime helper requests destroy/stream.destroy; this field does not claim a remote absence observation.' };
   const resultRef = write(options.out || directory + '/result.json', report);

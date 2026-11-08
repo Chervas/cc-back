@@ -111,6 +111,8 @@ exports.signInWithToken = async (req, res) => {
 
 exports.signUp = async (req, res) => {
     try {
+        const legal = require('../services/legalAcceptance.service').getService();
+        const legalDocument = legal.prepareRegistration(req.body);
         const { rol, nombre, apellidos, email_usuario, email_factura, email_notificacion, password, fecha_creacion } = req.body;
         const hashedPassword = await bcrypt.hash(password, 8);
         const cfg = sessions.settings();
@@ -125,10 +127,11 @@ exports.signUp = async (req, res) => {
                 password_usuario: hashedPassword,
                 fecha_creacion: fecha_creacion || new Date(),
             }, { transaction });
+            await legal.recordRegistration({ user: newUser, document: legalDocument, transaction, req });
             const issued = cfg.emailMfaMode === 'enforce' ? null : await sessions.issue(newUser, { transaction, reason: 'account_created' });
             return { newUser, issued };
         };
-        const { newUser, issued } = cfg.mode === 'enforce' ? await db.sequelize.transaction(createAccount) : await createAccount();
+        const { newUser, issued } = cfg.mode === 'enforce' || legalDocument ? await db.sequelize.transaction(createAccount) : await createAccount();
 
         systemNotificationsService.notifyUserRegistration({
             user: newUser,
@@ -152,6 +155,7 @@ exports.signUp = async (req, res) => {
             ...(issued ? { token: issued.token, expiresIn: issued.expiresIn } : { signInRequired: true }),
         });
     } catch (error) {
+        if (error?.status && error?.code?.startsWith('legal_')) return res.status(error.status).json({ error: error.code });
         console.error('[Auth] Account creation failed.');
         res.status(500).json({ message: 'Error al crear el usuario' });
     }
