@@ -19,8 +19,13 @@ test('Mounted OAuth router preserves authentication and uses the same configured
     verify:async v=>{if(v!=='FICTITIOUS_JWT')throw Object.assign(Error(),{name:'JsonWebTokenError'});return {userId:91002,sessionVersion:1,jti:sessionRef,exp:Math.floor(Date.now()/1000)+600};}};
   const service={callback:async({state})=>{callbacks++;if(state!=='FICTITIOUS_STATE')throw Error('FICTITIOUS_PRIVATE_ERROR');return {requestId:id,returnOrigin:C.frontendOrigin()};},
     status:async input=>{statuses++;assert.equal(input.scopeKey,'group:5');return {enabled:false};}};
+  const unrequested=prefix=>({createRouter:()=>((req,_res,next)=>{
+    assert(!req.path.startsWith(prefix),'UNEXPECTED_META_SURFACE_IN_OAUTH_QA');return next();
+  })});
   const auth=loadDiscoverySource('routes/auth.middleware.js',{'../services/accessSession.service':sessions});
   const router=loadDiscoverySource('routes/oauth.routes.js',{...unusedMetaSurfaceDependencies(),express,sequelize:require('sequelize'),'../../models':{},'./auth.middleware':auth,
+    './metaLeadReceptionSetup.routes':unrequested('/lead-reception'),'./metaMarketingBusiness.routes':unrequested('/business-connection'),
+    './metaMarketingCredentialRenewal.routes':unrequested('/credential-renewal'),
     '../services/accessSession.service':sessions,'./metaMarketingOAuth.routes':{createRouter:options=>{
       assert.equal(options.returnOrigin,undefined,'Legacy hardcoded frontend origin must not override the configured OAuth origin');
       return require('../../routes/metaMarketingOAuth.routes').createRouter({...options,service});

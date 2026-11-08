@@ -14,6 +14,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const audit=require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
   const reviewAssignment=require('./metaMarketingEnrollmentReview.service').createReview({models,sessions,now});
   const tx=fn=>models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},fn),locked=transaction=>({transaction,lock:transaction.LOCK.UPDATE,logging:false});
+  const order=require('./metaMarketingTransactionOrder.service').createOrder({models,authorize:scope.authorize,unavailable:()=>C.fail('meta_oauth_unavailable',503),missingFlow:()=>C.fail('meta_oauth_scope_forbidden',403)});
   const plain=r=>r?.get?r.get({plain:true}):r;
   const gate=()=>{if(!enabled())C.fail('meta_oauth_disabled');};
   const actor=row=>({scopeKey:row.scope_key,actorId:Number(row.actor_user_id),sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at});
@@ -41,7 +42,9 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
         .cancelFromOAuth(current.flow_id,transaction,worker?undefined:{actorId:Number(current.actor_user_id),sessionRef});
       return plain(current);
   }
-  const cancelPending=(row,worker=false,sessionRef=row.session_ref)=>tx(t=>cancelInTransaction(row,t,worker,sessionRef));
+  // The ordering helper has fenced the linked Enrollment (or proved its stable
+  // absence under the Flow lock) before cancelInTransaction can queue withdrawal.
+  const cancelPending=(row,worker=false,sessionRef=row.session_ref)=>order.flow(null,row.flow_id,({transaction})=>cancelInTransaction(row,transaction,worker,sessionRef));
   async function call(row,name,payload={}){
     const requestId=name==='begin'?row.flow_id:randomUUID();
     const value=await client.execute({requestId,operation:B.OPERATIONS[name],tenantRef:'clinic:'+JSON.parse(row.clinic_ids)[0],connectionRef:row.connection_ref,assetRef:row.asset_ref,
@@ -67,7 +70,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   async function reconcileRow(row,{worker=false,ownedLease=null}={}){
     if(row.state==='cancelled')return row;
     if(row.state!=='cancel_pending'){
-      try{await tx(t=>authorizedRow(row,t));}
+      try{await order.flow(actor(row),row.flow_id,({transaction})=>authorizedRow(row,transaction));}
       catch(e){if([401,403,409].includes(e.httpStatus)||e.code==='meta_oauth_disabled')row=await cancelPending(row,true);else throw e;}
     }
     const remote=await call(row,row.state==='cancel_pending'?'abort':'status');
@@ -87,7 +90,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       row=await cancelPending(row,true);return reconcileRow(row,{worker:true,ownedLease});
     }
     try{
-      return await tx(async transaction=>{
+      return await order.flow(actor(row),row.flow_id,async({transaction})=>{
         const current=await authorizedRow(row,transaction);
         if(ownedLease&&(current.lease_token!==ownedLease||+current.lease_until<=+now()))C.fail();
         if(['cancel_pending','cancelled'].includes(current.state))C.fail('meta_oauth_scope_changed',409);
@@ -115,7 +118,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     },
     async assets(input,id){
       gate();if(!discoveryEnabled())C.fail('meta_oauth_disabled');if(!C.UUID.test(id))C.fail('meta_oauth_state_invalid',400);
-      const requestId=randomUUID(),startedAt=+now();let captured;
+      input=require('./metaMarketingTransactionOrder.service').pinInput(input);const requestId=randomUUID(),startedAt=+now();let captured;
       const authorize=async transaction=>{
         gate();if(!discoveryEnabled())C.fail('meta_oauth_disabled');
         await scope.authorize(input,transaction);const row=await R.findByPk(id,locked(transaction));
@@ -126,15 +129,18 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
         if([candidate.expiresAt,candidate.dataAccessExpiresAt].some(v=>v!==null&&v<=+now()))C.fail('meta_oauth_scope_changed',409);
         return plain(row);
       };
+      const authorizedAssets=work=>order.flow(input,id,async({transaction})=>{
+        const row=await authorize(transaction);return work?work(row,transaction):row;
+      });
       try{
-        captured=await tx(async transaction=>{const row=await authorize(transaction);await recordEvent(fromDiscovery(row,input,requestId,'inventory_requested',now()),transaction);return row;});
-        await tx(authorize);
+        captured=await authorizedAssets(async(row,transaction)=>{await recordEvent(fromDiscovery(row,input,requestId,'inventory_requested',now()),transaction);return row;});
+        await authorizedAssets();
         const response=await client.execute({requestId,operation:D.OPERATION,tenantRef:'clinic:'+JSON.parse(captured.clinic_ids)[0],connectionRef:captured.connection_ref,assetRef:captured.asset_ref,
           payload:{flowId:id,scopeDigest:captured.scope_digest}},{timeoutMs:30000});
         if(!C.exact(response,'requestId,data,replayed')||response.requestId!==requestId||response.replayed!==false)C.fail('broker_response_invalid');
         const inventory=D.validateResult(response.data,{flowId:id,candidateDigest:JSON.parse(captured.candidate_metadata).digest,scopeDigest:captured.scope_digest,scopeKey:captured.scope_key,
           clinicSetDigest:C.hash(captured.clinic_ids),metadata:JSON.parse(captured.candidate_metadata),startedAt,now:+now()});
-        return await tx(async transaction=>{const row=await authorize(transaction);if(inventory.expiresAt<=+now())C.fail('broker_response_invalid');
+        return await authorizedAssets(async(row,transaction)=>{if(inventory.expiresAt<=+now())C.fail('broker_response_invalid');
           const assignmentReview=await reviewAssignment({row,inventory},transaction);
           await recordEvent(fromDiscovery(row,input,requestId,'inventory_verified',now(),inventory),transaction);return {...projection(row),inventory,assignmentReview};});
       }catch(e){
@@ -144,17 +150,17 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     },
     async status(input){
       if(!enabled())return {enabled:false};
-      return tx(async transaction=>{
+      return order.scope(input,{},async({transaction,flow,expectedFlowId,input})=>{
         gate();
-        const captured=await scope.capture(input,transaction),latest=await R.findOne({...locked(transaction),where:{scope_key:input.scopeKey},order:[['requested_at','DESC'],['flow_id','DESC']]});
+        const captured=await scope.capture(input,transaction,{expectedFlowId}),latest=flow?await R.findByPk(flow.flow_id,locked(transaction)):null;
         if(latest&&Number(latest.actor_user_id)!==input.actorId&&latest.state!=='cancelled')return {enabled:true,available:false,status:'busy'};
         return {enabled:true,available:!!captured.slot&&(!latest||latest.state==='cancelled'),...(latest?projection(plain(latest)):{status:'none'})};
       });
     },
     async begin(input){
-      gate();const state=randomBytes(32).toString('base64url');
-      const row=await tx(async transaction=>{
-        const captured=await scope.capture(input,transaction);if(!captured.slot)C.fail('meta_oauth_unconfigured');
+      gate();input=require('./metaMarketingTransactionOrder.service').pinInput(input);const state=randomBytes(32).toString('base64url');
+      const row=await order.scope(input,{},async({transaction,expectedFlowId})=>{
+        const captured=await scope.capture(input,transaction,{expectedFlowId});if(!captured.slot)C.fail('meta_oauth_unconfigured');
         if(await R.findOne({attributes:['flow_id'],where:{scope_key:input.scopeKey,state:{[Op.ne]:'cancelled'}},transaction}))C.fail('meta_oauth_busy',409);
         const {slot}=captured,expires=new Date(Math.min(+now()+600000,+input.sessionExpiresAt,+slot.expires_at));if(+expires<=+now())C.fail('meta_oauth_session_required',401);
         const fresh={flow_id:randomUUID(),state_hash:C.hash(state),scope_key:slot.scope_key,connection_ref:slot.connection_ref,asset_ref:slot.asset_ref,app_id:slot.app_id,
@@ -164,7 +170,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       });
       try{
         const remote=await call(row,'begin',{state,scopeDigest:row.scope_digest,clinicSetDigest:C.hash(row.clinic_ids),expiresAt:+row.expires_at});
-        await tx(async transaction=>{const current=await authorizedRow(row,transaction);if(current.state!=='begin_pending')C.fail('meta_oauth_scope_changed',409);await current.update({state:'awaiting'},{transaction});});
+        await order.flow(actor(row),row.flow_id,async({transaction})=>{const current=await authorizedRow(row,transaction);if(current.state!=='begin_pending')C.fail('meta_oauth_scope_changed',409);await current.update({state:'awaiting'},{transaction});});
         return {enabled:true,...projection({...row,state:'awaiting'}),authUrl:remote.authUrl};
       }catch(e){await cancelPending(row,true);try{await reconcileRow({...row,state:'cancel_pending'},{worker:true});}catch{}throw e;}
     },
@@ -180,7 +186,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       if(denied){await cancelPending(row,true);try{await reconcileRow({...row,state:'cancel_pending'},{worker:true});}catch{}return result();}
       let mayExchange=false;
       try{
-        row=await tx(async transaction=>{
+        row=await order.flow(actor(row),row.flow_id,async({transaction})=>{
           const current=await authorizedRow(row,transaction);const digest=C.hash(code);
           if(current.code_digest&&current.code_digest!==digest)C.fail('meta_oauth_state_invalid',400);
           if(current.state!=='awaiting')return plain(current);
@@ -190,7 +196,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
           mayExchange=true;return plain(current);
         });
         if(mayExchange){
-          await tx(t=>authorizedRow(row,t));await call(row,'finish',{state,code});
+          await order.flow(actor(row),row.flow_id,({transaction})=>authorizedRow(row,transaction));await call(row,'finish',{state,code});
           await reconcileRow(row,{ownedLease:row.lease_token});
         }
       }catch(e){
@@ -201,7 +207,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     },
     async cancel(input,id){
       if(!C.UUID.test(id))C.fail('meta_oauth_state_invalid',400);
-      const row=await tx(async transaction=>{
+      input=require('./metaMarketingTransactionOrder.service').pinInput(input);const row=await order.flow(input,id,async({transaction})=>{
         await scope.authorize(input,transaction);const current=await R.findByPk(id,locked(transaction));
         if(!current||current.scope_key!==input.scopeKey||Number(current.actor_user_id)!==input.actorId)C.fail('meta_oauth_scope_forbidden',403);
         return plain(current);
@@ -209,7 +215,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       const pending=await cancelPending(row,false,input.sessionRef);try{return projection(await reconcileRow(pending));}catch{return projection(pending);}
     },
     async reconcile(input,id){
-      const row=await tx(async transaction=>{await scope.authorize(input,transaction);const current=await R.findByPk(id,locked(transaction));
+      input=require('./metaMarketingTransactionOrder.service').pinInput(input);const row=await order.flow(input,id,async({transaction})=>{await scope.authorize(input,transaction);const current=await R.findByPk(id,locked(transaction));
         if(!current||current.scope_key!==input.scopeKey||Number(current.actor_user_id)!==input.actorId)C.fail('meta_oauth_scope_forbidden',403);return plain(current);});
       if(row.lease_until&&row.lease_until>now())return projection(row);
       return projection(await reconcileRow(row));

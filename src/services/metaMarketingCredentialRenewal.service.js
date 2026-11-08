@@ -9,6 +9,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const bindings=require('./metaMarketingEnrollmentBinding.service').createBindings({models,sessions,now});
   const audit=providedAudit||require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
   const tx=work=>models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},work);
+  const order=require('./metaMarketingTransactionOrder.service').createOrder({models,authorize:scope.authorize,unavailable:()=>C.fail('meta_renewal_unavailable',503)});
   const lock=transaction=>({transaction,lock:transaction.LOCK.UPDATE,raw:true,logging:false});
   const gate=()=>{if(!enabled())C.fail('meta_renewal_disabled',503);if(!R||!P)C.fail('meta_renewal_unavailable',503);};
   async function record(row,reason,transaction,input){
@@ -30,10 +31,13 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     if(changed!==1)C.fail('meta_renewal_busy',409);return C.request({...row,...changes});
   }
   async function admission(input,transaction,enrollmentId=null){
-    if(input)await scope.authorize(input,transaction);
     let raw;
     if(enrollmentId)raw=await models.MetaMarketingEnrollmentRequest.findByPk(enrollmentId,lock(transaction));
-    else raw=await models.MetaMarketingEnrollmentRequest.findOne({...lock(transaction),where:{scope_key:input.scopeKey,state:'active'},order:[['requested_at','DESC']]});
+    else raw=await models.MetaMarketingEnrollmentRequest.findOne({...lock(transaction),where:{scope_key:input.scopeKey,state:'active'},order:[['requested_at','DESC'],['enrollment_id','DESC']]});
+    // Human callers preauthorize in a separate transaction. Match the reader's
+    // enrollment -> clinic order, then repeat current session/email/WRITE checks
+    // before inspecting the row or loading assets, even when no row was found.
+    if(input)await scope.authorize(input,transaction);
     if(!raw)return null;const enrollment=require('./metaMarketingEnrollment.contract').request(plain(raw));
     if(enrollment.state!=='active'||input&&enrollment.scope_key!==input.scopeKey)C.fail('meta_renewal_scope_forbidden',403);
     // Business credentials have their own consent and maintenance protocol.
@@ -159,8 +163,8 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const service={
     async overview(input){
       if(!enabled())return {enabled:false,canRenew:false,credential:null,pending:null};
-      return tx(async transaction=>{
-        await scope.authorize(input,transaction);const context=await admission(input,transaction);if(!context)return {enabled:true,canRenew:false,credential:null,pending:null};
+      return order.scope(input,{active:true},async({transaction,enrollment,input})=>{
+        const context=enrollment?await admission(input,transaction,enrollment.enrollment_id):null;if(!context)return {enabled:true,canRenew:false,credential:null,pending:null};
         const pending=await R.findOne({...lock(transaction),where:{pending_enrollment_id:context.enrollment.enrollment_id}});
         const latest=plain(pending||await R.findOne({...lock(transaction),where:{enrollment_id:context.enrollment.enrollment_id},order:[['requested_at','DESC'],['renewal_id','DESC']]}));
         const row=latest?C.request(latest):null,value=context.effective;
@@ -169,9 +173,9 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       });
     },
     async begin(input){
-      gate();const state=randomBytes(32).toString('base64url');
-      const row=await tx(async transaction=>{
-        const context=await admission(input,transaction);if(!context)C.fail('meta_renewal_scope_forbidden',403);
+      gate();input=require('./metaMarketingTransactionOrder.service').pinInput(input);const state=randomBytes(32).toString('base64url');
+      const row=await order.scope(input,{active:true},async({transaction,enrollment:stored})=>{
+        const context=stored?await admission(input,transaction,stored.enrollment_id):null;if(!context)C.fail('meta_renewal_scope_forbidden',403);
         const {enrollment,slot,effective}=context;
         if(await R.findOne({...lock(transaction),where:{pending_enrollment_id:enrollment.enrollment_id}}))C.fail('meta_renewal_busy',409);
         const date=now(),id=randomUUID(),expires=new Date(Math.min(+date+600000,+input.sessionExpiresAt,+slot.expires_at));

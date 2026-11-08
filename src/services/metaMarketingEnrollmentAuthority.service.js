@@ -31,6 +31,7 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
   const recovery=recoveryGuard||require('./metaMarketingLegacyRecovery.service').createRecovery({models,sessions,now});
   const S=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now,recoveryGuard:recovery});
   const audit=require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
+  const order=require('./metaMarketingTransactionOrder.service').createOrder({models,authorize:S.authorize,unavailable:()=>C.fail('meta_enrollment_unavailable',503),missingFlow:()=>C.fail('meta_enrollment_scope_forbidden',403)});
   const options=transaction=>{
     if(!transaction?.LOCK?.UPDATE||transaction.finished)C.fail();
     return {transaction,lock:transaction.LOCK.UPDATE,logging:false,raw:true};
@@ -193,6 +194,7 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
     await physical(saved.selected,transaction,saved.enrollment_id,proof);gate();return saved;
   }
   async function reserve(input,flowId,assetRefs){
+    input=require('./metaMarketingTransactionOrder.service').pinInput(input);
     let phase='source',proof=null,refs;
     try{gate();refs=selectedRefs(assetRefs);if(!C.UUID.test(flowId)||typeof oauth?.assets!=='function')C.fail('meta_enrollment_invalid',400);}
     catch(error){reservationRejected(phase,error?.code,assetRefs,proof);throw error;}
@@ -201,7 +203,7 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
     const startedAt=+now();let discovered;phase='discovery';
     try{discovered=await oauth.assets(input,flowId);}catch(error){reservationRejected(phase,error?.code,refs,proof);throw error;}
     phase='source';
-    try{return await models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},async transaction=>{
+    try{return await order.flow(input,flowId,async({transaction,input})=>{
       phase='source';const {row,metadata,recovery:currentProof}=await source(input,flowId,transaction);proof=currentProof;
       phase='inventory';
       let inventory;try{inventory=D.validateResult(discovered.inventory,{flowId,candidateDigest:metadata.digest,scopeDigest:row.scope_digest,scopeKey:row.scope_key,

@@ -138,6 +138,9 @@ module.exports=async({models,sql,now,advance,report,baseline,untouched})=>{
   report.checks.push('Two new Business identities/canonical connections transfer the exact original claims and 2/4 asset mapping IDs atomically; SQL audit rollback and owner ACK loss both reconcile one owner CAS, old enrollments become superseded without revocation and immutable Recovery/WhatsApp history remains unchanged');
   const maintenance=require('../../../services/metaMarketingCredentialMaintenance.service').createMaintenance({models,client,now,enabled:()=>true});
   const drainAudit=async()=>{const repo=require('../../../services/platformAudit.repository'),event=require('../../../../services/platform-audit/src/event');const result=await repo.drain(repo.createRepository(models.PlatformAuditEvent),{write:async row=>({key:event.keyFor(row),digest:row.digest,versionId:'FICTITIOUS_BUSINESS_AUDIT_ACK'})},{now,limit:100});assert.equal(result.failed,0);};
+  await drainAudit();
+  if(process.env.META_MARKETING_POST_HANDOVER_LOCK_TEST==='1')await require('./meta_marketing_post_handover_lock_mysql.fixture')({models,sql,now,report,initial,currentIds:newIds,baseline,untouched});
+  if(process.env.META_MARKETING_ORDINARY_OAUTH_LOCK_TEST==='1')await require('./meta_marketing_ordinary_oauth_order_mysql.fixture')({models,sql,now,advance,report,baseline,untouched});
   await drainAudit();advance(46*86400000+1);temporaryMaintenance=true;
   let result=await maintenance.run();assert.equal(result.failed,1);const retry=await models.MetaMarketingCredentialMaintenance.findOne({where:{state:'retry_wait'},raw:true});assert(retry);assert.equal(+retry.next_attempt_at-+now(),7200000);
   assert.equal((await credentials.getCredentialStatus(await models.MetaMarketingEnrollmentRequest.findByPk(retry.enrollment_id,{raw:true}))).epoch,0);

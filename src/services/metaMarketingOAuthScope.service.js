@@ -20,12 +20,13 @@ function createScope({models,sessions,now=()=>new Date(),recoveryGuard}){
     if(!await hasMarketingClinicScopeAccess({userId:actorId,clinicIds,access:'write',membershipModel:{findAll:opts=>models.UsuarioClinica.findAll({...opts,...options})}}))C.fail('meta_oauth_scope_forbidden',403);
     return {scopeKey,clinicIds,actorId,sessionRef,sessionExpiresAt,options};
   }
-  async function captureStructure(authorized,{flow=null,phase='pending',allowExpiredCredential=false}={}){
+  async function captureStructure(authorized,{flow=null,phase='pending',allowExpiredCredential=false,expectedFlowId}={}){
     const {scopeKey,clinicIds,options}=authorized;
     const raw=await models.MetaMarketingOAuthSlot.findByPk(scopeKey,options);if(!raw)return {...authorized,slot:null};
     const slot=C.slot(raw);if(slot.state!=='active'||+slot.expires_at<=+now()||JSON.stringify(clinicIds)!==slot.clinic_ids)C.fail('meta_oauth_scope_changed',409);
     const proof=flow?await recovery.forFlow(flow,options.transaction,{phase,allowExpiredCredential}):await recovery.inspectPrepared({scopeKey,clinicIds,appId:slot.app_id,
-      actorId:authorized.actorId,sessionRef:authorized.sessionRef,sessionExpiresAt:authorized.sessionExpiresAt},options.transaction);
+      actorId:authorized.actorId,sessionRef:authorized.sessionRef,sessionExpiresAt:authorized.sessionExpiresAt,
+      ...(expectedFlowId!==undefined?{expectedFlowId}:{})},options.transaction);
     const [assignmentScope,scopeId]=scopeKey.split(':');
     // A raw tombstone remains universal. Only a fresh, root-prepared generation
     // can authorize its exact non-WhatsApp scope; legacy readers keep the block.
@@ -37,7 +38,10 @@ function createScope({models,sessions,now=()=>new Date(),recoveryGuard}){
     if(proof)pieces.push(proof.immutableDigest);
     return {...authorized,slot,recovery:proof,slotDigest:C.slotDigest(slot),scopeDigest:C.hash(JSON.stringify(pieces))};
   }
-  const capture=async(actor,transaction)=>captureStructure(await authorize(actor,transaction));
+  const capture=async(actor,transaction,{expectedFlowId}={})=>{
+    if(expectedFlowId!==undefined&&expectedFlowId!==null&&!C.UUID.test(expectedFlowId))C.fail();
+    return captureStructure(await authorize(actor,transaction),{expectedFlowId});
+  };
   function compare(row,fresh){
     if(!fresh.slot||fresh.slotDigest!==row.slot_digest||fresh.scopeDigest!==row.scope_digest||JSON.stringify(fresh.clinicIds)!==row.clinic_ids
       ||['scope_key','connection_ref','asset_ref','app_id','clinic_ids','scopes','redirect_uri'].some(k=>row[k]!==fresh.slot[k]))C.fail('meta_oauth_scope_changed',409);

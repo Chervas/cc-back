@@ -18,6 +18,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const credentials=C.F.createEffectiveCredentials({models,now}),audit=providedAudit||require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
   const drain=providedDrain||require('./metaMarketingBusinessDrain.service').createDrain({models,now});
   const tx=work=>models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},work),opts=transaction=>({transaction,lock:transaction.LOCK.UPDATE,raw:true,logging:false});
+  const order=require('./metaMarketingTransactionOrder.service').createOrder({models,authorize:scope.authorize,unavailable:()=>C.fail('meta_business_unavailable',503)});
   const gate=()=>{if(!enabled())C.fail('meta_business_disabled',503);if(!H)C.fail();};
   const policy=scopeKey=>{const value=configuration(scopeKey);if(!value||!C.ISSUERS.includes(value.issuerKind)||!/^[1-9][0-9]{0,29}$/.test(value.configId||'')||!/^v(?:24|25|26|27)\.0$/.test(value.graphVersion||'')
     ||(value.issuerKind===C.A.ISSUER?value.graphVersion!=='v27.0'||!/^[1-9][0-9]{0,29}$/.test(value.issuerBusinessId||''):value.issuerBusinessId!==null))C.fail();return value;};
@@ -35,8 +36,11 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     const [changed]=await H.update(changes,{where:{handover_id:row.handover_id,state:row.state},transaction,logging:false});if(changed!==1)C.fail('meta_business_busy',409);return C.request({...row,...changes});
   }
   async function admission(input,transaction,enrollmentId=null,handoverId=null){
+    const raw=plain(enrollmentId?await R.findByPk(enrollmentId,opts(transaction)):await R.findOne({...opts(transaction),where:{scope_key:input.scopeKey,state:'active'},order:[['requested_at','DESC'],['enrollment_id','DESC']]}));
+    // Human callers preauthorize in a separate transaction. Match the reader's
+    // enrollment -> clinic order and recheck current session/email/WRITE access
+    // before inspecting the row or loading assets, including an absent result.
     if(input)await scope.authorize(input,transaction);
-    const raw=plain(enrollmentId?await R.findByPk(enrollmentId,opts(transaction)):await R.findOne({...opts(transaction),where:{scope_key:input.scopeKey,state:'active'},order:[['requested_at','DESC']]}));
     if(!raw)return null;const enrollment=require('./metaMarketingEnrollment.contract').request(raw);if(enrollment.state!=='active'||input&&enrollment.scope_key!==input.scopeKey)C.fail('meta_business_scope_changed',409);
     const authority=await bindings.committed(enrollment.enrollment_id,transaction,{allowExpiredCredential:true,allowBusinessHandover:handoverId});
     const effective=await credentials.resolve(enrollment,null,transaction,{allowExpired:true}).catch(async error=>{
@@ -146,16 +150,17 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     candidateExpiresAt:row.candidate?.expiresAt??null,candidateDataAccessExpiresAt:row.candidate?.dataAccessExpiresAt??null,
     canConfirm:enabled()&&row.state==='staged'&&Number(row.actor_user_id)===input.actorId&&row.session_ref===input.sessionRef&&+input.sessionExpiresAt>=+row.session_expires_at&&+row.session_expires_at>+now()&&C.F.expiry(row.candidate)>+now(),canCancel:!C.TERMINAL.includes(row.state),lastError:row.last_error});
   const service={
-    async overview(input){if(!enabled())return {enabled:false,authorizationMode:null,canBegin:false,current:null,pending:null};return tx(async transaction=>{
-      await scope.authorize(input,transaction);const observed=await H.findOne({where:{pending_scope_key:input.scopeKey},attributes:['handover_id'],transaction,raw:true,logging:false});
+    async overview(input){if(!enabled())return {enabled:false,authorizationMode:null,canBegin:false,current:null,pending:null};
+      return order.scope(input,{active:true},async({transaction,enrollment,input})=>{
+      const observed=await H.findOne({where:{pending_scope_key:input.scopeKey},attributes:['handover_id'],transaction,raw:true,logging:false});
       let authorizationMode=null;try{authorizationMode=policy(input.scopeKey).issuerKind;}catch{}
-      const context=await admission(input,transaction,null,observed?.handover_id??null);if(!context)return {enabled:true,authorizationMode,canBegin:false,current:null,pending:null};
+      const context=enrollment?await admission(input,transaction,enrollment.enrollment_id,observed?.handover_id??null):null;if(!context)return {enabled:true,authorizationMode,canBegin:false,current:null,pending:null};
       const raw=plain(await H.findOne({...opts(transaction),where:{pending_scope_key:input.scopeKey}})||await H.findOne({...opts(transaction),where:{scope_key:input.scopeKey},order:[['requested_at','DESC'],['handover_id','DESC']]})),row=raw?C.request(raw):null;
       const maintenance=await require('./metaMarketingCredentialMaintenance.service').createMaintenance({models,now}).getMaintenanceStatus(context.enrollment,{transaction});
       return {enabled:true,authorizationMode,canBegin:authorizationMode!==null&&(!row||C.TERMINAL.includes(row.state)),current:{enrollmentId:context.enrollment.enrollment_id,assetCount:context.enrollment.selected.length,tokenType:context.effective.metadata.tokenType,issuerKind:C.issuer(context.effective.metadata),providerBusinessId:C.providerBusinessId(context.effective.metadata),clientBusinessId:context.effective.metadata.clientBusinessId??null,subjectId:context.enrollment.meta_user_id,maintenance:{mechanism:maintenance.automaticSupported?(maintenance.mechanism==='agency_system_user'?'agency_system_user':'bisu_management'):'human_required',status:maintenance.attemptState==='retry_wait'?'retry_scheduled':maintenance.attemptState==='running'?'pending':maintenance.attemptState==='human_required'?'human_required':maintenance.unknownSince!==null?'unknown':maintenance.attemptState==='scheduled'&&maintenance.nextAttemptAt<=+now()?'due':'healthy',expiresAt:C.F.expiry(context.effective.metadata),nextAttemptAt:maintenance.nextAttemptAt,lastSuccessAt:maintenance.lastHealthyAt,lastError:maintenance.humanReason}},pending:row?pendingDto(row,input):null};
     });},
-    async begin(input){gate();const selectedPolicy=policy(input.scopeKey),state=randomBytes(32).toString('base64url');
-      const row=await tx(async transaction=>{const context=await admission(input,transaction);if(!context)C.fail('meta_business_scope_forbidden',403);
+    async begin(input){gate();input=require('./metaMarketingTransactionOrder.service').pinInput(input);const state=randomBytes(32).toString('base64url');
+      const row=await order.scope(input,{active:true},async({transaction,enrollment})=>{const selectedPolicy=policy(input.scopeKey),context=enrollment?await admission(input,transaction,enrollment.enrollment_id):null;if(!context)C.fail('meta_business_scope_forbidden',403);
         if(await H.findOne({...opts(transaction),where:{pending_scope_key:input.scopeKey}})||models.MetaMarketingCredentialRenewal&&await models.MetaMarketingCredentialRenewal.findOne({...opts(transaction),where:{pending_enrollment_id:context.enrollment.enrollment_id}})||models.MetaMarketingCredentialMaintenance&&await models.MetaMarketingCredentialMaintenance.findOne({...opts(transaction),where:{pending_enrollment_id:context.enrollment.enrollment_id,rotate_sent_at:{[Op.ne]:null}}}))C.fail('meta_business_busy',409);
         const old=context.enrollment,flow=await models.MetaMarketingOAuthRequest.findByPk(old.flow_id,opts(transaction));let redirectUri=flow?.redirect_uri;
         if(!redirectUri){const source=await require('./metaMarketingBusinessSource.service').createSource({models,now}).forEnrollment(old,transaction);redirectUri=source?.row.redirect_uri;}
