@@ -120,7 +120,7 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
         else assertGrant(match('group',Number(clinics.find(row => Number(row.id_clinica) === id).grupoClinicaId)));
       }
     }
-    const connection = await loadConnection(selected.meta_connection_id, selected.meta_user_id,authority);
+    const connection = await loadConnection(selected.meta_connection_id, selected.meta_user_id,authority,{appId:selected.app_id,enrollmentId:selected.enrollment_id});
     if (!connection || Number(connection.id) !== selected.meta_connection_id || connection.metaUserId !== selected.meta_user_id
       || connection.broker_app_id !== selected.app_id || Number(connection.credentials_external) !== 1 || Number(connection.credentials_absent) !== 1) fail();
     const captured = { mappingId:requested.mappingId, ...asset(selected.asset_ref), parentPageId:selected.parent_page_id,
@@ -162,7 +162,15 @@ function createMetaMarketingScopeRepository(getModels, { transaction = null } = 
       return field ? getModels().GrupoClinica.findAll({ ...options,attributes:['id_grupo',[field,'asset_id']],where:{[field]:{[Op.in]:mappingIds}},order:[['id_grupo','ASC']] }) : Promise.resolve([]); },
     loadGrants:(clinicIds,groupIds) => getModels().MetaConnectionAssignment.findAll({ ...options,attributes:['id','assignmentScope','clinicaId','grupoClinicaId','metaConnectionId','status','updated_at'],
       where:{[Op.or]:[{assignmentScope:'clinic',clinicaId:{[Op.in]:clinicIds}},{assignmentScope:'group',grupoClinicaId:{[Op.in]:groupIds}}]},order:[['id','ASC']] }),
-    loadConnection:async(id,subject,recovery=null) => {
+    loadConnection:async(id,subject,recovery=null,context={}) => {
+      if(!recovery&&context.enrollmentId){
+        const resolve=tx=>require('./metaMarketingCanonicalIdentity.service').resolveUserIdentity({models:getModels(),appId:context.appId,
+          subjectId:subject,expectedConnectionId:Number(id),transaction:tx,lock:!!transaction,requireRegistered:true,allowHistoricalReuse:true});
+        // A standalone repository read owns a consistent snapshot; no foreign
+        // history lock and no unlocked multi-table provenance observation.
+        const selected=transaction?await resolve(transaction):await getModels().sequelize.transaction({isolationLevel:'REPEATABLE READ'},resolve);
+        return selected.connection;
+      }
       const rows=await getModels().MetaConnection.findAll({ ...options,limit:recovery?1:2,
         attributes:['id','userId','metaUserId','broker_app_id','credentials_external',[literal('(accessToken IS NULL)'),'credentials_absent']],
         where:recovery?{id,metaUserId:subject}:{[Op.or]:[{id},{metaUserId:subject}]},order:[['id','ASC']] });
