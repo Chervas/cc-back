@@ -1,5 +1,5 @@
 'use strict';
-const K=require('./meta-marketing-credential-shape');
+const K=require('./meta-marketing-credential-shape'),R=require('./meta-marketing-read-diagnostics');
 const https=require('node:https'),{createHmac}=require('node:crypto');
 const {BrokerError,fail}=require('./errors'),{tokenText}=require('./whatsapp-secrets');
 const A=require('./meta-marketing-ads-contract'),M=require('./meta-marketing-contract'),D=require('./meta-marketing-discovery-contract'),C=require('./meta-marketing-oauth-contract'),E=require('./meta-marketing-enrollment-contract');
@@ -20,6 +20,7 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
     E.assets([asset]);K.metadata(metadata,binding);M.assertAssetCredential(metadata,asset);
     const codecScope={principalId:context?.principalId,tenantRef:context?.tenantRef,binding,assetRef:asset.assetRef,operation,policyVersion:context?.policyVersion};
     if(typeof codecScope.principalId!=='string'||!codecScope.principalId||typeof codecScope.tenantRef!=='string'||!codecScope.tenantRef||typeof codecScope.policyVersion!=='string'||!codecScope.policyVersion)fail('invalid_request');
+    const diagnostic=R.create({operation,assetRef:asset.assetRef});
     let after=null,pages=0;
     if(payload.pageToken!==null){let v;try{v=JSON.parse(cursor.open(payload.pageToken,codecScope));}catch{fail('invalid_request');}
       if(!v||Object.keys(v).sort().join(',')!=='after,endDate,pages,startDate'||typeof v.after!=='string'||!/^[\x21-\x7e]{1,1024}$/.test(v.after)
@@ -29,36 +30,38 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
     const scope='meta-ads-app:'+metadata.appId,deadline=now()+25000;let observed=0;
     const check=()=>{if(signal.aborted||now()>=deadline)fail('provider_timeout');authorize();};
     const pacedRequest=(work)=>pacer.run(scope,{signal,deadline},async()=>{check();const result=await work();check();return result;});
-    const transport=(settings,callback)=>request(settings,res=>{const pct=usage(res.headers);observed=Math.max(observed,pct);pacer.observe(scope,pct);callback(res);});
+    const transport=(settings,callback)=>request(settings,res=>{diagnostic.status(res.statusCode);const pct=usage(res.headers);observed=Math.max(observed,pct);pacer.observe(scope,pct);callback(res);});
     const path=`/${metadata.graphVersion||M.GRAPH_VERSION}/act_${asset.id}/${['insights','actions'].includes(name)?'insights':name}`;
-    const fetchGraph=(targetPath,bearer)=>pacedRequest(()=>new Promise((resolve,reject)=>{
+    const fetchGraph=(targetPath,bearer)=>{diagnostic.begin();return pacedRequest(()=>new Promise((resolve,reject)=>{
+        diagnostic.stage('request');
         let req,res,timer,settled=false,bytes=0;const chunks=[];
         const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);signal.removeEventListener('abort',abort);for(const b of chunks)b.fill(0);chunks.length=0;error?reject(error):resolve(value);};
-        const abort=()=>{finish(new BrokerError('provider_timeout'));res?.destroy();req?.destroy();};
+        const abort=()=>{diagnostic.stage('timeout');finish(new BrokerError('provider_timeout'));res?.destroy();req?.destroy();};
         timer=setTimeout(abort,Math.min(timeoutMs,Math.max(1,deadline-now())));timer.unref?.();
         try{req=transport({protocol:'https:',hostname:'graph.facebook.com',port:443,method:'GET',path:targetPath,agent:false,rejectUnauthorized:true,minVersion:'TLSv1.2',headers:{authorization:'Bearer '+bearer.toString('utf8'),accept:'application/json','accept-encoding':'identity'}},response=>{
           res=response;if(settled){res.destroy();return;}
           if(res.statusCode===429){finish(new BrokerError('rate_limited'));res.destroy();req?.destroy();return;}
           if(String(res.headers['content-type']||'').split(';')[0].trim().toLowerCase()!=='application/json'||!['','identity'].includes(String(res.headers['content-encoding']||'').toLowerCase())||res.statusCode>=300&&res.statusCode<400){finish(new BrokerError('provider_failed'));res.destroy();req?.destroy();return;}
-          res.on('data',chunk=>{bytes+=chunk.length;if(bytes>131072){chunk.fill(0);finish(new BrokerError('provider_failed'));res.destroy();req?.destroy();}else if(!settled)chunks.push(chunk);});
-          res.on('aborted',()=>finish(new BrokerError('provider_failed')));res.on('error',()=>finish(new BrokerError('provider_failed')));
-          res.on('end',()=>{if(settled)return;let buffer;try{buffer=Buffer.concat(chunks);const value=JSON.parse(buffer.toString('utf8'));
+          res.on('data',chunk=>{diagnostic.stage('body');bytes+=chunk.length;if(bytes>131072){chunk.fill(0);finish(new BrokerError('provider_failed'));res.destroy();req?.destroy();}else if(!settled)chunks.push(chunk);});
+          res.on('aborted',()=>{diagnostic.stage('aborted');finish(new BrokerError('provider_failed'));});res.on('error',()=>{diagnostic.stage('transport');finish(new BrokerError('provider_failed'));});
+          res.on('end',()=>{if(settled)return;let buffer;try{buffer=Buffer.concat(chunks);diagnostic.stage('json');const value=JSON.parse(buffer.toString('utf8'));diagnostic.meta(value?.error);diagnostic.stage('http');
             if(res.statusCode===429||[4,17,32,613].includes(value?.error?.code))fail('rate_limited');
             if([190,102].includes(value?.error?.code))fail('credential_revoked');if([401,403].includes(res.statusCode)||[10,200].includes(value?.error?.code))fail('provider_unauthorized');
-            if(res.statusCode!==200||!value||value.error||typeof value!=='object'||Array.isArray(value))fail('provider_failed');finish(null,value);
+            if(res.statusCode!==200||!value||value.error||typeof value!=='object'||Array.isArray(value))fail('provider_failed');diagnostic.stage('complete');finish(null,value);
           }catch(e){finish(e instanceof BrokerError?e:new BrokerError('provider_failed'));}finally{buffer?.fill(0);}});
-        });req.on('error',()=>finish(new BrokerError('provider_failed')));signal.addEventListener('abort',abort,{once:true});if(signal.aborted||settled)abort();else req.end();
-        }catch{finish(new BrokerError('provider_failed'));req?.destroy();}
-      }));
+        });req.on('error',()=>{diagnostic.stage('transport');finish(new BrokerError('provider_failed'));});signal.addEventListener('abort',abort,{once:true});if(signal.aborted||settled)abort();else req.end();
+        }catch{diagnostic.stage('transport');finish(new BrokerError('provider_failed'));req?.destroy();}
+      }));};
     try{
-      const verify=async()=>{const raw=await fetchGraph(`/${metadata.graphVersion||M.GRAPH_VERSION}/debug_token?${new URLSearchParams({input_token:ownToken.toString('utf8')})}`,appToken);
-        const fresh=D.fresh(raw,binding,metadata,now());M.assertAssetCredential(fresh,asset);return fresh;};
+      const verify=async(afterRead=false)=>{diagnostic.phase(afterRead?'after_credential_http':'before_credential_http');const raw=await fetchGraph(`/${metadata.graphVersion||M.GRAPH_VERSION}/debug_token?${new URLSearchParams({input_token:ownToken.toString('utf8')})}`,appToken);
+        diagnostic.scopes(raw?.data?.scopes);diagnostic.phase(afterRead?'after_credential_validation':'before_credential_validation');const fresh=D.fresh(raw,binding,metadata,now());M.assertAssetCredential(fresh,asset);return fresh;};
       await verify();const proof=createHmac('sha256',ownApp).update(ownToken).digest('hex');
       const query=new URLSearchParams({fields:A.FIELDS[name],limit:'50',appsecret_proof:proof});
       if(after)query.set('after',after);
       if(['insights','actions'].includes(name)){query.set('level','ad');query.set('time_increment','1');query.set('time_range',JSON.stringify({since:payload.startDate,until:payload.endDate}));query.set('breakdowns','publisher_platform,platform_position');}
-      const raw=await fetchGraph(path+'?'+query,ownToken);
-      const results=A.projectPage(name,raw,payload);let nextPageToken=null;
+      diagnostic.phase('data_http');const raw=await fetchGraph(path+'?'+query,ownToken);
+      diagnostic.phase('data_projection');let results;try{results=A.projectPage(name,raw,payload);}catch(error){diagnostic.adsProjection(name,raw,payload);throw error;}let nextPageToken=null;
+      diagnostic.phase('pagination');
       if(raw.paging?.next){let next;try{next=new URL(raw.paging.next);}catch{fail('provider_failed');}
         const cursorAfter=raw.paging?.cursors?.after;
         if(next.protocol!=='https:'||next.hostname!=='graph.facebook.com'||next.port||next.username||next.password||next.hash||next.pathname!==path
@@ -66,15 +69,15 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
           ||cursorAfter.includes(ownToken.toString('utf8'))||cursorAfter.includes(ownApp.toString('ascii')))fail('provider_failed');
         nextPageToken=cursor.seal(JSON.stringify({after:cursorAfter,startDate:payload.startDate??null,endDate:payload.endDate??null,pages:pages+1}),codecScope);
       }
-      let serialized=JSON.stringify(results);
+      diagnostic.phase('reflection');let serialized=JSON.stringify(results);
       // Also reject URL-encoded reflections in an otherwise permitted label or
       // canonical permalink path. Query/fragment secrets were already removed.
       for(let round=0;round<3;round++){
         if(serialized.includes(ownToken.toString('utf8'))||serialized.includes(ownApp.toString('ascii')))fail('provider_failed');
         let decoded;try{decoded=decodeURIComponent(serialized);}catch{break;}if(decoded===serialized)break;serialized=decoded;
       }
-      await verify();check();return A.validatePage(operation,{results,nextPageToken,usage:pacer.usage(scope,observed)},payload);
-    }catch(e){if(e instanceof BrokerError)throw e;throw new BrokerError('provider_failed');}
+      await verify(true);diagnostic.phase('authorization');check();diagnostic.phase('response_validation');return A.validatePage(operation,{results,nextPageToken,usage:pacer.usage(scope,observed)},payload);
+    }catch(e){const error=e instanceof BrokerError?e:new BrokerError('provider_failed');diagnostic.fail(error);throw error;}
     finally{signal.removeEventListener('abort',wipe);wipe();}
   }
   return {read};
