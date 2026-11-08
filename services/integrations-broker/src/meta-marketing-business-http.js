@@ -20,7 +20,7 @@ function createMetaMarketingBusinessHttp({request=https.request,timeoutMs=8000,n
    B.metadata(metadata,binding);
    if(!Array.isArray(assetIds)||!assetIds.length||assetIds.length>100||new Set(assetIds).size!==assetIds.length||assetIds.some(id=>!M.graphId(id))||typeof fetchOnly!=='boolean')fail('invalid_request');
    method='POST';path=`/${version}/${metadata.clientBusinessId}/system_user_access_tokens`;
-   body=Buffer.from(new URLSearchParams({appsecret_proof:proof(),asset:[...assetIds].sort().join(','),scope:B.SCOPES.join(','),set_token_expires_in_60_days:'true',fetch_only:String(fetchOnly)}).toString());
+   body=Buffer.from(new URLSearchParams({appsecret_proof:proof(),asset:[...assetIds].sort().join(','),scope:b.scopes.join(','),set_token_expires_in_60_days:'true',fetch_only:String(fetchOnly)}).toString());
    // Optional system_user_id is deliberately omitted: /me.id is app scoped,
    // and no undocumented identity equivalence is assumed.
   }

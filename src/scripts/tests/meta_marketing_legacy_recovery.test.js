@@ -38,7 +38,8 @@ function fixture({ version = 1 } = {}) {
     MetaMarketingBrokerBinding: { findAll: async options => state.bindings.filter(row => row.enrollment_id === options.where.enrollment_id),
       update: async (patch, options) => { let count = 0; for (const row of state.bindings) if (row.enrollment_id === options.where.enrollment_id && row.meta_connection_id === options.where.meta_connection_id && options.where.mapping_id[Op.in].includes(row.mapping_id)) { Object.assign(row, patch); count++; } return [count]; } },
     MetaMarketingRecovery: {
-      findAll: async options => state.recovery && (options.where.scope_key === undefined || state.recovery.scope_key === options.where.scope_key) && options.where.state[Op.in].includes(state.recovery.state) ? [state.recovery] : [],
+      findAll: async options => state.recovery && (options.where.scope_key === undefined || state.recovery.scope_key === options.where.scope_key)
+        && (options.where.recovery_id ? options.where.recovery_id[Op.in].includes(state.recovery.recovery_id) : options.where.state[Op.in].includes(state.recovery.state)) ? [state.recovery] : [],
       findOne: async options => state.recovery && Object.entries(options.where).every(([key, value]) => state.recovery[key] === value) ? state.recovery : null,
       findByPk: async id => state.recovery?.recovery_id === id ? state.recovery : null,
       update: async (patch, options) => {
@@ -87,7 +88,24 @@ function fixture({ version = 1 } = {}) {
     const active = await guard.activate({ flow: state.flow, enrollment: state.enrollment }, tx);
     assert.equal(active.immutableDigest, pending.immutableDigest); return active;
   }
-  return { guard, state, models, sessions, input, actor, tx, prepare, flow, canonical, activate, blocks, assignments, tick: value => { clock += value; } };
+  // The real prefix/context validator runs against a closed metadata adapter;
+  // these are locator fields, never a substitute Recovery authority proof.
+  const matches = (row, where) => row && Object.entries(where).every(([key, value]) => row[key] === value);
+  models.MetaMarketingEnrollmentRequest.findOne = async options => matches(state.enrollment, options.where) ? state.enrollment : null;
+  models.MetaMarketingOAuthRequest.findOne = async options => matches(state.flow, options.where) ? state.flow : null;
+  models.sequelize = { query: async (sql, options) => {
+    assert.equal(options.transaction, tx);assert.match(sql, /FOR UPDATE NOWAIT$/);
+    const row = sql.includes('`MetaMarketingEnrollmentRequests`') ? state.enrollment
+      : sql.includes('`MetaMarketingOAuthRequests`') ? state.flow
+      : sql.includes('`MetaMarketingRecoveries`') && ['prepared','flow_bound','active'].includes(state.recovery?.state) ? state.recovery : null;
+    return [[...(row?.scope_key === options.bind.scopeKey ? [row] : [])]];
+  } };
+  async function retirement(scope,clinicIds){
+    const block=require('../../services/metaScopeBlock.service'),preparedContext=await block.prepareRetirement({scope,clinicIds,models});
+    await block.lockRetirement(preparedContext,tx,{models});await block.validateRetirement(preparedContext,tx,{models});
+    return {scope,clinicIds,preparedContext};
+  }
+  return { guard, state, models, sessions, input, actor, tx, prepare, flow, canonical, activate, retirement, blocks, assignments, tick: value => { clock += value; } };
 }
 
 test('recovery preparation records only credential presence and SQL digests; admission is off by default', async () => {
@@ -197,25 +215,26 @@ test('a scope withdrawal retires only owned canonical mappings and queues the ex
   const f = fixture(); const proof = await f.activate(); f.state.enabled = false;
   const peers = encode([f.state.connections[0], f.state.aliases.slice(1), f.blocks, f.assignments]);
   const lease = f.state.enrollment.lease_token;
-  const result = await f.guard.retireForScope({ scope: { assignmentScope: 'clinic', clinicId: 1 }, clinicIds: [1] }, f.tx);
+  await assert.rejects(()=>f.guard.retireForScope({scope:{assignmentScope:'clinic',clinicId:1},clinicIds:[1]},f.tx),{code:'meta_security_state_unavailable'});
+  const result = await f.guard.retireForScope(await f.retirement({ assignmentScope: 'clinic', clinicId: 1 },[1]), f.tx);
   assert.equal(result.retired, 1); assert.equal(result.enrollmentsQueued, 1);
   assert.equal(f.state.recovery.state, 'retired'); assert.equal(f.state.enrollment.state, 'revoke_pending');
   assert.equal(f.state.enrollment.attempts, 0); assert.equal(f.state.enrollment.lease_token, lease);
   assert.equal(f.state.bindings[0].state, 'blocked'); assert.equal(f.state.aliases[0].isActive, false);
   assert.equal(encode([f.state.connections[0], f.state.aliases.slice(1), f.blocks, f.assignments]), peers);
-  assert.equal((await f.guard.retireForScope({ scope: { assignmentScope: 'clinic', clinicId: 1 }, clinicIds: [1] }, f.tx)).retired, 0);
+  assert.equal((await f.guard.retireForScope(await f.retirement({ assignmentScope: 'clinic', clinicId: 1 },[1]), f.tx)).retired, 0);
   f.state.enabled = true;
   await assert.rejects(() => f.guard.assertActive({ enrollmentId: proof.enrollmentId }, f.tx), { code: 'meta_recovery_retired' });
 });
 
 test('an unrelated scope does not retire this generation, and only an absent optional DEV table can be skipped', async () => {
   const f = fixture(); await f.activate();
-  assert.equal((await f.guard.retireForScope({ scope: { assignmentScope: 'clinic', clinicId: 99 }, clinicIds: [99] }, f.tx)).retired, 0);
+  assert.equal((await f.guard.retireForScope(await f.retirement({ assignmentScope: 'clinic', clinicId: 99 },[99]), f.tx)).retired, 0);
   f.models.MetaMarketingRecovery.findAll = async () => { throw Object.assign(Error('missing'), { original: { code: 'ER_NO_SUCH_TABLE' } }); };
   const development = createRecovery({ models: f.models, sessions: f.sessions, enabled: () => false, isDevelopment: () => true });
-  assert.equal((await development.retireForScope({ scope: { assignmentScope: 'clinic', clinicId: 1 }, clinicIds: [1] }, f.tx)).reason, 'meta_recovery_dev_table_absent');
+  assert.equal((await development.prepareRetirement({ scope: { assignmentScope: 'clinic', clinicId: 1 }, clinicIds: [1] })).reason, 'meta_recovery_dev_table_absent');
   const staging = createRecovery({ models: f.models, sessions: f.sessions, enabled: () => false, isDevelopment: () => false });
-  await assert.rejects(() => staging.retireForScope({ scope: { assignmentScope: 'clinic', clinicId: 1 }, clinicIds: [1] }, f.tx));
+  await assert.rejects(() => staging.prepareRetirement({ scope: { assignmentScope: 'clinic', clinicId: 1 }, clinicIds: [1] }));
   f.models.MetaMarketingRecovery.findAll = async () => { throw Object.assign(Error('denied'), { original: { code: 'ER_TABLEACCESS_DENIED_ERROR' } }); };
-  await assert.rejects(() => development.retireForScope({ scope: { assignmentScope: 'clinic', clinicId: 1 }, clinicIds: [1] }, f.tx));
+  await assert.rejects(() => development.prepareRetirement({ scope: { assignmentScope: 'clinic', clinicId: 1 }, clinicIds: [1] }));
 });

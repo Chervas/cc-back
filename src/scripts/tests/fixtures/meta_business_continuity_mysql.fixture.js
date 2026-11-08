@@ -4,8 +4,8 @@
 const assert=require('node:assert/strict'),{randomUUID}=require('node:crypto'),{DataTypes:D,Op}=require('sequelize');
 module.exports=async({models,sql,now,advance,report,baseline,untouched})=>{
   const C=require('../../../services/metaMarketingBusiness.contract'),E=require('../../../services/metaMarketingEnrollment.contract'),F=require('../../../services/metaMarketingEffectiveCredential.service'),M=require('../../../../services/integrations-broker/src/meta-marketing-credential-maintenance-contract');
-  const agencyMode=process.env.META_BUSINESS_AGENCY_TEST==='1';
-  const configuration=scopeKey=>agencyMode&&scopeKey==='group:29'?{issuerKind:C.A.ISSUER,issuerBusinessId:'348',configId:'222',graphVersion:'v27.0'}:{issuerKind:'BISU',issuerBusinessId:null,configId:'111',graphVersion:'v24.0'};
+  const agencyMode=process.env.META_BUSINESS_AGENCY_TEST==='1',permissionProfile=process.env.META_BUSINESS_PAID_PROFILE_TEST==='1'?'paid-leads-v2':'legacy-v1';
+  const configuration=scopeKey=>({...agencyMode&&scopeKey==='group:29'?{issuerKind:C.A.ISSUER,issuerBusinessId:'348',configId:'222',graphVersion:'v27.0'}:{issuerKind:'BISU',issuerBusinessId:null,configId:'111',graphVersion:'v24.0'},permissionProfile});
   for(const[name,file]of[['MetaMarketingBusinessHandover','metamarketingbusinesshandover'],['MetaMarketingCredentialMaintenance','metamarketingcredentialmaintenance'],['MetaMarketingBusinessDrain','metamarketingbusinessdrain']])models[name]=require('../../../../models/'+file)(sql,D);
   await require('../../../../migrations/20261107223000-create-meta-marketing-business-continuity').up(sql.getQueryInterface(),require('sequelize'));
   models.UsuarioClinica=sql.define('BusinessTestMembership',{id:{type:D.INTEGER,primaryKey:true,autoIncrement:true},id_usuario:D.INTEGER,id_clinica:D.INTEGER,rol_clinica:D.STRING,estado_invitacion:D.STRING},{timestamps:false});await models.UsuarioClinica.sync();
@@ -41,8 +41,8 @@ module.exports=async({models,sql,now,advance,report,baseline,untouched})=>{
       }else if(name==='finish'){
         if(r.plan==='insufficient'){r.status='rejected';throw error('oauth_credentials_incomplete');}
         const old=grants.get(r.oldEnrollmentId),group=old.row.scope_key.split(':')[1],subjectId=r.plan==='identity'?old.row.meta_user_id:'8'+group;
-        const metadata=r.issuerKind===C.A.ISSUER&&r.plan!=='wrong_issuer'?{appId:old.row.app_id,subjectId,tokenType:'SYSTEM_USER',issuerKind:C.A.ISSUER,issuerBusinessId:r.plan==='wrong_provider'?'999':r.issuerBusinessId,systemUserId:subjectId,configId:r.configId,graphVersion:r.graphVersion,scopes:[...C.A.SCOPES],expiresAt:+now()+60*86400000,dataAccessExpiresAt:null,granularScopes:[]}
-          :{appId:old.row.app_id,subjectId,tokenType:'SYSTEM_USER',clientBusinessId:'9'+group,configId:r.configId,graphVersion:r.graphVersion,scopes:[...C.B.SCOPES],expiresAt:+now()+60*86400000,dataAccessExpiresAt:null,granularScopes:[]};
+        const metadata=r.issuerKind===C.A.ISSUER&&r.plan!=='wrong_issuer'?{appId:old.row.app_id,subjectId,tokenType:'SYSTEM_USER',issuerKind:C.A.ISSUER,issuerBusinessId:r.plan==='wrong_provider'?'999':r.issuerBusinessId,systemUserId:subjectId,configId:r.configId,graphVersion:r.graphVersion,scopes:[...C.scopesFor(C.A.ISSUER,permissionProfile)],expiresAt:+now()+60*86400000,dataAccessExpiresAt:null,granularScopes:[]}
+          :{appId:old.row.app_id,subjectId,tokenType:'SYSTEM_USER',clientBusinessId:'9'+group,configId:r.configId,graphVersion:r.graphVersion,scopes:[...C.scopesFor('BISU',permissionProfile)],expiresAt:+now()+60*86400000,dataAccessExpiresAt:null,granularScopes:[]};
         r.candidate={versionId:r.handoverId,digest:E.hash('FICTITIOUS_BUSINESS_'+r.handoverId),metadata};r.status='staged';
         if(r.plan==='processing'){r.delayedCandidate=r.candidate;r.candidate=null;r.status='processing';r.remainingPolls=2;}
         data=businessView(r);
@@ -109,6 +109,30 @@ module.exports=async({models,sql,now,advance,report,baseline,untouched})=>{
   await models.UsuarioClinica.create({id_usuario:99,id_clinica:72,rol_clinica:'agencia',estado_invitacion:'aceptada'});
   report.checks.push('Verified non-global client owner/agency requires membership in both Beta clinics; cancelled authorization, reused USER identity and insufficient Business permissions preserve original working grants');
   const newIds=[];
+  const withRetirementTransaction=async(options,work)=>{
+    const scope={...options.scope,scopeKey:options.scope.scopeKey||options.scope.assignmentScope+':'+(options.scope.assignmentScope==='group'?options.scope.groupId:options.scope.clinicId)};
+    let authorizationCalls=0;
+    const authorize=async transaction=>{
+      const query={transaction,lock:transaction.LOCK.UPDATE,raw:true,logging:false};
+      const result=await require('../../../lib/oauthMarketingScopeAccess').authorizeRequestedMarketingConnectionScope({userId:options.actorId,access:'write',assignmentScopeRaw:scope.assignmentScope,
+        clinicIdRaw:scope.assignmentScope==='clinic'?scope.clinicId:null,groupIdRaw:scope.assignmentScope==='group'?scope.groupId:null,
+        findClinicGroupId:async id=>(await models.Clinica.findByPk(id,{...query,attributes:['grupoClinicaId']}))?.grupoClinicaId,
+        findGroupClinicIds:async id=>(await models.Clinica.findAll({...query,attributes:['id_clinica'],where:{grupoClinicaId:id},order:[['id_clinica','ASC']]})).map(row=>row.id_clinica),
+        authorizeClinicIds:args=>require('../../../lib/marketingScopeAccess').hasMarketingClinicScopeAccess({...args,membershipModel:{findAll:opts=>models.UsuarioClinica.findAll({...opts,...query})}})});
+      assert.equal(result.assignmentScope,scope.assignmentScope);authorizationCalls++;
+      if(authorizationCalls%2===0&&options.afterFreshAuthorization)await options.afterFreshAuthorization({transaction,authorizationCalls});
+      return scope;
+    };
+    return require('../../../services/oauthScopedDisconnect.service').withMetaRetirementTransaction({...options,scope,models,authorize},work);
+  };
+  const enterprise=async phase=>{
+    if(process.env.META_MARKETING_ENTERPRISE_LOCK_TEST!=='1')return;
+    const fs=require('node:fs'),path=require('node:path'),filename=process.env.META_ENTERPRISE_BASELINES_JSON;
+    assert(path.isAbsolute(filename)&&filename.startsWith('/home/ubuntu/qa-evidence/'));
+    const baselines=JSON.parse(fs.readFileSync(filename,'utf8'));
+    await require('./meta_marketing_enterprise_lock_order_mysql.fixture')({models,sql,now,report,initial,currentIds:newIds,baseline,untouched,phase,baselines,withRetirementTransaction});
+  };
+  await enterprise('pre_handover');
   for(let index=0;index<2;index++){
     const start=await begin(inputs[index]);await callback(start);let overview=await service.overview(inputs[index]);assert.equal(overview.pending.canConfirm,true);assert.equal(overview.pending.assetCount,index===0?2:4);
     await assert.rejects(service.confirm(inputs[index],start.requestId,confirmationFrom(overview.pending,{subjectId:'999'})),{code:'meta_business_identity_mismatch'});
@@ -139,6 +163,7 @@ module.exports=async({models,sql,now,advance,report,baseline,untouched})=>{
   const maintenance=require('../../../services/metaMarketingCredentialMaintenance.service').createMaintenance({models,client,now,enabled:()=>true});
   const drainAudit=async()=>{const repo=require('../../../services/platformAudit.repository'),event=require('../../../../services/platform-audit/src/event');const result=await repo.drain(repo.createRepository(models.PlatformAuditEvent),{write:async row=>({key:event.keyFor(row),digest:row.digest,versionId:'FICTITIOUS_BUSINESS_AUDIT_ACK'})},{now,limit:100});assert.equal(result.failed,0);};
   await drainAudit();
+  await enterprise('post_handover');
   if(process.env.META_MARKETING_POST_HANDOVER_LOCK_TEST==='1')await require('./meta_marketing_post_handover_lock_mysql.fixture')({models,sql,now,report,initial,currentIds:newIds,baseline,untouched});
   if(process.env.META_MARKETING_ORDINARY_OAUTH_LOCK_TEST==='1')await require('./meta_marketing_ordinary_oauth_order_mysql.fixture')({models,sql,now,advance,report,baseline,untouched});
   await drainAudit();advance(46*86400000+1);temporaryMaintenance=true;
@@ -164,6 +189,7 @@ module.exports=async({models,sql,now,advance,report,baseline,untouched})=>{
   const previous=previousStatus.get(initial[0].enrollment_id),lineage=await require('../../../services/metaMarketingBusinessSource.service').createSource({models,now}).getConfirmedHandover({enrollmentId:previous.enrollmentId,connectionId:previous.connectionId,epoch:previous.epoch,versionId:previous.versionId,scopeKey:previous.scopeKey});
   assert.equal(lineage.currentStatus.enrollmentId,reconsent.requestId);assert(policy.handoverResolution(previousAlerts.get(previous.enrollmentId),lineage,+now()));
   report.checks.push('Metadata-only confirmed handover lineage resolves the exact prior credential incident across a second authorization without scope-only matching, provider calls, duplicate mail or historical lead replay; a wrong prior version is rejected');
+  await drainAudit();await enterprise('lineage');
   await drainAudit();advance(46*86400000+1);healthPlan='healthy';
   const otherWorker=require('../../../services/metaMarketingCredentialMaintenance.service').createMaintenance({models,client,now,enabled:()=>true});
   await Promise.all([maintenance.run(),otherWorker.run()]);
@@ -177,13 +203,13 @@ module.exports=async({models,sql,now,advance,report,baseline,untouched})=>{
   const nextAttempt=+capped.next_attempt_at;await maintenance.reconcile(capped.maintenance_id);assert.equal((await models.MetaMarketingCredentialMaintenance.findByPk(capped.maintenance_id)).attempts,5);assert.equal(+(await models.MetaMarketingCredentialMaintenance.findByPk(capped.maintenance_id)).next_attempt_at,nextAttempt);
   const healthyOld=await credentials.getCredentialStatus(await models.MetaMarketingEnrollmentRequest.findByPk(newIds[1],{raw:true}));assert.equal(healthyOld.versionId,beforeFailures);assert.deepEqual(policy.alertsFromStatus(healthyOld,+now(),await maintenance.getMaintenanceStatus(await models.MetaMarketingEnrollmentRequest.findByPk(newIds[1],{raw:true}))),[]);
   report.checks.push('Two concurrent SQL workers claim one provider operation per enrollment/version; repeated temporary renewal failure reuses one command, observes1/2/4/8/24hour backoff and stops at5 attempts per24hours, retaining a healthy usable old credential without premature alerts');
-  await sql.transaction(async transaction=>{
-    await require('../../../services/metaMarketingLegacyRecovery.service').createRecovery({models,now,enabled:()=>true}).retireForScope({scope:{assignmentScope:'group',groupId:28},clinicIds:[1,70]},transaction);
-    await require('../../../services/metaMarketingBusinessSource.service').createSource({models,now}).retireForScope({scope:{assignmentScope:'group',groupId:28},clinicIds:[1,70]},transaction);
+  await withRetirementTransaction({scope:{assignmentScope:'group',groupId:28},connectionId:158,actorId:99},async({transaction,preparedContext,inheritedClinicIds})=>{
+    await require('../../../services/metaMarketingLegacyRecovery.service').createRecovery({models,now,enabled:()=>true}).retireForScope({scope:{assignmentScope:'group',groupId:28},clinicIds:inheritedClinicIds,preparedContext},transaction);
+    await require('../../../services/metaMarketingBusinessSource.service').createSource({models,now}).retireForScope({scope:{assignmentScope:'group',groupId:28},clinicIds:inheritedClinicIds,preparedContext},transaction);
   });
   assert.equal((await service.overview(actor(28))).canBegin,false);await assert.rejects(service.begin(actor(28)),{code:'meta_business_scope_forbidden'});
   assert.equal(await require('../../../services/metaConnectionMetadata.service').createMetaDataAccessRepository(models,{now,enabled:()=>true})({scopeKey:'group:28',clinicIds:[1,70]}),null);
   assert.equal((await models.MetaMarketingEnrollmentRequest.findByPk(newIds[1])).state,'active');await sql.transaction(transaction=>require('../../../services/metaMarketingEnrollmentBinding.service').createBindings({models,now}).committed(newIds[1],transaction));assert.equal(await baseline(),untouched);
   report.checks.push('Confirmed permission loss preserves authorization history and supports fresh verified client reconsent into the same Business canonical identity without Root preparation; explicit scope withdrawal stays irreversible and cannot revive assets or affect the other Beta group/WhatsApp');
-  report.business={scopes:2,confirmedHandovers:3,bsIssuer:agencyMode?C.A.ISSUER:'BISU',bsAssets:4,oldState:'superseded',waUnchanged:true,providerRequests:0,liveSql:false};report.pool={inUse:sql.connectionManager.pool.using,waiting:sql.connectionManager.pool.waiting};assert.deepEqual(report.pool,{inUse:0,waiting:0});
+  report.business={scopes:2,confirmedHandovers:3,permissionProfile,bsIssuer:agencyMode?C.A.ISSUER:'BISU',bsAssets:4,oldState:'superseded',waUnchanged:true,providerRequests:0,liveSql:false};report.pool={inUse:sql.connectionManager.pool.using,waiting:sql.connectionManager.pool.waiting};assert.deepEqual(report.pool,{inUse:0,waiting:0});
 };

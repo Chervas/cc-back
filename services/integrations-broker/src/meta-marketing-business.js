@@ -30,7 +30,7 @@ function createMetaMarketingBusiness({store,epochs,enrollment,oauth,secrets,http
    newEnrollment:row.state==='active'?enrollment.receiptForEnrollment(row.id,base):null,handoverApplied:row.state==='active',drain:drain(row)};
  }
  async function execute({request,principal,binding:base,policy}){
-  const existingRow=get(request.payload.handoverId),modeConfig=I.selected(base,config),binding=I.derive(base,config,existingRow?JSON.parse(existingRow.assets):null),name=B.validate(request.operation,request.payload),p=request.payload,id=p.handoverId;I.authorize({request,principal,binding},environment);
+  const existingRow=get(request.payload.handoverId),binding=existingRow?I.pinned(base,config,existingRow.config_digest,JSON.parse(existingRow.assets)):I.derive(base,config),modeConfig=I.bindingFor(binding).businessLogin,name=B.validate(request.operation,request.payload),p=request.payload,id=p.handoverId;I.authorize({request,principal,binding},environment);
   let row=owned(request,get(id));if(closed)fail('connection_blocked');
   if(name==='status'&&!row)return {requestId:request.requestId,data:view(request,base,null),replayed:false};
   if(name!=='begin'&&!row)fail('scope_denied');
@@ -46,7 +46,7 @@ function createMetaMarketingBusiness({store,epochs,enrollment,oauth,secrets,http
    if(signal.aborted||closed)fail('provider_timeout');const current=policy.principals.find(v=>v.id===principal.id);
    if(!current?.enabled||C.hash(JSON.stringify([current.id,current.keyId,current.publicKey]))!==authPin)fail('scope_denied');
    require('./auth').authorize(current,request,policy);const currentBase=policy.connections.find(v=>v.connectionRef===base.connectionRef);
-   if(K.fingerprint(I.derive(currentBase,config))!==configPin)fail('scope_denied');
+   if(K.fingerprint(I.pinned(currentBase,config,configPin))!==configPin)fail('scope_denied');
    store.connection(base.connectionRef,now());store.assertAssetActive(request);row=owned(request,get(id));
    if(!row||row.config_digest!==configPin||!terminal&&['active','aborted','rejected'].includes(row.state))fail('oauth_flow_interrupted');
    return old?original(request,base,row):null;

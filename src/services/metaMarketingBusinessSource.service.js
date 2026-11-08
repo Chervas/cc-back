@@ -3,6 +3,7 @@ const C=require('./metaMarketingBusiness.contract');
 const plain=row=>row?.get?row.get({plain:true}):row;
 function createSource({models,now=()=>new Date()}){
   const opts=transaction=>({raw:true,logging:false,...(transaction?{transaction,lock:transaction.LOCK.UPDATE}:{})});
+  const order=require('./metaMarketingTransactionOrder.service').createOrder({models,unavailable:()=>C.fail('meta_business_unavailable',503)});
   async function forEnrollment(enrollment,transaction){
     if(!models.MetaMarketingBusinessHandover)return null;
     const raw=plain(await models.MetaMarketingBusinessHandover.findByPk(enrollment.enrollment_id,opts(transaction)));if(!raw)return null;
@@ -22,11 +23,21 @@ function createSource({models,now=()=>new Date()}){
       issuerKind:row.issuer_kind,issuerBusinessId:row.issuer_business_id,configId:row.config_id,graphVersion:row.graph_version};
     return {row,flow,candidate:row.candidate,authority};
   }
-  async function retireForScope({scope,clinicIds},transaction){
+  async function prepareRetirement({scope,clinicIds}){
+    if(!models.MetaMarketingBusinessHandover)return {rows:[]};
+    const key=scope?.assignmentScope==='group'?'group:'+Number(scope.groupId):scope?.assignmentScope==='clinic'?'clinic:'+Number(scope.clinicId):null;
+    if(!/^(clinic|group):[1-9][0-9]{0,9}$/.test(key||'')||!Array.isArray(clinicIds))C.fail('meta_business_scope_changed',409);
+    const rows=await models.MetaMarketingBusinessHandover.findAll({attributes:['handover_id','scope_key','clinic_ids','app_id','old_enrollment_id','new_enrollment_id','state','retired_at'],where:{state:'active',retired_at:null},order:[['handover_id','ASC']],limit:1001,raw:true,logging:false});
+    if(rows.length>1000)C.fail();return {rows:rows.filter(row=>row.scope_key===key||C.clinics(row.clinic_ids).some(id=>clinicIds.includes(id)))};
+  }
+  async function retireForScope({scope,clinicIds,preparedContext},transaction){
     if(!models.MetaMarketingBusinessHandover)return {retired:0,enrollmentsQueued:0};
     const key=scope?.assignmentScope==='group'?'group:'+Number(scope.groupId):scope?.assignmentScope==='clinic'?'clinic:'+Number(scope.clinicId):null;
     if(!/^(clinic|group):[1-9][0-9]{0,9}$/.test(key||'')||!Array.isArray(clinicIds))C.fail('meta_business_scope_changed',409);
-    const rows=await models.MetaMarketingBusinessHandover.findAll({...opts(transaction),where:{state:'active',retired_at:null},order:[['handover_id','ASC']],limit:1001});
+    // Every caller must enter through the complete scope/enrollment prefix.
+    // Falling back to a global H lock here would invert the normal reader.
+    const selected=require('./metaScopeBlock.service').retirementRows(preparedContext,'business',transaction,{scope,clinicIds});
+    const rows=selected.ids.length?await models.MetaMarketingBusinessHandover.findAll({...opts(transaction),where:{handover_id:selected.ids,state:'active',retired_at:null},order:[['handover_id','ASC']],limit:1001}):[];
     if(rows.length>1000)C.fail();let retired=0,enrollmentsQueued=0;
     for(const input of rows){const row=C.request(plain(input));if(row.scope_key!==key&&!row.clinicIds.some(id=>clinicIds.includes(id)))continue;
       const enrollment=plain(await models.MetaMarketingEnrollmentRequest.findByPk(row.handover_id,opts(transaction)));if(!enrollment||!['active','superseded','revoke_pending','revoked'].includes(enrollment.state))C.fail('meta_business_scope_changed',409);
@@ -39,14 +50,24 @@ function createSource({models,now=()=>new Date()}){
       await models.MetaMarketingBusinessHandover.update({retired_at:now()},{where:{handover_id:row.handover_id,retired_at:null},transaction,logging:false});retired++;
     }return {retired,enrollmentsQueued};
   }
-  async function getConfirmedHandover(previous,{transaction}={}){
-    if(!transaction)return models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},value=>getConfirmedHandover(previous,{transaction:value}));
+  async function prepareConfirmedHandover(previous){
     if(!models.MetaMarketingBusinessHandover||!C.UUID.test(previous?.enrollmentId)||!C.UUID.test(previous?.versionId)||!C.positive(previous.connectionId)
       ||!Number.isSafeInteger(previous.epoch)||previous.epoch<0||!/^(clinic|group):[1-9][0-9]{0,9}$/.test(previous.scopeKey||''))return null;
+    return order.prepareEnrollment(previous.enrollmentId,{scopeKey:previous.scopeKey});
+  }
+  async function getConfirmedHandover(previous,{transaction,prepared}={}){
+    if(!models.MetaMarketingBusinessHandover||!C.UUID.test(previous?.enrollmentId)||!C.UUID.test(previous?.versionId)||!C.positive(previous.connectionId)
+      ||!Number.isSafeInteger(previous.epoch)||previous.epoch<0||!/^(clinic|group):[1-9][0-9]{0,9}$/.test(previous.scopeKey||''))return null;
+    if(!transaction){const captured=prepared||await prepareConfirmedHandover(previous);if(!captured)return null;return models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},value=>getConfirmedHandover(previous,{transaction:value,prepared:captured}));}
+    // Callers with their own incident transaction prepare before opening it.
+    // A locator is not authority: every historical/current receipt check below
+    // still runs under the current Enrollment -> ancestors -> H prefix.
+    if(!prepared||prepared.enrollmentId!==previous?.enrollmentId||prepared.observed.scopeKey!==previous.scopeKey)C.fail('meta_business_unavailable',503);
+    await order.lockPrepared(prepared,transaction);
     let id=previous.enrollmentId;const chain=[];
     for(let n=0;n<16;n++){
       const old=plain(await models.MetaMarketingEnrollmentRequest.findByPk(id,opts(transaction)));if(!old||old.state!=='superseded'||old.scope_key!==previous.scopeKey)return null;
-      const rows=await models.MetaMarketingBusinessHandover.findAll({...opts(transaction),where:{old_enrollment_id:id,state:'active'},limit:2});if(rows.length!==1)return null;
+      const rows=await models.MetaMarketingBusinessHandover.findAll({...opts(transaction),where:{scope_key:previous.scopeKey,old_enrollment_id:id,state:'active'},indexHints:[{type:'FORCE',values:['cc_meta_business_latest']}],limit:2});if(rows.length!==1)return null;
       let row,remote;try{row=C.request(plain(rows[0]));remote=C.receipt(JSON.parse(row.owner_receipt),row);}catch{return null;}
       if(!remote.handoverApplied||row.retired_at!==null||row.source_snapshot!==JSON.stringify(C.freeze(old)))return null;
       if(n===0&&(Number(row.expected_epoch)!==previous.epoch||row.expected_version_id!==previous.versionId||Number(old.meta_connection_id)!==previous.connectionId))return null;
@@ -59,6 +80,6 @@ function createSource({models,now=()=>new Date()}){
       return {currentStatus,maintenanceStatus,proof:{oldEnrollmentId:previous.enrollmentId,oldEpoch:previous.epoch,oldVersionId:previous.versionId,newEnrollmentId:id,oldConnectionId:previous.connectionId,newConnectionId:Number(current.meta_connection_id),scopeKey:previous.scopeKey,chainDigest:C.hash(JSON.stringify(chain))}};
     }return null;
   }
-  return {forEnrollment,retireForScope,getConfirmedHandover};
+  return {forEnrollment,prepareRetirement,retireForScope,prepareConfirmedHandover,getConfirmedHandover};
 }
 module.exports={createSource};

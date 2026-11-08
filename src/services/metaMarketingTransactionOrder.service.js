@@ -14,6 +14,8 @@ const E_FIELDS = ['enrollment_id', 'flow_id', 'scope_key', 'app_id'];
 const F_FIELDS = ['flow_id', 'scope_key', 'app_id'];
 const H_FIELDS = ['handover_id', 'new_enrollment_id', 'old_enrollment_id', 'scope_key', 'app_id'];
 const tuple = (row, fields) => JSON.stringify(fields.map(key => row?.[key]));
+const changed = () => { const error=Object.assign(Error('meta_marketing_order_changed'),{code:'meta_marketing_order_changed',httpStatus:503});error[RETRY]=true;throw error; };
+const isChanged = error => error?.[RETRY] === true;
 function createOrder({ models, authorize, unavailable, missingFlow = unavailable }) {
   const E = models.MetaMarketingEnrollmentRequest, F = models.MetaMarketingOAuthRequest, H = models.MetaMarketingBusinessHandover;
   const tx = work => models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, work);
@@ -76,6 +78,83 @@ function createOrder({ models, authorize, unavailable, missingFlow = unavailable
     if (tuple(head, E_FIELDS) !== tuple(observed.head, E_FIELDS)) throw RETRY;
     return { linked, head };
   }
+  async function prepareEnrollment(enrollmentId, { scopeKey = null, appId = null } = {}) {
+    if (!C.UUID.test(enrollmentId)) return unavailable();
+    const hint = plain(await E.findByPk(enrollmentId, eOptions));
+    if (!hint) return null;
+    if (scopeKey !== null && hint.scope_key !== scopeKey || appId !== null && hint.app_id !== appId) return unavailable();
+    const observed = await observe(hint.scope_key, hint.flow_id, hint.app_id);
+    if (id(observed.linked) !== enrollmentId) return unavailable();
+    return { enrollmentId, observed };
+  }
+  async function lockPrepared(prepared, transaction) {
+    if (!transaction?.LOCK?.UPDATE || transaction.finished || !prepared?.observed) return unavailable();
+    try {
+      await lockPrefix(prepared.observed, transaction);
+      const current = await birthCheck(prepared.observed, transaction);
+      if (id(current.linked) !== prepared.enrollmentId) throw RETRY;
+      return current;
+    } catch (error) {
+      // Existing caller-owned transactions cannot restart after an earlier
+      // incident/audit operation. Deny temporarily and let their owner roll
+      // back; never turn stale metadata or storage failure into withdrawal.
+      if (error === RETRY) return unavailable();
+      throw error;
+    }
+  }
+  async function prepareScopes(scopeKeys,enrollmentIds=[]){
+    if(!Array.isArray(scopeKeys)||scopeKeys.length>1000||!Array.isArray(enrollmentIds)||enrollmentIds.length>1000)return unavailable();
+    const scopes=new Map();
+    for(const scopeKey of [...new Set(scopeKeys)].sort()){
+      if(!/^(clinic|group):[1-9][0-9]{0,9}$/.test(scopeKey))return unavailable();
+      const head=E?plain(await E.findOne({...eOptions,where:{scope_key:scopeKey},order:eLatest})):null;
+      const flowHint=F?plain(await F.findOne({...fOptions,where:{scope_key:scopeKey},order:latest})):null;
+      const observed=head?await observe(scopeKey,head.flow_id,head.app_id):flowHint?await observe(scopeKey,flowHint.flow_id,flowHint.app_id):null;
+      if(observed&&flowHint&&flowHint.app_id!==observed.appId)return unavailable();
+      scopes.set(scopeKey,{scopeKey,head:observed?.head??null,flowHint,observed,prefix:observed?[...observed.prefix]:[],edges:observed?[...observed.edges]:[]});
+    }
+    for(const enrollmentId of [...new Set(enrollmentIds)].sort()){
+      const prepared=await prepareEnrollment(enrollmentId);if(!prepared)return unavailable();
+      const observed=prepared.observed,item=scopes.get(observed.scopeKey);if(!item||!item.observed||tuple(item.head,E_FIELDS)!==tuple(observed.head,E_FIELDS)||item.observed.appId!==observed.appId)return unavailable();
+      for(const row of observed.prefix)if(!item.prefix.some(value=>value.enrollment_id===row.enrollment_id))item.prefix.push(row);
+      for(const row of observed.edges)if(!item.edges.some(value=>value.handover_id===row.handover_id))item.edges.push(row);
+    }
+    return {scopes:[...scopes.values()]};
+  }
+  async function lockScopes(prepared,transaction){
+    if(!prepared?.scopes||!transaction?.LOCK?.UPDATE||transaction.finished)return unavailable();
+    // Across an overlapping scope set, finish EVERY E prefix before any H,
+    // User/Clinic, mapping or tombstone lock. Never acquire an absent E gap.
+    for(const item of prepared.scopes)for(const hint of item.prefix){
+      const row=plain(await E.findByPk(hint.enrollment_id,{...eOptions,...locked(transaction)}));
+      if(!row||tuple(row,E_FIELDS)!==tuple(hint,E_FIELDS))changed();
+    }
+    for(const item of prepared.scopes)for(const hint of item.edges){
+      const row=plain(await H.findByPk(hint.handover_id,{attributes:H_FIELDS,...locked(transaction)}));
+      if(!row||tuple(row,H_FIELDS)!==tuple(hint,H_FIELDS))changed();
+    }
+    for(const item of prepared.scopes)if(item.flowHint){
+      const row=plain(await F.findByPk(item.flowHint.flow_id,{...fOptions,...locked(transaction)}));
+      if(!row||tuple(row,F_FIELDS)!==tuple(item.flowHint,F_FIELDS))changed();
+    }
+  }
+  async function validateScopes(prepared,transaction){
+    // Mixed existing/no-journal scopes cannot share a stale first RR snapshot.
+    // After fresh Clinic locks, use current NOWAIT reads: never wait for a late
+    // E/Flow owner that may itself be waiting for our Clinic locks. Empty ranges
+    // are fenced only NOW, in the creator's Clinic -> first-Flow order.
+    async function current(table,fields,order,scopeKey){
+      try{
+        const [rows]=await models.sequelize.query('SELECT '+fields.map(field=>'`'+field+'`').join(',')+' FROM `'+table+'` WHERE `scope_key`=$scopeKey ORDER BY '+order+' LIMIT 1 FOR UPDATE NOWAIT',
+          {bind:{scopeKey},transaction,logging:false});return plain(rows[0])||null;
+      }catch(error){if((error?.original?.code||error?.parent?.code||error?.code)==='ER_LOCK_NOWAIT')changed();throw error;}
+    }
+    for(const item of prepared.scopes){
+      const head=E?await current('MetaMarketingEnrollmentRequests',E_FIELDS,'`requested_at` DESC,`enrollment_id` DESC',item.scopeKey):null;
+      const flow=F?await current('MetaMarketingOAuthRequests',F_FIELDS,'`requested_at` DESC,`flow_id` DESC',item.scopeKey):null;
+      if(tuple(head,E_FIELDS)!==tuple(item.head,E_FIELDS)||tuple(flow,F_FIELDS)!==tuple(item.flowHint,F_FIELDS))changed();
+    }
+  }
   async function flowAttempt(input, flowId, work) {
     const hint = plain(await F.findByPk(flowId, fOptions));
     if (!hint || input && hint.scope_key !== input.scopeKey) return tx(async transaction => {
@@ -136,6 +215,6 @@ function createOrder({ models, authorize, unavailable, missingFlow = unavailable
       return work({ transaction, enrollment: current.linked, input: pinned });
     });
   });
-  return { flow, scope, enrollment };
+  return { flow, scope, enrollment, prepareEnrollment, lockPrepared,prepareScopes,lockScopes,validateScopes,changed,isChanged };
 }
-module.exports = { createOrder, pinInput };
+module.exports = { createOrder, pinInput, changed, isChanged };

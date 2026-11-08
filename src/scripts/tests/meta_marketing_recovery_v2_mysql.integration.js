@@ -229,7 +229,9 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   assert.equal((await models.MetaMarketingRecovery.findByPk(records[0].recovery_id)).canonical_connection_id,null);
   await models.MetaConnection.create({id:160,userId:null,metaUserId:'201',accessToken:null,credentials_external:true,broker_app_id:'101'});
   await assert.rejects(committed(arriaga.enrollment_id));await models.MetaConnection.destroy({where:{id:160}});await committed(arriaga.enrollment_id);
-  const retired=await sql.transaction(t=>guard.retireForScope({scope:{assignmentScope:'group',groupId:29},clinicIds:[66,72]},t));assert.equal(retired.retired,1);
+  const block=require('../../services/metaScopeBlock.service'),retireArgs={scope:{assignmentScope:'group',groupId:29},clinicIds:[66,72]};
+  const preparedContext=await block.prepareRetirement({...retireArgs,models});
+  const retired=await sql.transaction(async t=>{await block.lockRetirement(preparedContext,t,{models});await block.validateRetirement(preparedContext,t,{models});return guard.retireForScope({...retireArgs,preparedContext},t);});assert.equal(retired.retired,1);
   assert.equal(retired.blockedBindings,4);assert.equal(retired.deactivatedMappings,4);assert.equal((await models.MetaMarketingEnrollmentRequest.findByPk(bs.enrollment_id)).state,'revoke_pending');
   await committed(arriaga.enrollment_id);assert.equal((await models.MetaMarketingRecovery.findByPk(records[0].recovery_id)).state,'active');
   assert.equal((await models.ClinicMetaAsset.findByPk(361)).isActive,true);assert.equal(await baseline(),untouched);

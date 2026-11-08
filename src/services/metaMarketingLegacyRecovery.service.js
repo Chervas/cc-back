@@ -475,7 +475,17 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     if (row.state === 'retired') return dto(row);
     const retired = await update(row, { state: 'retired', retired_at: now() }, transaction); return dto(retired);
   }
-  async function retireForScope({ scope, clinicIds }, transaction) {
+  async function prepareRetirement({scope,clinicIds}){
+    if(!model)return {rows:[]};
+    const scopeKey=scope?.assignmentScope==='group'&&POSITIVE(Number(scope.groupId))?'group:'+Number(scope.groupId):scope?.assignmentScope==='clinic'&&POSITIVE(Number(scope.clinicId))?'clinic:'+Number(scope.clinicId):null;
+    if(!scopeKey||!Array.isArray(clinicIds)||clinicIds.some(id=>!POSITIVE(Number(id))))fail('meta_recovery_invalid');
+    let rows;try{rows=await model.findAll({attributes:['recovery_id','scope_key','clinic_ids','app_id','flow_id','enrollment_id','snapshot_digest','state'],where:{state:{[Op.in]:['prepared','flow_bound','active']}},order:[['recovery_id','ASC']],limit:1001,raw:true,logging:false});}
+    catch(error){const code=error?.original?.code||error?.parent?.code||error?.code;if(!enabled()&&isDevelopment()&&code==='ER_NO_SUCH_TABLE')return {rows:[],skipped:true,reason:'meta_recovery_dev_table_absent'};throw error;}
+    if(!Array.isArray(rows)||rows.length>1000)fail('meta_recovery_unavailable');
+    const affected=new Set(clinicIds.map(Number));if(scope.assignmentScope==='clinic')affected.add(Number(scope.clinicId));
+    return {rows:rows.filter(row=>{let members;try{members=ids(JSON.parse(row.clinic_ids));}catch{fail('meta_recovery_invalid');}return row.scope_key===scopeKey||members.some(id=>affected.has(id));})};
+  }
+  async function retireForScope({ scope, clinicIds, preparedContext }, transaction) {
     const result = { retired: 0, enrollmentsQueued: 0, blockedBindings: 0, deactivatedMappings: 0 };
     if (!model) return result;
     const scopeKey = scope?.assignmentScope === 'group' && POSITIVE(Number(scope.groupId)) ? 'group:' + Number(scope.groupId)
@@ -484,16 +494,9 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     const affected = new Set(clinicIds.map(Number));
     if (scope.assignmentScope === 'clinic') affected.add(Number(scope.clinicId));
     const o = options(transaction); let rows;
-    try {
-      rows = await model.findAll({ ...o, where: { state: { [Op.in]: ['prepared', 'flow_bound', 'active'] } },
-      order: [['recovery_id', 'ASC']], limit: 1001 });
-    } catch (error) {
-      // An unapplied optional DEV migration cannot contain prior authority.
-      // Never conceal a missing table in CRM or any other SQL failure.
-      const code = error?.original?.code || error?.parent?.code || error?.code;
-      if (!enabled() && isDevelopment() && code === 'ER_NO_SUCH_TABLE') return { ...result, skipped: true, reason: 'meta_recovery_dev_table_absent' };
-      throw error;
-    }
+    const selected=require('./metaScopeBlock.service').retirementRows(preparedContext,'recovery',transaction,{scope,clinicIds});
+    if(selected.skipped)return {...result,skipped:true,reason:selected.reason};
+    rows=selected.ids.length?await model.findAll({...o,where:{recovery_id:{[Op.in]:selected.ids},state:{[Op.in]:['prepared','flow_bound','active']}},order:[['recovery_id','ASC']],limit:1001}):[];
     if (!Array.isArray(rows) || rows.length > 1000) fail('meta_recovery_unavailable');
     for (const value of rows) {
       let row = plain(value); let members, mappings;
@@ -511,7 +514,9 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
           // recovery snapshot as history. Withdrawal retires the history here;
           // the independent Business authority closes the current generation.
           const H=models.MetaMarketingBusinessHandover;
-          const handover=H&&plain(await H.findOne({...o,where:{old_enrollment_id:enrollment.enrollment_id,state:'active'}}));
+          // Scope-leading access keeps a historical lookup from locking other
+          // tenants' handovers during an otherwise independent withdrawal.
+          const handover=H&&plain(await H.findOne({...o,where:{scope_key:enrollment.scope_key,old_enrollment_id:enrollment.enrollment_id,state:'active'},indexHints:[{type:'FORCE',values:['cc_meta_business_latest']}]}));
           const B=require('./metaMarketingBusiness.contract');let receipt;
           try{const saved=B.request(handover);if(saved.source_snapshot!==JSON.stringify(B.freeze(enrollment)))fail();receipt=B.receipt(JSON.parse(saved.owner_receipt),saved);}catch{fail('meta_recovery_changed');}
           if(!receipt.handoverApplied)fail('meta_recovery_changed');
@@ -552,7 +557,7 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     }
     return result;
   }
-    return { captureSnapshot, inspectPrepared, forFlow, bindCanonical, attachEnrollment, activate, assertActive, retire, retireForScope, selection };
+    return { captureSnapshot, inspectPrepared, forFlow, bindCanonical, attachEnrollment, activate, assertActive, retire, prepareRetirement, retireForScope, selection };
 }
 const cloneInventory = value => JSON.parse(encode(value));
 module.exports = { createRecovery, validateSnapshot, normalizeInventory, snapshotRecord, canonical, encode, hash, FIELDS,

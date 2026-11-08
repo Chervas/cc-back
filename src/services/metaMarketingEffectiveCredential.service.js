@@ -21,7 +21,7 @@ function createEffectiveCredentials({models,now=()=>new Date()}){
   async function resolve(enrollmentInput,flowInput,transaction,{allowExpired=false}={}){
     let enrollment=plain(enrollmentInput),flow=plain(flowInput);let original;
     const business=await require('./metaMarketingBusinessSource.service').createSource({models,now}).forEnrollment(enrollment,transaction);
-    if(business){flow=business.flow;original=business.candidate;enrollment={...enrollment,businessCredential:{issuerKind:business.row.issuer_kind,issuerBusinessId:business.row.issuer_business_id,clientBusinessId:original.clientBusinessId,systemUserId:original.systemUserId,configId:original.configId,graphVersion:original.graphVersion}};}
+    if(business){flow=business.flow;original=business.candidate;enrollment={...enrollment,businessCredential:{...require('./metaMarketingBusiness.contract').pin(business.row),clientBusinessId:original.clientBusinessId,systemUserId:original.systemUserId}};}
     else try{original=C.candidate(JSON.parse(flow.candidate_metadata),flow);}catch{fail();}
     if(enrollment.state!=='active'||flow.flow_id!==enrollment.flow_id||original.digest!==enrollment.candidate_digest
       ||original.appId!==enrollment.app_id||original.subjectId!==enrollment.meta_user_id)fail();

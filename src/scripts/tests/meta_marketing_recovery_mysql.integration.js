@@ -185,15 +185,15 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
     assert.equal(await baseline(),preserved);assert.equal((await initialBlock.reload()).scope_key,'clinic:1');
     report.checks.push('Confirmed generation remains valid after preparation expiry and origin logout; original universal block still denies ordinary Meta and WhatsApp routes');
     models.PlatformAuditEvent.addHook('beforeCreate','qa-recovery-disconnect-audit-failure',event=>{if(JSON.parse(event.body).version===14)throw Error('FICTITIOUS_RECOVERY_DISCONNECT_AUDIT_FAILURE');});
-    try{await assert.rejects(sql.transaction(transaction=>require('../../services/metaScopeBlock.service').preserve({scope:{assignmentScope:'clinic',clinicId:1,groupId:null},
-      connectionId:158,actorId:1,clinicIds:[1],models,transaction})),/FICTITIOUS_RECOVERY_DISCONNECT_AUDIT_FAILURE/);}
+    const block=require('../../services/metaScopeBlock.service'),retireArgs={scope:{assignmentScope:'clinic',clinicId:1,groupId:null},connectionId:158,actorId:1,clinicIds:[1],models};
+    const retirement=async()=>{const preparedContext=await block.prepareRetirement(retireArgs);return sql.transaction(async transaction=>{await block.lockRetirement(preparedContext,transaction,{models});await block.validateRetirement(preparedContext,transaction,{models});return block.preserve({...retireArgs,transaction,preparedContext});});};
+    try{await assert.rejects(retirement(),/FICTITIOUS_RECOVERY_DISCONNECT_AUDIT_FAILURE/);}
     finally{models.PlatformAuditEvent.removeHook('beforeCreate','qa-recovery-disconnect-audit-failure');}
     assert.equal((await models.MetaMarketingRecovery.findByPk(recoveryId)).state,'active');assert.equal((await R.findByPk(id)).state,'active');
     assert.equal((await models.MetaMarketingBrokerBinding.findByPk(359)).state,'active');assert.equal(Number((await models.ClinicMetaAsset.findByPk(359)).isActive),1);
     await committed();assert.equal(await baseline(),preserved);
     report.checks.push('Failure of the native disconnect audit rolls back generation retirement, pending withdrawal, binding block and mapping deactivation together');
-    await sql.transaction(transaction=>require('../../services/metaScopeBlock.service').preserve({scope:{assignmentScope:'clinic',clinicId:1,groupId:null},
-      connectionId:158,actorId:1,clinicIds:[1],models,transaction}));
+    await retirement();
     assert.equal((await models.MetaMarketingRecovery.findByPk(recoveryId)).state,'retired');
     assert.equal((await R.findByPk(id)).state,'revoke_pending');assert.equal((await models.MetaMarketingBrokerBinding.findByPk(359)).state,'blocked');
     await deny();assert.equal((await initialBlock.reload()).scope_key,'clinic:1');assert.equal(await baseline(),preserved);

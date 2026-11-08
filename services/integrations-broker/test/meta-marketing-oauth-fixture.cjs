@@ -5,7 +5,7 @@ const { BrokerStore } = require('../src/store'); const { Broker } = require('../
 const { createMetaMarketingOAuth, createMetaMarketingOAuthOperations } = require('../src/meta-marketing-oauth'); const { createMetaMarketingOAuthSecrets } = require('../src/meta-marketing-oauth-secrets');
 const { createMetaMarketingOAuthHttp } = require('../src/meta-marketing-oauth-http'); const C = require('../src/meta-marketing-oauth-contract'); const { ACCOUNT, SECRET_KEY } = require('../src/google-main');
 const TOKEN = 'FICTITIOUS_META_OAUTH_TOKEN'; const APP = '0123456789abcdef'.repeat(2);
-function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, adsManagement = false, business = false, agency = false, migrationDays = 366 } = {}) {
+function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, adsManagement = false, business = false, agency = false, migrationDays = 366, businessPermissionProfile = 'legacy-v1', businessRegistry } = {}) {
   business=business||agency;
   renewal=renewal||business;leads=leads||business;
   enrollment=enrollment||renewal;
@@ -20,7 +20,10 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
       scopeKey: 'group:9', clinicIds: [71, 72], scopes: ['public_profile', 'ads_read', 'pages_read_engagement', 'instagram_basic'],
     } };
   if(business)binding.expiresAt=Date.now()+migrationDays*86400000;
-  const businessConfig=agency?require('./meta-marketing-agency-fixture.cjs').config():business?{enabled:true,cohort:'meta-marketing-business-v1',configId:'777',graphVersion:'v27.0',providerBusinessId:'901',scopeKeys:['group:9']}:undefined;
+  const businessConfig=businessRegistry||(agency?require('./meta-marketing-agency-fixture.cjs').config():business?{enabled:true,cohort:'meta-marketing-business-v1',configId:'777',graphVersion:'v27.0',providerBusinessId:'901',scopeKeys:['group:9']}:undefined);
+  assert(['legacy-v1','paid-leads-v2'].includes(businessPermissionProfile));
+  if(businessConfig&&!businessRegistry&&businessPermissionProfile==='paid-leads-v2')businessConfig.cohort=require(agency?'../src/meta-marketing-agency-contract':'../src/meta-marketing-business-contract').PAID_COHORT;
+  const targetBusinessConfig=()=>require('../src/meta-marketing-business-issuer').selected(binding,businessConfig);
   if(discovery)binding.metaMarketingOAuth.scopes.push('pages_show_list');
   if(leads)binding.metaMarketingOAuth.scopes.push('leads_retrieval','pages_manage_ads','pages_manage_metadata');
   if(adsManagement)binding.metaMarketingOAuth.scopes.push('ads_management');
@@ -122,14 +125,14 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
       assert.equal(settings.hostname,'graph.facebook.com');assert.equal(settings.rejectUnauthorized,true);assert.equal(settings.minVersion,'TLSv1.2');
       assert(url.pathname.startsWith('/v27.0/'));state.httpCalls.push({kind});let response,statusCode;
       if(kind==='business_code'){assert.equal(settings.method,'GET');assert.equal(url.searchParams.get('client_secret'),APP);assert.equal(url.searchParams.get('grant_type'),null);state.codes++;
-        const token='FICTITIOUS_META_BUSINESS_TOKEN_'+(businessTokens.size+1);businessTokens.set(token,{subjectId:'601',clientBusinessId:'701',expiresAt:Math.floor(now()/1000)+60*86400});latestBusiness=token;response={access_token:token,token_type:'bearer',expires_in:60*86400};
+        const token='FICTITIOUS_META_BUSINESS_TOKEN_'+(businessTokens.size+1);businessTokens.set(token,{subjectId:'601',clientBusinessId:'701',expiresAt:Math.floor(now()/1000)+60*86400,scopes:[...require('../src/meta-marketing-business-contract').scopesForCohort(targetBusinessConfig().cohort)]});latestBusiness=token;response={access_token:token,token_type:'bearer',expires_in:60*86400};
       }else if(kind==='business_manage'){
-        assert.equal(settings.method,'POST');const params=new URLSearchParams(body.toString());assert.equal(params.get('set_token_expires_in_60_days'),'true');assert.equal(params.get('scope'),require('../src/meta-marketing-business-contract').SCOPES.join(','));assert.equal(params.get('asset'),'301,401');assert.equal(params.get('system_user_id'),null);assert.match(params.get('appsecret_proof'),/^[a-f0-9]{64}$/);assert(businessTokens.has(bearer));
+        assert.equal(settings.method,'POST');const params=new URLSearchParams(body.toString());assert.equal(params.get('set_token_expires_in_60_days'),'true');assert.equal(params.get('scope'),businessTokens.get(bearer)?.scopes.join(','));assert.equal(params.get('asset'),'301,401');assert.equal(params.get('system_user_id'),null);assert.match(params.get('appsecret_proof'),/^[a-f0-9]{64}$/);assert(businessTokens.has(bearer));
         state.manages=(state.manages||0)+(params.get('fetch_only')==='true'?0:1);state.fetches=(state.fetches||0)+(params.get('fetch_only')==='true'?1:0);
         if(params.get('fetch_only')==='false'&&state.manageRateLimitOnce){state.manageRateLimitOnce=false;response={error:{code:4}};statusCode=429;}
         else if(params.get('fetch_only')==='false'){const token='FICTITIOUS_META_BUSINESS_TOKEN_'+(businessTokens.size+1);businessTokens.set(token,{...businessTokens.get(bearer),expiresAt:Math.floor(now()/1000)+60*86400});latestBusiness=token;}
         response??={access_token:latestBusiness};
-      }else if(kind==='business_debug'){assert.equal(settings.headers.authorization,'Bearer 101|'+APP);const value=businessTokens.get(input);response={data:{app_id:'101',user_id:value.subjectId,type:'SYSTEM_USER',is_valid:true,expires_at:value.expiresAt,data_access_expires_at:0,scopes:[...require('../src/meta-marketing-business-contract').SCOPES],granular_scopes:[{scope:'ads_read',target_ids:['301']}]}};
+      }else if(kind==='business_debug'){assert.equal(settings.headers.authorization,'Bearer 101|'+APP);const value=businessTokens.get(input);response={data:{app_id:'101',user_id:value.subjectId,type:'SYSTEM_USER',is_valid:true,expires_at:value.expiresAt,data_access_expires_at:0,scopes:[...value.scopes],granular_scopes:[{scope:'ads_read',target_ids:['301']}]}};
       }else if(kind==='business_me'){const value=businessTokens.get(bearer);assert(value);assert.equal(url.searchParams.get('fields'),'client_business_id');response={id:value.subjectId,client_business_id:value.clientBusinessId};
       }else if(kind==='business_ads')response={data:[{id:'act_301',account_id:'301',name:'Cuenta ficticia',account_status:1,currency:'EUR',timezone_name:'Europe/Madrid'}]};
       else if(kind==='business_pages')response={data:[{id:'401',name:'Página ficticia'}]};
@@ -138,7 +141,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
       if(destroyed)return;const res=new PassThrough();res.statusCode=statusCode||state.businessStatus||200;res.headers={'content-type':'application/json'};callback(res);res.end(JSON.stringify(response));
     }catch(error){req.emit('error',error);}});return req;
   };
-  const chosenRequest=agency?require('./meta-marketing-agency-fixture.cjs').request({state,now,binding,fallback:request,appSecret:APP}):business?businessRequest:request;
+  const chosenRequest=agency?require('./meta-marketing-agency-fixture.cjs').request({state,now,binding,fallback:request,appSecret:APP,cohort:()=>targetBusinessConfig().cohort}):business?businessRequest:request;
   const http=createMetaMarketingOAuthHttp({request:chosenRequest,now});
   const secrets = createMetaMarketingOAuthSecrets({ client: aws, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/meta-marketing/staging/', kmsKeyArn: SECRET_KEY });
   const stores = []; const engines = [];
@@ -177,7 +180,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
   if(enrollment)config.assetEnrollment=true;
   if(renewal)config.credentialRenewal=true;
   if(leadAds)config.leadAds=leadAds;
-  if(businessConfig)config[agency?'agencySystemUser':'businessLogin']=businessConfig;
+  if(businessConfig){if(businessRegistry){for(const c of businessRegistry.active)config[require('../src/meta-marketing-business-issuer').family(c)===require('../src/meta-marketing-agency-contract')?'agencySystemUser':'businessLogin']=c;if(businessRegistry.history.length)config.businessCredentialHistory=businessRegistry.history;}else config[agency?'agencySystemUser':'businessLogin']=businessConfig;}
   t.after(() => { for (const engine of engines) engine.close(); for (const store of stores) try { store.close(); } catch {} fs.rmSync(dir, { recursive: true, force: true }); });
   return { dir, filename, binding, policy, state, records, secrets, aws, http, request:chosenRequest, config,businessTokens,businessConfig, now, make, command, signed, execute,
     begin, finish, status, abort, snapshot, gateway, control,reader,assetControl, get current() { return current; }, restart() { current.enrollment?.close();current.engine.close(); current.store.close(); current = make(); return current; } };

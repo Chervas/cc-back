@@ -28,7 +28,7 @@ function createMetaMarketingLeadsHttp({request=https.request,pacer,cursor,now=Da
     if(['receiptAccept','challenge'].includes(name)||Object.keys(input).some(k=>!['binding','metadata','token','appSecret','asset','account','operation','payload','signal','authorize','context','receipt','recipientClinicId'].includes(k))
       ||asset?.kind!=='facebook_page'||asset.assetRef!==`meta-facebook_page:${asset.id}`||!M.graphId(asset.id)||account?.kind!=='ad_account'||account.assetRef!==payload.adAccountAssetRef||account.assetRef!==`meta-ad_account:${account.id}`||!M.graphId(account.id)
       ||typeof authorize!=='function'||!(signal instanceof AbortSignal)||!Buffer.isBuffer(token)||!tokenText(token.toString('utf8'))||!Buffer.isBuffer(appSecret)||!/^[a-f0-9]{32}$/.test(appSecret.toString('ascii')))fail('invalid_request');
-    K.metadata(metadata,binding);for(const a of [asset,account])M.assertAssetCredential(metadata,a);
+    K.metadata(metadata,binding);K.assertPaidAttribution(binding,metadata,account);for(const a of [asset,account])M.assertAssetCredential(metadata,a);
     for(const scope of L.REQUIRED_SCOPES){if(!metadata.scopes.includes(scope))fail('scope_denied');const granular=metadata.granularScopes.find(r=>r.scope===scope);if(granular&&!granular.targetIds.includes(scope==='ads_read'?account.id:asset.id))fail('scope_denied');}
     const codecScope={principalId:context?.principalId,tenantRef:context?.tenantRef,binding,assetRef:asset.assetRef,operation,policyVersion:context?.policyVersion};
     if(['principalId','tenantRef','policyVersion'].some(k=>typeof codecScope[k]!=='string'||!codecScope[k]))fail('invalid_request');

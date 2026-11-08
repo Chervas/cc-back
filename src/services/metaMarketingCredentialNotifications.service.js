@@ -17,7 +17,7 @@ function enabled(env = process.env, namespace) {
       || env.META_MARKETING_BUSINESS_MAINTENANCE_ENABLED === 'true');
 }
 function createCredentialNotifications({ models, queue, channels, namespace, now = () => Date.now(),
-  enabled: isEnabled = () => enabled(process.env, namespace), credentialStatus, maintenanceStatus, confirmedHandover } = {}) {
+  enabled: isEnabled = () => enabled(process.env, namespace), credentialStatus, maintenanceStatus, confirmedHandover, ordering: providedOrder } = {}) {
   async function run() {
     // In particular, do not query an optional new table before its reviewed
     // migration/feature activation. DEV and Gateway never collect this cohort.
@@ -29,9 +29,13 @@ function createCredentialNotifications({ models, queue, channels, namespace, now
     const upkeep = maintenanceStatus || require('./metaMarketingCredentialMaintenance.service').createMaintenance({
       models, now: () => new Date(now()),
     }).getMaintenanceStatus;
-    const handover = confirmedHandover || ((previous, options) => require('./metaMarketingBusinessSource.service')
-      .createSource({ models, now: () => new Date(now()) }).getConfirmedHandover(previous, options));
-    async function current(id, transaction) {
+    const source = confirmedHandover ? null : require('./metaMarketingBusinessSource.service').createSource({ models, now: () => new Date(now()) });
+    const handover = confirmedHandover || source.getConfirmedHandover;
+    const order = providedOrder || require('./metaMarketingTransactionOrder.service').createOrder({ models,
+      unavailable: () => fail('meta_credential_notification_current_changed') });
+    async function current(id, transaction, prepared) {
+      if (!prepared || prepared.enrollmentId !== id) fail('meta_credential_notification_current_changed');
+      await order.lockPrepared(prepared, transaction);
       const row = await models.MetaMarketingEnrollmentRequest.findByPk(id, { attributes: ENROLLMENT_FIELDS,
         raw: true, logging: false, transaction, lock: transaction.LOCK.UPDATE });
       if (!row || row.state !== 'active') return null;
@@ -46,8 +50,10 @@ function createCredentialNotifications({ models, queue, channels, namespace, now
     if (!Array.isArray(enrollments) || enrollments.length > 100) fail('meta_credential_notification_limit');
     const statuses = new Map();
     for (const row of enrollments) {
-      const value = await models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, transaction => current(row.enrollment_id, transaction));
-      if (value) statuses.set(value.value.enrollmentId, value);
+      const prepared = await order.prepareEnrollment(row.enrollment_id);
+      if (!prepared) continue;
+      const value = await models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, transaction => current(row.enrollment_id, transaction, prepared));
+      if (value) statuses.set(value.value.enrollmentId, { ...value, prepared });
     }
     const alerts = [...statuses.values()].flatMap(({ value, maintenance }) => policy.alertsFromStatus(value, now(), maintenance));
     const handovers = new Map();
@@ -61,13 +67,13 @@ function createCredentialNotifications({ models, queue, channels, namespace, now
         const capturedHandover = closing && handovers.get(previous?.metadata?.incident_scope);
         if (capturedHandover) {
           const identity = previous.metadata.credential, latest = await handover({ enrollmentId: identity.enrollmentId, connectionId: identity.connectionId,
-            epoch: identity.epoch, versionId: identity.versionId, scopeKey: identity.scopeKey }, { transaction });
-          if (!latest || JSON.stringify(latest.proof) !== JSON.stringify(capturedHandover.proof)
-            || latest.currentStatus.epoch !== capturedHandover.currentStatus.epoch || latest.currentStatus.versionId !== capturedHandover.currentStatus.versionId
+            epoch: identity.epoch, versionId: identity.versionId, scopeKey: identity.scopeKey }, { transaction, prepared: capturedHandover.prepared });
+          if (!latest || JSON.stringify(latest.proof) !== JSON.stringify(capturedHandover.value.proof)
+            || latest.currentStatus.epoch !== capturedHandover.value.currentStatus.epoch || latest.currentStatus.versionId !== capturedHandover.value.currentStatus.versionId
             || !policy.handoverResolution(previous, latest, now())) fail('meta_credential_notification_current_changed');
           return;
         }
-        const identity = alert.metadata?.credential, latest = identity && await current(identity.enrollmentId, transaction);
+        const identity = alert.metadata?.credential, latest = identity && await current(identity.enrollmentId, transaction, statuses.get(identity.enrollmentId)?.prepared);
         if (!latest) fail('meta_credential_notification_current_changed');
         if (closing) {
           const captured = statuses.get(latest.value.enrollmentId);
@@ -85,11 +91,13 @@ function createCredentialNotifications({ models, queue, channels, namespace, now
       if (current) return policy.resolution(original, current.value, now(), current.maintenance);
       const identity = original.metadata?.credential;
       if (!identity) return null;
-      const value = await models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, transaction => handover({
-        enrollmentId: identity.enrollmentId, connectionId: identity.connectionId, epoch: identity.epoch, versionId: identity.versionId, scopeKey: identity.scopeKey,
-      }, { transaction }));
+      const previous = { enrollmentId: identity.enrollmentId, connectionId: identity.connectionId, epoch: identity.epoch, versionId: identity.versionId, scopeKey: identity.scopeKey };
+      const prepared = source ? await source.prepareConfirmedHandover(previous) : null;
+      if (source && !prepared) return null;
+      const value = source ? await handover(previous, { prepared })
+        : await models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, transaction => handover(previous, { transaction }));
       const recovered = policy.handoverResolution(original, value, now());
-      if (recovered) handovers.set(original.metadata.incident_scope, value);
+      if (recovered) handovers.set(original.metadata.incident_scope, { value, prepared });
       return recovered;
     } });
     return { status: 'completed', alerts: alerts.length, checked: statuses.size, queued };

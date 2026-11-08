@@ -6,8 +6,11 @@ function configurationFrom(env,scopeKey){
   let modes;try{modes=JSON.parse(env.META_MARKETING_BUSINESS_SCOPE_MODES||'null');}catch{return null;}
   if(!modes||Object.getPrototypeOf(modes)!==Object.prototype||Object.keys(modes).length>64||Object.entries(modes).some(([key,value])=>!/^(clinic|group):[1-9][0-9]{0,9}$/.test(key)||!C.ISSUERS.includes(value)))return null;
   const issuerKind=modes[scopeKey];if(!issuerKind)return null;
-  return issuerKind===C.A.ISSUER?{issuerKind,issuerBusinessId:env.META_MARKETING_AGENCY_ISSUER_BUSINESS_ID,configId:env.META_MARKETING_AGENCY_SETUP_CONFIG_ID,graphVersion:env.META_MARKETING_AGENCY_GRAPH_VERSION}
+  const profileKey=issuerKind===C.A.ISSUER?'META_MARKETING_AGENCY_PERMISSION_PROFILE':'META_MARKETING_BUSINESS_PERMISSION_PROFILE';
+  const profile=env[profileKey]===undefined?'legacy-v1':env[profileKey];if(!C.PERMISSION_PROFILES.includes(profile))return null;
+  const configured=issuerKind===C.A.ISSUER?{issuerKind,issuerBusinessId:env.META_MARKETING_AGENCY_ISSUER_BUSINESS_ID,configId:env.META_MARKETING_AGENCY_SETUP_CONFIG_ID,graphVersion:env.META_MARKETING_AGENCY_GRAPH_VERSION}
     :{issuerKind,issuerBusinessId:null,configId:env.META_MARKETING_BUSINESS_CONFIG_ID,graphVersion:env.META_MARKETING_BUSINESS_GRAPH_VERSION};
+  return profile==='legacy-v1'?configured:{...configured,permissionProfile:profile};
 }
 const runtimeConfiguration=scopeKey=>configurationFrom(process.env,scopeKey);
 function createService({models,sessions,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_BUSINESS_ENABLED==='true',
@@ -21,15 +24,27 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const order=require('./metaMarketingTransactionOrder.service').createOrder({models,authorize:scope.authorize,unavailable:()=>C.fail('meta_business_unavailable',503)});
   const gate=()=>{if(!enabled())C.fail('meta_business_disabled',503);if(!H)C.fail();};
   const policy=scopeKey=>{const value=configuration(scopeKey);if(!value||!C.ISSUERS.includes(value.issuerKind)||!/^[1-9][0-9]{0,29}$/.test(value.configId||'')||!/^v(?:24|25|26|27)\.0$/.test(value.graphVersion||'')
-    ||(value.issuerKind===C.A.ISSUER?value.graphVersion!=='v27.0'||!/^[1-9][0-9]{0,29}$/.test(value.issuerBusinessId||''):value.issuerBusinessId!==null))C.fail();return value;};
+    ||(value.issuerKind===C.A.ISSUER?value.graphVersion!=='v27.0'||!/^[1-9][0-9]{0,29}$/.test(value.issuerBusinessId||''):value.issuerBusinessId!==null))C.fail();return {...value,permissionProfile:C.permissionProfile(value.permissionProfile)};};
   const actor=row=>({scopeKey:row.scope_key,actorId:Number(row.actor_user_id),sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at});
   async function record(row,reason,transaction,input){
     const health=await audit.health(now(),{includeUnresolved:false,transaction});if(!Number.isSafeInteger(health.pending)||health.pending>=10000||!Number.isFinite(health.oldestAgeSeconds)||health.oldestAgeSeconds>=3600)C.fail('audit_unavailable');
     await audit.append(require('../../services/platform-audit/src/meta-business-continuity-event').fromHandover(row,reason,{now:now(),...(input?{actorId:input.actorId,sessionRef:input.sessionRef}:{})}),{transaction});
   }
-  async function current(id,transaction){
-    if(!C.UUID.test(id))C.fail('meta_business_invalid',400);const observed=plain(await H.findByPk(id,{transaction,raw:true,logging:false}));if(!observed)C.fail('meta_business_scope_forbidden',403);
-    await R.findByPk(observed.old_enrollment_id,opts(transaction));const row=plain(await H.findByPk(id,opts(transaction)));if(!row)C.fail();return C.request(row);
+  async function requestTx(id,work,input=null){
+    input=require('./metaMarketingTransactionOrder.service').pinInput(input);
+    if(!C.UUID.test(id))C.fail('meta_business_invalid',400);
+    if(input)await tx(transaction=>scope.authorize(input,transaction));
+    const observed=plain(await H.findByPk(id,{attributes:['handover_id','old_enrollment_id','scope_key','app_id'],raw:true,logging:false}));
+    if(!observed||input&&observed.scope_key!==input.scopeKey)C.fail('meta_business_scope_forbidden',403);
+    const prepared=await order.prepareEnrollment(observed.old_enrollment_id,{scopeKey:observed.scope_key,appId:observed.app_id});
+    if(!prepared)C.fail('meta_business_unavailable',503);
+    return tx(async transaction=>{
+      await order.lockPrepared(prepared,transaction);
+      if(input)await scope.authorize(input,transaction);
+      const row=plain(await H.findByPk(id,opts(transaction)));
+      if(!row||row.old_enrollment_id!==observed.old_enrollment_id||row.scope_key!==observed.scope_key||row.app_id!==observed.app_id)C.fail('meta_business_unavailable',503);
+      return work(C.request(row),transaction);
+    });
   }
   async function update(row,patch,transaction){
     const state=patch.state??row.state,changes={...patch,pending_scope_key:C.TERMINAL.includes(state)?null:row.scope_key,updated_at:now()};
@@ -53,7 +68,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       const value=input||actor(row);if(value.sessionRef!==row.session_ref||+value.sessionExpiresAt<+row.session_expires_at)C.fail('meta_business_session_required',409);
       try{await scope.authorize(actor(row),transaction);}catch(error){if(error.httpStatus===401)C.fail('meta_business_session_required',409);throw error;}
     }
-    const selected=policy(row.scope_key);if(selected.issuerKind!==row.issuer_kind||selected.issuerBusinessId!==row.issuer_business_id||selected.configId!==row.config_id||selected.graphVersion!==row.graph_version)C.fail('meta_business_scope_changed',409);
+    const selected=policy(row.scope_key);if(selected.issuerKind!==row.issuer_kind||selected.issuerBusinessId!==row.issuer_business_id||selected.configId!==row.config_id||selected.graphVersion!==row.graph_version||JSON.stringify(C.scopesFor(selected.issuerKind,selected.permissionProfile))!==row.scopes)C.fail('meta_business_scope_changed',409);
     const context=await admission(null,transaction,row.old_enrollment_id,row.handover_id);if(!context||JSON.stringify(C.freeze(context.enrollment))!==row.source_snapshot)C.fail('meta_business_scope_changed',409);
     if(version&&(context.effective.epoch!==Number(row.expected_epoch)||context.effective.versionId!==row.expected_version_id||context.effective.digest!==row.expected_candidate_digest))C.fail('meta_business_version_changed',409);
     return context;
@@ -67,9 +82,9 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     const expected={client_id:row.app_id,redirect_uri:row.redirect_uri,response_type:'code',config_id:row.config_id,state:payload.state,override_default_response_type:'true'};
     if(url.origin!=='https://www.facebook.com'||url.pathname!=='/'+row.graph_version+'/dialog/oauth'||url.username||url.password||url.hash||[...url.searchParams.keys()].sort().join(',')!==Object.keys(expected).sort().join(',')||Object.entries(expected).some(([key,value])=>url.searchParams.get(key)!==value))C.fail('broker_response_invalid');return value;
   }
-  async function queueCancel(id,code=null,input=null){return tx(async transaction=>{const row=await current(id,transaction);if(C.TERMINAL.includes(row.state))return row;
+  async function queueCancel(id,code=null,input=null){return requestTx(id,async(row,transaction)=>{if(C.TERMINAL.includes(row.state))return row;
     if(input){await scope.authorize(input,transaction);if(input.scopeKey!==row.scope_key||input.actorId!==Number(row.actor_user_id))C.fail('meta_business_scope_forbidden',403);}
-    const next=await update(row,{state:'cancel_pending',last_error:code,next_attempt_at:now()},transaction);if(row.state!=='cancel_pending')await record(next,'meta_business_cancel_requested',transaction,input);return next;});}
+    const next=await update(row,{state:'cancel_pending',last_error:code,next_attempt_at:now()},transaction);if(row.state!=='cancel_pending')await record(next,'meta_business_cancel_requested',transaction,input);return next;},input);}
   async function cancelled(row,remote,transaction){
     if(C.TERMINAL.includes(row.state))return row;
     const rejected=!!row.last_error&&!['meta_business_disabled'].includes(row.last_error),next=await update(row,{state:rejected?'rejected':'cancelled',owner_receipt:JSON.stringify(remote),completed_at:now(),lease_token:null,lease_until:null},transaction);
@@ -110,32 +125,32 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     await require('./metaMarketingCredentialMaintenance.service').createMaintenance({models,now}).schedule(newRow,{transaction});await record(next,'meta_business_activated',transaction);return next;
   }
   async function reconcileId(id){
-    let row=await tx(transaction=>current(id,transaction));if(C.TERMINAL.includes(row.state))return row;
+    let row=await requestTx(id,row=>row);if(C.TERMINAL.includes(row.state))return row;
     if(!enabled()&&row.state!=='cancel_pending')row=await queueCancel(id,'meta_business_disabled');
     let remote;try{remote=await call(row,row.state==='cancel_pending'?'abort':'status',{handoverId:id});}
     catch(error){if(row.state!=='cancel_pending'||error.code!=='scope_denied')throw error;remote=await call(row,'status',{handoverId:id});if(remote.status!=='not_found')throw error;}
-    if(remote.handoverApplied)return tx(async transaction=>apply(await current(id,transaction),remote,transaction));
+    if(remote.handoverApplied)return requestTx(id,(row,transaction)=>apply(row,remote,transaction));
     if(['cancel_pending','begin_pending'].includes(row.state)){
       if(!['aborted','rejected','interrupted','not_found'].includes(remote.status))remote=await call(row,'abort',{handoverId:id});
-      if(remote.handoverApplied)return tx(async transaction=>apply(await current(id,transaction),remote,transaction));return tx(async transaction=>cancelled(await current(id,transaction),remote,transaction));
+      if(remote.handoverApplied)return requestTx(id,(row,transaction)=>apply(row,remote,transaction));return requestTx(id,(row,transaction)=>cancelled(row,remote,transaction));
     }
     if(['aborted','rejected','interrupted','not_found'].includes(remote.status)){await queueCancel(id,'meta_business_candidate_rejected');return reconcileId(id);}
     if(row.state==='activate_pending'){
       if(!remote.drain)remote=await call(row,'drain',{handoverId:id});
-      if(remote.handoverApplied)return tx(async transaction=>apply(await current(id,transaction),remote,transaction));
-      const ready=await tx(async transaction=>{const fresh=await current(id,transaction);if(fresh.state!=='activate_pending')return false;const context=await assertRequest(fresh,transaction,{origin:true});
+      if(remote.handoverApplied)return requestTx(id,(row,transaction)=>apply(row,remote,transaction));
+      const ready=await requestTx(id,async(fresh,transaction)=>{if(fresh.state!=='activate_pending')return false;const context=await assertRequest(fresh,transaction,{origin:true});
         const result=await drain.begin(context.enrollment,{transaction,handoverId:id,ownerDrain:remote.drain,oldGrantDigest:fresh.old_grant_digest});
         const next=await update(fresh,{drain_digest:result.drainDigest,owner_receipt:JSON.stringify(remote),last_error:result.ready?null:'meta_business_drain_pending',next_attempt_at:new Date(+now()+30000)},transaction);
         if(!result.ready)return false;await drain.assert(fresh.old_enrollment_id,result.drainDigest,{transaction,handoverId:id,ownerDrain:remote.drain,oldGrantDigest:fresh.old_grant_digest});
         await update(next,{activate_sent_at:next.activate_sent_at||now()},transaction);return true;});
-      if(!ready)return tx(transaction=>current(id,transaction));
+      if(!ready)return requestTx(id,row=>row);
       if(!enabled()){await queueCancel(id,'meta_business_disabled');return reconcileId(id);}
-      row=await tx(transaction=>current(id,transaction));if(row.state!=='activate_pending')return reconcileId(id);
+      row=await requestTx(id,row=>row);if(row.state!=='activate_pending')return reconcileId(id);
       remote=await call(row,'activate',{handoverId:id,oldEnrollmentId:row.old_enrollment_id,newEnrollmentId:id,oldGrantDigest:row.old_grant_digest,
         expectedEpoch:Number(row.expected_epoch),expectedVersionId:row.expected_version_id,expectedCandidateDigest:row.expected_candidate_digest,candidateVersionId:id,candidateDigest:row.candidate.digest,drainDigest:row.drain_digest});
-      return tx(async transaction=>apply(await current(id,transaction),remote,transaction));
+      return requestTx(id,(row,transaction)=>apply(row,remote,transaction));
     }
-    return tx(async transaction=>{const fresh=await current(id,transaction);if(C.TERMINAL.includes(fresh.state)||['activate_pending','cancel_pending'].includes(fresh.state))return fresh;const context=await assertRequest(fresh,transaction,{origin:true});
+    return requestTx(id,async(fresh,transaction)=>{if(C.TERMINAL.includes(fresh.state)||['activate_pending','cancel_pending'].includes(fresh.state))return fresh;const context=await assertRequest(fresh,transaction,{origin:true});
       if(remote.status==='staged'){
         const value=C.candidate({versionId:remote.candidate.versionId,digest:remote.candidate.digest,...remote.candidate.metadata},C.pin(fresh));
         if(C.F.expiry(value)<=+now())C.fail('meta_business_expired',409);if(context.effective.metadata.tokenType==='USER'&&value.subjectId===context.enrollment.meta_user_id)C.fail('meta_business_identity_mismatch',409);
@@ -166,29 +181,29 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
         if(!redirectUri){const source=await require('./metaMarketingBusinessSource.service').createSource({models,now}).forEnrollment(old,transaction);redirectUri=source?.row.redirect_uri;}
         if(typeof redirectUri!=='string')C.fail();const id=randomUUID(),date=now(),sourceSnapshot=JSON.stringify(C.freeze(old));
         const value=C.request({handover_id:id,new_enrollment_id:id,old_enrollment_id:old.enrollment_id,pending_scope_key:old.scope_key,scope_key:old.scope_key,clinic_ids:old.clinic_ids,assets:old.assets,mapping_ids:old.mapping_ids,connection_ref:old.connection_ref,app_id:old.app_id,issuer_kind:selectedPolicy.issuerKind,issuer_business_id:selectedPolicy.issuerBusinessId,config_id:selectedPolicy.configId,graph_version:selectedPolicy.graphVersion,
-          old_scope_digest:old.scope_digest,source_snapshot:sourceSnapshot,source_digest:C.hash(sourceSnapshot),scope_digest:C.hash(JSON.stringify([old.enrollment_id,context.authority.digest,old.scope_digest,old.clinic_ids,C.F.assetSetDigest(old.selected),old.app_id,selectedPolicy.issuerKind,selectedPolicy.issuerBusinessId,selectedPolicy.configId,selectedPolicy.graphVersion,'business-v2'])),asset_set_digest:C.F.assetSetDigest(old.selected),scopes:JSON.stringify(C.scopesFor(selectedPolicy.issuerKind)),state_hash:C.hash(state),
+          old_scope_digest:old.scope_digest,source_snapshot:sourceSnapshot,source_digest:C.hash(sourceSnapshot),scope_digest:C.hash(JSON.stringify([old.enrollment_id,context.authority.digest,old.scope_digest,old.clinic_ids,C.F.assetSetDigest(old.selected),old.app_id,selectedPolicy.issuerKind,selectedPolicy.issuerBusinessId,selectedPolicy.configId,selectedPolicy.graphVersion,...C.policyDigestParts(selectedPolicy),'business-v2'])),asset_set_digest:C.F.assetSetDigest(old.selected),scopes:JSON.stringify(C.scopesFor(selectedPolicy.issuerKind,selectedPolicy.permissionProfile)),state_hash:C.hash(state),
           actor_user_id:input.actorId,session_ref:input.sessionRef,session_expires_at:input.sessionExpiresAt,expected_epoch:context.effective.epoch,expected_version_id:context.effective.versionId,expected_candidate_digest:context.effective.digest,
           begin_request_id:randomUUID(),finish_request_id:randomUUID(),activate_request_id:randomUUID(),abort_request_id:randomUUID(),drain_request_id:randomUUID(),revoke_request_id:randomUUID(),redirect_uri:redirectUri,return_origin:returnOrigin,state:'begin_pending',requested_at:date,updated_at:date,expires_at:new Date(+date+600000),next_attempt_at:date,
           completed_at:null,activate_sent_at:null,retired_at:null,lease_token:null,lease_until:null,attempts:0,candidate_metadata:null,owner_receipt:null,old_grant_digest:null,code_digest:null,drain_digest:null,new_canonical_id:null,last_error:null});
         await H.create(value,{transaction,logging:false});await record(value,'meta_business_requested',transaction,input);return value;});
       try{const remote=await call(row,'begin',{handoverId:row.handover_id,flowId:row.handover_id,newEnrollmentId:row.handover_id,oldEnrollmentId:row.old_enrollment_id,expectedEpoch:Number(row.expected_epoch),expectedVersionId:row.expected_version_id,expectedCandidateDigest:row.expected_candidate_digest,assetSetDigest:row.asset_set_digest,oldScopeDigest:row.old_scope_digest,scopeDigest:row.scope_digest,clinicSetDigest:C.hash(row.clinic_ids),state,expiresAt:+row.expires_at});
-        await tx(async transaction=>{const fresh=await current(row.handover_id,transaction);await assertRequest(fresh,transaction,{input,origin:true});await update(fresh,{state:'awaiting',old_grant_digest:remote.oldGrantDigest,next_attempt_at:new Date(+now()+30000)},transaction);});return {enabled:true,authorizationMode:row.issuer_kind,requestId:row.handover_id,status:'awaiting',authUrl:remote.authUrl,expiresAt:remote.expiresAt};
+        await requestTx(row.handover_id,async(fresh,transaction)=>{await assertRequest(fresh,transaction,{input,origin:true});await update(fresh,{state:'awaiting',old_grant_digest:remote.oldGrantDigest,next_attempt_at:new Date(+now()+30000)},transaction);},input);return {enabled:true,authorizationMode:row.issuer_kind,requestId:row.handover_id,status:'awaiting',authUrl:remote.authUrl,expiresAt:remote.expiresAt};
       }catch(error){await queueCancel(row.handover_id,C.safe(error));throw error;}
     },
     async callback({state,code,denied=false}){if(!C.STATE.test(state)||!denied&&(typeof code!=='string'||!(/^[\x21-\x7e]{1,4096}$/).test(code)))C.fail('meta_business_invalid',400);
       let row=plain(await H.findOne({where:{state_hash:C.hash(state)},raw:true,logging:false}));if(!row)C.fail('meta_oauth_state_invalid',400);row=C.request(row);const result={returnOrigin:row.return_origin,requestId:row.handover_id};
       if(denied||!enabled()){await queueCancel(row.handover_id,!enabled()?'meta_business_disabled':null);try{await reconcileId(row.handover_id);}catch{}return result;}
       if(row.code_digest!==null){if(row.code_digest!==C.hash(code))C.fail('meta_business_invalid',400);try{await reconcileId(row.handover_id);}catch{}return result;}
-      let sent=false;try{row=await tx(async transaction=>{const fresh=await current(row.handover_id,transaction);await assertRequest(fresh,transaction,{origin:true});if(fresh.state!=='awaiting'||+fresh.expires_at<=+now())C.fail('meta_business_expired',409);return update(fresh,{state:'processing',code_digest:C.hash(code),next_attempt_at:now()},transaction);});
+      let sent=false;try{row=await requestTx(row.handover_id,async(fresh,transaction)=>{await assertRequest(fresh,transaction,{origin:true});if(fresh.state!=='awaiting'||+fresh.expires_at<=+now())C.fail('meta_business_expired',409);return update(fresh,{state:'processing',code_digest:C.hash(code),next_attempt_at:now()},transaction);},actor(row));
         if(!enabled()){await queueCancel(row.handover_id,'meta_business_disabled');await reconcileId(row.handover_id);return result;}sent=true;await call(row,'finish',{handoverId:row.handover_id,flowId:row.handover_id,state,code});await reconcileId(row.handover_id);
-      }catch(error){if([400,401,403,409].includes(error.httpStatus)||['meta_business_candidate_rejected','meta_business_identity_mismatch'].includes(C.safe(error)))await queueCancel(row.handover_id,C.safe(error));else if(sent)await tx(async transaction=>{const fresh=await current(row.handover_id,transaction);if(!C.TERMINAL.includes(fresh.state))await update(fresh,{last_error:C.safe(error),next_attempt_at:now()},transaction);});}return result;
+      }catch(error){if([400,401,403,409].includes(error.httpStatus)||['meta_business_candidate_rejected','meta_business_identity_mismatch'].includes(C.safe(error)))await queueCancel(row.handover_id,C.safe(error));else if(sent)await requestTx(row.handover_id,async(fresh,transaction)=>{if(!C.TERMINAL.includes(fresh.state))await update(fresh,{last_error:C.safe(error),next_attempt_at:now()},transaction);});}return result;
     },
     async confirm(input,id,{candidateDigest,clientBusinessId,subjectId,issuerKind,providerBusinessId}){gate();if(!C.HASH.test(candidateDigest)||!/^[1-9][0-9]{0,29}$/.test(subjectId||'')||!C.ISSUERS.includes(issuerKind)||(issuerKind===C.A.ISSUER?clientBusinessId!==null||!/^[1-9][0-9]{0,29}$/.test(providerBusinessId||''):providerBusinessId!==null||!/^[1-9][0-9]{0,29}$/.test(clientBusinessId||'')))C.fail('meta_business_invalid',400);
-      await tx(async transaction=>{const row=await current(id,transaction);await assertRequest(row,transaction,{input,origin:true});if(!row.candidate||row.candidate.digest!==candidateDigest||(row.candidate.clientBusinessId??null)!==clientBusinessId||row.candidate.subjectId!==subjectId||row.issuer_kind!==issuerKind||C.providerBusinessId(row.candidate)!==providerBusinessId||C.F.expiry(row.candidate)<=+now())C.fail('meta_business_identity_mismatch',409);
-        if(row.state==='activate_pending')return;if(row.state!=='staged')C.fail('meta_business_scope_changed',409);const next=await update(row,{state:'activate_pending',last_error:null,next_attempt_at:now()},transaction);await record(next,'meta_business_activation_requested',transaction,input);});try{await reconcileId(id);}catch{}return service.overview(input);},
+      await requestTx(id,async(row,transaction)=>{await assertRequest(row,transaction,{input,origin:true});if(!row.candidate||row.candidate.digest!==candidateDigest||(row.candidate.clientBusinessId??null)!==clientBusinessId||row.candidate.subjectId!==subjectId||row.issuer_kind!==issuerKind||C.providerBusinessId(row.candidate)!==providerBusinessId||C.F.expiry(row.candidate)<=+now())C.fail('meta_business_identity_mismatch',409);
+        if(row.state==='activate_pending')return;if(row.state!=='staged')C.fail('meta_business_scope_changed',409);const next=await update(row,{state:'activate_pending',last_error:null,next_attempt_at:now()},transaction);await record(next,'meta_business_activation_requested',transaction,input);},input);try{await reconcileId(id);}catch{}return service.overview(input);},
     async cancel(input,id){await queueCancel(id,null,input);try{await reconcileId(id);}catch{}return service.overview(input);},
-    async reconcile(input,id){await tx(async transaction=>{const row=await current(id,transaction);await scope.authorize(input,transaction);if(input.scopeKey!==row.scope_key)C.fail('meta_business_scope_forbidden',403);});try{await reconcileId(id);}catch(error){await tx(async transaction=>{const row=await current(id,transaction);if(!C.TERMINAL.includes(row.state))await update(row,{last_error:C.safe(error),next_attempt_at:new Date(+now()+30000)},transaction);});}return service.overview(input);},
-    async run(){if(!enabled()||!H)return {status:'completed',skipped:true};let processed=0,failed=0;const deadline=+now()+30000,rows=await H.findAll({where:{state:{[Op.notIn]:C.TERMINAL},next_attempt_at:{[Op.lte]:now()}},order:[['next_attempt_at','ASC']],limit:10,raw:true,logging:false});for(const row of rows){if(+now()>=deadline)break;try{await reconcileId(row.handover_id);processed++;}catch(error){failed++;if([400,401,403,409].includes(error.httpStatus))await queueCancel(row.handover_id,C.safe(error));else await tx(async transaction=>{const fresh=await current(row.handover_id,transaction);if(!C.TERMINAL.includes(fresh.state))await update(fresh,{last_error:C.safe(error),next_attempt_at:new Date(+now()+60000)},transaction);});}}return {status:failed?'failed':'completed',retryable:false,processed,failed};},reconcileId
+    async reconcile(input,id){await requestTx(id,async(row,transaction)=>{await scope.authorize(input,transaction);if(input.scopeKey!==row.scope_key)C.fail('meta_business_scope_forbidden',403);},input);try{await reconcileId(id);}catch(error){await requestTx(id,async(row,transaction)=>{if(!C.TERMINAL.includes(row.state))await update(row,{last_error:C.safe(error),next_attempt_at:new Date(+now()+30000)},transaction);});}return service.overview(input);},
+    async run(){if(!enabled()||!H)return {status:'completed',skipped:true};let processed=0,failed=0;const deadline=+now()+30000,rows=await H.findAll({where:{state:{[Op.notIn]:C.TERMINAL},next_attempt_at:{[Op.lte]:now()}},order:[['next_attempt_at','ASC']],limit:10,raw:true,logging:false});for(const row of rows){if(+now()>=deadline)break;try{await reconcileId(row.handover_id);processed++;}catch(error){failed++;if([400,401,403,409].includes(error.httpStatus))await queueCancel(row.handover_id,C.safe(error));else await requestTx(row.handover_id,async(fresh,transaction)=>{if(!C.TERMINAL.includes(fresh.state))await update(fresh,{last_error:C.safe(error),next_attempt_at:new Date(+now()+60000)},transaction);});}}return {status:failed?'failed':'completed',retryable:false,processed,failed};},reconcileId
   };return service;
 }
 let singleton;const instance=()=>singleton||=createService({models:require('../../models'),sessions:require('./accessSession.service'),client:require('./metaMarketingOAuthClient.service').createClient()});

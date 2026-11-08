@@ -33,7 +33,7 @@ function createMetaMarketingAgencyHttp({request=https.request,timeoutMs=8000,now
   }else if(['adUsers','pageUsers'].includes(operation)){
    if(!M.graphId(id))fail('invalid_request');path=fields(operation==='adUsers'?'act_'+id:id,'assigned_users','id,tasks',{business:c.issuerBusinessId});
   }else if(operation==='mint'){
-   if(!M.graphId(id))fail('invalid_request');post(id,'access_tokens',{business_app:b.appId,scope:A.SCOPES.join(','),set_token_expires_in_60_days:'true'});
+   if(!M.graphId(id))fail('invalid_request');post(id,'access_tokens',{business_app:b.appId,scope:b.scopes.join(','),set_token_expires_in_60_days:'true'});
   }else if(operation==='refresh'){
    path=`/${version}/oauth/access_token?`+new URLSearchParams({grant_type:'fb_exchange_token',client_id:b.appId,client_secret:appSecret.toString('ascii'),fb_exchange_token:token.toString('utf8'),set_token_expires_in_60_days:'true'});mutates=true;
   }else fail('operation_denied');
@@ -76,7 +76,7 @@ function createMetaMarketingAgencyHttp({request=https.request,timeoutMs=8000,now
  return {call,inspect,verifyPages,
   async withExchangedToken({binding,flowId,code,appSecret,signal,authorize=()=>{}},work){if(!bootstrap||typeof bootstrap.run!=='function')fail('operation_denied');const app=Buffer.from(appSecret),ownCode=Buffer.from(code);let admin,result;
    try{result=await call(binding,'exchange',{code:ownCode,appSecret:app,signal,authorize});if(!tokenText(result.access_token))fail('oauth_credentials_incomplete');admin=Buffer.from(result.access_token);delete result.access_token;
-    const raw=await call(binding,'debug',{token:admin,appSecret:app,signal,authorize}),b=A.bindingFor(binding),checked=M.inspectCredential(raw,{appId:b.appId,subjectId:raw?.data?.user_id,scopes:A.SETUP_SCOPES},now(),A.SETUP_SCOPES);
+    const raw=await call(binding,'debug',{token:admin,appSecret:app,signal,authorize}),b=A.bindingFor(binding),setupScopes=A.setupScopesForCohort(b.businessLogin.cohort),checked=M.inspectCredential(raw,{appId:b.appId,subjectId:raw?.data?.user_id,scopes:setupScopes},now(),setupScopes);
     if(checked.tokenType!=='USER'||checked.expiresAt!==null&&checked.expiresAt<=now())fail('oauth_identity_mismatch');
     const me=await call(binding,'me',{token:admin,appSecret:app,signal,authorize});if(!C.exact(me,'id')||me.id!==checked.subjectId)fail('oauth_identity_mismatch');
     return await bootstrap.run({binding,flowId,adminSubjectId:checked.subjectId,signal,authorize,call:(operation,params={})=>call(binding,operation,{...params,token:admin,appSecret:app,signal,authorize})},async(token,systemUserId)=>use({binding,token,appSecret:app,signal,authorize,systemUserId},work));

@@ -236,6 +236,7 @@ async function deactivateMetaMappingsForScope({
   transaction,
   actorId,
   models = db,
+  preparedContext,
 }) {
   const isClinic = scope.assignmentScope === 'clinic';
   const allGroupClinicIds = isClinic
@@ -274,12 +275,68 @@ async function deactivateMetaMappingsForScope({
     assignmentModel: models.GroupAssetClinicAssignment,
     models,
   });
-  await require('./metaScopeBlock.service').preserve({ scope, connectionId, actorId, clinicIds: inheritedIds, models, transaction });
+  if(preparedContext&&JSON.stringify([...inheritedIds].sort((a,b)=>a-b))!==JSON.stringify(preparedContext.clinicIds))require('./metaMarketingTransactionOrder.service').changed();
+  await require('./metaScopeBlock.service').preserve({ scope, connectionId, actorId, clinicIds: inheritedIds, models, transaction,preparedContext });
   return { meta: await deactivateRows(rows, 'isActive', transaction) };
+}
+
+async function metaSelection(scope,models,transaction=null){
+  const options={raw:true,logging:false,...(transaction?{transaction,lock:transaction.LOCK.UPDATE}:{})};
+  const clinics=await models.Clinica.findAll({...options,attributes:['id_clinica','grupoClinicaId'],where:scope.assignmentScope==='clinic'?{id_clinica:scope.clinicId}:{grupoClinicaId:scope.groupId},order:[['id_clinica','ASC']],limit:1001});
+  if(!clinics.length||clinics.length>1000)throw Object.assign(Error('meta_security_state_unavailable'),{code:'meta_security_state_unavailable',httpStatus:503});
+  const all=clinics.map(row=>Number(row.id_clinica));
+  const overrides=scope.assignmentScope==='clinic'?[]:await models.MetaConnectionAssignment.findAll({...options,attributes:['clinicaId'],where:{assignmentScope:'clinic',clinicaId:{[Op.in]:all},status:{[Op.in]:['active','reauthorization_required']}},order:[['clinicaId','ASC']],limit:1001});
+  const excluded=new Set(overrides.map(row=>Number(row.clinicaId)));
+  return {clinics:clinics.map(row=>[Number(row.id_clinica),row.grupoClinicaId===null?null:Number(row.grupoClinicaId)]),all,inherited:scope.assignmentScope==='clinic'?all:all.filter(value=>!excluded.has(value))};
+}
+async function withMetaRetirementTransaction({scope,connectionId,actorId,models=db,authorize,expectedAssignment=null},work){
+  if(typeof authorize!=='function'||typeof work!=='function')throw Error('meta_retirement_authorization_required');
+  scope={...scope};connectionId=Number(connectionId);actorId=Number(actorId);
+  const ordering=require('./metaMarketingTransactionOrder.service'),block=require('./metaScopeBlock.service');
+  for(let attempt=0;attempt<2;attempt++){
+    let retryAllowed=true;
+    try{
+    // Existing route policy, not OAuth/Business admission or email MFA. The
+    // caller reuses the same authentication/whole-scope WRITE predicate.
+    await models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},authorize);
+    const selection=await metaSelection(scope,models);
+    const preparedContext=await block.prepareRetirement({scope,clinicIds:selection.inherited,models});
+    return await models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},async transaction=>{
+      await block.lockRetirement(preparedContext,transaction,{models});
+      await authorize(transaction);
+      const current=await metaSelection(scope,models,transaction);
+      if(JSON.stringify(current)!==JSON.stringify(selection))ordering.changed();
+      const connection=await models.MetaConnection.findByPk(connectionId,{attributes:['id','credentials_external'],raw:true,logging:false,transaction,lock:transaction.LOCK.UPDATE});
+      if(!connection)ordering.changed();
+      if(Number(connection.credentials_external)===1)throw Object.assign(Error('meta_marketing_scoped_revocation_required'),{code:'meta_marketing_scoped_revocation_required',httpStatus:409});
+      if(expectedAssignment){
+        const assignment=await models.MetaConnectionAssignment.findByPk(expectedAssignment.id,{attributes:['id','scopeKey','metaConnectionId','status'],raw:true,logging:false,transaction,lock:transaction.LOCK.UPDATE});
+        if(!assignment||assignment.scopeKey!==expectedAssignment.scopeKey||Number(assignment.metaConnectionId)!==connectionId||assignment.status!==expectedAssignment.status)ordering.changed();
+      }else{
+        const assignment=await models.MetaConnectionAssignment.findOne({where:{scopeKey:scope.scopeKey},attributes:['metaConnectionId','status'],raw:true,logging:false,transaction,lock:transaction.LOCK.UPDATE});
+        if(assignment&&['active','reauthorization_required'].includes(assignment.status)&&Number(assignment.metaConnectionId)!==connectionId)ordering.changed();
+      }
+      // Current NOWAIT checks occur before mappings, tombstones, audit or work.
+      // They cannot wait on a newly born E/H owner that is waiting for Clinic.
+      await block.validateRetirement(preparedContext,transaction,{models});
+      retryAllowed=false;
+      return work({transaction,preparedContext,scope:{...scope},clinicIds:current.all,inheritedClinicIds:current.inherited});
+    });}catch(error){
+      if(ordering.isChanged(error)&&retryAllowed)continue;
+      // Sequelize has settled/rolled back the owned transaction before this
+      // classification. A normal InnoDB wait/deadlock is temporary, and must
+      // never replay completed work, writes or an external operation.
+      const code=error?.original?.code||error?.parent?.code||error?.code;
+      if(ordering.isChanged(error)||['ER_LOCK_WAIT_TIMEOUT','ER_LOCK_DEADLOCK'].includes(code))throw Object.assign(Error('meta_security_state_unavailable'),{code:'meta_security_state_unavailable',httpStatus:503});
+      throw error;
+    }
+  }
+  throw Object.assign(Error('meta_security_state_unavailable'),{code:'meta_security_state_unavailable',httpStatus:503});
 }
 
 module.exports = {
   deactivateGoogleMappingsForScope,
   deactivateMetaMappingsForScope,
   metaSharedAssetType,
+  withMetaRetirementTransaction,
 };

@@ -29,7 +29,7 @@ function fixture(value=status({days:2})){
   assert.equal(request.channelsOverride.whatsapp,false);assert.deepEqual(request.allowedChannels,['panel','email']);
   const created=Object.entries(request.channelsOverride).filter(([,on])=>on).map(([channel])=>({channel}));deliveries.push(...created.map(c=>({...c,metadata:request.metadata,payload:request.payload})));return{created,skipped:[]};};
  const create=()=>N.createCredentialNotifications({models,queue,channels:()=>['panel','email','whatsapp'],namespace:'staging',now:()=>time,
-  enabled:()=>state.enabled,credentialStatus:async()=>{if(state.error)throw Error(state.error);return structuredClone(state.value);},
+  enabled:()=>state.enabled,ordering:{prepareEnrollment:async enrollmentId=>({enrollmentId}),lockPrepared:async(prepared,transaction)=>{assert(transaction);assert(prepared.enrollmentId);}},credentialStatus:async()=>{if(state.error)throw Error(state.error);return structuredClone(state.value);},
   maintenanceStatus:async()=>structuredClone(state.maintenance||maintenance(state.value)),confirmedHandover:async(previous,options)=>{assert(options.transaction);state.handoverReads=(state.handoverReads||0)+1;state.onHandoverRead?.(state.handoverReads);return structuredClone(state.handoverResult||null);}});
  return {state,rows,deliveries,models,create,advance:ms=>time+=ms};
 }

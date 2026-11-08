@@ -2,9 +2,15 @@
 const C=require('./metaMarketingCredentialRenewal.contract'),B=require('../../services/integrations-broker/src/meta-marketing-business-contract');
 const A=require('../../services/integrations-broker/src/meta-marketing-agency-contract');
 const ISSUERS=['BISU',A.ISSUER],issuer=value=>value?.issuerKind===A.ISSUER?A.ISSUER:value?.tokenType==='USER'?'USER':'BISU';
-const scopesFor=kind=>kind===A.ISSUER?A.SCOPES:B.SCOPES;
+const PERMISSION_PROFILES=Object.freeze(['legacy-v1','paid-leads-v2']);
+function permissionProfile(value='legacy-v1'){if(!PERMISSION_PROFILES.includes(value))fail();return value;}
+function cohortFor(kind,profile='legacy-v1'){if(!ISSUERS.includes(kind))fail();return kind===A.ISSUER?(permissionProfile(profile)==='legacy-v1'?A.COHORT:A.PAID_COHORT):(permissionProfile(profile)==='legacy-v1'?B.COHORT:B.PAID_COHORT);}
+const scopesFor=(kind,profile='legacy-v1')=>(kind===A.ISSUER?A:B).scopesForCohort(cohortFor(kind,profile));
+function profileForScopes(kind,serialized){for(const profile of PERMISSION_PROFILES)if(serialized===JSON.stringify(scopesFor(kind,profile)))return profile;fail();}
+const policyDigestParts=policy=>permissionProfile(policy.permissionProfile)==='legacy-v1'?[]:['paid-leads-v2',scopesFor(policy.issuerKind,'paid-leads-v2')];
 const providerBusinessId=value=>issuer(value)===A.ISSUER?value.issuerBusinessId:null;
-const pin=row=>({appId:row.app_id,configId:row.config_id,graphVersion:row.graph_version,issuerKind:row.issuer_kind,issuerBusinessId:row.issuer_business_id});
+const pin=row=>{const profile=row.scopes===undefined?'legacy-v1':profileForScopes(row.issuer_kind,row.scopes);return {appId:row.app_id,configId:row.config_id,graphVersion:row.graph_version,issuerKind:row.issuer_kind,issuerBusinessId:row.issuer_business_id,
+  ...(profile==='legacy-v1'?{}:{cohort:cohortFor(row.issuer_kind,profile)})};};
 const IMMUTABLE=['enrollment_id','flow_id','scope_key','connection_ref','scope_digest','flow_digest','candidate_digest','meta_user_id','app_id','assignment_digest','clinic_ids','assets','mapping_ids','meta_connection_id','actor_user_id','session_ref','session_expires_at','requested_at','prepared_at','activated_at','selection_digest'];
 const freeze=row=>Object.fromEntries(IMMUTABLE.map(key=>[key,row[key] instanceof Date?row[key].toISOString():row[key]]));
 const ERRORS=new Set(['meta_business_disabled','meta_business_unavailable','meta_business_invalid','meta_business_scope_forbidden','meta_business_scope_changed','meta_business_identity_mismatch','meta_business_candidate_rejected','meta_business_expired','meta_business_busy','meta_business_drain_pending','meta_business_activation_uncertain','meta_business_version_changed','meta_business_session_required','auth_email_verification_required','broker_response_invalid','broker_configuration_invalid','broker_timeout','broker_unavailable','rate_limited','provider_timeout','audit_unavailable','outcome_unknown']);
@@ -35,7 +41,8 @@ function request(row){
   if(!/^(clinic|group):[1-9][0-9]{0,9}$/.test(row.scope_key)||!/^([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$/.test(row.connection_ref)
     ||![row.app_id,row.config_id].every(id=>typeof id==='string'&&/^[1-9][0-9]{0,29}$/.test(id))||!/^v(?:24|25|26|27)\.0$/.test(row.graph_version)
     ||!ISSUERS.includes(row.issuer_kind)||(row.issuer_kind===A.ISSUER?!/^[1-9][0-9]{0,29}$/.test(row.issuer_business_id||''):row.issuer_business_id!==null)
-    ||row.scopes!==JSON.stringify(scopesFor(row.issuer_kind)))fail();
+    ||typeof row.scopes!=='string')fail();
+  profileForScopes(row.issuer_kind,row.scopes);
   const clinicIds=C.clinics(row.clinic_ids);let selected,source,candidateValue;
   try{selected=C.assets(JSON.parse(row.assets));source=JSON.parse(row.source_snapshot);candidateValue=row.candidate_metadata?candidate(JSON.parse(row.candidate_metadata),pin(row)):null;}catch{fail();}
   if(!C.exact(source,IMMUTABLE.join(','))||source.enrollment_id!==row.old_enrollment_id||source.scope_key!==row.scope_key||source.app_id!==row.app_id||source.scope_digest!==row.old_scope_digest
@@ -61,4 +68,4 @@ function receipt(value,row){
     ||value.drain.receiptSetDigest!==B.drainDigest(row.handover_id,value.oldGrantDigest,value.drain.receiptRefs)))fail('broker_response_invalid');
   return structuredClone(value);
 }
-module.exports={...C,B,A,ISSUERS,issuer,scopesFor,providerBusinessId,pin,IMMUTABLE,freeze,ERRORS,fail,safe,metadata,candidate,request,receipt,sourceFlow,sourceDigest};
+module.exports={...C,B,A,ISSUERS,issuer,PERMISSION_PROFILES,permissionProfile,cohortFor,scopesFor,profileForScopes,policyDigestParts,providerBusinessId,pin,IMMUTABLE,freeze,ERRORS,fail,safe,metadata,candidate,request,receipt,sourceFlow,sourceDigest};

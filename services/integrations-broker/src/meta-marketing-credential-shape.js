@@ -9,6 +9,14 @@ const metadata=(v,b)=>business(b)?B.metadata(v,b):C.metadata(v,b);
 const keys=b=>business(b)?B.keys(b):['appId','subjectId','tokenType','scopes','expiresAt','dataAccessExpiresAt','granularScopes'];
 const graphVersion=b=>business(b)?bindingFor(b).businessLogin.graphVersion:require('./meta-marketing-contract').GRAPH_VERSION;
 function inspected(raw,b,now,prior){return business(b)?B.forBinding(b).inspected(raw,b,now,prior?.issuerKind==='AGENCY_SYSTEM_USER'?{id:prior.subjectId,systemUserId:prior.systemUserId}:{id:prior?.subjectId,client_business_id:prior?.clientBusinessId}):C.inspected(raw,b,now);}
+function assertPaidAttribution(b,value,account){
+ // Only the owner-selected profile requests this capability. Extra provider
+ // scopes never activate it, and legacy pinned profiles keep their semantics.
+ if(!bindingFor(b).scopes.includes('ads_management'))return;
+ if(!value.scopes.includes('ads_management'))require('./errors').fail('scope_denied');
+ const granular=value.granularScopes.find(row=>row.scope==='ads_management');
+ if(granular&&!granular.targetIds.includes(account.id))require('./errors').fail('scope_denied');
+}
 function authorize(context){if(!business(context.binding))return C.authorize(context);const b=bindingFor(context.binding),{request,principal}=context;
  if(request.tenantRef!=='clinic:'+b.clinicIds[0]||request.assetRef!=='meta-enroll:'+b.scopeKey||!/^(gateway|control):(dev|staging):meta-marketing-oauth$/.test(principal.id)||principal.id.startsWith('control:')&&![C.OPERATIONS.abort,C.OPERATIONS.status].includes(request.operation))require('./errors').fail('scope_denied');}
-module.exports={authorize,business,bindingFor,fingerprint,metadata,keys,graphVersion,inspected};
+module.exports={authorize,business,bindingFor,fingerprint,metadata,keys,graphVersion,inspected,assertPaidAttribution};

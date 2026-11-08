@@ -1198,7 +1198,7 @@ function normalizeBusinessLocation(location, account) {
     };
 }
 
-async function authorizeExplicitConnectionScope(req, access = 'read') {
+async function authorizeExplicitConnectionScope(req, access = 'read', transaction = null) {
     const userId = getUserIdFromToken(req);
     if (!userId) {
         const error = new Error('Usuario no autenticado');
@@ -1207,6 +1207,7 @@ async function authorizeExplicitConnectionScope(req, access = 'read') {
         throw error;
     }
     const scopeInput = getScopeInputFromRequest(req);
+    const locked = transaction ? { transaction, lock: transaction.LOCK.UPDATE, logging: false } : {};
     return authorizeRequestedMarketingConnectionScope({
         userId,
         ...scopeInput,
@@ -1214,12 +1215,13 @@ async function authorizeExplicitConnectionScope(req, access = 'read') {
         findClinicGroupId: async (clinicId) => {
             const clinic = await Clinica.findByPk(clinicId, {
                 attributes: ['grupoClinicaId'],
-                raw: true
+                raw: true,
+                ...locked
             });
             return clinic?.grupoClinicaId || null;
         },
-        findGroupClinicIds: getClinicIdsForGroup,
-        authorizeClinicIds: hasMarketingClinicScopeAccess
+        findGroupClinicIds: transaction ? async groupId => (await Clinica.findAll({ where: { grupoClinicaId: groupId }, attributes: ['id_clinica'], raw: true, order: [['id_clinica', 'ASC']], ...locked })).map(row => Number(row.id_clinica)) : getClinicIdsForGroup,
+        authorizeClinicIds: transaction ? options => hasMarketingClinicScopeAccess({ ...options, membershipModel: { findAll: query => db.UsuarioClinica.findAll({ ...query, ...locked }) } }) : hasMarketingClinicScopeAccess
     });
 }
 
@@ -4343,7 +4345,8 @@ router.delete('/meta/disconnect', async (req, res) => {
 
         if (scope.scopeKey) {
             const { connection, assignment } = await resolveMetaRequestConnection(req, {
-                allowLegacyUserFallback: true
+                allowLegacyUserFallback: true,
+                metadataOnly: true
             });
 
             if (!connection && !assignment) {
@@ -4356,18 +4359,37 @@ router.delete('/meta/disconnect', async (req, res) => {
             const connectionId = connection?.id || assignment?.metaConnectionId || null;
             if (connectionId) {
                 await require('../services/metaMarketingRevocation.service').assertLegacyDisconnectAllowed(db, connectionId);
-                await db.sequelize.transaction(async (transaction) => {
+                const session = { ...req.authSession };
+                const authorize = async transaction => {
+                    // Reuse the route's existing managed OR legacy verifier.
+                    // Withdrawal does not acquire Business/OAuth admission or
+                    // a new email-MFA requirement, including with gates off.
+                    if (session.id) {
+                        await accessSessions.verifyReference({ userId, sessionRef: session.id, expiresAt: new Date(session.expiresAt * 1000) }, { transaction, requireEmail: false });
+                    } else {
+                        const configuration = accessSessions.settings();
+                        if (configuration.mode !== 'legacy') throw Object.assign(Error('auth_invalid'), { name: 'JsonWebTokenError', httpStatus: 401 });
+                        const verified = await require('../lib/adminCredentialSession').verifyToken(accessSessions.bearer(req.headers.authorization), configuration.secret, {
+                            findUser: id => db.Usuario.findByPk(id, { attributes: ['id_usuario', 'password_usuario', 'email_usuario', 'estado_cuenta', 'es_provisional'], transaction, lock: transaction.LOCK.UPDATE, logging: false })
+                        });
+                        if (verified.userId !== userId) throw Object.assign(Error('auth_invalid'), { name: 'JsonWebTokenError', httpStatus: 401 });
+                    }
+                    return authorizeExplicitConnectionScope(req, 'write', transaction);
+                };
+                await require('../services/oauthScopedDisconnect.service').withMetaRetirementTransaction({ scope, connectionId, actorId: userId, models: db, authorize,
+                    expectedAssignment: assignment ? { id: assignment.id, scopeKey: assignment.scopeKey, status: assignment.status } : null }, async ({ transaction, preparedContext, scope: lockedScope }) => {
                     await deactivateMetaMappingsForScope({
-                        scope,
+                        scope: lockedScope,
                         connectionId,
                         actorId: userId,
-                        transaction
+                        transaction,
+                        preparedContext
                     });
                     await MetaConnectionAssignment.upsert({
-                        scopeKey: scope.scopeKey,
-                        assignmentScope: scope.assignmentScope,
-                        clinicaId: scope.assignmentScope === 'clinic' ? scope.clinicId : null,
-                        grupoClinicaId: scope.groupId || null,
+                        scopeKey: lockedScope.scopeKey,
+                        assignmentScope: lockedScope.assignmentScope,
+                        clinicaId: lockedScope.assignmentScope === 'clinic' ? lockedScope.clinicId : null,
+                        grupoClinicaId: lockedScope.groupId || null,
                         metaConnectionId: connectionId,
                         status: 'disconnected',
                         authorizedByUserId: userId,
@@ -4430,6 +4452,12 @@ router.delete('/meta/disconnect', async (req, res) => {
         });
         
     } catch (error) {
+        if (error.code === 'auth_invalid' || ['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error.name)) {
+            return res.status(401).json({ success: false, error: 'Usuario no autenticado', code: 'auth_invalid' });
+        }
+        if (error.httpStatus === 503 && ['meta_security_state_unavailable', 'meta_marketing_order_changed'].includes(error.code)) {
+            return res.status(503).json({ success: false, error: 'No se pudo verificar el estado de la conexión. Vuelve a intentarlo.', code: 'meta_security_state_unavailable' });
+        }
         if (sendKnownOAuthMappingError(res, error)) return;
         console.error('❌ Error eliminando conexión Meta:', error);
         res.status(500).json({

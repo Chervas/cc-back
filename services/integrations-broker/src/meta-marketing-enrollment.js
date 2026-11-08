@@ -31,7 +31,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   const physical=a=>[a.assetRef,...(a.parentPageId?['meta-facebook_page:'+a.parentPageId]:[])];
   const selected=row=>E.assets(JSON.parse(row.assets));
   const succession=id=>businessConfig?get('SELECT * FROM meta_marketing_enrollment_successions WHERE old_enrollment=?',id):null;
-  function grantBinding(row,binding){const f=row?.flow&&flowFor(row.flow),m=f?.credential_metadata&&JSON.parse(f.credential_metadata);if(m?.tokenType!=='SYSTEM_USER')return B.baseBinding(binding);const candidates=B.configs(businessConfig).filter(c=>(m.issuerKind==='AGENCY_SYSTEM_USER')===(c.cohort===require('./meta-marketing-agency-contract').COHORT)&&c.configId===m.configId);if(candidates.length!==1)fail('scope_denied');return B.derive(B.baseBinding(binding),candidates[0],selected(row));}
+  function grantBinding(row,binding){const f=row?.flow&&flowFor(row.flow),m=f?.credential_metadata&&JSON.parse(f.credential_metadata);if(m?.tokenType!=='SYSTEM_USER')return B.baseBinding(binding);return B.forCredential(B.baseBinding(binding),businessConfig,m,selected(row));}
   function barrier(row){return businessConfig?get("SELECT * FROM meta_marketing_business_barriers WHERE enrollment=? AND state='closed'",row.id):null;}
   function settledDuplicate(row,context,digest,event){if(!businessConfig)return false;const next=get('SELECT * FROM meta_marketing_business_receipt_lineage WHERE receipt=? AND new_enrollment=?',row.id,context.enrollment);return !!next&&row.app===context.app&&row.tenant===context.tenant&&row.connection===context.connection&&row.page===context.page&&row.account===context.account&&row.recipient_clinic===context.recipientClinicId&&row.form===event.form_id&&row.ad===event.ad_id&&row.body_digest===digest;}
   function owned(request,row){
@@ -352,6 +352,9 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     assertRenewalCredential(enrollmentId,binding,metadata){
       if(!credentialEpochs||!C.uuid(enrollmentId))fail('operation_denied');
       const row=rowFor(enrollmentId),authority=enrollmentActive(row,grantBinding(row,B.baseBinding(binding)),{requireActive:true,allowExpired:true});
+      const candidateBinding=metadata.tokenType==='SYSTEM_USER'?B.forCredential(B.baseBinding(binding),businessConfig,metadata,authority.assets):B.baseBinding(binding);
+      K.metadata(metadata,candidateBinding);
+      for(const asset of authority.assets.filter(value=>value.kind==='ad_account'))K.assertPaidAttribution(candidateBinding,metadata,asset);
       for(const asset of authority.assets)M.assertAssetCredential(metadata,asset);
       const pairs=(leadAds?.pairs||[]).filter(pair=>authority.assets.some(a=>a.assetRef===pair.pageAssetRef)&&authority.assets.some(a=>a.assetRef===pair.adAccountAssetRef));
       if(X.includes(enrolledAssetAccess,binding)){
