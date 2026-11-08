@@ -152,3 +152,25 @@ test('runtime opt-in is additive and requires exactly the renewal grants; V1 con
     const v = structuredClone(r.f.config); mutate(v); assert.throws(() => runtime.validateConfig(v), { code: 'invalid_request' });
   }
 });
+
+test('explicitly provisioned USER paid Lead grant renews same scope and preserves assets and history', async t => {
+  const r=await ready(t,{leads:true,adsManagement:true}),before=r.immutable(),n=r.next();
+  const begin=await n.begin();assert(new URL(begin.data.authUrl).searchParams.get('scope').split(',').includes('ads_management'));
+  const response=await n.finish();assert(response.data.candidate.metadata.scopes.includes('ads_management'));assert.equal(response.data.effectiveCredential.epoch,0);
+  assert.equal((await r.read()).data.id,'act_301');const active=(await n.activate(response.data.candidate)).data;
+  assert.equal(active.effectiveCredential.epoch,1);assert(active.effectiveCredential.metadata.scopes.includes('ads_management'));assert.equal(r.immutable(),before);assert.equal((await r.read()).data.id,'act_301');
+});
+test('cancelled or insufficient USER paid Lead renewal preserves current credential and both clinics', async t => {
+  for(const reject of [false,true]){
+    const r=await ready(t,{leads:true,adsManagement:true}),before=r.immutable(),n=r.next();await n.begin();
+    if(reject){r.f.state.afterGraph=(kind,value)=>kind==='inspect'?{data:{...value.data,scopes:value.data.scopes.filter(s=>s!=='ads_management')}}:value;
+      await assert.rejects(n.finish(),{code:'oauth_credentials_incomplete'});r.f.state.afterGraph=null;assert.equal((await n.status()).data.status,'rejected');}
+    await n.abort();assert.equal((await r.read()).data.id,'act_301');assert.equal(r.immutable(),before);
+    assert.equal(r.f.current.store.db.prepare('SELECT COUNT(*) n FROM meta_marketing_effective_credentials').get().n,0);assert.deepEqual(r.f.binding.metaMarketingOAuth.clinicIds,[71,72]);
+  }
+});
+test('adding permission to existing USER binding is not an implicit renewal scope upgrade', async t => {
+  const r=await ready(t,{leads:true}),before=r.immutable(),n=r.next(),aws=r.f.state.awsCalls.length;
+  r.f.policy.connections[0].metaMarketingOAuth.scopes.push('ads_management');r.f.restart();await assert.rejects(n.begin());assert.equal(r.f.state.awsCalls.length,aws);assert.equal(r.immutable(),before);
+  r.f.policy.connections[0].metaMarketingOAuth.scopes.pop();r.f.restart();assert.equal((await r.read()).data.id,'act_301');
+});

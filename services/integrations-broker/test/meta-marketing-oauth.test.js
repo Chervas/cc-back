@@ -95,3 +95,25 @@ test('complete scope, expiry and changed configuration cannot be rebound to an e
   f.policy.connections[0].metaMarketingOAuth.clinicIds=[71,72,73];f.restart();
   await assert.rejects(f.finish(flow),{code:'scope_denied'});assert.equal(f.state.codes,0);
 });
+
+test('explicit USER Lead consent requests and validates ads_management without enabling campaign writes or other issuers', async t => {
+  const f=fixture(t,{leads:true,adsManagement:true}),flow=await f.begin();
+  const requested=new URL(flow.result.data.authUrl).searchParams.get('scope').split(',');
+  assert(requested.includes('ads_management'));assert.deepEqual(requested,f.binding.metaMarketingOAuth.scopes);
+  const result=await f.finish(flow);assert(result.data.candidate.scopes.includes('ads_management'));assert.equal(result.data.candidate.tokenType,'USER');
+  for(const name of ['meta-marketing-contract','meta-marketing-agency-contract','meta-marketing-business-contract'])assert.equal(require('../src/'+name).SCOPES.includes('ads_management'),false);
+  assert(!f.policy.grants.some(g=>g.operations.some(op=>/campaign.*(?:create|update|delete)/.test(op))));assert.equal(f.state.puts,1);
+});
+test('USER candidate missing explicitly requested paid Lead permission is rejected before secret staging', async t => {
+  const f=fixture(t,{leads:true,adsManagement:true}),flow=await f.begin();
+  f.state.afterGraph=(kind,value)=>kind==='inspect'?{data:{...value.data,scopes:value.data.scopes.filter(s=>s!=='ads_management')}}:value;
+  await assert.rejects(f.finish(flow),{code:'oauth_credentials_incomplete'});assert.equal(f.state.puts,0);
+  assert.equal(f.current.store.db.prepare("SELECT COUNT(*) n FROM meta_marketing_oauth_flows WHERE state='staged'").get().n,0);
+});
+test('legacy USER binding projects extra observed ads_management without silently requesting or adopting it', async t => {
+  const f=fixture(t,{leads:true}),flow=await f.begin();
+  assert(!new URL(flow.result.data.authUrl).searchParams.get('scope').split(',').includes('ads_management'));
+  f.state.afterGraph=(kind,value)=>kind==='inspect'?{data:{...value.data,scopes:[...value.data.scopes,'ads_management']}}:value;
+  const result=await f.finish(flow);assert(!result.data.candidate.scopes.includes('ads_management'));
+  assert.deepEqual(result.data.candidate.scopes,[...f.binding.metaMarketingOAuth.scopes].sort());
+});

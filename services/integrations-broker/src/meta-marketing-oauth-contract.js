@@ -2,6 +2,9 @@
 const { createHash } = require('node:crypto');
 const { schema } = require('./contracts'), { fail } = require('./errors');
 const M = require('./meta-marketing-contract');
+// USER consent can require ads_management for paid Lead Ads identifiers. This
+// does not add campaign-write operations or broaden the direct-read contract.
+const SCOPES = Object.freeze([...M.SCOPES, 'ads_management']);
 const PROVIDER = 'meta_marketing_onboarding', COHORT = 'meta-marketing-oauth-v1';
 const OPERATIONS = Object.freeze(Object.fromEntries(['begin', 'finish', 'status', 'abort'].map(k => [k, `meta.marketing.oauth.${k}.v1`])));
 const id = { type: 'string', pattern: '^[1-9][0-9]{0,29}$' };
@@ -12,7 +15,7 @@ const object = properties => ({ type: 'object', additionalProperties: false, pro
 const bindingSchema = object({ appId: id, appVersionId: pin, slotVersionId: pin,
   redirectUri: { type: 'string', maxLength: 512 }, scopeKey: { type: 'string', pattern: '^(clinic|group):[1-9][0-9]{0,9}$' },
   clinicIds: { type: 'array', minItems: 1, maxItems: 1000, uniqueItems: true, items: { type: 'integer', minimum: 1, maximum: 2147483647 } },
-  scopes: { type: 'array', minItems: 2, maxItems: M.SCOPES.length, uniqueItems: true, items: { enum: M.SCOPES } } });
+  scopes: { type: 'array', minItems: 2, maxItems: SCOPES.length, uniqueItems: true, items: { enum: SCOPES } } });
 const checkBinding = schema({ value: bindingSchema });
 const validators = {
   begin: schema({ state, scopeDigest: digest, clinicSetDigest: digest, expiresAt: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } }),
@@ -60,10 +63,10 @@ function metadata(value, binding) {
 }
 function inspected(raw, binding, now) {
   const b = bindingFor(binding), subjectId = raw?.data?.user_id;
-  const checked = M.inspectCredential(raw, { appId: b.appId, subjectId, scopes: b.scopes }, now);
+  const checked = M.inspectCredential(raw, { appId: b.appId, subjectId, scopes: b.scopes }, now, SCOPES);
   delete checked.verifiedAt;
   checked.granularScopes = checked.granularScopes.map(v => ({ scope: v.scope, targetIds: v.targetIds.sort() })).sort((a,b) => a.scope.localeCompare(b.scope));
   return metadata(checked, binding);
 }
-module.exports = { PROVIDER, COHORT, OPERATIONS, bindingSchema, validators, bindingFor, clinicDigest, fingerprint,
+module.exports = { PROVIDER, COHORT, OPERATIONS, SCOPES, bindingSchema, validators, bindingFor, clinicDigest, fingerprint,
   authorize, metadata, inspected, hash, exact, uuid: value => typeof value === 'string' && new RegExp(uuid.pattern).test(value) };

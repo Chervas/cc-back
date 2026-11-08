@@ -5,7 +5,7 @@ const { BrokerStore } = require('../src/store'); const { Broker } = require('../
 const { createMetaMarketingOAuth, createMetaMarketingOAuthOperations } = require('../src/meta-marketing-oauth'); const { createMetaMarketingOAuthSecrets } = require('../src/meta-marketing-oauth-secrets');
 const { createMetaMarketingOAuthHttp } = require('../src/meta-marketing-oauth-http'); const C = require('../src/meta-marketing-oauth-contract'); const { ACCOUNT, SECRET_KEY } = require('../src/google-main');
 const TOKEN = 'FICTITIOUS_META_OAUTH_TOKEN'; const APP = '0123456789abcdef'.repeat(2);
-function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, business = false, agency = false, migrationDays = 366 } = {}) {
+function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, adsManagement = false, business = false, agency = false, migrationDays = 366 } = {}) {
   business=business||agency;
   renewal=renewal||business;leads=leads||business;
   enrollment=enrollment||renewal;
@@ -23,6 +23,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
   const businessConfig=agency?require('./meta-marketing-agency-fixture.cjs').config():business?{enabled:true,cohort:'meta-marketing-business-v1',configId:'777',graphVersion:'v27.0',providerBusinessId:'901',scopeKeys:['group:9']}:undefined;
   if(discovery)binding.metaMarketingOAuth.scopes.push('pages_show_list');
   if(leads)binding.metaMarketingOAuth.scopes.push('leads_retrieval','pages_manage_ads','pages_manage_metadata');
+  if(adsManagement)binding.metaMarketingOAuth.scopes.push('ads_management');
   const leadAds=leads?{enabled:true,cohort:'meta-marketing-lead-ads-v1',verifyTokenRef:{secretArn:prefix+'qa-lead-verify-abcdef',versionId:'v'.repeat(32)},
     pairs:[{pageAssetRef:'meta-facebook_page:401',adAccountAssetRef:'meta-ad_account:301',recipientClinicId:71}]}:undefined;
   const principal = (id, keyId, key) => ({ id, keyId, enabled: true, maxPerMinute: 20, publicKey: key.publicKey.export({ type: 'spki', format: 'pem' }) });

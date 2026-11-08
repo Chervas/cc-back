@@ -85,7 +85,7 @@ function iso(value) {
 function validScopes(scopes) {
   return Array.isArray(scopes) && scopes.length >= 2 && scopes.includes('public_profile')
     && new Set(scopes).size === scopes.length
-    && scopes.every((value, i, values) => M.SCOPES.includes(value) && (i === 0 || value > values[i - 1]));
+    && scopes.every((value, i, values) => C.SCOPES.includes(value) && (i === 0 || value > values[i - 1]));
 }
 function validateObserved(observed) {
   fields(observed, ['config', 'configSha256', 'observedAt', 'stateTables', 'stateTablesComplete']);
