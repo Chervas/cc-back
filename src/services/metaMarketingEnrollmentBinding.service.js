@@ -41,16 +41,23 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
       }
     }
   }
-  async function committed(id,transaction){
+  async function committed(id,transaction,{allowExpiredCredential=false,allowBusinessHandover=null}={}){
     if(!C.UUID.test(id))C.fail();const o=opts(transaction),raw=await R.findByPk(id,o);
     if(!raw)fail();const row=C.request(raw);if(row.state!=='active')fail('meta_enrollment_not_active');
-    const scope=scopeOf(row),flow=await models.MetaMarketingOAuthRequest.findByPk(row.flow_id,o);
-    if(!flow||flow.state!=='staged'||C.sourceDigest(flow)!==row.flow_digest)fail();
-    await S.revalidateStructure(flow,transaction);
-    const candidate=C.candidate(JSON.parse(flow.candidate_metadata),flow);
-    if(candidate.digest!==row.candidate_digest||candidate.appId!==row.app_id||candidate.subjectId!==row.meta_user_id
-      ||[candidate.expiresAt,candidate.dataAccessExpiresAt].some(v=>v!==null&&v<=+now()))fail();
-    const proof=await recovery.assertActive({flow,enrollmentId:id},transaction);
+    if(models.MetaMarketingBusinessHandover){
+      const pending=await models.MetaMarketingBusinessHandover.findOne({...o,attributes:['handover_id','activate_sent_at'],where:{old_enrollment_id:id,state:'activate_pending'}});
+      if(pending?.activate_sent_at&&pending.handover_id!==allowBusinessHandover)C.fail('meta_business_activation_uncertain',503);
+    }
+    const scope=scopeOf(row),businessSource=await require('./metaMarketingBusinessSource.service').createSource({models,now}).forEnrollment(row,transaction);
+    const flow=businessSource?.flow||await models.MetaMarketingOAuthRequest.findByPk(row.flow_id,o);
+    if(!businessSource){if(!flow||flow.state!=='staged'||C.sourceDigest(flow)!==row.flow_digest)fail();await S.revalidateStructure(flow,transaction,{allowExpiredCredential});}
+    const candidate=businessSource?.candidate||C.candidate(JSON.parse(flow.candidate_metadata),flow);
+    if(candidate.digest!==row.candidate_digest||candidate.appId!==row.app_id||candidate.subjectId!==row.meta_user_id)fail();
+    const effective=await require('./metaMarketingEffectiveCredential.service').createEffectiveCredentials({models,now})
+      .resolve(row,flow,transaction,{allowExpired:allowExpiredCredential});
+    // Business handover has its own confirmed authority and immutable lineage.
+    // It never masquerades as a Root recovery claim or changes that snapshot.
+    const proof=businessSource?.authority||await recovery.assertActive({flow,enrollmentId:id,allowExpiredCredential},transaction);
     if(proof&&(proof.enrollmentId!==id||proof.flowId!==row.flow_id||Number(proof.canonicalConnectionId)!==Number(row.meta_connection_id)
       ||proof.scopeKey!==row.scope_key||proof.subjectId!==row.meta_user_id||proof.appId!==row.app_id
       ||JSON.stringify(proof.clinicIds)!==row.clinic_ids||JSON.stringify(proof.mappingIds)!==row.mapping_ids))fail();
@@ -93,7 +100,7 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
     const physicalBindings=await B.findAll({...o,attributes:['mapping_id','enrollment_id'],where:physicalWhere,limit:201});
     if(physicalBindings.length!==bindings.length||physicalBindings.some(v=>v.enrollment_id!==id||!row.mappingIds.includes(Number(v.mapping_id))))fail('meta_enrollment_asset_in_use');
     const clinics=await models.Clinica.findAll({...o,attributes:['id_clinica','grupoClinicaId'],where:{id_clinica:{[Op.in]:row.clinicIds}},order:[['id_clinica','ASC']],limit:1001});
-    if(clinics.length!==row.clinicIds.length)fail();
+    if(clinics.length!==row.clinicIds.length||scope.assignmentScope==='group'&&clinics.some(value=>Number(value.grupoClinicaId)!==scope.groupId))fail();
     const groups=[...new Set(clinics.map(v=>v.grupoClinicaId).filter(v=>v!==null))];
     const grants=proof?[]:await models.MetaConnectionAssignment.findAll({...o,attributes:['id','scopeKey','assignmentScope','clinicaId','grupoClinicaId','metaConnectionId','status'],
       where:{[Op.or]:[{assignmentScope:'clinic',clinicaId:{[Op.in]:row.clinicIds}},{assignmentScope:'group',grupoClinicaId:{[Op.in]:groups}}]},limit:2001});
@@ -108,8 +115,10 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
     }
     await references(row,mappings,transaction);
     const pieces=[id,row.flow_id,row.flow_digest,row.selection_digest,row.assets,row.mapping_ids,row.clinic_ids];
-    if(proof)pieces.push(proof.snapshotDigest,proof.recoveryId,proof.canonicalConnectionId);
-    return {enrollmentId:id,flowId:row.flow_id,clinicIds:row.clinicIds,mappingIds:row.mappingIds,recovery:proof,
+    if(businessSource)pieces.push('business',proof.immutableDigest,proof.handoverId,proof.canonicalConnectionId);
+    else if(proof)pieces.push(proof.snapshotDigest,proof.recoveryId,proof.canonicalConnectionId);
+    return {enrollmentId:id,flowId:row.flow_id,clinicIds:row.clinicIds,mappingIds:row.mappingIds,recovery:businessSource?null:proof,business:businessSource?proof:null,
+      credential:{epoch:effective.epoch,versionId:effective.versionId,expiresAt:effective.metadata.expiresAt,dataAccessExpiresAt:effective.metadata.dataAccessExpiresAt},
       digest:C.hash(JSON.stringify(pieces))};
   }
   async function activate(value,remote,transaction){

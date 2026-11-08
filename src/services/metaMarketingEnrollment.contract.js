@@ -1,6 +1,6 @@
 'use strict';
 const C=require('./metaMarketingOAuth.contract'),E=require('../../services/integrations-broker/src/meta-marketing-enrollment-contract');
-const HASH=/^[a-f0-9]{64}$/,STATES=['prepare_pending','prepared','activate_pending','active','revoke_pending','revoked'];
+const HASH=/^[a-f0-9]{64}$/,STATES=['prepare_pending','prepared','activate_pending','active','revoke_pending','revoked','superseded'];
 const fail=(code='meta_enrollment_unavailable',httpStatus=503)=>C.fail(code,httpStatus);
 function assets(value){try{return E.assets(value);}catch{fail('meta_enrollment_invalid',400);}}
 const physical=value=>[...new Set(assets(value).flatMap(a=>[a.assetRef,...(a.parentPageId?['meta-facebook_page:'+a.parentPageId]:[])]))].sort();

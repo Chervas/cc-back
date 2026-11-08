@@ -11,6 +11,7 @@ const { snapshot, compare, digest, validatePlan } = require('../lib/securitySche
 const { observedEnvironment } = require('./security-email-login-metadata');
 const { configuration } = require('./security-database-metadata');
 const publicDatabase = require('../lib/schemaReleaseDatabase');
+const credentialPreflight = require('../lib/delegatedSchemaPreflight');
 const SOURCE = path.resolve(__dirname, '../..');
 const DEV_DATABASE = 'clinicaclick_dev_isolated';
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -52,20 +53,23 @@ function settings(env) {
     'AUTH_EMAIL_MFA_MODE','EMAIL_ENABLED','JOBS_WORKER_ENABLED','JOBS_CRON_LEADER'].map(k => [k, env[k] ?? null]));
 }
 function parse(argv) {
-  const action = argv.shift(); const options = { source: SOURCE, runtime: 'dev', migrations: [] };
+  const action = argv.shift(); const options = { source: SOURCE, runtime: 'dev', migrations: [], required: [] };
   if (!['check', 'plan-dev', 'apply-dev'].includes(action)) fail('schema_arguments_invalid');
   const seen = new Set();
   while (argv.length) {
     const key = argv.shift(); const value = argv.shift();
-    if (!value || !['--source','--runtime','--out','--migration','--plan','--binding','--binding-sha'].includes(key) || key !== '--migration' && seen.has(key)) fail('schema_arguments_invalid');
+    if (!value || !['--source','--runtime','--out','--migration','--require-migration','--plan','--binding','--binding-sha'].includes(key) || !['--migration','--require-migration'].includes(key) && seen.has(key)) fail('schema_arguments_invalid');
     seen.add(key);
-    if (key === '--migration') options.migrations.push(value); else options[key.slice(2)] = value;
+    if (key === '--migration') options.migrations.push(value); else if (key === '--require-migration') options.required.push(value); else options[key.slice(2)] = value;
   }
   if (!['dev','staging','gateway'].includes(options.runtime) || !options.out || !path.isAbsolute(options.out)
     || action !== 'check' && options.runtime !== 'dev'
     || action === 'apply-dev' && (!options.plan || options.migrations.length)
     || action === 'plan-dev' && (!options.migrations.length || options.plan)
     || action === 'check' && (options.plan || options.migrations.length)
+    || action !== 'check' && options.required.length || options.required.length > 20
+    || new Set(options.required).size !== options.required.length
+    || options.required.some(name => !/^[0-9]{14}-[a-z0-9-]+\.js$/.test(name))
     || options.runtime === 'dev' && (options.binding || options['binding-sha'])
     || options.runtime !== 'dev' && (!options.binding || !options['binding-sha'] || !/^[a-f0-9]{64}$/.test(options['binding-sha']))) fail('schema_arguments_invalid');
   options.source = fs.realpathSync(options.source);
@@ -109,6 +113,10 @@ async function applyPlan({ connection, plan, info, loadMigration, journal }) {
 async function run(argv) {
   const options = parse([...argv]);
   const info = sourceInfo(options.source, options.action !== 'check');
+  for (const name of options.required) {
+    const pin = info.contract.migrations.find(row => row.name === name);
+    if (!pin || info.migrations[name] !== pin.sha256) fail('schema_required_migration_invalid');
+  }
   const env = environment(options.runtime);
   const binding = options.runtime === 'dev' ? null : publicDatabase.readBinding(options.binding, options['binding-sha'], options.runtime);
   const opened = binding ? await publicDatabase.connectCheck(env, binding, options.runtime) : null;
@@ -118,13 +126,23 @@ async function run(argv) {
   try {
     if (options.action !== 'apply-dev') {
       await query('SET TRANSACTION READ ONLY'); await connection.beginTransaction();
-      const before = await snapshot(query); await connection.commit();
+      const before = await snapshot(query);
+      const requiredRows = options.required.length
+        ? await query('SELECT name FROM SequelizeMeta WHERE name IN (' + options.required.map(() => '?').join(',') + ')', options.required) : [];
+      if (!Array.isArray(requiredRows) || requiredRows.some(row => !options.required.includes(row.name))) fail('schema_required_migration_readback_invalid');
+      const missingRequiredMigrations = options.required.filter(name => !requiredRows.some(row => row.name === name));
+      await connection.commit();
       if (binding) publicDatabase.validateBinding(binding, options.runtime);
       const compatibility = compare(before, info.contract);
+      if (missingRequiredMigrations.length) compatibility.compatible = false;
       if (options.action === 'check') {
+        const credentialGroup = info.contract.featureGroups?.meta_marketing_credentials;
+        const credentialGrants = credentialGroup?.required === true
+          ? await credentialPreflight.checkTables(query, credentialGroup.tables) : null;
+        if (credentialGrants?.some(row => !row.compatible)) compatibility.compatible = false;
         const report = { status: compatibility.compatible ? 'compatible' : 'incompatible', runtime: options.runtime,
           revision: info.revision, contractDigest: info.contractDigest, snapshotDigest: digest(before),
-          settings: settings(env), checkedTables: Object.keys(info.contract.tables).length, ...(opened ? { transportProof: opened.proof } : {}), ...compatibility };
+          settings: settings(env), checkedTables: Object.keys(info.contract.tables).length, requiredMigrations: options.required, missingRequiredMigrations, ...(credentialGrants ? { credentialGrants } : {}), ...(opened ? { transportProof: opened.proof } : {}), ...compatibility };
         writeJson(options.out, report); if (binding) publicDatabase.validateBinding(binding, options.runtime); return report;
       }
       const plan = { version: 1, runtime: 'dev', database: DEV_DATABASE, revision: info.revision,

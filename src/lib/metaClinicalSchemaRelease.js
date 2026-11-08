@@ -18,6 +18,17 @@ const TABLES = Object.freeze(['MetaConnections', 'ClinicMetaAssets']);
 const NEW_TABLES = Object.freeze(['MetaMarketingBrokerBindings', 'MetaMarketingBrokerRevocations',
   'MetaMarketingOAuthSlots', 'MetaMarketingOAuthRequests', 'MetaMarketingEnrollmentRequests',
   'MetaMarketingEnrollmentClaims', 'MetaMarketingEnrollmentIdentities']);
+// The existing bootstrap operator remains a fixed nine-migration cut. Later
+// continuity releases use the normal selective RDS operator and this exact
+// metadata dependency group, never the bootstrap's empty-table assumptions.
+function continuitySelection(info){
+  const group=info.contract.featureGroups?.meta_marketing_credentials;
+  const migrations=['20261107203000-create-meta-marketing-credential-renewals.js','20261107223000-create-meta-marketing-business-continuity.js'];
+  const tables=['MetaMarketingCredentialRenewals','MetaMarketingEffectiveCredentials','MetaMarketingBusinessHandovers','MetaMarketingCredentialMaintenances','MetaMarketingBusinessDrains'];
+  if(group?.required!==true||JSON.stringify(group.migrations)!==JSON.stringify(migrations)||JSON.stringify(group.tables)!==JSON.stringify(tables)||tables.some(name=>!info.contract.tables[name]))throw Error('meta_schema_continuity_contract_invalid');
+  for(const name of migrations)if(!/^[a-f0-9]{64}$/.test(info.migrations[name]||'')||!info.contract.migrations.some(row=>row.name===name&&row.sha256===info.migrations[name]))throw Error('meta_schema_continuity_contract_invalid');
+  return {migrations:migrations.map(name=>({name,sha256:info.migrations[name]})),tables};
+}
 const fail = code => { throw Error(code); };
 function originalColumns(before) {
   return Object.fromEntries(TABLES.map(table => {
@@ -106,4 +117,4 @@ async function apply({ connection, plan, info, database, verifyWritersStopped, v
     return { ...result, completed, afterDigest: digest(after), rowsPreserved: plan.rows };
   } finally { await query("SELECT RELEASE_LOCK('clinicaclick_meta_clinical_schema_release')"); }
 }
-module.exports = { MIGRATIONS, TABLES, NEW_TABLES, originalColumns, rowFingerprints, validate, prepare, apply };
+module.exports = { MIGRATIONS, TABLES, NEW_TABLES, originalColumns, rowFingerprints, validate, prepare, apply, continuitySelection };

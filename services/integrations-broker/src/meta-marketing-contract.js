@@ -90,10 +90,10 @@ function granularDimensions(value, scopes, expected) {
 function verifyCredential(raw, binding, now) {
   return inspectCredential(raw, bindingFor(binding), now);
 }
-function inspectCredential(raw, expected, now) {
+function inspectCredential(raw, expected, now, allowedScopes = SCOPES) {
   if (!graphId(expected?.appId) || !graphId(expected?.subjectId) || !Array.isArray(expected.scopes)
     || !expected.scopes.length || new Set(expected.scopes).size !== expected.scopes.length
-    || expected.scopes.some(scope => !SCOPES.includes(scope))) fail('invalid_request');
+    || expected.scopes.some(scope => !allowedScopes.includes(scope))) fail('invalid_request');
   const data = raw?.data;
   if (raw?.error || !data || typeof data !== 'object' || Array.isArray(data)) credentialFailure('debug_response_shape');
   if (data.is_valid !== true) fail('credential_revoked');
@@ -149,4 +149,6 @@ function projectAsset(raw, asset) {
   return result;
 }
 module.exports = { PROVIDER, COHORT, GRAPH_VERSION, STATUS, ASSET, REVOKE, OPERATIONS, SCOPES,
-  bindingSchema, bindingFor, resource, requiredScopes, graphId, validate, verifyCredential, inspectCredential, assertAssetCredential, projectAsset };
+  bindingSchema, bindingFor, resource, requiredScopes, graphId, validate, verifyCredential, inspectCredential,
+  inspectBusinessCredential:(raw,expected,now)=>inspectCredential(raw,expected,now,['ads_read','business_management','leads_retrieval','pages_manage_ads','pages_manage_metadata','pages_read_engagement','pages_show_list']),
+  assertAssetCredential, projectAsset };

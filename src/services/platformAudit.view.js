@@ -74,6 +74,8 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
           metaOAuth: v.version === 22 ? { requestRef: v.correlationId, clinicCount: v.clinicCount } : null,
           metaDiscovery: v.version === 23 ? { flowRef: v.flowRef, clinicCount: v.clinicCount, assetCount: v.assetCount } : null,
           metaEnrollment: v.version === 24 ? { requestRef: v.requestRef, flowRef: v.flowRef, clinicCount: v.clinicCount, assetCount: v.assetCount, state: v.state } : null,
+          metaCredentialRenewal: v.version === 28 ? { requestRef: v.requestRef, enrollmentRef: v.enrollmentRef, epoch: v.epoch, clinicCount: v.clinicCount, assetCount: v.assetCount } : null,
+          metaBusinessContinuity: [29,30].includes(v.version) ? { requestRef:v.requestRef,enrollmentRef:v.enrollmentRef,previousEnrollmentRef:v.previousEnrollmentRef,epoch:v.epoch,clinicCount:v.clinicCount,assetCount:v.assetCount } : null,
           metaRevocation: v.version === 21 ? { assetRef: v.assetRef, clinicCount: v.affectedClinicCount } : null,
           metaAccessCheck: v.version === 20 ? { assetRef: v.assetRef, mappingId: v.mappingId, clinicCount: v.clinicCount, operation: v.operation } : null,
           googleReceiptReview: v.version === 19 ? { assetRef: v.assetRef, mappingId: v.mappingId, clinicCount: v.clinicCount,

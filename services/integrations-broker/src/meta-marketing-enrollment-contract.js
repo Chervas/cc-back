@@ -1,4 +1,5 @@
 'use strict';
+const K=require('./meta-marketing-credential-shape');
 const {schema}=require('./contracts'),{fail}=require('./errors'),C=require('./meta-marketing-oauth-contract'),M=require('./meta-marketing-contract');
 const OPERATIONS=Object.freeze(Object.fromEntries(['prepare','activate','status','revoke'].map(k=>[k,`meta.marketing.enrollment.${k}.v1`])));
 const uuid={type:'string',pattern:'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$'},digest={type:'string',pattern:'^[a-f0-9]{64}$'};
@@ -25,9 +26,9 @@ function assets(value){
   return value.map(a=>({...a})).sort((a,b)=>a.assetRef.localeCompare(b.assetRef));
 }
 const identity=a=>({assetRef:a.assetRef,kind:a.kind,id:a.id,parentPageId:a.parentPageId});
-const selectionDigest=(flow,binding,selected)=>C.hash(JSON.stringify([flow.id,flow.secret_digest,flow.scope_digest,flow.clinic_digest,C.fingerprint(binding),assets(selected)]));
+const selectionDigest=(flow,binding,selected)=>C.hash(JSON.stringify([flow.id,flow.secret_digest,flow.scope_digest,flow.clinic_digest,K.fingerprint(binding),assets(selected)]));
 function authorize({request,binding,principal},environment){
-  const r=roles(environment),b=C.bindingFor(binding);
+  const r=roles(environment),b=K.bindingFor(binding);
   if(request.tenantRef!=='clinic:'+b.clinicIds[0]||request.assetRef!=='meta-enroll:'+b.scopeKey
     ||![r.gateway,r.control].includes(principal.id)||principal.id===r.control&&![OPERATIONS.status,OPERATIONS.revoke].includes(request.operation))fail('scope_denied');
 }

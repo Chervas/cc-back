@@ -2,8 +2,10 @@
 const B=require('../../services/integrations-broker/src/meta-marketing-oauth-contract'),C=require('./metaMarketingOAuth.contract');
 const D=require('../../services/integrations-broker/src/meta-marketing-discovery-contract');
 const E=require('../../services/integrations-broker/src/meta-marketing-enrollment-contract');
-const ALLOWED=new Set([...Object.values(B.OPERATIONS),D.OPERATION,...Object.values(E.OPERATIONS)]);
-const CONTROL=new Set([B.OPERATIONS.abort,B.OPERATIONS.status,E.OPERATIONS.status,E.OPERATIONS.revoke]);
+const U=require('../../services/integrations-broker/src/meta-marketing-credential-renewal-contract');
+const L=require('../../services/integrations-broker/src/meta-marketing-business-contract'),M=require('../../services/integrations-broker/src/meta-marketing-credential-maintenance-contract');
+const ALLOWED=new Set([...Object.values(B.OPERATIONS),D.OPERATION,...Object.values(E.OPERATIONS),...Object.values(U.OPERATIONS),...Object.values(L.OPERATIONS),...Object.values(M.OPERATIONS)]);
+const CONTROL=new Set([B.OPERATIONS.abort,B.OPERATIONS.status,E.OPERATIONS.status,E.OPERATIONS.revoke,U.OPERATIONS.status,U.OPERATIONS.abort,L.OPERATIONS.status,L.OPERATIONS.abort,...Object.values(M.OPERATIONS)]);
 function createClient({env=process.env}={}){
   const clients=new Map();
   return {execute(command,budget){

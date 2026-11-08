@@ -20,11 +20,11 @@ function createScope({models,sessions,now=()=>new Date(),recoveryGuard}){
     if(!await hasMarketingClinicScopeAccess({userId:actorId,clinicIds,access:'write',membershipModel:{findAll:opts=>models.UsuarioClinica.findAll({...opts,...options})}}))C.fail('meta_oauth_scope_forbidden',403);
     return {scopeKey,clinicIds,actorId,sessionRef,sessionExpiresAt,options};
   }
-  async function captureStructure(authorized,{flow=null,phase='pending'}={}){
+  async function captureStructure(authorized,{flow=null,phase='pending',allowExpiredCredential=false}={}){
     const {scopeKey,clinicIds,options}=authorized;
     const raw=await models.MetaMarketingOAuthSlot.findByPk(scopeKey,options);if(!raw)return {...authorized,slot:null};
     const slot=C.slot(raw);if(slot.state!=='active'||+slot.expires_at<=+now()||JSON.stringify(clinicIds)!==slot.clinic_ids)C.fail('meta_oauth_scope_changed',409);
-    const proof=flow?await recovery.forFlow(flow,options.transaction,{phase}):await recovery.inspectPrepared({scopeKey,clinicIds,appId:slot.app_id,
+    const proof=flow?await recovery.forFlow(flow,options.transaction,{phase,allowExpiredCredential}):await recovery.inspectPrepared({scopeKey,clinicIds,appId:slot.app_id,
       actorId:authorized.actorId,sessionRef:authorized.sessionRef,sessionExpiresAt:authorized.sessionExpiresAt},options.transaction);
     const [assignmentScope,scopeId]=scopeKey.split(':');
     // A raw tombstone remains universal. Only a fresh, root-prepared generation
@@ -47,14 +47,14 @@ function createScope({models,sessions,now=()=>new Date(),recoveryGuard}){
     const authorized=await authorize({scopeKey:row.scope_key,actorId:Number(row.actor_user_id),sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at},transaction);
     return compare(row,await captureStructure(authorized,{flow:row}));
   }
-  async function revalidateStructure(row,transaction){
+  async function revalidateStructure(row,transaction,{allowExpiredCredential=false}={}){
     // A confirmed clinic connection outlives the user's login. This internal
     // structural guard never authorizes a human request or a pending activation.
     if(!transaction||!/^(clinic|group):[1-9][0-9]{0,9}$/.test(row.scope_key))C.fail();
     const [kind,id]=row.scope_key.split(':'),options={transaction,lock:transaction.LOCK.UPDATE,raw:true,logging:false};
     const clinics=await models.Clinica.findAll({...options,attributes:['id_clinica'],where:kind==='group'?{grupoClinicaId:Number(id)}:{id_clinica:Number(id)},order:[['id_clinica','ASC']],limit:1001});
     if(!clinics.length||clinics.length>1000)C.fail('meta_oauth_scope_changed',409);
-    return compare(row,await captureStructure({scopeKey:row.scope_key,clinicIds:clinics.map(v=>Number(v.id_clinica)),options},{flow:row,phase:'active'}));
+    return compare(row,await captureStructure({scopeKey:row.scope_key,clinicIds:clinics.map(v=>Number(v.id_clinica)),options},{flow:row,phase:'active',allowExpiredCredential}));
   }
   return {authorize,capture,revalidate,revalidateStructure};
 }

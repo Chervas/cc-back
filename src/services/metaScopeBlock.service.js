@@ -39,6 +39,8 @@ async function preserve({ scope, connectionId, actorId, clinicIds, models = requ
   // enrollment outbox owns remote revocation; shared WhatsApp stays untouched.
   await require('./metaMarketingLegacyRecovery.service').createRecovery({ models })
     .retireForScope({ scope, clinicIds }, transaction);
+  await require('./metaMarketingBusinessSource.service').createSource({models})
+    .retireForScope({scope,clinicIds},transaction);
   const repo = require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
   const health = await repo.health(new Date(), { includeUnresolved: false, transaction });
   if (health.pending >= 10000 || health.oldestAgeSeconds >= 3600) unavailable();

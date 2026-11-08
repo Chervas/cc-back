@@ -110,6 +110,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       if(!transaction||!models.MetaMarketingEnrollmentRequest||!C.UUID.test(enrollment.enrollment_id))C.fail();
       const saved=await models.MetaMarketingEnrollmentRequest.findByPk(enrollment.enrollment_id,locked(transaction));
       if(!saved||saved.state!=='revoked'||saved.flow_id!==enrollment.flow_id||saved.scope_key!==enrollment.scope_key)C.fail();
+      if(models.MetaMarketingBusinessHandover){const business=await models.MetaMarketingBusinessHandover.findByPk(saved.flow_id,locked(transaction));if(business){if(business.state!=='active'||business.new_enrollment_id!==saved.enrollment_id)C.fail();await models.MetaMarketingBusinessHandover.update({retired_at:now()},{where:{handover_id:business.handover_id,retired_at:null},transaction});return business;}}
       return cancelInTransaction({flow_id:saved.flow_id},transaction,true);
     },
     async assets(input,id){
@@ -169,7 +170,12 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     },
     async callback({state,code,denied=false}){
       if(!C.STATE.test(state)||!denied&&(typeof code!=='string'||!/^[\x21-\x7e]{1,4096}$/.test(code)))C.fail('meta_oauth_state_invalid',400);
-      let row=await R.findOne({where:{state_hash:C.hash(state)},raw:true,logging:false});if(!row)C.fail('meta_oauth_state_invalid',400);
+      let row=await R.findOne({where:{state_hash:C.hash(state)},raw:true,logging:false});
+      if(!row&&models.MetaMarketingBusinessHandover&&await models.MetaMarketingBusinessHandover.findOne({where:{state_hash:C.hash(state)},attributes:['handover_id'],raw:true,logging:false}))return require('./metaMarketingBusiness.service')
+        .createService({models,sessions,client,now,returnOrigin}).callback({state,code,denied});
+      if(!row&&models.MetaMarketingCredentialRenewal)return require('./metaMarketingCredentialRenewal.service')
+        .createService({models,sessions,client,now,returnOrigin}).callback({state,code,denied});
+      if(!row)C.fail('meta_oauth_state_invalid',400);
       const result=()=>({returnOrigin:row.return_origin,requestId:row.flow_id});
       if(denied){await cancelPending(row,true);try{await reconcileRow({...row,state:'cancel_pending'},{worker:true});}catch{}return result();}
       let mayExchange=false;

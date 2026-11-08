@@ -1,4 +1,5 @@
 'use strict';
+const K=require('./meta-marketing-credential-shape');
 const {schema}=require('./contracts'),{fail}=require('./errors'),C=require('./meta-marketing-oauth-contract'),M=require('./meta-marketing-contract');
 const OPERATION='meta.marketing.oauth.assets.v1';
 const validate=schema({flowId:{type:'string',pattern:'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$'},scopeDigest:{type:'string',pattern:'^[a-f0-9]{64}$'}});
@@ -11,7 +12,7 @@ function kinds(metadata){
   return out;
 }
 function fresh(raw,binding,stored,now){
-  const v=C.inspected(raw,binding,now);
+  const v=K.inspected(raw,binding,now,stored);
   if(['appId','subjectId','tokenType','scopes','granularScopes'].some(k=>JSON.stringify(v[k])!==JSON.stringify(stored[k])))fail('oauth_identity_mismatch');
   if([stored.expiresAt,stored.dataAccessExpiresAt].some(x=>x!==null&&x<=now))fail('credential_revoked');
   if(['expiresAt','dataAccessExpiresAt'].some(k=>v[k]!==null&&(stored[k]===null||v[k]<stored[k])))fail('credential_revoked');
@@ -40,7 +41,7 @@ function checkAssets(assets,metadata){
 function result({assets,metadata,request,binding,row,now}){
   const availableKinds=checkAssets(assets,metadata);
   const value={flowId:row.id,candidateVersionId:row.id,candidateDigest:row.secret_digest,scopeDigest:row.scope_digest,
-    scopeKey:C.bindingFor(binding).scopeKey,clinicSetDigest:row.clinic_digest,observedAt:now,
+    scopeKey:K.bindingFor(binding).scopeKey,clinicSetDigest:row.clinic_digest,observedAt:now,
     expiresAt:Math.min(now+300000,...[metadata.expiresAt,metadata.dataAccessExpiresAt,binding.expiresAt].filter(v=>v!==null)),
     accessBlocked:true,availableKinds,assets:assets.slice().sort((a,b)=>a.assetRef.localeCompare(b.assetRef))};
   if(value.expiresAt<=now||request.payload.scopeDigest!==row.scope_digest||Buffer.byteLength(JSON.stringify(value))>MAX_RESULT_BYTES)fail('scope_denied');

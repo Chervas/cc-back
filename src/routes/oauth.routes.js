@@ -1137,6 +1137,16 @@ router.use((req, res, next) => {
 
 let metaMarketingOAuthRoutes;
 let metaMarketingEnrollmentRoutes;
+let metaMarketingCredentialRenewalRoutes;
+let metaMarketingBusinessRoutes;
+router.use('/meta/marketing', (req, res, next) => {
+    metaMarketingBusinessRoutes ||= require('./metaMarketingBusiness.routes').createRouter({ sessions: accessSessions });
+    return metaMarketingBusinessRoutes(req, res, next);
+});
+router.use('/meta/marketing', (req, res, next) => {
+    metaMarketingCredentialRenewalRoutes ||= require('./metaMarketingCredentialRenewal.routes').createRouter({ sessions: accessSessions });
+    return metaMarketingCredentialRenewalRoutes(req, res, next);
+});
 router.use('/meta/marketing', (req, res, next) => {
     metaMarketingOAuthRoutes ||= require('./metaMarketingOAuth.routes').createRouter({ sessions: accessSessions });
     return metaMarketingOAuthRoutes(req, res, next);

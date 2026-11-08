@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { Op } = require('sequelize');
+const { Op, literal, where: sqlWhere } = require('sequelize');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { campaignIncluded } = require('./campaignWorkspaceSettings.service');
 
@@ -50,7 +50,17 @@ async function brokerPairsForPage(models, pageId, reader, transaction = null) {
     const bindings = await models.MetaMarketingBrokerBinding.findAll({ where: { enrollment_id: pageBindings[0].enrollment_id,
       scope_key: pageBindings[0].scope_key, connection_ref: pageBindings[0].connection_ref, state: 'active' },
     attributes: ['mapping_id', 'asset_ref'], ...query(transaction) });
-    const accounts = bindings.filter(row => /^meta-ad_account:[1-9][0-9]{0,29}$/.test(row.asset_ref));
+    let accounts = bindings.filter(row => /^meta-ad_account:[1-9][0-9]{0,29}$/.test(row.asset_ref));
+    if (typeof models.CampaignWorkspaceSetting?.findOne === 'function') {
+      const [scope_type, scopeId] = pageBindings[0].scope_key.split(':');
+      const setting = await models.CampaignWorkspaceSetting.findOne({ where: { scope_type, scope_id: Number(scopeId) },
+        attributes: ['preferences'], ...query(transaction) });
+      const registry = setting?.preferences?.meta_lead_routes;
+      if (registry !== undefined) {
+        const route = require('./metaLeadRoutes.service').routes(registry).find(row => row.pageAssetRef === 'meta-facebook_page:' + pageId);
+        accounts = route ? accounts.filter(row => row.asset_ref === route.adAccountAssetRef) : [];
+      }
+    }
     if (accounts.length !== 1) fail('meta_lead_account_access_required');
     const pair = await reader.preparePair(Number(page.id), Number(accounts[0].mapping_id), { transaction });
     await reader.assertPair(pair, { transaction });
@@ -58,6 +68,23 @@ async function brokerPairsForPage(models, pageId, reader, transaction = null) {
   }
   if (pairs.length > 1) fail('meta_lead_clinic_assignment_required');
   return pairs;
+}
+
+async function enqueueAcceptedMetaLeadJob({ models, enqueue, job }) {
+  if (!models.MetaMarketingBusinessDrain) return enqueue(job);
+  return models.sequelize.transaction(async transaction => {
+    await require('./metaMarketingBusinessDrain.service').createDrain({ models }).assertAdmission(job.payload, { transaction });
+    const completed = await models.JobRequest.findOne({ where: { type: JOB_TYPE, status: 'completed',
+      [Op.and]: [sqlWhere(literal("JSON_UNQUOTE(JSON_EXTRACT(`payload`, '$.receipt_ref'))"), job.payload.receipt_ref)] },
+      order: [['id', 'ASC']], raw: true, transaction, lock: transaction.LOCK.UPDATE, logging: false });
+    if (completed) {
+      const p = typeof completed.payload === 'string' ? JSON.parse(completed.payload) : completed.payload;
+      if (!sameEvent(p, job.payload) || p.page_asset_id !== job.payload.page_asset_id || p.account_asset_id !== job.payload.account_asset_id)
+        fail('meta_lead_receipt_review_required');
+      return { job: completed, created: false };
+    }
+    return enqueue(job, { transaction, JobRequestModel: models.JobRequest, sequelizeInstance: models.sequelize });
+  });
 }
 
 async function enqueueMetaLeadNotifications(body, overrides = {}) {
@@ -104,7 +131,7 @@ async function enqueueMetaLeadNotifications(body, overrides = {}) {
     }
   }
   for (const job of acceptedJobs) {
-    try { await enqueue(job); queued++; } catch (error) { failure ||= error || new Error('meta_lead_receipt_unavailable'); }
+    try { await enqueueAcceptedMetaLeadJob({ models, enqueue, job }); queued++; } catch (error) { failure ||= error || new Error('meta_lead_receipt_unavailable'); }
   }
   // Preserve successful receipts/jobs, but require redelivery for every Page
   // that was not accepted. Existing per-lead dedupe handles accepted repeats.
@@ -275,5 +302,5 @@ async function runMetaLeadReceptionJob(payload, job = null, overrides = {}) {
   }
 }
 
-module.exports = { JOB_TYPE, webhookEvents, receptionRuntimeNamespace, enqueueMetaLeadNotifications, brokerPairsForPage, mappedAssets, resolveMetaLeadClinic,
+module.exports = { JOB_TYPE, webhookEvents, receptionRuntimeNamespace, enqueueMetaLeadNotifications, enqueueAcceptedMetaLeadJob, brokerPairsForPage, mappedAssets, resolveMetaLeadClinic,
   retrieveMetaLead, contactFields, persistMetaLead, runMetaLeadReceptionJob };
