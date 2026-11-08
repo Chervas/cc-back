@@ -1,6 +1,7 @@
 'use strict';
 const {createHash}=require('node:crypto'),M=require('../../services/integrations-broker/src/meta-marketing-contract');
 const R=require('./metaMarketingRevocation.contract');
+const O=require('../../services/integrations-broker/src/meta-marketing-oauth-contract');
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,STATE=/^[A-Za-z0-9_-]{43}$/;
 const fail=(code='meta_oauth_unavailable',httpStatus=503)=>{throw Object.assign(Error(code),{code,httpStatus});};
 const hash=value=>createHash('sha256').update(value).digest('hex');
@@ -13,7 +14,7 @@ function slot(row){
   let uri;try{uri=new URL(row.redirect_uri);}catch{fail();}
   if(!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(row.connection_ref)||row.asset_ref!=='meta-enroll:'+row.scope_key
     ||!M.graphId(row.app_id)||!['active','blocked'].includes(row.state)||!(row.expires_at instanceof Date)||!Number.isFinite(+row.expires_at)
-    ||!Array.isArray(scopes)||JSON.stringify([...new Set(scopes)].sort())!==row.scopes||!scopes.includes('public_profile')||scopes.length<2||scopes.some(s=>!M.SCOPES.includes(s))
+    ||!Array.isArray(scopes)||JSON.stringify([...new Set(scopes)].sort())!==row.scopes||!scopes.includes('public_profile')||scopes.length<2||scopes.some(s=>!O.SCOPES.includes(s))
     ||uri.href!==row.redirect_uri||uri.protocol!=='https:'||uri.username||uri.password||uri.port||uri.search||uri.hash||uri.pathname!=='/oauth/meta/marketing/callback'
     ||row.scope_key.startsWith('clinic:')&&(ids.length!==1||row.scope_key!=='clinic:'+ids[0]))fail();
   return {...row,clinicIds:ids,scopeValues:scopes};
