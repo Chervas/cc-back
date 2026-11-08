@@ -1365,6 +1365,11 @@ let metaMarketingOAuthRoutes;
 let metaMarketingEnrollmentRoutes;
 let metaMarketingCredentialRenewalRoutes;
 let metaMarketingBusinessRoutes;
+let metaLeadReceptionSetupRoutes;
+router.use('/meta/marketing', (req, res, next) => {
+    metaLeadReceptionSetupRoutes ||= require('./metaLeadReceptionSetup.routes').createRouter({ sessions: accessSessions });
+    return metaLeadReceptionSetupRoutes(req, res, next);
+});
 router.use('/meta/marketing', (req, res, next) => {
     metaMarketingBusinessRoutes ||= require('./metaMarketingBusiness.routes').createRouter({ sessions: accessSessions });
     return metaMarketingBusinessRoutes(req, res, next);
