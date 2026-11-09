@@ -13,7 +13,11 @@ const plain = row => row?.get ? row.get({ plain: true }) : row;
 const LEAD_FIELDS = ['id', 'clinica_id', 'grupo_clinica_id', 'external_source', 'external_id',
   'source', 'channel', 'source_detail', 'archived_at'];
 const STOP = new Set(['rate_limited', 'credential_revoked', 'provider_unauthorized', 'scope_denied',
-  'asset_revoked', 'connection_blocked', 'broker_configuration_invalid', 'meta_leads_disabled']);
+  'asset_revoked', 'connection_blocked', 'broker_configuration_invalid', 'meta_leads_disabled',
+  // Closed classifications emitted by the reader. Further leads cannot repair
+  // authorization or broker authority, so preserve the code and stop the batch.
+  'meta_credential_renewal_required', 'meta_business_activation_uncertain', 'broker_cohort_disabled',
+  'meta_broker_binding_invalid', 'meta_broker_scope_changed', 'meta_broker_not_active']);
 function decoded(value) {
   if (typeof value !== 'string') return value;
   // JSON SQL projections differ between dialect adapters. Never turn an

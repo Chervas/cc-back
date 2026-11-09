@@ -131,6 +131,33 @@ test('privacy storage failure rolls back and safe reports never include answers 
   assert.equal(limited.results[0].retryAfterMs, 7200000); assert.equal(limited.results[1].status, 'not_attempted');
   assert.equal(p.state.providerReads, 1); assert(!JSON.stringify(limited).includes('patient private text'));
 });
+test('classified authorization and broker authority failures preserve fixed codes and stop recovery without writes', async () => {
+  for (const code of ['meta_credential_renewal_required', 'meta_business_activation_uncertain',
+    'broker_cohort_disabled', 'meta_broker_binding_invalid', 'meta_broker_scope_changed', 'meta_broker_not_active']) {
+    const f = fixture(), before = structuredClone({ leads: f.state.leads, audits: f.state.audits, jobs: f.state.jobs });
+    let providerWrites = 0;
+    f.reader.write = async () => { providerWrites++; assert.fail('recovery attempted provider write'); };
+    f.state.providerError = Object.assign(Error('private provider exception'), { code, token: 'SECRET_FIXTURE' });
+    const result = await f.service.run({ leadIds: [1, 2, 3], clinicIds: [72], apply: true });
+    assert.deepEqual(result.results, [{ leadId: 1, status: 'unavailable', code },
+      { leadId: 2, status: 'not_attempted', code: 'meta_lead_form_batch_stopped' },
+      { leadId: 3, status: 'not_attempted', code: 'meta_lead_form_batch_stopped' }]);
+    assert.equal(f.state.providerReads, 1); assert.equal(providerWrites, 0);
+    assert.equal(f.state.transactionCount, 0); assert.equal(f.state.forms.length, 0); assert.equal(f.state.forbiddenWrites, 0);
+    assert.deepEqual({ leads: f.state.leads, audits: f.state.audits, jobs: f.state.jobs }, before);
+    assert(!JSON.stringify(result).includes('private provider exception')); assert(!JSON.stringify(result).includes('SECRET_FIXTURE'));
+  }
+});
+test('unclassified provider codes stay generic instead of exposing provider exception text', async () => {
+  const f = fixture();
+  f.state.providerError = Object.assign(Error('meta_credential_renewal_required with private details'), {
+    code: 'meta_credential_renewal_required_private_details',
+  });
+  const result = await f.service.run({ leadIds: [1], clinicIds: [72], apply: true });
+  assert.deepEqual(result.results, [{ leadId: 1, status: 'unavailable', code: 'meta_lead_form_enrichment_unavailable' }]);
+  assert.equal(f.state.forms.length, 0); assert.equal(f.state.transactionCount, 0); assert.equal(f.state.forbiddenWrites, 0);
+  assert(!JSON.stringify(result).includes('private details'));
+});
 test('native event comparison tolerates MySQL JSON key order and refuses a changed answer', async () => {
   const f = fixture();
   await f.service.run({ leadIds: [1], clinicIds: [72], apply: true });
