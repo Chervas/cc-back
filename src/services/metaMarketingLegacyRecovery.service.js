@@ -355,6 +355,10 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
     if (rows.length !== 1) fail('meta_recovery_conflict');
     const row = snapshotRecord(rows[0]);
     if (row.app_id !== input.appId || encode(row.clinicIds) !== encode(input.clinicIds)) fail();
+    // The OAuth consumer already fenced this exact Flow/Enrollment pair. A
+    // changed active witness must fail before acquiring another Flow or a late
+    // Enrollment lock; this pin conveys no recovery or scope authority.
+    if (row.state !== 'prepared' && Object.hasOwn(input, 'expectedFlowId') && row.flow_id !== input.expectedFlowId) fail();
     await actorCheck(row, input, transaction);
     // The status/begin consumer captures the scope before inspecting its latest
     // OAuth request. Preserve the same immutable digest for that status read;

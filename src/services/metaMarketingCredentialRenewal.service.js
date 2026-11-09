@@ -9,6 +9,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const bindings=require('./metaMarketingEnrollmentBinding.service').createBindings({models,sessions,now});
   const audit=providedAudit||require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
   const tx=work=>models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},work);
+  const order=require('./metaMarketingTransactionOrder.service').createOrder({models,authorize:scope.authorize,unavailable:()=>C.fail('meta_renewal_unavailable',503)});
   const lock=transaction=>({transaction,lock:transaction.LOCK.UPDATE,raw:true,logging:false});
   const gate=()=>{if(!enabled())C.fail('meta_renewal_disabled',503);if(!R||!P)C.fail('meta_renewal_unavailable',503);};
   async function record(row,reason,transaction,input){
@@ -16,13 +17,21 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     if(!Number.isSafeInteger(health.pending)||health.pending>=10000||!Number.isFinite(health.oldestAgeSeconds)||health.oldestAgeSeconds>=3600)C.fail('audit_unavailable');
     await audit.append(fromRenewal(row,reason,{now:now(),...(input?{actorId:input.actorId,sessionRef:input.sessionRef}:{})}),{transaction});
   }
-  async function current(id,transaction){
+  async function requestTx(id,work,input=null){
+    input=require('./metaMarketingTransactionOrder.service').pinInput(input);
     if(!C.UUID.test(id))C.fail('meta_renewal_invalid',400);
-    const observed=plain(await R.findByPk(id,{transaction,raw:true,logging:false}));if(!observed)C.fail('meta_renewal_scope_forbidden',403);
-    // Enrollment is the common lock for begin, pointer CAS, expiry health and
-    // withdrawal. Never acquire the pending-request lock before that grant.
-    await models.MetaMarketingEnrollmentRequest.findByPk(observed.enrollment_id,lock(transaction));
-    const row=plain(await R.findByPk(id,lock(transaction)));if(!row||row.enrollment_id!==observed.enrollment_id)C.fail('meta_renewal_scope_forbidden',403);return C.request(row);
+    if(input)await tx(transaction=>scope.authorize(input,transaction));
+    const observed=plain(await R.findByPk(id,{attributes:['renewal_id','enrollment_id','scope_key','app_id'],raw:true,logging:false}));
+    if(!observed||input&&observed.scope_key!==input.scopeKey)C.fail('meta_renewal_scope_forbidden',403);
+    const prepared=await order.prepareEnrollment(observed.enrollment_id,{scopeKey:observed.scope_key,appId:observed.app_id});
+    if(!prepared)C.fail('meta_renewal_unavailable',503);
+    return tx(async transaction=>{
+      await order.lockPrepared(prepared,transaction);
+      if(input)await scope.authorize(input,transaction);
+      const row=plain(await R.findByPk(id,lock(transaction)));
+      if(!row||row.enrollment_id!==observed.enrollment_id||row.scope_key!==observed.scope_key||row.app_id!==observed.app_id)C.fail('meta_renewal_unavailable',503);
+      return work(C.request(row),transaction);
+    });
   }
   async function update(row,patch,transaction){
     const state=patch.state??row.state,changes={...patch,updated_at:now(),pending_enrollment_id:C.TERMINAL.includes(state)?null:row.enrollment_id};
@@ -30,10 +39,13 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     if(changed!==1)C.fail('meta_renewal_busy',409);return C.request({...row,...changes});
   }
   async function admission(input,transaction,enrollmentId=null){
-    if(input)await scope.authorize(input,transaction);
     let raw;
     if(enrollmentId)raw=await models.MetaMarketingEnrollmentRequest.findByPk(enrollmentId,lock(transaction));
-    else raw=await models.MetaMarketingEnrollmentRequest.findOne({...lock(transaction),where:{scope_key:input.scopeKey,state:'active'},order:[['requested_at','DESC']]});
+    else raw=await models.MetaMarketingEnrollmentRequest.findOne({...lock(transaction),where:{scope_key:input.scopeKey,state:'active'},order:[['requested_at','DESC'],['enrollment_id','DESC']]});
+    // Human callers preauthorize in a separate transaction. Match the reader's
+    // enrollment -> clinic order, then repeat current session/email/WRITE checks
+    // before inspecting the row or loading assets, even when no row was found.
+    if(input)await scope.authorize(input,transaction);
     if(!raw)return null;const enrollment=require('./metaMarketingEnrollment.contract').request(plain(raw));
     if(enrollment.state!=='active'||input&&enrollment.scope_key!==input.scopeKey)C.fail('meta_renewal_scope_forbidden',403);
     // Business credentials have their own consent and maintenance protocol.
@@ -111,38 +123,36 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     const next=await update(row,{state:'active',owner_receipt:ownerReceipt,completed_at:now(),lease_token:null,lease_until:null,last_error:null},transaction);
     await record(next,'meta_credential_renewal_activated',transaction);return next;
   }
-  async function queueCancel(id,code=null,input=null){return tx(async transaction=>{
-    const row=await current(id,transaction);if(C.TERMINAL.includes(row.state))return row;
+  async function queueCancel(id,code=null,input=null){return requestTx(id,async(row,transaction)=>{if(C.TERMINAL.includes(row.state))return row;
     if(input){await scope.authorize(input,transaction);if(input.scopeKey!==row.scope_key||input.actorId!==Number(row.actor_user_id))C.fail('meta_renewal_scope_forbidden',403);}
     const next=await update(row,{state:'cancel_pending',last_error:code,next_attempt_at:now(),lease_token:null,lease_until:null},transaction);
     if(row.state!=='cancel_pending')await record(next,'meta_credential_renewal_cancel_requested',transaction,input);return next;
-  });}
+  },input);}
   async function reconcileId(id){
-    let row=await tx(transaction=>current(id,transaction));if(C.TERMINAL.includes(row.state))return row;
+    let row=await requestTx(id,row=>row);if(C.TERMINAL.includes(row.state))return row;
     // Closing admission also stops a queued exchange/activation. Abort still
     // returns a previously applied CAS so its receipt can be acknowledged.
     if(!enabled()&&row.state!=='cancel_pending')row=await queueCancel(id,'meta_renewal_disabled');
     // Status/abort never need an old login to resolve an already-authorized CAS.
     let remote=await call(row,row.state==='cancel_pending'?'abort':'status',{renewalId:id});
-    if(remote.activationApplied)return tx(async transaction=>apply(await current(id,transaction),remote,transaction));
+    if(remote.activationApplied)return requestTx(id,(row,transaction)=>apply(row,remote,transaction));
     if(row.state==='cancel_pending'||row.state==='begin_pending'){
       if(!['aborted','not_found','rejected','interrupted'].includes(remote.status))remote=await call(row,'abort',{renewalId:id});
-      if(remote.activationApplied)return tx(async transaction=>apply(await current(id,transaction),remote,transaction));
-      return tx(async transaction=>finishCancelled(await current(id,transaction),remote,transaction));
+      if(remote.activationApplied)return requestTx(id,(row,transaction)=>apply(row,remote,transaction));
+      return requestTx(id,(row,transaction)=>finishCancelled(row,remote,transaction));
     }
     if(['aborted','rejected','interrupted','not_found'].includes(remote.status)){
-      return tx(async transaction=>{const currentRow=await current(id,transaction);if(C.TERMINAL.includes(currentRow.state))return currentRow;const next=await update(currentRow,{state:'rejected',last_error:'meta_renewal_candidate_rejected',owner_receipt:JSON.stringify(remote),completed_at:now(),lease_token:null,lease_until:null},transaction);await record(next,'meta_credential_renewal_rejected',transaction);return next;});
+      return requestTx(id,async(currentRow,transaction)=>{if(C.TERMINAL.includes(currentRow.state))return currentRow;const next=await update(currentRow,{state:'rejected',last_error:'meta_renewal_candidate_rejected',owner_receipt:JSON.stringify(remote),completed_at:now(),lease_token:null,lease_until:null},transaction);await record(next,'meta_credential_renewal_rejected',transaction);return next;});
     }
     if(row.state==='activate_pending'){
-      const send=await tx(async transaction=>{const currentRow=await current(id,transaction);if(currentRow.state!=='activate_pending')return false;await assertRequest(currentRow,transaction,{requireOrigin:true});if(!currentRow.activate_sent_at)await update(currentRow,{activate_sent_at:now()},transaction);return true;});
-      if(!send)return tx(transaction=>current(id,transaction));
+      const send=await requestTx(id,async(currentRow,transaction)=>{if(currentRow.state!=='activate_pending')return false;await assertRequest(currentRow,transaction,{requireOrigin:true});if(!currentRow.activate_sent_at)await update(currentRow,{activate_sent_at:now()},transaction);return true;});
+      if(!send)return requestTx(id,row=>row);
       if(!enabled()){await queueCancel(id,'meta_renewal_disabled');return reconcileId(id);}
       remote=await call(row,'activate',{renewalId:id,enrollmentId:row.enrollment_id,expectedEpoch:Number(row.expected_epoch),expectedVersionId:row.expected_version_id,
         expectedCandidateDigest:row.expected_candidate_digest,candidateVersionId:id,candidateDigest:row.candidate.digest});
-      return tx(async transaction=>apply(await current(id,transaction),remote,transaction));
+      return requestTx(id,(row,transaction)=>apply(row,remote,transaction));
     }
-    return tx(async transaction=>{
-      const currentRow=await current(id,transaction);
+    return requestTx(id,async(currentRow,transaction)=>{
       if(C.TERMINAL.includes(currentRow.state)||['activate_pending','cancel_pending'].includes(currentRow.state))return currentRow;
       await assertRequest(currentRow,transaction,{requireOrigin:true});
       if(remote.status==='staged'){
@@ -159,8 +169,8 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const service={
     async overview(input){
       if(!enabled())return {enabled:false,canRenew:false,credential:null,pending:null};
-      return tx(async transaction=>{
-        await scope.authorize(input,transaction);const context=await admission(input,transaction);if(!context)return {enabled:true,canRenew:false,credential:null,pending:null};
+      return order.scope(input,{active:true},async({transaction,enrollment,input})=>{
+        const context=enrollment?await admission(input,transaction,enrollment.enrollment_id):null;if(!context)return {enabled:true,canRenew:false,credential:null,pending:null};
         const pending=await R.findOne({...lock(transaction),where:{pending_enrollment_id:context.enrollment.enrollment_id}});
         const latest=plain(pending||await R.findOne({...lock(transaction),where:{enrollment_id:context.enrollment.enrollment_id},order:[['requested_at','DESC'],['renewal_id','DESC']]}));
         const row=latest?C.request(latest):null,value=context.effective;
@@ -169,9 +179,9 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       });
     },
     async begin(input){
-      gate();const state=randomBytes(32).toString('base64url');
-      const row=await tx(async transaction=>{
-        const context=await admission(input,transaction);if(!context)C.fail('meta_renewal_scope_forbidden',403);
+      gate();input=require('./metaMarketingTransactionOrder.service').pinInput(input);const state=randomBytes(32).toString('base64url');
+      const row=await order.scope(input,{active:true},async({transaction,enrollment:stored})=>{
+        const context=stored?await admission(input,transaction,stored.enrollment_id):null;if(!context)C.fail('meta_renewal_scope_forbidden',403);
         const {enrollment,slot,effective}=context;
         if(await R.findOne({...lock(transaction),where:{pending_enrollment_id:enrollment.enrollment_id}}))C.fail('meta_renewal_busy',409);
         const date=now(),id=randomUUID(),expires=new Date(Math.min(+date+600000,+input.sessionExpiresAt,+slot.expires_at));
@@ -188,7 +198,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       try{
         const remote=await call(row,'begin',{renewalId:row.renewal_id,flowId:row.renewal_id,enrollmentId:row.enrollment_id,expectedEpoch:Number(row.expected_epoch),expectedVersionId:row.expected_version_id,
           expectedCandidateDigest:row.expected_candidate_digest,assetSetDigest:row.asset_set_digest,scopeDigest:row.scope_digest,clinicSetDigest:C.hash(row.clinic_ids),state,expiresAt:+row.expires_at});
-        await tx(async transaction=>{const currentRow=await current(row.renewal_id,transaction);await assertRequest(currentRow,transaction,{input,requireOrigin:true});await update(currentRow,{state:'awaiting',next_attempt_at:new Date(+now()+30000)},transaction);});
+        await requestTx(row.renewal_id,async(currentRow,transaction)=>{await assertRequest(currentRow,transaction,{input,requireOrigin:true});await update(currentRow,{state:'awaiting',next_attempt_at:new Date(+now()+30000)},transaction);},input);
         return {enabled:true,requestId:row.renewal_id,status:'awaiting',authUrl:remote.authUrl,expiresAt:remote.expiresAt};
       }catch(error){await queueCancel(row.renewal_id,C.safe(error));throw error;}
     },
@@ -201,33 +211,33 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       if(row.code_digest!==null){if(row.code_digest!==C.hash(code))C.fail('meta_renewal_invalid',400);try{await reconcileId(row.renewal_id);}catch{}return result;}
       let mayExchange=false;
       try{
-        row=await tx(async transaction=>{const currentRow=await current(row.renewal_id,transaction);await assertRequest(currentRow,transaction,{requireOrigin:true});
+        row=await requestTx(row.renewal_id,async(currentRow,transaction)=>{await assertRequest(currentRow,transaction,{requireOrigin:true});
           if(currentRow.state!=='awaiting'||+currentRow.expires_at<=+now())C.fail('meta_renewal_expired',409);
-          mayExchange=true;return update(currentRow,{state:'processing',code_digest:C.hash(code),next_attempt_at:now()},transaction);});
+          mayExchange=true;return update(currentRow,{state:'processing',code_digest:C.hash(code),next_attempt_at:now()},transaction);},actor(row));
         if(!enabled()){await queueCancel(row.renewal_id,'meta_renewal_disabled');await reconcileId(row.renewal_id);return result;}
         await call(row,'finish',{renewalId:row.renewal_id,flowId:row.renewal_id,state,code});await reconcileId(row.renewal_id);
       }catch(error){
         if([400,401,403,409].includes(error.httpStatus)||['meta_renewal_candidate_rejected','meta_renewal_assets_insufficient','meta_renewal_identity_mismatch'].includes(C.safe(error)))await queueCancel(row.renewal_id,C.safe(error));
-        else if(mayExchange)await tx(async transaction=>{const currentRow=await current(row.renewal_id,transaction);await update(currentRow,{last_error:C.safe(error),next_attempt_at:now()},transaction);});
+        else if(mayExchange)await requestTx(row.renewal_id,async(currentRow,transaction)=>{await update(currentRow,{last_error:C.safe(error),next_attempt_at:now()},transaction);});
       }
       return result;
     },
     async confirm(input,id,candidateDigest){
       gate();if(!C.HASH.test(candidateDigest))C.fail('meta_renewal_invalid',400);
-      await tx(async transaction=>{const row=await current(id,transaction);await assertRequest(row,transaction,{input,requireOrigin:true});
+      await requestTx(id,async(row,transaction)=>{await assertRequest(row,transaction,{input,requireOrigin:true});
         if(row.state==='activate_pending'&&row.candidate?.digest===candidateDigest)return;
         if(row.state!=='staged'||row.candidate?.digest!==candidateDigest||C.F.expiry(row.candidate)!==null&&C.F.expiry(row.candidate)<=+now())C.fail('meta_renewal_expired',409);
-        const next=await update(row,{state:'activate_pending',last_error:null,next_attempt_at:now()},transaction);await record(next,'meta_credential_renewal_activation_requested',transaction,input);});
+        const next=await update(row,{state:'activate_pending',last_error:null,next_attempt_at:now()},transaction);await record(next,'meta_credential_renewal_activation_requested',transaction,input);},input);
       try{await reconcileId(id);}catch{}return service.overview(input);
     },
     async cancel(input,id){await queueCancel(id,null,input);try{await reconcileId(id);}catch{}return service.overview(input);},
-    async reconcile(input,id){await tx(async transaction=>{const row=await current(id,transaction);await scope.authorize(input,transaction);if(row.scope_key!==input.scopeKey)C.fail('meta_renewal_scope_forbidden',403);});try{await reconcileId(id);}catch(error){await tx(async transaction=>{const row=await current(id,transaction);if(!C.TERMINAL.includes(row.state))await update(row,{last_error:C.safe(error),next_attempt_at:new Date(+now()+30000)},transaction);});}return service.overview(input);},
+    async reconcile(input,id){await requestTx(id,async(row,transaction)=>{await scope.authorize(input,transaction);if(row.scope_key!==input.scopeKey)C.fail('meta_renewal_scope_forbidden',403);},input);try{await reconcileId(id);}catch(error){await requestTx(id,async(row,transaction)=>{if(!C.TERMINAL.includes(row.state))await update(row,{last_error:C.safe(error),next_attempt_at:new Date(+now()+30000)},transaction);});}return service.overview(input);},
     async run(){
       if(!R||!enabled())return {status:'completed',skipped:true};let processed=0,failed=0;
       const deadline=+now()+30000,rows=await R.findAll({where:{state:{[Op.notIn]:C.TERMINAL},next_attempt_at:{[Op.lte]:now()}},order:[['next_attempt_at','ASC']],limit:10,raw:true,logging:false});
       for(const raw of rows){if(+now()>=deadline)break;try{await reconcileId(raw.renewal_id);processed++;}catch(error){failed++;const code=C.safe(error);
         if([400,401,403,409].includes(error.httpStatus))try{await queueCancel(raw.renewal_id,code);}catch{}
-        else await tx(async transaction=>{const row=await current(raw.renewal_id,transaction);if(!C.TERMINAL.includes(row.state))await update(row,{last_error:code,next_attempt_at:new Date(+now()+60000),attempts:Number(row.attempts)+1},transaction);});
+        else await requestTx(raw.renewal_id,async(row,transaction)=>{if(!C.TERMINAL.includes(row.state))await update(row,{last_error:code,next_attempt_at:new Date(+now()+60000),attempts:Number(row.attempts)+1},transaction);});
       }}return {status:failed?'failed':'completed',retryable:false,processed,failed};
     },
     reconcileId

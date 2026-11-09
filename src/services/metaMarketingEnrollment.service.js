@@ -17,6 +17,7 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
   const authority=require('./metaMarketingEnrollmentAuthority.service').createAuthority({models,sessions,oauth,now,enabled});
   const bindings=require('./metaMarketingEnrollmentBinding.service').createBindings({models,sessions,authority,now});
   const tx=fn=>models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},fn),lock=transaction=>({transaction,lock:transaction.LOCK.UPDATE,logging:false});
+  const order=require('./metaMarketingTransactionOrder.service').createOrder({models,authorize:scope.authorize,unavailable:()=>C.fail('meta_enrollment_unavailable',503)});
   const project=row=>({requestId:row.enrollment_id,flowId:row.flow_id,state:row.state,connected:row.state==='active',clinicCount:row.clinicIds.length,
     assets:row.selected,selectionDigest:row.selection_digest,mappingIds:row.mappingIds,lastError:row.last_error,cancellationConfirmed:row.state==='revoked'});
   async function current(id,transaction){
@@ -131,11 +132,9 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
   }
   let running=false;
   return {
-    async overview(input){return tx(async transaction=>{
-      await scope.authorize(input,transaction);
-      const stored=await R.findOne({...lock(transaction),where:{scope_key:input.scopeKey},order:[['requested_at','DESC'],['enrollment_id','DESC']]});
-      if(!stored)return {enabled:enabled(),canSelect:enabled(),selection:null};
-      const row=C.request(plain(stored));let selection=project(row);
+    async overview(input){return order.scope(input,{},async({transaction,enrollment,input})=>{
+      if(!enrollment)return {enabled:enabled(),canSelect:enabled(),selection:null};
+      const row=await current(enrollment.enrollment_id,transaction);let selection=project(row);
       if(row.state==='active')try{await bindings.committed(row.enrollment_id,transaction);}
       catch(error){selection={...selection,connected:false,attentionRequired:true,lastError:safe(error)};}
       return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',selection:{...selection,
@@ -148,10 +147,11 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
       return row?cancelLocked(C.request(plain(row)),transaction,actor):null;
     },
     async reserve(input,flowId,refs){return project(C.request(await authority.reserve(input,flowId,refs)));},
-    async status(input,id){return tx(async transaction=>{const row=await access(input,id,transaction);if(row.state==='active')await bindings.committed(id,transaction);return project(row);});},
+    async status(input,id){if(!C.UUID.test(id))C.fail('meta_enrollment_invalid',400);return order.enrollment(input,id,async({transaction,enrollment,input})=>{if(!enrollment)C.fail('meta_enrollment_scope_forbidden',403);const row=await access(input,id,transaction);if(row.state==='active')await bindings.committed(id,transaction);return project(row);});},
     async confirm(input,id,selectionDigest){
-      if(!C.HASH.test(selectionDigest))C.fail('meta_enrollment_invalid',400);
-      return tx(async transaction=>{
+      if(!C.UUID.test(id)||!C.HASH.test(selectionDigest))C.fail('meta_enrollment_invalid',400);
+      return order.enrollment(input,id,async({transaction,enrollment,input})=>{
+        if(!enrollment)C.fail('meta_enrollment_scope_forbidden',403);
         const row=await access(input,id,transaction,true);await authority.assertPending(row,transaction);
         if(row.selection_digest!==selectionDigest||!['prepared','activate_pending'].includes(row.state))C.fail('meta_enrollment_scope_changed',409);
         if(row.state==='activate_pending')return project(row);
@@ -160,7 +160,7 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
         await bindings.record(next,'meta_enrollment_activation_requested',transaction);return project(await update(row,next,transaction));
       });
     },
-    async cancel(input,id){return tx(async transaction=>project(await cancelLocked(await access(input,id,transaction),transaction,{actorId:input.actorId,sessionRef:input.sessionRef})));},
+    async cancel(input,id){if(!C.UUID.test(id))C.fail('meta_enrollment_invalid',400);return order.enrollment(input,id,async({transaction,enrollment,input})=>{if(!enrollment)C.fail('meta_enrollment_scope_forbidden',403);return project(await cancelLocked(await access(input,id,transaction),transaction,{actorId:input.actorId,sessionRef:input.sessionRef}));});},
     async run({enrollmentId,closing=()=>false}={}){
       if(!workerEnabled()||running||closing())return {status:'completed',skipped:true,reason:'meta_enrollment_worker_disabled_or_busy'};
       running=true;let advanced=0,failed=0,cancelled=0;const deadline=+now()+30000;
