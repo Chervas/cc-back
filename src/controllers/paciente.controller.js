@@ -2198,7 +2198,7 @@ exports.createPaciente = async (req, res) => {
     }, { transaction });
 
     await require('../services/newPatientWhatsappConversation.service').link({
-      db, patient: newPaciente, clinicId: clinica_id, transaction,
+      db: require('../../models'), patient: newPaciente, clinicId: clinica_id, transaction,
     });
 
     await recordPatientOperationalEvent({
