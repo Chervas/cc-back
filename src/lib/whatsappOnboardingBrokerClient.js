@@ -74,10 +74,21 @@ function response(result, name, row, b, requestId, selection) {
     if (name === 'abort' && !tombstone) throw Error();
     if (d.status === 'staged') {
       S.exact(d.candidate, ['versionId', 'appId', 'subjectId', 'wabaId', 'phoneId', 'tokenType', 'scopes', 'expiresAt', 'dataAccessExpiresAt',
-        ...(b.customer ? ['businessId','grantedWabaIds'] : [])]);
+        ...(b.customer ? ['businessId','grantedWabaIds'] : []), ...(b.customer?.providerGrantPolicy ? ['providerGrant'] : [])]);
       const v = d.candidate;
       let candidateScopesValid = true;
-      try { C.grantedScopes(v.scopes, b.scopes, b.customer?.selectionOnly); }
+      try {
+        C.grantedScopes(v.scopes, b.scopes, b.customer?.selectionOnly, b.customer?.providerGrantPolicy);
+        if (b.customer?.providerGrantPolicy) {
+          const { versionId, ...metadata } = v;
+          const { connectionRef, ...enrollment } = b;
+          // Validate the full receipt as well as its schema: both WhatsApp
+          // grants must cover the selected WABA and match grantedWabaIds.
+          C.grantMetadata(metadata, { provider: C.PROVIDER, connectionRef,
+            secretArn: 'candidate', clientSecretArn: 'app', whatsappOnboarding: { ...enrollment,
+              appVersionId: 'a'.repeat(32), slotVersionId: 'b'.repeat(32) } });
+        }
+      }
       catch { candidateScopesValid = false; }
       if (v.versionId !== row.requestId || v.appId !== b.appId || ![v.subjectId, v.wabaId, v.phoneId].every(C.id)
         || !['USER', 'SYSTEM_USER'].includes(v.tokenType) || !candidateScopesValid

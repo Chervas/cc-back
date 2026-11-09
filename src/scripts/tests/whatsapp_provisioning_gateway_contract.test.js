@@ -17,6 +17,11 @@ test('Automatic provisioning contract loads from the gateway package without the
     const binding = P.publicBinding({appId:'101',configId:'102',redirectUri:'https://example.invalid/callback',
       scopes:['whatsapp_business_management','whatsapp_business_messaging']}, 'clinic:123', [123]);
     if (binding.connectionRef !== 'whatsapp-auto-clinic-123-v1' || binding.customer.selectionOnly !== true) throw Error('invalid_binding');
+    const template = {appId:'101',configId:'102',redirectUri:'https://example.invalid/callback',
+      scopes:['public_profile','whatsapp_business_management','whatsapp_business_messaging'],
+      grantPolicyOverrides:[{scopeKey:'clinic:123',policy:'meta-app-companion-v1'}]};
+    if (P.publicBinding(template,'clinic:123',[123]).customer.providerGrantPolicy !== 'meta-app-companion-v1') throw Error('missing_policy_parser');
+    if (P.publicBinding(template,'clinic:124',[124]).customer.providerGrantPolicy !== undefined) throw Error('foreign_policy');
     process.stdout.write('gateway_contract_ready');`;
   assert.equal(execFileSync(process.execPath, ['-e', script], {
     cwd: dir, encoding: 'utf8', env: { ...process.env, NODE_PATH: path.join(root, 'node_modules') },

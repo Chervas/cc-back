@@ -12,30 +12,49 @@ function connectionRef(scope) {
   if (!scopeKey(scope)) fail('invalid_request');
   return 'whatsapp-auto-' + scope.replace(':', '-') + '-v1';
 }
+function grantPolicyOverrides(value) {
+  if (!Array.isArray(value) || !value.length || value.length > 64
+    || value.some((entry, i) => !C.exact(entry, ['scopeKey','policy']) || !scopeKey(entry.scopeKey)
+      || entry.policy !== C.PROVIDER_GRANT_POLICY || i > 0 && entry.scopeKey <= value[i - 1].scopeKey)) fail('invalid_request');
+  return structuredClone(value);
+}
+function publicTemplate(value) {
+  return Object.fromEntries(['appId','configId','redirectUri','scopes',
+    ...(Object.hasOwn(value, 'grantPolicyOverrides') ? ['grantPolicyOverrides'] : [])].map(key => [key, structuredClone(value[key])]));
+}
 function publicBinding(template, scope, clinicIds) {
   const binding = { connectionRef: connectionRef(scope), scopeKey: scope, clinicIds: [...clinicIds],
     appId: template.appId, configId: template.configId, redirectUri: template.redirectUri,
     scopes: [...template.scopes], customer: { selectionOnly: true } };
+  if (Object.hasOwn(template, 'grantPolicyOverrides')) {
+    const override = grantPolicyOverrides(template.grantPolicyOverrides).find(entry => entry.scopeKey === scope);
+    if (override) binding.customer.providerGrantPolicy = override.policy;
+  }
   const { connectionRef: ref, ...metadata } = binding;
   C.bindingFor({ provider: C.PROVIDER, connectionRef: ref, secretArn: 'candidate', clientSecretArn: 'application',
     whatsappOnboarding: { ...metadata, appVersionId: 'a'.repeat(32), slotVersionId: 'b'.repeat(32) } });
   return binding;
 }
 function validatePublicTemplate(value) {
-  if (!C.exact(value, ['appId', 'configId', 'redirectUri', 'scopes'])) fail('invalid_request');
-  const b = { scopeKey: 'clinic:1', clinicIds: [1], ...value, customer: { selectionOnly: true },
+  if (!C.exact(value, ['appId', 'configId', 'redirectUri', 'scopes',
+    ...(Object.hasOwn(value || {}, 'grantPolicyOverrides') ? ['grantPolicyOverrides'] : [])])) fail('invalid_request');
+  if (Object.hasOwn(value, 'grantPolicyOverrides')) grantPolicyOverrides(value.grantPolicyOverrides);
+  const b = { scopeKey: 'clinic:1', clinicIds: [1], ...Object.fromEntries(['appId','configId','redirectUri','scopes'].map(key => [key, value[key]])), customer: { selectionOnly: true },
     appVersionId: 'a'.repeat(32), slotVersionId: 'b'.repeat(32) };
   C.bindingFor({ provider: C.PROVIDER, secretArn: 'candidate', clientSecretArn: 'application', whatsappOnboarding: b });
+  if (value.grantPolicyOverrides) C.bindingFor({ provider: C.PROVIDER, secretArn: 'candidate', clientSecretArn: 'application',
+    whatsappOnboarding: { ...b, customer: { selectionOnly: true, providerGrantPolicy: C.PROVIDER_GRANT_POLICY } } });
   return structuredClone(value);
 }
 function validateSettings(v) {
-  if (!C.exact(v, ['appId','configId','redirectUri','scopes','appVersionId','clientSecretArn','maxConnections'])
+  if (!C.exact(v, ['appId','configId','redirectUri','scopes','appVersionId','clientSecretArn','maxConnections',
+    ...(Object.hasOwn(v || {}, 'grantPolicyOverrides') ? ['grantPolicyOverrides'] : [])])
     || typeof v.appVersionId !== 'string' || !/^[A-Za-z0-9-]{32,64}$/.test(v.appVersionId)
     || typeof v.clientSecretArn !== 'string' || !v.clientSecretArn.startsWith(ARN_PREFIX + '/clinicaclick/integrations/prod/')
     || v.clientSecretArn.startsWith(ARN_PREFIX + PREFIX)
     || !/^[A-Za-z0-9/_+=.@-]+$/.test(v.clientSecretArn.slice(ARN_PREFIX.length))
     || !Number.isInteger(v.maxConnections) || v.maxConnections < 1 || v.maxConnections > 10000) fail('invalid_request');
-  validatePublicTemplate(Object.fromEntries(['appId','configId','redirectUri','scopes'].map(k => [k,v[k]])));
+  validatePublicTemplate(publicTemplate(v));
   return structuredClone(v);
 }
 function validatePreparation(v, now) {
@@ -49,7 +68,9 @@ function validatePreparation(v, now) {
   return v;
 }
 function settingsDigest(settings) {
-  const { maxConnections, ...identity } = validateSettings(settings);
+  // Scope overrides are pinned by each derived enrollment fingerprint, not by
+  // the common empty-slot identity. Unrelated ready slots retain their digest.
+  const { maxConnections, grantPolicyOverrides: overrides, ...identity } = validateSettings(settings);
   return C.hash(canonical(identity));
 }
 function bindingFromSlot(settings, row) {
@@ -67,4 +88,4 @@ function bindingFromSlot(settings, row) {
   C.bindingFor(binding); return binding;
 }
 module.exports = { PREPARE, PREFIX, ARN_PREFIX, connectionRef, publicBinding, validatePublicTemplate, validateSettings,
-  validatePreparation, settingsDigest, bindingFromSlot };
+  validatePreparation, settingsDigest, bindingFromSlot, publicTemplate };
