@@ -187,7 +187,8 @@ function createWhatsappOnboarding({ store, policy, secrets, http, resolveBinding
       guard(); const code = Buffer.from(request.payload.code); let appToken;
       try {
         attempt.phase = 'code_exchange';
-        return await exchangeFactory({ appId: b.appId, redirectUri: b.redirectUri, now }).withExchangedToken({ code, appSecret, signal }, async (token, info) => {
+        return await exchangeFactory({ appId: b.appId, redirectUri: b.redirectUri, now,
+          ...(b.customer?.providerGrantPolicy ? { providerGrantPolicy: b.customer.providerGrantPolicy } : {}) }).withExchangedToken({ code, appSecret, signal }, async (token, info) => {
           guard(); appToken = Buffer.concat([Buffer.from(b.appId + '|'), appSecret]);
           let raw; attempt.phase = 'grant_inspection';
           try { raw = await http({ action: 'inspect', id: b.appId, token: appToken, candidate: token, signal: info.signal }); } finally { appToken.fill(0); }
@@ -200,6 +201,8 @@ function createWhatsappOnboarding({ store, policy, secrets, http, resolveBinding
           if (!C.id(raw?.data?.user_id)) fail('oauth_credentials_incomplete');
           let grant;
           if (b.customer) {
+            // The optional companion-grant policy is pinned by the server's
+            // binding, never supplied by the callback or learned from scopes.
             const expected = { appId: b.appId, selectedWabaId: row.waba_id, scopes: b.scopes, ...b.customer };
             const preview = inspectCustomerGrant(raw, expected, now());
             // Do not read assets already reserved for another authorized scope.

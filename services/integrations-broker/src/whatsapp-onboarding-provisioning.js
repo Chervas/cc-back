@@ -12,7 +12,7 @@ function createWhatsappProvisioning({ store, policy, settings, client, now = () 
   // Capacity is an operational limit, not part of an existing grant's identity.
   const { maxConnections } = config;
   const configDigest = P.settingsDigest(config);
-  const template = Object.fromEntries(['appId','configId','redirectUri','scopes'].map(k => [k,config[k]]));
+  const template = P.publicTemplate(config);
   store.db.exec(`CREATE TABLE IF NOT EXISTS whatsapp_provisioned_slots (
     scope TEXT PRIMARY KEY, connection TEXT NOT NULL UNIQUE, clinic_ids TEXT NOT NULL,
     config_digest TEXT NOT NULL, version_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL UNIQUE,

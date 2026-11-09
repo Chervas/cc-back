@@ -5,29 +5,38 @@ const https = require('node:https');
 const { BrokerError, fail } = require('./errors');
 const { tokenText } = require('./whatsapp-secrets');
 const { GRAPH_VERSION } = require('./whatsapp-contract');
+const C = require('./whatsapp-onboarding-contract');
 const id = v => typeof v === 'string' && /^[1-9][0-9]{0,29}$/.test(v);
 const exact = (v, keys) => v && Object.getPrototypeOf(v) === Object.prototype && Object.keys(v).sort().join(',') === [...keys].sort().join(',');
-function metadata(v, appId) {
+function metadata(v, appId, providerGrantPolicy) {
   const customer = Object.hasOwn(v || {}, 'businessId') || Object.hasOwn(v || {}, 'grantedWabaIds');
+  const companion = providerGrantPolicy === C.PROVIDER_GRANT_POLICY;
   if (!exact(v, ['appId', 'subjectId', 'wabaId', 'phoneId', 'tokenType', 'scopes', 'expiresAt', 'dataAccessExpiresAt',
-    ...(customer ? ['businessId','grantedWabaIds'] : [])])
+    ...(customer ? ['businessId','grantedWabaIds'] : []), ...(companion ? ['providerGrant'] : [])])
+    || companion && !customer
     || v.appId !== appId || ![v.subjectId, v.wabaId, v.phoneId].every(id) || !['USER', 'SYSTEM_USER'].includes(v.tokenType)
-    || !Array.isArray(v.scopes) || !v.scopes.length || v.scopes.length > (customer ? 4 : 3) || new Set(v.scopes).size !== v.scopes.length
+    || !Array.isArray(v.scopes) || !v.scopes.length || v.scopes.length > (companion ? C.PROVIDER_GRANT_LIMITS.maxScopes : customer ? 4 : 3) || new Set(v.scopes).size !== v.scopes.length
     || v.scopes.some(s => !['whatsapp_business_messaging', 'whatsapp_business_management', 'public_profile',
-      ...(customer ? ['whatsapp_business_manage_events'] : [])].includes(s))
+      ...(customer ? ['whatsapp_business_manage_events'] : []), ...(companion ? C.COMPANION_SCOPES : [])].includes(s))
     || !v.scopes.some(s => s !== 'public_profile')
     || ![v.expiresAt, v.dataAccessExpiresAt].every(t => t === null || Number.isSafeInteger(t) && t > 0)) fail('oauth_credentials_incomplete');
   if (customer && (!id(v.businessId) || v.tokenType !== 'SYSTEM_USER'
     || !Array.isArray(v.grantedWabaIds) || !v.grantedWabaIds.length || v.grantedWabaIds.length > 64
     || !v.grantedWabaIds.includes(v.wabaId) || v.grantedWabaIds.some((value, i, all) => !id(value) || i > 0 && value <= all[i - 1]))) fail('oauth_credentials_incomplete');
+  if (companion) {
+    C.grantedScopes(v.scopes, ['whatsapp_business_management','whatsapp_business_messaging','public_profile','whatsapp_business_manage_events'], true, providerGrantPolicy);
+    const evidence = C.validateProviderGrant(v.providerGrant, v.scopes);
+    if (JSON.stringify(evidence) !== JSON.stringify(v.providerGrant)) fail('oauth_credentials_incomplete');
+  }
   return structuredClone(v);
 }
-function createWhatsappOAuthHttp({ appId, redirectUri, request = https.request, timeoutMs = 8000, now = () => Date.now() }) {
+function createWhatsappOAuthHttp({ appId, redirectUri, request = https.request, timeoutMs = 8000, now = () => Date.now(), providerGrantPolicy }) {
   let redirect;
   try { redirect = new URL(redirectUri); } catch { fail('invalid_request'); }
   if (!id(appId) || typeof redirectUri !== 'string' || redirectUri.length > 2048 || redirect.href !== redirectUri
     || redirect.protocol !== 'https:' || redirect.username || redirect.password || redirect.hash || redirect.search || redirect.port
-    || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000) fail('invalid_request');
+    || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000
+    || providerGrantPolicy !== undefined && providerGrantPolicy !== C.PROVIDER_GRANT_POLICY) fail('invalid_request');
   // redirectUri pins the configured launch page. This transport accepts codes
   // from FB.login only: the JavaScript SDK owns the OAuth return channel, so its
   // code exchange uses the empty redirect URI (Facebook's JS helper contract).
@@ -103,7 +112,7 @@ function createWhatsappOAuthHttp({ appId, redirectUri, request = https.request, 
         const result = metadata(await Promise.race([
           Promise.resolve().then(() => { if (signal.aborted) fail('provider_timeout'); return work(callbackToken, { expiresAt: borrowed.expiresAt, signal }); }),
           new Promise((resolve, reject) => { abortWork = () => reject(new BrokerError('provider_timeout')); signal.addEventListener('abort', abortWork, { once: true }); if (signal.aborted) abortWork(); }),
-        ]), appId);
+        ]), appId, providerGrantPolicy);
         if (signal?.aborted) fail('provider_timeout');
         if (borrowed.expiresAt !== null && (borrowed.expiresAt <= now() || result.expiresAt === null || result.expiresAt > borrowed.expiresAt)) fail('credential_revoked');
         if ([result.expiresAt, result.dataAccessExpiresAt].some(t => t !== null && t <= now())) fail('credential_revoked');

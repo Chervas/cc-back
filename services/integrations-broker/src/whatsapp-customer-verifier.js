@@ -6,7 +6,8 @@
 // account comes from signup and is proven against authenticated Meta evidence.
 const { BrokerError, fail } = require('./errors');
 const { tokenText } = require('./whatsapp-secrets');
-const { grantedScopes } = require('./whatsapp-onboarding-contract');
+const C = require('./whatsapp-onboarding-contract');
+const { grantedScopes } = C;
 const id = v => typeof v === 'string' && /^[1-9][0-9]{0,29}$/.test(v);
 const required = ['whatsapp_business_management', 'whatsapp_business_messaging'];
 const permitted = [...required, 'public_profile'];
@@ -20,6 +21,8 @@ function expiry(v, now) {
 }
 function inspectCustomerGrant(response, expected, now) {
   const selectedOnly = expected?.selectionOnly === true;
+  const companion = expected?.providerGrantPolicy === C.PROVIDER_GRANT_POLICY;
+  if (expected?.providerGrantPolicy !== undefined && (!companion || !selectedOnly)) fail('invalid_request');
   const allowedScopes = selectedOnly ? [...permitted, 'whatsapp_business_manage_events'] : permitted;
   if (!Number.isSafeInteger(now) || now <= 0 || !expected || !id(expected.appId)
     || (!selectedOnly || expected.businessId !== undefined) && !id(expected.businessId)
@@ -31,8 +34,19 @@ function inspectCustomerGrant(response, expected, now) {
   if (!data || typeof data !== 'object' || Array.isArray(data) || response.error) fail('oauth_credentials_incomplete');
   if (data.is_valid !== true) fail('credential_revoked');
   if (data.app_id !== expected.appId || !id(data.user_id) || data.type !== 'SYSTEM_USER') fail('oauth_identity_mismatch');
-  const checkedScopes = grantedScopes(data.scopes, expected.scopes, selectedOnly);
-  const granular = data.granular_scopes;
+  const checkedScopes = grantedScopes(data.scopes, expected.scopes, selectedOnly, expected.providerGrantPolicy);
+  let granular = data.granular_scopes, providerGrant;
+  if (companion) {
+    if (!Array.isArray(granular) || !granular.length || granular.length > C.PROVIDER_GRANT_LIMITS.maxScopes) fail('oauth_credentials_incomplete');
+    providerGrant = C.validateProviderGrant({ version: 1, granularScopes: granular.map(row => {
+      if (!(C.exact(row, ['scope']) || C.exact(row, ['scope','target_ids']))) fail('oauth_credentials_incomplete');
+      return { scope: row.scope, targetIds: row.target_ids == null ? null : row.target_ids };
+    }) }, checkedScopes);
+    // Preserve all provider evidence above, but only WhatsApp permission rows
+    // establish WABA targets. No Marketing target can authorize or trigger a GET.
+    granular = providerGrant.granularScopes.filter(row => expected.scopes.includes(row.scope) && row.scope !== 'public_profile')
+      .map(row => ({ scope: row.scope, target_ids: row.targetIds }));
+  }
   if (!Array.isArray(granular) || !granular.length || granular.length > (selectedOnly ? 3 : 2)
     || granular.some(g => !g || typeof g !== 'object' || Array.isArray(g))
     || new Set(granular.map(g => g.scope)).size !== granular.length) fail('oauth_credentials_incomplete');
@@ -55,7 +69,7 @@ function inspectCustomerGrant(response, expected, now) {
   }
   return { appId: data.app_id, subjectId: data.user_id, tokenType: data.type, scopes: checkedScopes,
     expiresAt: expiry(data.expires_at, now), dataAccessExpiresAt: expiry(data.data_access_expires_at, now),
-    businessId: expected.businessId || null, wabaIds: [...wabas].sort() };
+    businessId: expected.businessId || null, wabaIds: [...wabas].sort(), ...(companion ? { providerGrant } : {}) };
 }
 function createWhatsappCustomerVerifier({ http, now = () => Date.now() }) {
   if (typeof http !== 'function' || typeof now !== 'function') fail('invalid_request');

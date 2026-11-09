@@ -18,14 +18,15 @@ const templateMessage = () => ({ messaging_product: 'whatsapp', to: '34000000123
   { type: 'button', sub_type: 'quick_reply', index: '0', parameters: [{ type: 'payload', payload: 'FICTITIOUS_CONFIRM' }] },
   { type: 'button', sub_type: 'url', index: '1', parameters: [{ type: 'text', text: 'qa' }] },
 ] } });
-async function fixture(t, { enabled = true, ongoing = false, omitEventsGrant = false } = {}) {
-  const f = onboardingFixture(t, { customer: { selectionOnly: true }, scopes: ['whatsapp_business_management','whatsapp_business_messaging','public_profile','whatsapp_business_manage_events'] });
-  if (omitEventsGrant) f.state.afterGraph = (request, response) => {
-    if (request.action === 'inspect') {
+async function fixture(t, { enabled = true, ongoing = false, omitEventsGrant = false,
+  customer = { selectionOnly: true }, afterGraph, verifyProvider = false } = {}) {
+  const f = onboardingFixture(t, { customer, scopes: ['whatsapp_business_management','whatsapp_business_messaging','public_profile','whatsapp_business_manage_events'] });
+  if (omitEventsGrant || afterGraph) f.state.afterGraph = (request, response) => {
+    if (omitEventsGrant && request.action === 'inspect') {
       response.data.scopes = response.data.scopes.filter(scope => scope !== 'whatsapp_business_manage_events');
       response.data.granular_scopes = response.data.granular_scopes.filter(scope => scope.scope !== 'whatsapp_business_manage_events');
     }
-    return response;
+    return afterGraph ? afterGraph(request, response) : response;
   };
   const flow = await f.begin(); await f.finish(flow); const row = f.current.store.db.prepare('SELECT * FROM whatsapp_onboarding_flows WHERE id=?').get(flow.flowId);
   if (ongoing) {
@@ -50,7 +51,7 @@ async function fixture(t, { enabled = true, ongoing = false, omitEventsGrant = f
     else result = await f.http(request);
     return state.after ? state.after(request, result) : result;
   };
-  const secrets = createWhatsappAuthorizedSecrets({ client: f.aws, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY, registry, http, now: f.now });
+  const secrets = createWhatsappAuthorizedSecrets({ client: f.aws, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY, registry, http, verifyProvider, now: f.now });
   const principal = (id, keyId, key) => ({ id, keyId, enabled: true, maxPerMinute: 60, publicKey: key.publicKey.export({ type: 'spki', format: 'pem' }) });
   const policy = { audience: 'broker:authorized-qa', version: 'authorized-qa-v1', maxBacklog: 100,
     principals: [principal('staging:whatsapp','qa-staging',f.gateway), principal('control:whatsapp','qa-control',f.control)], connections: [binding],

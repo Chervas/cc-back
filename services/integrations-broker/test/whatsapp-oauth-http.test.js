@@ -114,6 +114,39 @@ test('Business metadata crosses the token callback only as a bounded exact ident
     assert(held.every(b => b === 0));
   }
 });
+test('Companion metadata needs the server constructor pin and retains complete scopes/evidence without changing the token exchange', async () => {
+  const C = require('../src/whatsapp-onboarding-contract');
+  const f = require('./whatsapp-companion-fixture.cjs').fixture();
+  const { wabaIds, ...grant } = require('../src/whatsapp-customer-verifier').inspectCustomerGrant(f.response, f.expected, AT);
+  const value = { ...grant, wabaId: '301', phoneId: '401', businessId: '501', grantedWabaIds: wabaIds };
+  const response = { access_token: TOKEN, token_type: 'bearer' };
+  await assert.rejects(transport(wire({ response })).withExchangedToken(input(), () => value), { code: 'oauth_credentials_incomplete' });
+  const connection = wire({ response }); let held;
+  const result = await transport(connection, { providerGrantPolicy: C.PROVIDER_GRANT_POLICY }).withExchangedToken(input(), token => { held = token; return value; });
+  assert.deepEqual(result, value); assert.equal(result.scopes.length, 12); assert.equal(result.providerGrant.granularScopes.length, 11);
+  assert(held.every(value => value === 0)); assert.equal(connection.calls.length, 1);
+  const options = connection.calls[0].options, url = new URL('https://graph.facebook.com' + options.path);
+  assert.equal(url.pathname, '/v24.0/oauth/access_token'); assert.equal(url.searchParams.get('redirect_uri'), '');
+  assert.equal(options.hostname, 'graph.facebook.com'); assert.equal(options.rejectUnauthorized, true); assert.equal(options.minVersion, 'TLSv1.2');
+  for (const mutate of [
+    v => { delete v.providerGrant; }, v => { v.providerGrant.version = 2; },
+    v => { v.scopes = v.scopes.filter(scope => scope !== 'whatsapp_business_messaging'); },
+    v => { v.scopes.push('pages_messaging'); },
+    v => { v.providerGrant.granularScopes[0].targetIds = ['0']; },
+    v => { v.providerGrant.granularScopes.reverse(); },
+  ]) {
+    const changed = structuredClone(value); mutate(changed);
+    await assert.rejects(transport(wire({ response }), { providerGrantPolicy: C.PROVIDER_GRANT_POLICY }).withExchangedToken(input(), token => {
+      held = token; return changed;
+    })); assert(held.every(value => value === 0));
+  }
+});
+test('Provider-grant policy is server configuration and cannot be enabled through OAuth callback inputs', async () => {
+  const C = require('../src/whatsapp-onboarding-contract'), f = wire();
+  assert.throws(() => transport(f, { providerGrantPolicy: 'allow_all' }), { code: 'invalid_request' });
+  await assert.rejects(transport(f).withExchangedToken({ ...input(), providerGrantPolicy: C.PROVIDER_GRANT_POLICY }, metadata), { code: 'invalid_request' });
+  assert.equal(f.calls.length, 0);
+});
 test('Abort before/during exchange and during borrowed-token callback stops waiting and erases token without retry', async () => {
   const f = wire({ hold: true }); const controller = new AbortController();
   const work = transport(f).withExchangedToken({ ...input(), signal: controller.signal }, metadata); controller.abort();

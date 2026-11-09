@@ -41,11 +41,14 @@ function createWhatsappAuthorizedSecrets({ client, accountId, prefix, kmsKeyArn,
           check(); const b = E.bindingFor(original);
           // Meta can expand the same system user's granular WhatsApp grant when
           // another number is connected. selectionOnly still pins this phone,
-          // selected WABA, subject, owner and WhatsApp-only permissions. Verify
-          // every current owner, but do not turn the historical unselected list
-          // into a permanent restriction on later authorized enrollments.
+          // selected WABA, subject and owner. The explicitly configured companion
+          // policy preserves the complete provider grant; it grants no additional
+          // broker operations. Strict enrollments keep their WhatsApp-only check.
+          // Verify every current WABA owner without permanently pinning the
+          // historical unselected list of later authorized enrollments.
           grant = await customer({ response, token, proof, signal, expected: { ...b.customer, appId: b.appId, scopes: b.scopes,
-            businessId: metadata.businessId, ...(b.customer.selectionOnly ? {} : { wabaIds: metadata.grantedWabaIds }), selectedWabaId: metadata.wabaId } }); check();
+            businessId: metadata.businessId, providerGrantPolicy: b.customer.providerGrantPolicy,
+            ...(b.customer.selectionOnly ? {} : { wabaIds: metadata.grantedWabaIds }), selectedWabaId: metadata.wabaId } }); check();
           if (grant.subjectId !== metadata.subjectId || grant.tokenType !== metadata.tokenType || grant.businessId !== metadata.businessId
             || !b.customer.selectionOnly && JSON.stringify(grant.wabaIds) !== JSON.stringify(metadata.grantedWabaIds)) fail('scope_denied');
           await phone({ wabaId: metadata.wabaId, phoneId: metadata.phoneId, token, proof, signal }); check();

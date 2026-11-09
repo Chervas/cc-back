@@ -43,7 +43,8 @@ function createWhatsappOnboardingSecrets({ client, accountId, prefix, kmsKeyArn 
       || !Number.isSafeInteger(flow.expires_at) || flow.expires_at <= 0 || metadata.wabaId !== flow.waba_id || metadata.phoneId !== flow.phone_id
       || flow.channel_role != null && !['primary','secondary'].includes(flow.channel_role)
       || !Buffer.isBuffer(token) || !tokenText(token.toString('utf8'))) fail('invalid_request');
-    const v = { version: 1, provider: 'meta-whatsapp-candidate', flowId: flow.id, connectionRef: binding.connectionRef,
+    const v = { version: b.customer?.providerGrantPolicy === C.PROVIDER_GRANT_POLICY ? 2 : 1,
+      provider: 'meta-whatsapp-candidate', flowId: flow.id, connectionRef: binding.connectionRef,
       scopeKey: b.scopeKey, scopeDigest: flow.scope_digest, clinicSetDigest: flow.clinic_digest, authorizationExpiresAt: flow.expires_at,
       configId: b.configId, ...(flow.channel_role != null ? { channelRole: flow.channel_role } : {}), ...metadata, accessToken: token.toString('utf8') };
     const body = Buffer.from(JSON.stringify(v)); if (body.length > 32768) { body.fill(0); fail('invalid_request'); }
@@ -54,7 +55,8 @@ function createWhatsappOnboardingSecrets({ client, accountId, prefix, kmsKeyArn 
     try {
       parsed = JSON.parse(body.toString('utf8')); token = Buffer.from(parsed.accessToken || '');
       const metadata = Object.fromEntries(['appId', 'subjectId', 'wabaId', 'phoneId', 'tokenType', 'scopes', 'expiresAt', 'dataAccessExpiresAt',
-        ...(C.bindingFor(binding).customer ? ['businessId','grantedWabaIds'] : [])].map(k => [k, parsed[k]]));
+        ...(C.bindingFor(binding).customer ? ['businessId','grantedWabaIds'] : []),
+        ...(C.bindingFor(binding).customer?.providerGrantPolicy === C.PROVIDER_GRANT_POLICY ? ['providerGrant'] : [])].map(k => [k, parsed[k]]));
       const encoded = envelope(binding, flow, metadata, token);
       try { if (!body.equals(encoded.body)) fail('secret_unavailable'); return encoded.metadata; } finally { encoded.body.fill(0); }
     } finally { token?.fill(0); if (parsed && typeof parsed === 'object') delete parsed.accessToken; }

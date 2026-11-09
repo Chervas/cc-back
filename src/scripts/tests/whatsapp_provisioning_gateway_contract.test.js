@@ -10,13 +10,18 @@ test('Automatic provisioning contract loads from the gateway package without the
   const root = path.resolve(__dirname, '../../..');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-gateway-contract-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  for (const file of ['whatsapp-provisioning-contract.js', 'whatsapp-onboarding-contract.js', 'canonical.js', 'contracts.js', 'errors.js', 'bedrock-errors.js']) {
+  for (const file of ['whatsapp-provisioning-contract.js', 'whatsapp-onboarding-contract.js', 'canonical.js', 'contracts.js', 'errors.js', 'bedrock-errors.js', 'whatsapp-provider-errors.js']) {
     fs.copyFileSync(path.join(root, 'services/integrations-broker/src', file), path.join(dir, file));
   }
   const script = `const P = require('./whatsapp-provisioning-contract');
     const binding = P.publicBinding({appId:'101',configId:'102',redirectUri:'https://example.invalid/callback',
       scopes:['whatsapp_business_management','whatsapp_business_messaging']}, 'clinic:123', [123]);
     if (binding.connectionRef !== 'whatsapp-auto-clinic-123-v1' || binding.customer.selectionOnly !== true) throw Error('invalid_binding');
+    const template = {appId:'101',configId:'102',redirectUri:'https://example.invalid/callback',
+      scopes:['public_profile','whatsapp_business_management','whatsapp_business_messaging'],
+      grantPolicyOverrides:[{scopeKey:'clinic:123',policy:'meta-app-companion-v1'}]};
+    if (P.publicBinding(template,'clinic:123',[123]).customer.providerGrantPolicy !== 'meta-app-companion-v1') throw Error('missing_policy_parser');
+    if (P.publicBinding(template,'clinic:124',[124]).customer.providerGrantPolicy !== undefined) throw Error('foreign_policy');
     process.stdout.write('gateway_contract_ready');`;
   assert.equal(execFileSync(process.execPath, ['-e', script], {
     cwd: dir, encoding: 'utf8', env: { ...process.env, NODE_PATH: path.join(root, 'node_modules') },
