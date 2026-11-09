@@ -25,9 +25,10 @@ function safeError(error, fallback = 'meta_broker_binding_invalid') {
 }
 function createMetaMarketingAdsReader({ scope, client, enabled = () => process.env.META_MARKETING_ADS_SYNC_ENABLED === 'true', now = Date.now }) {
   if (!scope || typeof scope.prepare !== 'function' || typeof scope.assertContext !== 'function' || typeof client?.execute !== 'function') fail('broker_configuration_invalid');
-  async function assert(context) {
+  async function assert(context, options) {
+    if(options!==undefined&&(!options||Object.getPrototypeOf(options)!==Object.prototype||Object.keys(options).join(',')!=='transaction'||!options.transaction))fail('invalid_request');
     if (!enabled()) fail('meta_ads_sync_disabled');
-    const state = await scope.assertContext(context);
+    const state = await scope.assertContext(context, options);
     if (state.kind !== 'ad_account') fail('scope_denied');
     if (!enabled()) fail('meta_ads_sync_disabled');
     return state;
@@ -63,7 +64,7 @@ function createMetaMarketingAdsReader({ scope, client, enabled = () => process.e
     const context = await prepare(mappingId);
     let usage = { usagePct: 0, nextAllowedAt: 0, pauseUntil: 0 };
     return Object.freeze({
-      assert: () => assert(context),
+      assert: options => assert(context, options),
       async readPage(family, payload) { const page = await read(context, family, payload); usage = page.usage; return page; },
       async *pages(family, range = {}) {
         const seen = new Set(); let pageToken = null;

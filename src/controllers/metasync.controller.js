@@ -2576,23 +2576,23 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                         clinic_match_source: matchSource, clinic_match_value: assignmentInfo.matchValue || null });
                 }
                 await adsSource.assert();
-                await SocialAdsInsightsDaily.sequelize.transaction(async transaction => {
-                    await adsSource.assert();
+                await SocialAdsInsightsDaily.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, async transaction => {
+                    await adsSource.assert({ transaction });
                     const where = { ad_account_id: accountId, level: 'ad', date: { [Op.between]: [range.startDate, range.endDate] } };
                     const previous = await SocialAdsInsightsDaily.findAll({ where, attributes: ['id', 'entity_id', 'date', 'publisher_platform', 'platform_position'],
                         raw: true, transaction, lock: transaction.LOCK.UPDATE });
                     const keyOf = row => JSON.stringify([String(row.entity_id), row.date, row.publisher_platform, row.platform_position]);
                     const retained = new Set(snapshots.map(keyOf));
                     for (const snapshot of snapshots) {
-                        await adsSource.assert();
+                        await adsSource.assert({ transaction });
                         await SocialAdsInsightsDaily.upsert(snapshot, { transaction });
                     }
                     const staleIds = previous.filter(row => !retained.has(keyOf(row))).map(row => row.id);
                     if (staleIds.length) {
-                        await adsSource.assert();
+                        await adsSource.assert({ transaction });
                         await SocialAdsInsightsDaily.destroy({ where: { ...where, id: { [Op.in]: staleIds } }, transaction });
                     }
-                    await adsSource.assert();
+                    await adsSource.assert({ transaction });
                 });
                 totalRows += snapshots.length;
             }
@@ -2700,14 +2700,14 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                         where.entity_id = { [Op.in]: Array.from(chunkAdIds) };
                     }
                     await adsSource.assert();
-                    await SocialAdsActionsDaily.sequelize.transaction(async transaction => {
-                        await adsSource.assert();
+                    await SocialAdsActionsDaily.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, async transaction => {
+                        await adsSource.assert({ transaction });
                         await SocialAdsActionsDaily.destroy({ where, transaction });
                         if (rowsToPersist.length) {
-                            await adsSource.assert();
+                            await adsSource.assert({ transaction });
                             await SocialAdsActionsDaily.bulkCreate(rowsToPersist, { transaction });
                         }
-                        await adsSource.assert();
+                        await adsSource.assert({ transaction });
                     });
                     totalActions += rowsToPersist.length;
                 };
@@ -2722,10 +2722,10 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
         // 3.bis) Agregados diarios por adset (tabla auxiliar)
         try {
             await adsSource.assert();
-            await SocialAdsAdsetDailyAgg.sequelize.transaction(async transaction => {
-                await adsSource.assert();
+            await SocialAdsAdsetDailyAgg.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, async transaction => {
+                await adsSource.assert({ transaction });
                 await SocialAdsAdsetDailyAgg.destroy({ where: { ad_account_id: accountId, date: { [Op.between]: [sinceStr, untilStr] } }, transaction });
-                await adsSource.assert();
+                await adsSource.assert({ transaction });
                 await SocialAdsAdsetDailyAgg.sequelize.query(`
               INSERT INTO SocialAdsAdsetDailyAgg (ad_account_id, adset_id, date, spend, impressions, clicks, leads, created_at, updated_at)
               SELECT agg.ad_account_id, agg.adset_id, agg.date,
@@ -2763,7 +2763,7 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                 GROUP BY base.adset_id, base.date
               ) la ON la.adset_id = agg.adset_id AND la.date = agg.date;
                 `, { replacements: { acc: accountId, since: sinceStr, until: untilStr }, transaction });
-                await adsSource.assert();
+                await adsSource.assert({ transaction });
             });
         } catch (eAgg) {
             throw eAgg;

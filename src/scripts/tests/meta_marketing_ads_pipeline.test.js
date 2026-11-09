@@ -81,35 +81,53 @@ function persistenceFixture() {
     ],
     actions: [{ ad_id: '403', date_start: '2026-11-01', publisher_platform: 'facebook', actions: [{ action_type: 'lead', value: '2' }] }],
   };
-  const assertActive = async () => { if (state.blocked) throw fail('asset_revoked'); };
+  let activeTransaction = null;
+  const assertActive = async options => {
+    if (activeTransaction) {
+      assert.equal(options?.transaction, activeTransaction, 'every SQL-window guard must reuse its caller transaction');
+      activeTransaction.guards++; activeTransaction.guardedWrites = state.writes;
+    } else assert.equal(options, undefined);
+    if (state.blocked) throw fail('asset_revoked');
+  };
+  const assertDataTransaction = options => {
+    assert.equal(options?.transaction, activeTransaction);
+    assert(activeTransaction?.guards > 0, 'full authority must be guarded before the first data query');
+  };
   const sequelize = {
-    query: async () => { state.writes++; return [[], 0]; },
-    transaction: async callback => {
+    query: async (sql, options) => { if (activeTransaction) assertDataTransaction(options); state.writes++; return [[], 0]; },
+    transaction: async (options, callback) => {
+      assert.equal(options.isolationLevel, 'REPEATABLE READ');
+      assert.equal(activeTransaction, null);
+      activeTransaction = { fixture: true, LOCK: { UPDATE: 'UPDATE' }, guards: 0, guardedWrites: null };
       state.transactions++; const before = { actions: clone(state.actions), insights: clone([...state.insights]) };
-      try { return await callback({ fixture: true, LOCK: { UPDATE: 'UPDATE' } }); }
+      try { const result = await callback(activeTransaction);
+        assert(activeTransaction.guards >= 2);
+        assert.equal(activeTransaction.guardedWrites, state.writes, 'full authority must be rechecked after the final data write');
+        return result; }
       catch (error) { state.actions = before.actions; state.insights = new Map(before.insights); state.rollbacks++; throw error; }
+      finally { activeTransaction = null; }
     },
   };
   const models = {
     Clinica: { findByPk: async () => ({ id_clinica: 11, nombre_clinica: 'Clínica Uno' }) }, GrupoClinica: {},
     SocialAdsEntity: { sequelize, upsert: async row => { state.writes++; state.entities.set(row.entity_id, clone(row)); } },
     SocialAdsInsightsDaily: { sequelize, upsert: async (row, options) => {
-      assert(options.transaction); state.writes++;
+      assertDataTransaction(options); state.writes++;
       const key = [row.entity_id, row.date, row.publisher_platform, row.platform_position].join('|');
       state.insights.set(key, { id: state.insights.get(key)?.id || ++state.insightSequence, ...clone(row) });
       await state.onInsightsUpsert?.();
-    }, findAll: async options => [...state.insights.values()].filter(row => {
+    }, findAll: async options => { if (options.transaction) assertDataTransaction(options); return [...state.insights.values()].filter(row => {
       const dates = options.where.date;
       return typeof dates === 'string' ? row.date === dates : row.date >= dates[Op.between][0] && row.date <= dates[Op.between][1];
-    }), destroy: async options => {
-      assert(options.transaction); state.writes++;
+    }); }, destroy: async options => {
+      assertDataTransaction(options); state.writes++;
       for (const [key, row] of state.insights) if (options.where.id[Op.in].includes(row.id)) state.insights.delete(key);
     } },
     SocialAdsActionsDaily: { sequelize, destroy: async options => {
-      assert(options.transaction); state.writes++; state.actionsDeletes++;
+      assertDataTransaction(options); state.writes++; state.actionsDeletes++;
       const dates = options.where.date[Op.in]; state.actions = state.actions.filter(row => !dates.includes(row.date));
-    }, bulkCreate: async (rows, options) => { assert(options.transaction); state.writes++; state.actions.push(...clone(rows)); await state.onActionsInsert?.(); } },
-    SocialAdsAdsetDailyAgg: { sequelize, destroy: async options => { assert(options.transaction); state.writes++; } },
+    }, bulkCreate: async (rows, options) => { assertDataTransaction(options); state.writes++; state.actions.push(...clone(rows)); await state.onActionsInsert?.(); } },
+    SocialAdsAdsetDailyAgg: { sequelize, destroy: async options => { assertDataTransaction(options); state.writes++; } },
     SocialStatsDaily: { findAll: async ({ where }) => [...state.stats.values()].filter(row => row.asset_id === where.asset_id && row.asset_type === where.asset_type && row.date === where.date), findOne: async ({ where }) => {
       const key = `${where.clinica_id}:${where.asset_id}:${where.date}`;
       return state.stats.has(key) ? { update: async row => { state.writes++; state.stats.set(key, { ...state.stats.get(key), ...clone(row) }); } } : null;
@@ -119,6 +137,7 @@ function persistenceFixture() {
     AdAttributionIssue: { update: async () => { state.writes++; }, findOrCreate: async () => [{ update: async () => {} }, true] },
   };
   const source = { assert: assertActive, async *pages(family, requestedRange) {
+    assert.equal(activeTransaction, null, 'provider reads must stay outside persistence transactions');
     state.requests.push({ family, range: clone(requestedRange || {}) }); await state.onFamily?.(family);
     if (state.failFamily === family) throw fail('provider_failed');
     yield dataset[family];

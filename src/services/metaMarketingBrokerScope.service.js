@@ -36,7 +36,7 @@ function mapping(value) {
     clinicId:value.clinicaId === null ? null : Number(value.clinicaId), groupId:value.grupoClinicaId === null ? null : Number(value.grupoClinicaId), active:[true,1].includes(value.isActive) };
 }
 function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocations, loadMappings, loadClinics, loadShared, loadPrimaryGroups, inspectEnrollment,
-  loadGrants, loadConnection, blocked, enabled = () => process.env.META_MARKETING_BROKER_ENABLED === 'true' }) {
+  loadGrants, loadConnection, blocked, inspectInTransaction, enabled = () => process.env.META_MARKETING_BROKER_ENABLED === 'true' }) {
   const contexts = new WeakMap();
   async function inspect(mappingId, expected) {
     if (!enabled()) fail('broker_cohort_disabled');
@@ -139,7 +139,18 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
   return { describe:context => { // Metadata from preparation, never a replacement for assertContext.
       const captured=contexts.get(context);if(!captured)fail();return structuredClone(captured);
     }, prepare:guard(async mappingId => { const captured=await inspect(mappingId); const context=Object.freeze({}); contexts.set(context,captured);return context; }),
-    assertContext:guard(async context => { const captured=contexts.get(context);if(!captured)fail();return structuredClone(await inspect(captured.mappingId,captured)); }) };
+    assertContext:guard(async (context, options) => {
+      if(options!==undefined&&(!options||Object.getPrototypeOf(options)!==Object.prototype||Object.keys(options).join(',')!=='transaction'||!options.transaction))fail();
+      const transaction=options?.transaction;
+      const captured=contexts.get(context);if(!captured)fail();
+      if(transaction!==undefined){
+        if(!transaction?.LOCK?.UPDATE||transaction.finished||typeof inspectInTransaction!=='function')fail();
+        const current=await inspectInTransaction(structuredClone(captured),transaction);
+        if(digest(current)!==digest(captured))fail('meta_broker_scope_changed');
+        return structuredClone(current);
+      }
+      return structuredClone(await inspect(captured.mappingId,captured));
+    }) };
 }
 function createMetaMarketingScopeRepository(getModels, { transaction = null } = {}) {
   if (transaction && (!transaction.LOCK?.UPDATE || transaction.finished)) fail();

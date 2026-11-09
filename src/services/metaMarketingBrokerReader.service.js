@@ -73,9 +73,37 @@ const client=createConfiguredMetaMarketingClient();
 const modelServices=new WeakMap();
 function forModels(models) {
   if(!models||typeof models!=='object')fail('broker_configuration_invalid');
-  if(!modelServices.has(models))modelServices.set(models,createMetaMarketingBroker({client,...createMetaMarketingScopeRepository(()=>models),
-    recordCredentialFailure:(state,error)=>require('./metaMarketingEffectiveCredential.service').createEffectiveCredentials({models})
-      .recordFailure({enrollmentId:state.enrollmentId,epoch:state.credentialEpoch,versionId:state.credentialVersionId},error)}));
+  if(!modelServices.has(models)){
+    const transactions=new WeakMap(),order=require('./metaMarketingTransactionOrder.service').createOrder({models,
+      unavailable:()=>fail('meta_broker_scope_changed')});
+    modelServices.set(models,createMetaMarketingBroker({client,...createMetaMarketingScopeRepository(()=>models),
+      inspectInTransaction:async(captured,transaction)=>{
+        if(transaction?.sequelize!==models.sequelize||!transaction.LOCK?.UPDATE||transaction.finished||transaction.options?.isolationLevel!=='REPEATABLE READ'||!captured.enrollmentId)fail('meta_broker_binding_invalid');
+        let bound=transactions.get(transaction);
+        if(!bound){
+          // Reserve one account synchronously, before any hint/lock awaits.
+          // Concurrent guards cannot acquire another Enrollment prefix later.
+          bound={mappingId:captured.mappingId,enrollmentId:captured.enrollmentId,scope:null,ready:null};
+          transactions.set(transaction,bound);
+          bound.ready=(async()=>{
+            // This is the persistence transaction's first metadata guard. Fence
+            // current Enrollment/ancestors before taking mapping/Clinic locks.
+            const prepared=await order.prepareEnrollment(captured.enrollmentId,{scopeKey:captured.scopeKey,appId:captured.appId});
+            if(!prepared)fail('meta_broker_scope_changed');
+            await order.lockPrepared(prepared,transaction);
+            bound.scope=createMetaMarketingBrokerScope(createMetaMarketingScopeRepository(()=>models,{transaction}));
+          })();
+        }
+        // A data transaction owns one account. Do not take another Enrollment
+        // prefix after it has already locked mappings or written metric rows.
+        if(bound.mappingId!==captured.mappingId||bound.enrollmentId!==captured.enrollmentId)fail('meta_broker_scope_changed');
+        await bound.ready;
+        const current=await bound.scope.prepare(captured.mappingId);
+        return bound.scope.describe(current);
+      },
+      recordCredentialFailure:(state,error)=>require('./metaMarketingEffectiveCredential.service').createEffectiveCredentials({models})
+        .recordFailure({enrollmentId:state.enrollmentId,epoch:state.credentialEpoch,versionId:state.credentialVersionId},error)}));
+  }
   return modelServices.get(models);
 }
 module.exports={createMetaMarketingBrokerReader,createMetaMarketingBroker,createConfiguredMetaMarketingClient,forModels,projection};
