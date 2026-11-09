@@ -35,11 +35,14 @@ const deferred = () => { let resolve; const promise = new Promise(done => { reso
 
 function defineModels(sql, db) {
   db.Sequelize = Sequelize;
+  db.GrupoClinica = sql.define('GrupoClinica', { id_grupo: { type: D.INTEGER, primaryKey: true },
+    nombre_grupo: D.STRING(100) }, { tableName: 'GruposClinicas', timestamps: false });
   db.Clinica = sql.define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true },
-    grupoClinicaId: D.INTEGER, nombre_clinica: D.STRING(100), datos_fiscales_clinica: D.JSON, configuracion: D.JSON,
+    grupoClinicaId: D.INTEGER, nombre_clinica: D.STRING(100), url_avatar: D.STRING(500), datos_fiscales_clinica: D.JSON, configuracion: D.JSON,
     direccion: D.STRING(150), codigo_postal: D.STRING(12), ciudad: D.STRING(100), provincia: D.STRING(100),
     pais: D.STRING(100), email: D.STRING(100), telefono: D.STRING(40), telefono_whatsapp: D.STRING(40),
   }, { tableName: 'Clinicas', timestamps: false });
+  db.Clinica.belongsTo(db.GrupoClinica, { foreignKey: 'grupoClinicaId', targetKey: 'id_grupo', as: 'grupoClinica', constraints: false });
   db.Paciente = sql.define('Paciente', { id_paciente: { type: D.INTEGER, primaryKey: true },
     clinica_id: D.INTEGER, public_id: D.STRING(80), nombre: D.STRING(100), apellidos: D.STRING(100),
     dni: D.STRING(40), email: D.STRING(100), telefono_movil: D.STRING(40), telefono_secundario: D.STRING(40), fecha_nacimiento: D.DATEONLY,
@@ -156,18 +159,18 @@ test('editable independent BS LOPD identity: native MySQL scope, CAS, frozen evi
     assert.equal(item.doc.personal_data_form.values.direccion, 'Calle inicial 1');
     assert.equal(item.doc.personal_data_form.values.compania, '', 'Do not invent a company not present in the patient record');
     assert.equal(item.doc.personal_data_form.values.telefono2, '+34000000001', 'Secondary telephone is prefilled from the real patient field');
-    assert.equal(item.doc.personal_data_form.fields.filter(field => field.required).length, 2);
+    assert.equal(item.doc.personal_data_form.fields.filter(field => field.required).length, 10);
     const patientBefore = snapshotOf(await db.Paciente.findByPk(item.patientId));
     assert.equal((await assess(item)).allowed, false);
     await unchangedRejection(item, () => service.signPublicPackage(item.session.public_token, signPayload(item.doc)));
     const values = { ...item.doc.personal_data_form.values, nombre: 'Paciente Corregido',
-      dni: '', direccion: 'Calle corregida 99 & prueba', ciudad: 'Elche', email: 'corregido@example.invalid',
+      dni: 'QA-CORREGIDO', direccion: 'Calle corregida 99 & prueba', ciudad: 'Elche', email: 'corregido@example.invalid',
       compania: 'Compañía ficticia QA', telefono2: '+34000000002' };
     const corrected = await confirm(item, values);
     const persisted = await refresh(item);
     assert.equal(persisted.snapshot_json.context.paciente.nombre, values.nombre);
     assert.equal(persisted.snapshot_json.context.paciente.nombre_completo, `${values.nombre} ${values.apellidos}`);
-    assert.equal(persisted.snapshot_json.context.paciente.dni, '');
+    assert.equal(persisted.snapshot_json.context.paciente.dni, 'QA-CORREGIDO');
     assert.equal(persisted.snapshot_json.context.paciente.direccion, values.direccion);
     assert.equal(persisted.snapshot_json.context.paciente.ciudad, 'Elche');
     assert.equal(persisted.snapshot_json.context.paciente.compania, values.compania);
@@ -219,6 +222,13 @@ test('editable independent BS LOPD identity: native MySQL scope, CAS, frozen evi
   }
 
   const profile = require('../../services/patientPrivacyProfile.service');
+  const optional = await prepare();
+  const optionalConfirmed = await confirm(optional, { ...optional.doc.personal_data_form.values, compania: '', telefono2: '' });
+  await service.signPublicPackage(optional.session.public_token, signPayload(optionalConfirmed));
+  assert.equal((await refresh(optional)).status, 'signed');
+  assert.equal((await refresh(optional)).snapshot_json.patient_identity.values.compania, '');
+  assert.equal((await refresh(optional)).snapshot_json.patient_identity.values.telefono2, '');
+  report.checks.push('company and fixed telephone remain optional through actual save and final signature');
   const empty = await prepare(66, { dni: null, fecha_nacimiento: null, direccion: null, codigo_postal: null,
     ciudad: null, poblacion: null, provincia: null, telefono_movil: null, telefono_secundario: null, email: null });
   const emptyBefore = snapshotOf(await db.Paciente.findByPk(empty.patientId));
@@ -320,6 +330,13 @@ test('editable independent BS LOPD identity: native MySQL scope, CAS, frozen evi
 
   const invalid = await prepare();
   const base = payload(invalid.doc);
+  for (const key of require('../../lib/consent-document-personal-data').REQUIRED_KEYS) {
+    for (const value of ['', '   ', null]) {
+      await unchangedRejection(invalid, () => update(invalid.session.public_token, invalid.doc.id,
+        { ...base, values: { ...base.values, [key]: value } }), [400]);
+    }
+  }
+  report.checks.push('all ten required privacy identity fields reject empty/whitespace/null through the real public service with zero document/event mutation');
   for (const changed of [
     { ...base, schema_version: 'forged' }, { ...base, snapshot_hash: '0'.repeat(64) },
     { ...base, values: { ...base.values, nombre: '' } }, { ...base, values: { ...base.values, apellidos: '   ' } },
@@ -466,6 +483,9 @@ test('editable independent BS LOPD identity: native MySQL scope, CAS, frozen evi
   oldSnapshot.context.paciente = { ...oldSnapshot.context.paciente, nombre: 'Paciente antiguo', apellidos: 'ficticio', ...historicalPatient };
   delete oldSnapshot.context.paciente.compania;
   delete oldSnapshot.context.paciente.telefono2;
+  // This evidence predates the explicit mobile/fixed label presentation;
+  // inherit neither that new marker nor its labels from today's fixture.
+  delete oldSnapshot.context.document_presentation;
   const evidence = { ...signature, signed_at: new Date(Date.now() - 1000).toISOString(), consent_choices: noChoices() };
   oldSnapshot.signature_evidence = evidence;
   const historicalBody = privacy.buildBsPrivacyDigitalHtml(oldSnapshot.context).html;

@@ -156,7 +156,9 @@ test('native block builder authoring + ordered immutable signed/completed answer
     const privacyView = await expect('GET', privacyRoute, undefined, undefined, 200); let privacyDoc = privacyView.documents[0];
     const privacyCorrected = await expect('POST', privacyRoute + '/documents/' + privacyDoc.id + '/personal-data', {
       schema_version: privacyDoc.personal_data_form.schema_version, snapshot_hash: privacyDoc.snapshot_hash,
-      values: { ...privacyDoc.personal_data_form.values, telefono: '+447700900183' } }, undefined, 200);
+      values: { ...privacyDoc.personal_data_form.values, dni: 'QA-PRIVACY-ID', fecha_nacimiento: '1990-01-01',
+        direccion: 'Calle ficticia 1', codigo_postal: '03003', ciudad: 'Alicante', provincia: 'Alicante',
+        telefono: '+447700900183', email: 'privacy-ficticio@example.invalid' } }, undefined, 200);
     privacyDoc = privacyCorrected.documents[0];
     await expect('POST', privacyRoute + '/sign', { ...signature, document_ids: [privacyDoc.id],
       document_snapshot_hashes: { [privacyDoc.id]: privacyDoc.snapshot_hash }, document_choices: { [privacyDoc.id]: {

@@ -9,15 +9,17 @@ const SCHEMA_VERSION = 'bs-lopd-identity/v1';
 const PRIVACY_KEY = 'bs-final-20261015-' + digital.SOURCE_DOCUMENT_SHA256;
 const FIELDS = Object.freeze([
   ['nombre', 'Nombre', 'text', true, 150], ['apellidos', 'Apellidos', 'text', true, 200],
-  ['dni', 'DNI, NIE o pasaporte', 'text', false, 40],
-  ['fecha_nacimiento', 'Fecha de nacimiento', 'date', false, 10],
+  ['dni', 'DNI, NIE o pasaporte', 'text', true, 40],
+  ['fecha_nacimiento', 'Fecha de nacimiento', 'date', true, 10],
   ['compania', 'Compañía', 'text', false, 150],
-  ['direccion', 'Dirección', 'text', false, 250], ['codigo_postal', 'Código postal', 'text', false, 20],
-  ['ciudad', 'Población', 'text', false, 120], ['provincia', 'Provincia', 'text', false, 120],
-  ['telefono', 'Teléfono móvil', 'tel', false, 40], ['telefono2', 'Teléfono fijo u otro teléfono', 'tel', false, 40],
-  ['email', 'Correo electrónico', 'email', false, 254],
+  ['direccion', 'Dirección', 'text', true, 250], ['codigo_postal', 'Código postal', 'text', true, 20],
+  ['ciudad', 'Población', 'text', true, 120], ['provincia', 'Provincia', 'text', true, 120],
+  ['telefono', 'Teléfono móvil', 'tel', true, 40], ['telefono2', 'Teléfono fijo u otro teléfono', 'tel', false, 40],
+  ['email', 'Correo electrónico', 'email', true, 254],
 ].map(([key, label, type, required, max_length]) => Object.freeze({ key, label, type, required, max_length })));
 const KEYS = FIELDS.map(field => field.key);
+const REQUIRED_KEYS = Object.freeze(FIELDS.filter(field => field.required).map(field => field.key));
+const LEGACY_REQUIRED_KEYS = Object.freeze(['nombre', 'apellidos']);
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
 const record = value => value && typeof value === 'object' && !Array.isArray(value);
 const object = value => { if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return {}; } } return record(value) ? value : {}; };
@@ -67,7 +69,15 @@ function identityValidationFields(document) {
     ? require('./consent-document-blocks').documentBlocks(doc)?.blocks.find(block => block.type === 'patient_data')?.fields || KEYS
     : KEYS;
 }
-function validateValues(raw, now = new Date(), fields = KEYS, timeZone) {
+function identityRequiredFields(document) {
+  const doc = plain(document);
+  // New requirements apply while the privacy document can still be signed.
+  // Historic receipts retain their original identity contract, and an ordinary
+  // document's optional identity block must not become an admission form.
+  return doc?.purpose === 'data_protection' && ['pending', 'sent', 'viewed'].includes(doc.status)
+    && !doc.signed_at && !doc.revoked_at ? REQUIRED_KEYS : LEGACY_REQUIRED_KEYS;
+}
+function validateValues(raw, now = new Date(), fields = KEYS, timeZone, requiredFields = REQUIRED_KEYS) {
   if (!record(raw) || Object.keys(raw).length !== KEYS.length || KEYS.some(key => !own(raw, key))) {
     throw failure('consent_personal_data_invalid', 'Revisa los campos de datos personales del documento.');
   }
@@ -79,7 +89,7 @@ function validateValues(raw, now = new Date(), fields = KEYS, timeZone) {
       throw failure('consent_personal_data_invalid', `Revisa el campo «${field.label}».`, 400, field.key);
     }
     values[field.key] = value.replace(/\s+/gu, ' ').trim();
-    if (field.required && !values[field.key]) throw failure('consent_personal_data_required',
+    if (requiredFields.includes(field.key) && !values[field.key]) throw failure('consent_personal_data_required',
       `Completa el campo «${field.label}».`, 400, field.key);
   }
   if (fields.includes('fecha_nacimiento') && values.fecha_nacimiento) {
@@ -105,15 +115,16 @@ function identityConfirmed(document) {
   if (evidence.schema_version !== identitySchema(document) || evidence.confirmed !== true
     || !Number.isFinite(new Date(evidence.confirmed_at).getTime())) return false;
   try { return JSON.stringify(validateValues(evidence.values, new Date(), identityValidationFields(document),
-    require('./consent-clinic-time').documentTimezone(document))) === JSON.stringify(contextValues(snapshot.context)); }
+    require('./consent-clinic-time').documentTimezone(document), identityRequiredFields(document))) === JSON.stringify(contextValues(snapshot.context)); }
   catch { return false; }
 }
 function publicDocumentPersonalData(document) {
   const doc = plain(document);
   if (!isIdentityDocument(doc)) return {};
   const selected = require('./consent-document-blocks').documentBlocks(doc)?.blocks.find(block => block.type === 'patient_data')?.fields;
+  const required = identityRequiredFields(doc);
   return { personal_data_form: { schema_version: identitySchema(doc), fields: FIELDS.filter(field => !selected || selected.includes(field.key))
-    .map(field => ({ ...field, label: field.key === 'telefono2' ? 'Teléfono fijo' : field.label })),
+    .map(field => ({ ...field, required: required.includes(field.key), label: field.key === 'telefono2' ? 'Teléfono fijo' : field.label })),
     values: contextValues(object(doc.snapshot_json).context),
     editable: ['pending', 'sent', 'viewed'].includes(doc.status) && !doc.signed_at && !doc.revoked_at,
     confirmed: identityConfirmed(doc) } };
@@ -163,7 +174,7 @@ function correctedSnapshot(document, payload, requestMeta = {}, now = new Date()
     ? { ...payload.values, ...Object.fromEntries(Object.entries(contextValues(snapshot.context)).filter(([key]) => !visibleFields.includes(key))) }
     : payload.values;
   const timeZone = require('./consent-clinic-time').documentTimezone(doc);
-  const values = validateValues(rawValues, now, visibleFields, timeZone), patient = { ...snapshot.context.paciente, ...values,
+  const values = validateValues(rawValues, now, visibleFields, timeZone, identityRequiredFields(doc)), patient = { ...snapshot.context.paciente, ...values,
     nombre_completo: `${values.nombre} ${values.apellidos}`.trim(), documento: values.dni,
     fecha_nacimiento: values.fecha_nacimiento ? values.fecha_nacimiento.split('-').reverse().join('/') : '' };
   if (identitySchema(doc) === 'cc-registration-identity/v2') {
@@ -193,5 +204,5 @@ function renderedIdentity(snapshot) {
     ? require('./registration-privacy-template').render(snapshot.version, snapshot.context)
     : digital.buildBsPrivacyDigitalHtml(snapshot.context).html;
 }
-module.exports = { SCHEMA_VERSION, FIELDS, isIdentityDocument, contextValues, validateValues,
+module.exports = { SCHEMA_VERSION, FIELDS, REQUIRED_KEYS, isIdentityDocument, contextValues, validateValues,
   publicDocumentPersonalData, correctedSnapshot, validateSnapshotMap, assertReadyToSign, payloadForDocument };

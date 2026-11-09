@@ -20,6 +20,7 @@ const shared = {
   consentDocumentPersonalData: require('../../lib/consent-document-personal-data'),
   documentBlocks: require('../../lib/consent-document-blocks'),
   documentCompletion: require('../../lib/consent-document-completion'),
+  signatureProgress: require('../../lib/consent-signature-progress').signatureProgress,
 };
 function compile(start, end, name, extra = {}) {
   return vm.runInNewContext(extract(start, end) + '\n' + name, { ...shared, ...extra });
@@ -59,7 +60,9 @@ test('new template contexts freeze clinic zone, preserve ISO instants, and never
 test('clinic calendar, not UTC/host day, determines DOB validation and minor status for new pending identity', () => {
   const personal = shared.consentDocumentPersonalData;
   const values = Object.fromEntries(personal.FIELDS.map(field => [field.key, '']));
-  values.nombre = 'QA'; values.apellidos = 'Ficticio'; values.fecha_nacimiento = '2026-01-02';
+  Object.assign(values, { nombre: 'QA', apellidos: 'Ficticio', fecha_nacimiento: '2026-01-02', dni: 'QA-ID',
+    direccion: 'Calle QA 1', codigo_postal: '03003', ciudad: 'Alicante', provincia: 'Alicante',
+    telefono: '+34 600 000 001', email: 'paciente@example.invalid' });
   const now = new Date('2026-01-01T23:30:00Z');
   assert.doesNotThrow(() => personal.validateValues(values, now, personal.FIELDS.map(field => field.key), 'Europe/Madrid'));
   assert.throws(() => personal.validateValues(values, now, personal.FIELDS.map(field => field.key), 'America/New_York'),

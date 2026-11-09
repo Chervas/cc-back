@@ -12,6 +12,7 @@ const render = vm.runInNewContext(block + '\nbuildPrintableHtml', {
   consentClinicTime: require('../../lib/consent-clinic-time'),
   documentCompletion: require('../../lib/consent-document-completion'),
   documentBranding: require('../../lib/consent-document-branding'),
+  signatureProgress: require('../../lib/consent-signature-progress').signatureProgress,
 });
 
 test('LOPD has one presented title without changing frozen signed HTML, identity, choices or hashes', () => {

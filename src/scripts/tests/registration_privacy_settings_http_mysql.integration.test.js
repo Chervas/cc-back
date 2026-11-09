@@ -166,7 +166,8 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     const corrected = await expect('POST', `${publicRoute}/documents/${doc.id}/personal-data`, {
       schema_version: registration.IDENTITY_SCHEMA, snapshot_hash: doc.snapshot_hash,
       values: { ...doc.personal_data_form.values, dni: 'QA-PATIENT-NOT-REAL', fecha_nacimiento: '1980-01-02',
-        direccion: 'Calle ficticia 9', ciudad: 'Alicante', telefono: '+34000000003', telefono2: '+34000000004', email: 'patient-qa@example.invalid' },
+        direccion: 'Calle ficticia 9', codigo_postal: '03003', ciudad: 'Alicante', provincia: 'Alicante',
+        telefono: '+34000000003', telefono2: '+34000000004', email: 'patient-qa@example.invalid' },
     }, undefined, 200);
     const current = corrected.documents[0];
     await expect('POST', publicRoute + '/sign', { ...signature,

@@ -162,6 +162,11 @@ test('Other phone-only identity does not require hidden legacy surname or valida
   assert.equal(current.snapshot_json.context.paciente.telefono, values.telefono);
   assert.equal(personal.publicDocumentPersonalData(current).personal_data_form.confirmed, true);
   assert.equal(personal.publicDocumentPersonalData(current).personal_data_form.fields.length, 1);
+  assert.equal(personal.publicDocumentPersonalData(current).personal_data_form.fields[0].required, false);
+  const emptyPhone = personal.correctedSnapshot(doc, { schema_version: 'cc-registration-identity/v2',
+    values: { ...values, telefono: '' }, snapshot_hash: doc.snapshot_hash });
+  assert.equal(personal.publicDocumentPersonalData({ ...doc, ...emptyPhone }).personal_data_form.confirmed, true,
+    'Ordinary phone-only documents retain their optional field and hidden legacy identity');
   assert(completion.isCompleted({ ...current, ...completion.completedValues(current, payload(current)) }));
 });
 test('unsigned block answers become immutable printable receipt, not a signature or permission', () => {

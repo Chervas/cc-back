@@ -11,7 +11,9 @@ function document() {
     catalog_key: 'bs-final-20261015-' + digital.SOURCE_DOCUMENT_SHA256, requires_representative_when_minor: true },
     version: { id: 20, body_json: { digital_presentation: rendered.metadata, consent_form: rendered.consent_form } },
     context: { paciente: { id: 30, nombre: 'Paciente', apellidos: 'Ficticio', nombre_completo: 'Paciente Ficticio',
-      dni: '', fecha_nacimiento: '01/02/1990', direccion: 'Calle original 1' }, clinica: { id: 72 } },
+      dni: 'QA-IDENTIDAD', fecha_nacimiento: '01/02/1990', direccion: 'Calle original 1',
+      codigo_postal: '03003', ciudad: 'Alicante', provincia: 'Alicante',
+      telefono: '+34 600 000 001', email: 'paciente@example.invalid' }, clinica: { id: 72 } },
     patient_flags: { is_minor: false }, integrity: { algorithm: choices.CHOICE_HASH_ALGORITHM } };
   const html = digital.buildBsPrivacyDigitalHtml(snapshot.context).html;
   return { id: 40, clinic_template_id: 10, clinica_id: 72, paciente_id: 30, purpose: 'data_protection',
@@ -24,7 +26,8 @@ test('issued identity is editable and prefilled, independent from a medical ques
   assert.equal(form.editable, true); assert.equal(form.confirmed, false);
   assert.equal(form.values.fecha_nacimiento, '1990-02-01');
   assert.equal(form.values.direccion, 'Calle original 1');
-  assert.deepEqual(form.fields.filter(row => row.required).map(row => row.key), ['nombre', 'apellidos']);
+  assert.deepEqual(form.fields.filter(row => row.required).map(row => row.key),
+    ['nombre', 'apellidos', 'dni', 'fecha_nacimiento', 'direccion', 'codigo_postal', 'ciudad', 'provincia', 'telefono', 'email']);
   assert.equal(form.fields.length, 12); assert.equal(form.values.compania, ''); assert.equal(form.values.telefono2, '');
   assert.equal(JSON.stringify(doc), before);
 });
@@ -36,7 +39,7 @@ test('confirmation keeps approved wording and identity IDs, changes only whiteli
   const saved = { ...doc, ...next };
   assert.equal(JSON.stringify(doc), before);
   assert.equal(saved.snapshot_json.context.paciente.id, 30);
-  assert.equal(saved.snapshot_json.context.paciente.documento, '');
+  assert.equal(saved.snapshot_json.context.paciente.documento, 'QA-IDENTIDAD');
   assert.equal(saved.snapshot_json.context.paciente.direccion, 'Calle nueva & 2');
   assert.match(saved.snapshot_html, /&lt;script&gt;Ficticio&lt;\/script&gt;/);
   assert.match(saved.snapshot_html, /Calle nueva &amp; 2/);
@@ -55,6 +58,47 @@ test('omitted optional fields may be empty and all four No choices remain indepe
   const next = helper.correctedSnapshot(doc, request, {}, now);
   assert.equal(helper.publicDocumentPersonalData({ ...doc, ...next }).personal_data_form.confirmed, true);
   assert.equal(choices.getConsentChoiceForm({ snapshot_json: next.snapshot_json }).fields.length, 4);
+});
+for (const key of helper.REQUIRED_KEYS) {
+  for (const value of ['', '   ', null]) test(`pending privacy rejects ${key}=${JSON.stringify(value)} without changing its snapshot`, () => {
+    const doc = document(), before = JSON.stringify(doc), request = payload(doc);
+    request.values[key] = value;
+    assert.throws(() => helper.correctedSnapshot(doc, request, {}, now), error =>
+      error.statusCode === 400 && error.details.field === key
+      && error.code === (value === null ? 'consent_personal_data_invalid' : 'consent_personal_data_required'));
+    assert.equal(JSON.stringify(doc), before);
+  });
+}
+test('an old pending confirmation missing newly-required data must be completed before signing', () => {
+  const doc = document(), snapshot = doc.snapshot_json;
+  for (const field of helper.FIELDS.filter(field => !['nombre', 'apellidos'].includes(field.key))) snapshot.context.paciente[field.key] = '';
+  snapshot.patient_identity = { schema_version: helper.SCHEMA_VERSION, confirmed: true,
+    values: helper.contextValues(snapshot.context), confirmed_at: now.toISOString() };
+  doc.snapshot_html = digital.buildBsPrivacyDigitalHtml(snapshot.context).html;
+  doc.snapshot_hash = choices.choiceSnapshotHash(snapshot, doc.snapshot_html);
+  const before = JSON.stringify(doc), form = helper.publicDocumentPersonalData(doc).personal_data_form;
+  assert.equal(form.confirmed, false); assert.equal(form.editable, true);
+  assert.deepEqual(form.fields.filter(field => field.required).map(field => field.key), helper.REQUIRED_KEYS);
+  assert.throws(() => helper.assertReadyToSign(doc, { document_snapshot_hashes: { [doc.id]: doc.snapshot_hash } }),
+    { code: 'consent_personal_data_confirmation_required' });
+  assert.equal(JSON.stringify(doc), before);
+});
+test('a signed historical confirmation with formerly-optional fields empty remains confirmed and immutable', () => {
+  const doc = document(), snapshot = doc.snapshot_json;
+  for (const field of helper.FIELDS.filter(field => !['nombre', 'apellidos'].includes(field.key))) snapshot.context.paciente[field.key] = '';
+  snapshot.patient_identity = { schema_version: helper.SCHEMA_VERSION, confirmed: true,
+    values: helper.contextValues(snapshot.context), confirmed_at: now.toISOString() };
+  doc.status = 'signed'; doc.signed_at = now.toISOString();
+  doc.snapshot_html = digital.buildBsPrivacyDigitalHtml(snapshot.context).html;
+  doc.snapshot_hash = choices.choiceSnapshotHash(snapshot, doc.snapshot_html);
+  const before = JSON.stringify(doc), form = helper.publicDocumentPersonalData(doc).personal_data_form;
+  assert.equal(form.confirmed, true); assert.equal(form.editable, false);
+  assert.deepEqual(form.fields.filter(field => field.required).map(field => field.key), ['nombre', 'apellidos']);
+  assert.equal(JSON.stringify(doc), before);
+  // A captured signature is historical even if a legacy status is still pending.
+  doc.status = 'pending';
+  assert.equal(helper.publicDocumentPersonalData(doc).personal_data_form.confirmed, true);
+  assert.equal(helper.publicDocumentPersonalData(doc).personal_data_form.editable, false);
 });
 for (const change of [
   req => { req.values.extra = 'bad'; }, req => { delete req.values.dni; },
