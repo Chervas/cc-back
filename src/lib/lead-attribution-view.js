@@ -16,6 +16,7 @@ const MARKETING_ORIGIN_LABELS = Object.freeze({
   seo: 'SEO',
   direct: 'Directo',
   social_organic: 'Redes sociales',
+  meta_form: 'Formulario de Meta',
   local_services: 'Local Services',
   unknown: 'Desconocido',
 });
@@ -44,6 +45,7 @@ const resolveLeadMarketingOrigin = (lead = {}) => {
   if (present(lead.ttclid)) return 'tiktok_ads';
 
   const source = clean(lead.source);
+  if (lead.external_source === 'meta_leadgen' && clean(lead.channel) === 'organic' && !source) return 'meta_form';
   if (source && source !== 'web') return source;
 
   const utmSource = clean(lead.utm_source);
@@ -96,6 +98,9 @@ const buildMarketingOriginWhere = (source, Op) => {
   if (normalized === 'meta_ads') {
     return { [Op.or]: [{ source: 'meta_ads' }, { fbclid: { [Op.ne]: null } }] };
   }
+  if (normalized === 'meta_form') {
+    return { external_source: 'meta_leadgen', channel: 'organic', source: null };
+  }
   if (normalized === 'tiktok_ads') {
     return { [Op.or]: [{ source: 'tiktok_ads' }, { ttclid: { [Op.ne]: null } }] };
   }
@@ -135,12 +140,12 @@ const buildLeadCreatedDescription = (lead = {}) => {
 const buildLeadAttributionView = (lead = {}, inventory = null) => {
   const marketingOrigin = resolveLeadMarketingOrigin(lead);
   const contactMethod = resolveLeadContactMethod(lead);
-  const campaignId = text(inventory?.campaign_id) || text(lead.google_ads_campaign_id);
-  const customerId = text(inventory?.customer_id) || text(lead.google_ads_customer_id);
+  const nativeMeta = lead.external_source === 'meta_leadgen';
+  const campaignId = text(inventory?.campaign_id) || (!nativeMeta ? text(lead.google_ads_campaign_id) : null);
+  const customerId = text(inventory?.customer_id) || (!nativeMeta ? text(lead.google_ads_customer_id) : null);
   const internalCampaignName = text(lead?.campana?.nombre);
   const campaignName = text(inventory?.campaign_name)
-    || text(lead.utm_campaign)
-    || internalCampaignName;
+    || (!nativeMeta ? text(lead.utm_campaign) || internalCampaignName : null);
   const campaignProvider = text(inventory?.provider)
     || (campaignId ? 'google_ads' : (marketingOrigin.endsWith('_ads') ? marketingOrigin : null));
 
@@ -148,7 +153,7 @@ const buildLeadAttributionView = (lead = {}, inventory = null) => {
     ...lead,
     contact_method: contactMethod,
     marketing_origin: marketingOrigin,
-    marketing_campaign: (campaignName || campaignId || lead.campana_id)
+    marketing_campaign: (campaignName || campaignId || !nativeMeta && lead.campana_id)
       ? {
           provider: campaignProvider,
           customer_id: customerId,
@@ -156,9 +161,18 @@ const buildLeadAttributionView = (lead = {}, inventory = null) => {
           name: campaignName,
           resolution: inventory?.campaign_name
             ? 'external_inventory'
-            : (lead.utm_campaign ? 'utm_campaign' : (internalCampaignName ? 'clinicaclick_campaign' : 'external_id')),
+            : (!nativeMeta && lead.utm_campaign ? 'utm_campaign' : (!nativeMeta && internalCampaignName ? 'clinicaclick_campaign' : 'external_id')),
+          ...(inventory?.provider === 'meta_ads' ? {
+            adset_id: text(inventory.adset_id),
+            adset_name: text(inventory.adset_name),
+            ad_id: text(inventory.ad_id),
+            ad_name: text(inventory.ad_name),
+            page_id: text(inventory.page_id),
+            form_id: text(inventory.form_id),
+          } : {}),
         }
       : null,
+    ...(inventory?.meta_form ? { meta_form: inventory.meta_form } : {}),
   };
 };
 

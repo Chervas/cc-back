@@ -636,7 +636,22 @@ const sanitizeLeadMarketingCampaign = (campaign) => {
     external_id: campaign.external_id || null,
     name: campaign.name || null,
     resolution: campaign.resolution || null,
+    ...(campaign.provider === 'meta_ads' ? {
+      adset_id: cleanString(campaign.adset_id) || null,
+      adset_name: cleanString(campaign.adset_name) || null,
+      ad_id: cleanString(campaign.ad_id) || null,
+      ad_name: cleanString(campaign.ad_name) || null,
+      page_id: cleanString(campaign.page_id) || null,
+      form_id: cleanString(campaign.form_id) || null,
+    } : {}),
   });
+};
+
+const sanitizeLeadMetaForm = (form) => {
+  if (!form || form.provider !== 'meta' || !/^[1-9][0-9]{0,29}$/.test(form.page_id || '')
+    || !/^[1-9][0-9]{0,29}$/.test(form.form_id || '') || typeof form.organic !== 'boolean') return null;
+  return { provider: 'meta', page_id: form.page_id, form_id: form.form_id,
+    name: cleanString(form.name) || null, organic: form.organic };
 };
 
 const sanitizeLeadSourceTrace = (trace) => {
@@ -670,6 +685,7 @@ const redactLeadForPrivacy = (lead) => {
     contact_method: plain.contact_method || null,
     marketing_origin: plain.marketing_origin || null,
     marketing_campaign: sanitizeLeadMarketingCampaign(plain.marketing_campaign),
+    ...(plain.meta_form ? { meta_form: sanitizeLeadMetaForm(plain.meta_form) } : {}),
     clinic_match_source: plain.clinic_match_source || null,
     utm_source: plain.utm_source || null,
     utm_medium: plain.utm_medium || null,
@@ -795,7 +811,7 @@ const buildLeadStatsWhereFromRequest = async (
 
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
-  if (source && SOURCES.has(source)) {
+  if (source && (SOURCES.has(source) || source === 'meta_form')) {
     const originWhere = buildMarketingOriginWhere(source, Op);
     if (originWhere) where[Op.and] = [...(where[Op.and] || []), originWhere];
   }
@@ -2468,6 +2484,8 @@ const enrichLeadsWithLinkedAppointments = async (leadRows = []) => {
 const enrichLeadsWithAttributionView = async (leadRows = []) => {
   const leads = leadRows.map((lead) => toPlain(lead));
   if (!leads.length) return leads;
+  const metaInventory = await require('../services/metaLeadAttributionView.service')
+    .loadMetaLeadAttribution({ models: db, leads });
 
   const googleKeys = Array.from(new Map(
     leads
@@ -2517,11 +2535,11 @@ const enrichLeadsWithAttributionView = async (leadRows = []) => {
   return leads.map((lead) => {
     const campaignId = cleanString(lead.google_ads_campaign_id);
     const customerId = cleanString(lead.google_ads_customer_id);
-    const inventory = campaignId
+    const inventory = metaInventory.get(String(lead.id)) || (campaignId
       ? (customerId
           ? inventoryByExactKey.get(`${customerId}:${campaignId}`)
           : inventoryByCampaignKey.get(campaignId))
-      : null;
+      : null);
     return buildLeadAttributionView(lead, inventory);
   });
 };
@@ -6577,7 +6595,7 @@ const buildLeadListPayload = async (query = {}, context = {}) => {
   await applyLeadScopeWhere(where, { ...query, clinicId: clinicIdRaw, groupId: groupIdRaw }, context.userId);
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
-  if (source && SOURCES.has(source)) {
+  if (source && (SOURCES.has(source) || source === 'meta_form')) {
     const originWhere = buildMarketingOriginWhere(source, Op);
     if (originWhere) where[Op.and] = [...(where[Op.and] || []), originWhere];
   }
@@ -6961,7 +6979,8 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
       fecha: event.submitted_at || event.created_at || lead.created_at,
       tipo: 'lead_form_submitted',
       titulo: 'Formulario enviado',
-      descripcion: detailParts.join(' · ') || 'Envío de formulario web',
+      descripcion: detailParts.join(' · ') || (String(event.source_detail || '').startsWith('meta_leadgen:')
+        ? 'Formulario de Meta' : 'Envío de formulario web'),
       icono: 'heroicons_outline:document-text',
       color: 'info',
       detalles: {

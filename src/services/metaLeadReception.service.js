@@ -215,19 +215,22 @@ async function resolveMetaLeadClinic({ models, event, identity, pageAssetId, con
   return clinic;
 }
 
-async function retrieveMetaLead({ models, event, reader, receiptRef, pageAssetId, accountAssetId }) {
+async function retrieveMetaLead({ models, event, reader, receiptRef, pageAssetId, accountAssetId, responseVersion = 2 }) {
   if (!UUID.test(receiptRef || '')) fail('meta_lead_invalid_notification');
+  if (![1, 2].includes(responseVersion)) fail('meta_lead_form_response_invalid');
   const pair = await reader.preparePair(pageAssetId, accountAssetId);
-  const data = await reader.read(pair, 'receiptRead', { receiptRef });
+  const data = await reader.read(pair, 'receiptRead', { receiptRef, ...(responseVersion === 2 ? { responseVersion: 2 } : {}) });
   if (!sameEvent(event, data.event) || graphId(data.lead.id) !== event.lead_id
     || graphId(data.lead.form_id) !== event.form_id || event.ad_id && data.lead.ad_id !== event.ad_id
     || data.identity && (data.identity.ad_id !== data.lead.ad_id || data.lead.campaign_id !== data.identity.campaign_id)) fail('meta_lead_identity_mismatch');
+  const formResponse = responseVersion === 2
+    ? require('./metaLeadFormResponse.service').validatedResponse(data.form_response, event.form_id) : null;
   const current = await reader.assertPair(pair);
   const authority = { assert: options => reader.assertPair(pair, options) };
   const details = { identity: data.identity, pageAssetId: Number(pageAssetId), accountAssetId: Number(accountAssetId),
     connectionId: current.page.connectionId, recipientClinicId: data.recipientClinicId, authority };
   const clinic = await resolveMetaLeadClinic({ models, event, ...details });
-  return { lead: data.lead, clinic, ...details };
+  return { lead: data.lead, clinic, responseVersion, formResponse, ...details };
 }
 
 function contactFields(lead) {
@@ -254,6 +257,10 @@ async function persistMetaLead({ models, event, retrieved, now = new Date() }) {
       transaction, lock: transaction.LOCK.UPDATE });
     if (existing) {
       if (Number(existing.clinica_id) !== Number(clinic.id_clinica)) fail('meta_lead_existing_scope_mismatch');
+      if (!existing.archived_at && retrieved.responseVersion === 2) await require('./metaLeadFormResponse.service').storeMetaLeadFormResponse({
+        models, event, lead: existing, clinic, formResponse: retrieved.formResponse,
+        providerCreatedAt: retrieved.lead.created_time, transaction,
+      });
       return { lead: existing, duplicate: true };
     }
     const identity = retrieved.identity && { version: 1, verified_by: 'meta_graph', provider: 'meta_ads',
@@ -273,6 +280,10 @@ async function persistMetaLead({ models, event, retrieved, now = new Date() }) {
       attribution_steps: { meta_page_id: event.page_id, meta_native_received_at: now.toISOString(),
         advertising_identity: identity },
     }, { transaction });
+    if (retrieved.responseVersion === 2) await require('./metaLeadFormResponse.service').storeMetaLeadFormResponse({
+      models, event, lead, clinic, formResponse: retrieved.formResponse,
+      providerCreatedAt: retrieved.lead.created_time, transaction,
+    });
     return { lead, duplicate: false };
   });
 }
@@ -297,7 +308,8 @@ async function runMetaLeadReceptionJob(payload, job = null, overrides = {}) {
     const waiting = require('./metaMarketingLeadReader.service').cooldownWait(error, JOB_TYPE);
     if (waiting) return waiting;
     const code = error.code?.startsWith('meta_lead_') ? error.code : 'meta_lead_reception_failed';
-    return { status: 'failed', retryable: error.code !== 'meta_lead_receipt_review_required'
+    return { status: 'failed', retryable: !['meta_lead_receipt_review_required', 'meta_lead_form_conflict',
+      'meta_lead_form_identity_mismatch', 'meta_lead_form_response_invalid'].includes(error.code)
       && !['scope_denied', 'asset_revoked', 'credential_revoked', 'operation_denied', 'meta_leads_disabled'].includes(error.code), error_message: code };
   }
 }

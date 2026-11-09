@@ -1,7 +1,7 @@
 'use strict';
 const K=require('./meta-marketing-credential-shape'),R=require('./meta-marketing-read-diagnostics');
 const https=require('node:https'),{createHmac}=require('node:crypto'),{BrokerError,fail}=require('./errors'),{tokenText}=require('./whatsapp-secrets');
-const L=require('./meta-marketing-leads-contract'),M=require('./meta-marketing-contract'),C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),{usage}=require('./meta-marketing-ads-http');
+const L=require('./meta-marketing-leads-contract'),M=require('./meta-marketing-contract'),C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),F=require('./meta-marketing-lead-form-response'),{usage}=require('./meta-marketing-ads-http');
 const AD_FIELDS='id,account_id,campaign_id,adset_id,effective_status,creative{id,call_to_action,object_story_spec}';
 // Only provider-defined standard contact question types authorize projection.
 // Localized keys are matched exactly, never inferred from labels or aliases.
@@ -67,7 +67,15 @@ function createMetaMarketingLeadsHttp({request=https.request,pacer,cursor,now=Da
       if(!d||d.is_valid!==true||d.app_id!==metadata.appId||d.type!=='PAGE'||d.profile_id!=null&&d.profile_id!==asset.id||!Array.isArray(d.scopes)||!d.scopes.includes('leads_retrieval'))fail('scope_denied');
       if([d.expires_at,d.data_access_expires_at].some(v=>!Number.isSafeInteger(v)||v<0||v!==0&&v*1000<=now()))fail('credential_revoked');
       diagnostic.phase('page_identity_http');const me=await get('me','id',pageToken);diagnostic.phase('page_identity_validation');if(me.id!==asset.id)fail('scope_denied');};
-    const form=async(id,withQuestions=false)=>{const f=await get(id,'id,name,page_id,status'+(withQuestions?',questions{key,type}':''),pageToken);if(f.id!==id||f.page_id!==asset.id)fail('scope_denied');return withQuestions?contactQuestionMap(f.questions):{id:f.id,name:f.name,page_id:f.page_id,status:f.status};};
+    const form=async(id,withQuestions=false,withResponse=false)=>{
+      const f=await get(id,'id,name,page_id,status'+(withQuestions?(withResponse?',questions{key,type,label}':',questions{key,type}') :''),pageToken);
+      if(f.id!==id||f.page_id!==asset.id)fail('scope_denied');
+      if(!withQuestions)return {id:f.id,name:f.name,page_id:f.page_id,status:f.status};
+      if(!withResponse)return contactQuestionMap(f.questions);
+      if(!contactText(f.name,256))fail('provider_failed');
+      const definition=F.questions(f.questions);
+      return {name:f.name,definition,contacts:contactQuestionMap(definition.map(({key,type})=>({key,type})))};
+    };
     const reception=async()=>{
       // HasLeadAccess is not available for this app. Read one owned Form and
       // one lead identifier through the supported APIs, never contact fields.
@@ -102,7 +110,8 @@ function createMetaMarketingLeadsHttp({request=https.request,pacer,cursor,now=Da
             }
           }
         }else if(name==='receiptRead'){
-          const questions=await form(receipt.form_id,true);
+          const withResponse=payload.responseVersion===2,definition=await form(receipt.form_id,true,withResponse);
+          const questions=withResponse?definition.contacts:definition;
           // Identity comes before contact fields. HMAC proves the application;
           // it does not prove an Ad belongs to this reviewed account.
           const metadataLead=await get(receipt.lead_id,'id,form_id,ad_id,campaign_id,created_time,is_organic',pageToken);
@@ -113,7 +122,8 @@ function createMetaMarketingLeadsHttp({request=https.request,pacer,cursor,now=Da
           check();const lead=await get(receipt.lead_id,'id,form_id,ad_id,campaign_id,created_time,is_organic,field_data',pageToken);
           for(const k of ['id','form_id','ad_id','campaign_id','created_time','is_organic'])if((lead[k]??null)!==(metadataLead[k]??null))fail('scope_denied');
           if(!Array.isArray(lead.field_data)||lead.field_data.length>100)fail('provider_failed');
-          result={event:receipt,recipientClinicId,lead:{id:lead.id,form_id:lead.form_id,ad_id:lead.ad_id??null,campaign_id:lead.campaign_id??null,created_time:lead.created_time,is_organic:lead.is_organic,field_data:projectContactFields(lead.field_data,questions)},identity};
+          result={event:receipt,recipientClinicId,lead:{id:lead.id,form_id:lead.form_id,ad_id:lead.ad_id??null,campaign_id:lead.campaign_id??null,created_time:lead.created_time,is_organic:lead.is_organic,field_data:projectContactFields(lead.field_data,questions)},identity,
+            ...(withResponse?{form_response:F.projectFormResponse({formId:lead.form_id,name:definition.name,definition:definition.definition,rows:lead.field_data})}:{})};
         }else fail('operation_denied');
       }
       await verifyUser(true);diagnostic.phase('authorization');check();result.usage=pacer.usage(scope,observed);diagnostic.phase('response_validation');const safe=L.validateResponse(operation,result,payload);diagnostic.phase('reflection');rejectReflections(JSON.stringify(safe));

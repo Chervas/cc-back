@@ -8,12 +8,14 @@ function ingressPrincipal(environment){if(!['dev','staging'].includes(environmen
 // and adds leadgen to this application's existing Page subscription only.
 const REQUIRED_SCOPES=Object.freeze(['ads_read','leads_retrieval','pages_show_list','pages_read_engagement','pages_manage_ads','pages_manage_metadata']);
 const id={type:'string',pattern:'^[1-9][0-9]{0,29}$'},account={type:'string',pattern:'^meta-ad_account:[1-9][0-9]{0,29}$'},uuid={type:'string',pattern:'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$'};
+const receiptReadV1=schema({adAccountAssetRef:account,receiptRef:uuid});
+const receiptReadV2=schema({adAccountAssetRef:account,receiptRef:uuid,responseVersion:{const:2}});
 const validators={
   destinations:schema({adAccountAssetRef:account,campaignId:id,cursor:{type:['string','null'],pattern:'^[A-Za-z0-9_-]{40,4096}$'}}),
   form:schema({adAccountAssetRef:account,formId:id}),pageStatus:schema({adAccountAssetRef:account}),
   pageEnable:schema({adAccountAssetRef:account,expectedSubscriptionRevision:{type:'string',pattern:'^[a-f0-9]{64}$'}}),
   receiptAccept:schema({adAccountAssetRef:account,rawBase64:{type:'string',minLength:4,maxLength:87384,pattern:'^[A-Za-z0-9+/]+={0,2}$'},signature:{type:'string',pattern:'^sha256=[a-f0-9]{64}$'}}),
-  receiptRead:schema({adAccountAssetRef:account,receiptRef:uuid}),
+  receiptRead:value=>(Object.hasOwn(value||{},'responseVersion')?receiptReadV2:receiptReadV1)(value),
   challenge:schema({adAccountAssetRef:account,mode:{const:'subscribe'},token:{type:'string',minLength:32,maxLength:256},challenge:{type:'string',minLength:1,maxLength:512,pattern:'^[\\x21-\\x7e]+$'}}),
 };
 const exact=(v,keys)=>v&&Object.getPrototypeOf(v)===Object.prototype&&Object.keys(v).sort().join(',')===keys.split(',').sort().join(',');
@@ -52,9 +54,10 @@ function validateResponse(op,data,payload){
   }else if(['pageStatus','pageEnable'].includes(key)){
     if(!exact(data,'page,subscription,usage')||!exact(data.page,'id,has_lead_access')||typeof data.page.has_lead_access!=='boolean'||!exact(data.subscription,'subscribed,fields,revision')||typeof data.subscription.subscribed!=='boolean'||!Array.isArray(data.subscription.fields)||data.subscription.fields.length>100||data.subscription.fields.some((v,i,a)=>typeof v!=='string'||!/^[a-z][a-z0-9_]{0,63}$/.test(v)||i>0&&v<=a[i-1])||!/^[a-f0-9]{64}$/.test(data.subscription.revision))bad();graphId(data.page.id);
   }else if(key==='receiptRead'){
-    if(!exact(data,'event,lead,identity,usage,recipientClinicId')||data.recipientClinicId!==null&&(!Number.isInteger(data.recipientClinicId)||data.recipientClinicId<1||data.recipientClinicId>2147483647))bad();const e=event(data.event),l=data.lead;if(!exact(l,'id,form_id,ad_id,campaign_id,created_time,is_organic,field_data')||l.id!==e.lead_id||l.form_id!==e.form_id||e.ad_id!==null&&l.ad_id!==e.ad_id||l.ad_id!==null&&!M.graphId(l.ad_id)||typeof l.is_organic!=='boolean'||typeof l.created_time!=='string'||l.created_time.length>40||!Number.isFinite(Date.parse(l.created_time))||!Array.isArray(l.field_data)||l.field_data.length>3)bad();
+    if(!exact(data,'event,lead,identity,usage,recipientClinicId'+(payload.responseVersion===2?',form_response':''))||data.recipientClinicId!==null&&(!Number.isInteger(data.recipientClinicId)||data.recipientClinicId<1||data.recipientClinicId>2147483647))bad();const e=event(data.event),l=data.lead;if(!exact(l,'id,form_id,ad_id,campaign_id,created_time,is_organic,field_data')||l.id!==e.lead_id||l.form_id!==e.form_id||e.ad_id!==null&&l.ad_id!==e.ad_id||l.ad_id!==null&&!M.graphId(l.ad_id)||typeof l.is_organic!=='boolean'||typeof l.created_time!=='string'||l.created_time.length>40||!Number.isFinite(Date.parse(l.created_time))||!Array.isArray(l.field_data)||l.field_data.length>3)bad();
     const seen=new Set();for(const f of l.field_data){if(!exact(f,'name,values')||!['full_name','email','phone_number'].includes(f.name)||seen.has(f.name)||!Array.isArray(f.values)||f.values.length!==1)bad();seen.add(f.name);text(f.values[0],512);}
     if(l.campaign_id!==null)graphId(l.campaign_id);if(data.identity===null){if(!l.is_organic||e.ad_id!==null||l.ad_id!==null||l.campaign_id!==null)bad();}else{const i=data.identity;if(!exact(i,'account_id,campaign_id,ad_id,adset_id')||i.account_id!==payload.adAccountAssetRef.split(':')[1]||i.ad_id!==l.ad_id||i.campaign_id!==l.campaign_id||l.is_organic)bad();for(const v of Object.values(i))graphId(v);}
+    if(payload.responseVersion===2)require('./meta-marketing-lead-form-response').validateFormResponse(data.form_response,e.form_id);
   }else bad();
   if(Buffer.byteLength(JSON.stringify(data))>110000)bad();return structuredClone(data);
 }

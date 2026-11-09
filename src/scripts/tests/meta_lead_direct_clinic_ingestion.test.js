@@ -8,7 +8,7 @@ const receiptRef = '11111111-1111-4111-8111-111111111111';
 // Only clinic95 is intentionally shared with the rollout label. Every provider
 // identity, enrollment, receipt, contact and transport below is fictitious.
 function fixture(registry) {
-  const state = { calls: [], leads: [], audits: [], notices: [], workspace: { id: 'fixture-setting', version: 1,
+  const state = { calls: [], leads: [], audits: [], forms: [], notices: [], workspace: { id: 'fixture-setting', version: 1,
     scope_type: 'clinic', scope_id: 95, preferences: registry === undefined ? {} : { meta_lead_routes: registry } },
     mappings: [
       { id: 10, assetType: 'facebook_page', metaAssetId: '501', metaConnectionId: 12, assignmentScope: 'clinic', clinicaId: 95, grupoClinicaId: null },
@@ -27,6 +27,10 @@ function fixture(registry) {
     Clinica: { findByPk: async id => id === 95 ? { id_clinica: 95, grupoClinicaId: null, estado_clinica: 1 } : null },
     LeadIntake: { findOne: async ({ where }) => state.leads.find(lead => lead.external_id === where.external_id), create: async row => { const lead = { id: state.leads.length + 1, ...row };state.leads.push(lead);return lead; } },
     LeadAttributionAudit: { create: async row => state.audits.push(row) },
+    FormSubmissionEvent: {
+      findAll: async ({ where }) => state.forms.filter(row => row.lead_intake_id === where.lead_intake_id && row.source_detail === where.source_detail),
+      create: async input => { const row = { id: state.forms.length + 1, ...input };state.forms.push(row);return row; },
+    },
     sequelize: { transaction: async fn => fn(transaction) },
   };
   const metadata = mappingId => {
@@ -41,7 +45,7 @@ function fixture(registry) {
     loadRoute: (page, account, transaction) => loadRoute({ models, page, account, transaction }),
     client: { execute: async command => {
       state.calls.push(command);assert.equal(command.operation, 'meta.marketing.leads.receipt.read.v1');assert.equal(command.tenantRef, 'clinic:95');
-      assert.deepEqual(command.payload, { receiptRef, adAccountAssetRef: 'meta-ad_account:601' });
+      assert.deepEqual(command.payload, { receiptRef, responseVersion: 2, adAccountAssetRef: 'meta-ad_account:601' });
       const pageId = command.assetRef.split(':')[1], event = state.event;
       assert.equal(event.page_id, pageId);
       return { requestId: command.requestId, data: { event, recipientClinicId: null,
@@ -49,6 +53,8 @@ function fixture(registry) {
           created_time: '2026-01-01T00:00:00Z', is_organic: state.organic,
           field_data: [{ name: 'email', values: ['fixture@example.invalid'] }] },
         identity: state.organic ? null : { account_id: '601', campaign_id: '901', ad_id: event.ad_id, adset_id: '902' },
+        form_response: { version: 2, formId: event.form_id, name: 'Fictitious native form',
+          fields: [{ key: 'email', label: 'Email', type: 'EMAIL', values: ['fixture@example.invalid'] }] },
         usage: { usagePct: 1, nextAllowedAt: 0, pauseUntil: 0 } } };
     } },
   });

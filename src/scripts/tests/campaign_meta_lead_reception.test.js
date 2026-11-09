@@ -14,7 +14,7 @@ const notification = (patch = {}) => ({ object: 'page', entry: [{ id: '200', cha
   leadgen_id: '100', page_id: '200', form_id: '300', ad_id: '400', ...patch,
 } }] }] });
 function harness(patch = {}) {
-  const state = { leads: [], audits: [], notifications: [], graph: [], rollback: 0,
+  const state = { leads: [], audits: [], forms: [], notifications: [], graph: [], rollback: 0,
     page: { id: 10, metaAssetId: '200', metaConnectionId: 1, pageAccessToken: 'page-secret',
       assignmentScope: 'group', grupoClinicaId: 28, clinicaId: 99 },
     account: { id: 11, metaAssetId: 'act_500', metaConnectionId: 1, assignmentScope: 'group', grupoClinicaId: 28, clinicaId: 99 },
@@ -37,7 +37,11 @@ function harness(patch = {}) {
     LeadIntake: { findOne: async ({ where }) => state.leads.find(row => row.external_source === where.external_source && row.external_id === where.external_id),
       create: async (input, options) => { assert.equal(options.transaction, transaction); const row = { id: state.leads.length + 1, ...input }; state.leads.push(row); return row; } },
     LeadAttributionAudit: { create: async (input, options) => { assert.equal(options.transaction, transaction); if (state.auditError) throw new Error('audit failed'); state.audits.push(input); } },
-    sequelize: { transaction: async fn => { const snapshot = structuredClone({ leads: state.leads, audits: state.audits });
+    FormSubmissionEvent: {
+      findAll: async ({ where }) => state.forms.filter(row => row.lead_intake_id === where.lead_intake_id && row.source_detail === where.source_detail),
+      create: async (input, options) => { assert.equal(options.transaction, transaction); if (state.formError) throw Error('private form failed'); const row = { id: state.forms.length + 1, ...input }; state.forms.push(row); return row; },
+    },
+    sequelize: { transaction: async fn => { const snapshot = structuredClone({ leads: state.leads, audits: state.audits, forms: state.forms });
       try { return await fn(transaction); } catch (error) { Object.assign(state, snapshot); state.rollback++; throw error; } } },
   };
   const http = { get: async (url, options) => {
@@ -57,7 +61,9 @@ function harness(patch = {}) {
       if (operation === 'receiptAccept') return { persisted: true, receipts: [{ receiptRef, event }] };
       state.graph.push({ operation, payload });
       if (state.graphError) throw Object.assign(Error('meta_lead_page_access_required'), { code: 'meta_lead_page_access_required' });
-      return { event: state.eventOverride || event, lead: state.providerLead, identity: state.providerLead.is_organic ? null : { ...identity, ...state.providerAd }, recipientClinicId: state.recipientClinicId ?? null };
+      return { event: state.eventOverride || event, lead: state.providerLead, identity: state.providerLead.is_organic ? null : { ...identity, ...state.providerAd }, recipientClinicId: state.recipientClinicId ?? null,
+        ...(payload.responseVersion === 2 ? { form_response: state.formResponse || { version: 2, formId: '300', name: 'Fictitious form',
+          fields: [{ key: 'preferred_time', label: 'Preferred time', type: 'CUSTOM', values: ['afternoon'] }] } } : {}) };
     },
   };
   return { state, models, http, notify, reader, receiptRef, pageAssetId: 10, accountAssetId: 11 };
@@ -93,7 +99,7 @@ test('the gateway sends receipts to its configured business worker, never to a c
 test('native reception reads only an opaque owner receipt with the fixed Page/account pair', async () => {
   const h = harness(); const result = await retrieveMetaLead({ ...h, event });
   assert.deepEqual(result.identity, identity); assert.equal(result.clinic.id_clinica, 5);
-  assert.deepEqual(h.state.graph, [{ operation: 'receiptRead', payload: { receiptRef } }]);
+  assert.deepEqual(h.state.graph, [{ operation: 'receiptRead', payload: { receiptRef, responseVersion: 2 } }]);
 });
 test('provider failure produces a retryable safe job result, no empty lead and no notification', async () => {
   const h = harness({ graphError: { response: { data: { error: { code: 190, message: 'secret contact' } } }, config: { access_token: 'secret' } } });
@@ -160,6 +166,48 @@ test('redelivery and an outbox failure retry use the original lead, not a second
   assert.equal(h.state.leads.length, 1); h.state.notifyError = false;
   const result = await runMetaLeadReceptionJob(jobPayload, null, h);
   assert.equal(result.duplicate, true); assert.equal(h.state.leads.length, 1); assert.equal(h.state.audits.length, 1);
+  assert.equal(h.state.forms.length, 1);
+});
+test('private form failure atomically rolls back the native lead and attribution without notifying', async () => {
+  const h = harness({ formError: true });
+  assert.equal((await runMetaLeadReceptionJob(jobPayload, null, h)).status, 'failed');
+  assert.equal(h.state.leads.length, 0); assert.equal(h.state.audits.length, 0);
+  assert.equal(h.state.forms.length, 0); assert.equal(h.state.notifications.length, 0);
+});
+test('explicit v1 reads remain contact-only while the default rejects a missing v2 response', async () => {
+  const h = harness();
+  const v1 = await retrieveMetaLead({ ...h, event, responseVersion: 1 });
+  assert.equal(v1.formResponse, null);
+  assert.deepEqual(h.state.graph[0].payload, { receiptRef });
+  h.state.formResponse = { version: 2, formId: '999', name: 'Foreign form', fields: [] };
+  await assert.rejects(retrieveMetaLead({ ...h, event }), /meta_lead_form_response_invalid/);
+  assert.equal(h.state.leads.length, 0);
+});
+test('invalid native form data and identity failures are terminal without lead, form or notification writes', async () => {
+  const invalid = harness({ formResponse: { version: 2, formId: '999', name: 'Foreign form', fields: [] } });
+  const identityMismatch = harness();
+  const create = identityMismatch.models.LeadIntake.create;
+  identityMismatch.models.LeadIntake.create = async (...args) => ({ ...await create(...args), external_id: '999' });
+  for (const [h, code] of [[invalid, 'meta_lead_form_response_invalid'], [identityMismatch, 'meta_lead_form_identity_mismatch']]) {
+    assert.deepEqual(await runMetaLeadReceptionJob(jobPayload, null, h), {
+      status: 'failed', retryable: false, error_message: code,
+    });
+    assert.equal(h.state.leads.length, 0); assert.equal(h.state.forms.length, 0);
+    assert.equal(h.state.audits.length, 0); assert.equal(h.state.notifications.length, 0);
+  }
+});
+test('a changed response on redelivery is terminal and preserves the original lead, private event and notification count', async () => {
+  const h = harness();
+  assert.equal((await runMetaLeadReceptionJob(jobPayload, null, h)).status, 'completed');
+  const before = structuredClone({ leads: h.state.leads, forms: h.state.forms,
+    audits: h.state.audits, notifications: h.state.notifications });
+  h.state.formResponse = { version: 2, formId: '300', name: 'Fictitious form',
+    fields: [{ key: 'preferred_time', label: 'Preferred time', type: 'CUSTOM', values: ['morning'] }] };
+  assert.deepEqual(await runMetaLeadReceptionJob(jobPayload, null, h), {
+    status: 'failed', retryable: false, error_message: 'meta_lead_form_conflict',
+  });
+  assert.deepEqual({ leads: h.state.leads, forms: h.state.forms,
+    audits: h.state.audits, notifications: h.state.notifications }, before);
 });
 test('a previously imported lead is neither moved nor notified in a different clinic', async () => {
   const h = harness({ leads: [{ id: 1, clinica_id: 6, external_source: 'meta_leadgen', external_id: '100' }] });

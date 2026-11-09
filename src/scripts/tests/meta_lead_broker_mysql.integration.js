@@ -37,6 +37,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     { indexes: [{ unique: true, fields: ['external_source', 'external_id'] }] });
     models.LeadAttributionAudit = define('LeadAttributionAudit', { id: { type: D.INTEGER, autoIncrement: true, primaryKey: true },
       lead_intake_id: D.INTEGER, raw_payload: D.JSON, attribution_steps: D.JSON, created_at: { type: D.DATE, defaultValue: D.NOW } });
+    models.FormSubmissionEvent = require('../../../models/formsubmissionevent')(sql, D);
     models.JobRequest = require('../../../models/jobrequest')(sql, D);
     await sql.sync();
     await models.Clinica.bulkCreate([71, 72].map(id => ({ id_clinica: id, grupoClinicaId: 9, estado_clinica: true })));
