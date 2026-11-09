@@ -133,6 +133,9 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     // Closing admission also stops a queued exchange/activation. Abort still
     // returns a previously applied CAS so its receipt can be acknowledged.
     if(!enabled()&&row.state!=='cancel_pending')row=await queueCancel(id,'meta_renewal_disabled');
+    // A live begin owns its bounded OAuth window. A worker or UI poll must not
+    // abort it while the Owner is still preparing the authorization response.
+    if(row.state==='begin_pending'&&+row.expires_at>+now())return row;
     // Status/abort never need an old login to resolve an already-authorized CAS.
     let remote=await call(row,row.state==='cancel_pending'?'abort':'status',{renewalId:id});
     if(remote.activationApplied)return requestTx(id,(row,transaction)=>apply(row,remote,transaction));
@@ -191,14 +194,14 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
           scopes:slot.scopes,redirect_uri:slot.redirect_uri,return_origin:returnOrigin,scope_digest:enrollment.scope_digest,slot_digest:C.slotDigest(slot),assets:enrollment.assets,
           asset_set_digest:C.F.assetSetDigest(enrollment.selected),expected_epoch:effective.epoch,expected_version_id:effective.versionId,expected_candidate_digest:effective.digest,
           state_hash:C.hash(state),actor_user_id:input.actorId,session_ref:input.sessionRef,session_expires_at:input.sessionExpiresAt,
-          begin_request_id:randomUUID(),finish_request_id:randomUUID(),activate_request_id:randomUUID(),abort_request_id:randomUUID(),requested_at:date,expires_at:expires,updated_at:date,next_attempt_at:date,
+          begin_request_id:randomUUID(),finish_request_id:randomUUID(),activate_request_id:randomUUID(),abort_request_id:randomUUID(),requested_at:date,expires_at:expires,updated_at:date,next_attempt_at:expires,
           state:'begin_pending',candidate_metadata:null,owner_receipt:null,grant_digest:null,code_digest:null,last_error:null,lease_token:null,lease_until:null,completed_at:null,activate_sent_at:null,attempts:0});
         await R.create(value,{transaction,logging:false});await record(value,'meta_credential_renewal_requested',transaction,input);return value;
       });
       try{
         const remote=await call(row,'begin',{renewalId:row.renewal_id,flowId:row.renewal_id,enrollmentId:row.enrollment_id,expectedEpoch:Number(row.expected_epoch),expectedVersionId:row.expected_version_id,
           expectedCandidateDigest:row.expected_candidate_digest,assetSetDigest:row.asset_set_digest,scopeDigest:row.scope_digest,clinicSetDigest:C.hash(row.clinic_ids),state,expiresAt:+row.expires_at});
-        await requestTx(row.renewal_id,async(currentRow,transaction)=>{await assertRequest(currentRow,transaction,{input,requireOrigin:true});await update(currentRow,{state:'awaiting',next_attempt_at:new Date(+now()+30000)},transaction);},input);
+        await requestTx(row.renewal_id,async(currentRow,transaction)=>{await assertRequest(currentRow,transaction,{input,requireOrigin:true});if(currentRow.state!=='begin_pending')C.fail('meta_renewal_scope_changed',409);await update(currentRow,{state:'awaiting',next_attempt_at:new Date(+now()+30000)},transaction);},input);
         return {enabled:true,requestId:row.renewal_id,status:'awaiting',authUrl:remote.authUrl,expiresAt:remote.expiresAt};
       }catch(error){await queueCancel(row.renewal_id,C.safe(error));throw error;}
     },
