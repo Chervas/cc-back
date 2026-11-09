@@ -167,8 +167,9 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const service={
     async overview(input){if(!enabled())return {enabled:false,authorizationMode:null,canBegin:false,current:null,pending:null};
       return order.scope(input,{active:true},async({transaction,enrollment,input})=>{
-      const observed=await H.findOne({where:{pending_scope_key:input.scopeKey},attributes:['handover_id'],transaction,raw:true,logging:false});
       let authorizationMode=null;try{authorizationMode=policy(input.scopeKey).issuerKind;}catch{}
+      if(authorizationMode===null)return {enabled:false,authorizationMode:null,canBegin:false,current:null,pending:null};
+      const observed=await H.findOne({where:{pending_scope_key:input.scopeKey},attributes:['handover_id'],transaction,raw:true,logging:false});
       const context=enrollment?await admission(input,transaction,enrollment.enrollment_id,observed?.handover_id??null):null;if(!context)return {enabled:true,authorizationMode,canBegin:false,current:null,pending:null};
       const raw=plain(await H.findOne({...opts(transaction),where:{pending_scope_key:input.scopeKey}})||await H.findOne({...opts(transaction),where:{scope_key:input.scopeKey},order:[['requested_at','DESC'],['handover_id','DESC']]})),row=raw?C.request(raw):null;
       const maintenance=await require('./metaMarketingCredentialMaintenance.service').createMaintenance({models,now}).getMaintenanceStatus(context.enrollment,{transaction});
