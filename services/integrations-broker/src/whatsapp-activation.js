@@ -108,6 +108,12 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
         const call=async(action,target,pin)=>{active();const v=await http({action,id:target,token,
           proof:secrets.proof(token,ctx.operational.connectionRef),signal,...(pin===undefined?{}:{pin})});active();return v;};
         let p=A.profile(await call('profile',ctx.flow.phone_id),ctx.flow.phone_id);
+        // This new server-pinned policy is exclusively for Business App
+        // coexistence. Reconfirm the provider state here even if enrollment
+        // observed coexistence: never turn a later false/unknown profile into
+        // Cloud registration or publish its capture/activation locally.
+        if(E.bindingFor(ctx.definition.enrollmentBinding).customer?.providerGrantPolicy===E.PROVIDER_GRANT_POLICY
+          &&!coexistence(p))fail('scope_denied');
         if(request.operation===A.PROFILE){update(saved.state,p);return;}
         if(saved.legacy_phone_digest&&(phoneDigest(p.displayPhoneNumber)!==saved.legacy_phone_digest||!coexistence(p)))fail('scope_denied');
         if(['BANNED','DELETED','MIGRATED'].includes(p.status)||p.platformType==='ON_PREMISE') {update('registration_required',p);return;}

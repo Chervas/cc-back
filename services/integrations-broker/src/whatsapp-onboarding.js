@@ -221,7 +221,14 @@ function createWhatsappOnboarding({ store, policy, secrets, http, resolveBinding
           attempt.phase = 'phone_observation';
           const phoneState = await inspectWhatsappPhoneState({ http, phoneId: phone.phoneId, token,
             proof: createHmac('sha256', appSecret).update(token).digest('hex'), signal: info.signal });
-          guard(); attempt.phase = 'candidate_encoding'; const metadata = C.grantMetadata({ ...grant, phoneId: phone.phoneId }, binding);
+          guard();
+          // This server-pinned opt-in is exclusively for coexistence. The SDK
+          // mode is not provider evidence and must never authorize Cloud setup
+          // for a phone whose Business App state is false or unknown.
+          if (b.customer?.providerGrantPolicy === C.PROVIDER_GRANT_POLICY
+            && !(phoneState.isOnBizApp === true && phoneState.platformType === 'CLOUD_API'
+              && phoneState.coexistenceAvailable === true)) fail('scope_denied');
+          attempt.phase = 'candidate_encoding'; const metadata = C.grantMetadata({ ...grant, phoneId: phone.phoneId }, binding);
           const encoded = secrets.encode(binding, { ...row, phone_id: phone.phoneId }, metadata, token);
           try {
             store.transaction(() => {

@@ -7,24 +7,31 @@ const {createWhatsappActivation}=require('../src/whatsapp-activation');
 const {createActivationReader}=require('../src/whatsapp-activation-reader');
 const capture=require('../src/whatsapp-capture-catalog');
 const A=require('../src/whatsapp-activation-contract');
+const E=require('../src/whatsapp-onboarding-contract');
 const {ACCOUNT,SECRET_KEY}=require('../src/google-main');
-async function setup(t,{legacyCaller=false,channelRole='primary'}={}){
-  const f=fixture(t,{customer:{selectionOnly:true}}),flow=await f.begin({channelRole});await f.finish(flow);
+async function setup(t,{legacyCaller=false,channelRole='primary',companion=false}={}){
+  const options={customer:{selectionOnly:true,...(companion?{providerGrantPolicy:E.PROVIDER_GRANT_POLICY}:{})}};
+  if(companion)options.scopes=[...require('./whatsapp-companion-fixture.cjs').WA_SCOPES];
+  const f=fixture(t,options);
+  if(companion)f.state.afterGraph=(r,v)=>r.action==='inspect'?require('./whatsapp-companion-fixture.cjs').broaden(v):v;
+  const flow=await f.begin({channelRole});await f.finish(flow);
   const captureFile=path.join(f.dir,'capture.json');
   fs.writeFileSync(captureFile,JSON.stringify({version:1,appId:'101',scopes:[]}),{mode:0o640});
-  const state={calls:[],subscribed:false,registerError:null,afterRegister:null,captureError:null,profile:{id:'401',status:'PENDING',
+  const state={calls:[],subscribed:false,registerError:null,afterRegister:null,captureError:null,captureCalls:0,profileError:null,profile:{id:'401',status:'PENDING',
     platform_type:'NOT_APPLICABLE',is_on_biz_app:false,code_verification_status:'VERIFIED',quality_rating:'UNKNOWN',
     display_phone_number:'+34000000000',verified_name:'Fictitious QA'}};
+  if(companion)Object.assign(state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
   const make=()=>createWhatsappActivation({store:f.current.store,filename:f.filename,policy:f.policy,client:f.aws,
     accountId:ACCOUNT,kmsKeyArn:SECRET_KEY,now:f.now,pinFactory:()=>async(options,fn)=>fn(Buffer.from('123456')),
     publishCapture:appId=>{
+      state.captureCalls++;
       const reader=createActivationReader(f.filename);
       try{capture.publish(captureFile,appId,reader.scopes(appId));}finally{reader.close();}
       if(state.captureError)throw state.captureError;
     },
     http:async r=>{
       state.calls.push(r.action);
-      if(r.action==='profile')return {...state.profile};
+      if(r.action==='profile'){if(state.profileError)throw state.profileError;return {...state.profile};}
       if(r.action==='register_phone'){
         if(state.registerError)throw state.registerError;
         state.profile={...state.profile,status:'CONNECTED',platform_type:'CLOUD_API'};
@@ -63,6 +70,43 @@ test('Cloud registration completes subscription and exposes only exact activated
 test('already connected coexistence never registers or changes its PIN',async t=>{
   const f=await setup(t);Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
   await f.prepare();assert.equal((await f.execute()).data.state,'active');assert(!f.state.calls.includes('register_phone'));
+});
+test('Server-pinned companion coexistence activates without Cloud registration or changing the staged grant',async t=>{
+  const f=await setup(t,{companion:true});const original=f.f.records.get(f.f.binding.secretArn).get(f.flow.flowId).body;
+  await f.prepare();const active=await f.execute();
+  assert.equal(active.data.state,'active');assert.equal(active.data.profile.isOnBizApp,true);assert.equal(active.data.profile.platformType,'CLOUD_API');
+  assert.equal(f.state.calls.includes('register_phone'),false);assert.equal(f.state.subscribed,true);
+  assert.equal(f.f.records.get(f.f.binding.secretArn).get(f.flow.flowId).body,original);assert.equal(f.f.state.puts,1);
+});
+for(const scenario of [
+  {name:'false Business App state',patch:{is_on_biz_app:false}},
+  {name:'unknown Business App state',patch:{is_on_biz_app:null}},
+  {name:'missing Business App state',patch:{is_on_biz_app:undefined}},
+  {name:'string Business App state',patch:{is_on_biz_app:'true'}},
+  {name:'missing platform',patch:{platform_type:undefined}},
+  {name:'incompatible platform',patch:{platform_type:'ON_PREMISE'}},
+  {name:'unfinished platform',patch:{platform_type:'NOT_APPLICABLE'}},
+])for(const operation of [A.PROFILE,A.ACTIVATE])test('Companion '+operation+' rejects '+scenario.name+' after staged coexistence',async t=>{
+  const f=await setup(t,{companion:true});if(operation===A.ACTIVATE)await f.prepare();
+  const original=f.f.records.get(f.f.binding.secretArn).get(f.flow.flowId).body;
+  const beforeCapture=fs.readFileSync(f.captureFile,'utf8');const metadata=f.f.current.store.db.prepare('SELECT credential_metadata FROM whatsapp_onboarding_flows WHERE id=?').get(f.flow.flowId).credential_metadata;
+  Object.assign(f.state.profile,scenario.patch);f.state.calls.length=0;
+  await assert.rejects(f.execute(operation,operation===A.ACTIVATE?{assetId:991}:{}),{code:'scope_denied'});
+  assert.equal(f.state.calls.includes('register_phone'),false);assert.equal(f.state.calls.includes('subscribe'),false);
+  assert.equal(f.state.calls.includes('subscriptions'),false);assert.equal(f.state.captureCalls,0);assert.equal(f.state.subscribed,false);
+  assert.equal(f.row().state,'prepared');assert.equal(f.row().activated_at,null);
+  assert.equal(fs.readFileSync(f.captureFile,'utf8'),beforeCapture);
+  assert.equal(f.f.records.get(f.f.binding.secretArn).get(f.flow.flowId).body,original);assert.equal(f.f.state.puts,1);
+  assert.equal(f.f.current.store.db.prepare('SELECT credential_metadata FROM whatsapp_onboarding_flows WHERE id=?').get(f.flow.flowId).credential_metadata,metadata);
+  const events=f.f.current.store.db.prepare('SELECT event FROM audit_outbox').all().map(r=>JSON.parse(r.event));
+  assert(!events.some(e=>['whatsapp_activation_started','whatsapp_registration_requested','whatsapp_activation_completed'].includes(e.reason)));
+});
+test('A transient live profile failure after staged coexistence cannot register or activate the number',async t=>{
+  const f=await setup(t,{companion:true});await f.prepare();f.state.calls.length=0;
+  f.state.profileError=new(require('../src/errors').BrokerError)('provider_timeout');
+  await assert.rejects(f.execute(),{code:'provider_timeout'});
+  assert.equal(f.state.calls.includes('register_phone'),false);assert.equal(f.state.calls.includes('subscribe'),false);
+  assert.equal(f.state.captureCalls,0);assert.equal(f.row().state,'prepared');assert.equal(f.row().activated_at,null);
 });
 test('legacy coexistence adoption is bound to the expected visible phone before subscription',async t=>{
   const f=await setup(t);Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});

@@ -113,6 +113,41 @@ test('Onboarding stores a v2 candidate with complete evidence and preserves it a
   assert.equal((await f.finish(flow)).replayed, true); assert.equal(f.state.codes, 1); assert.equal(f.state.puts, 1);
   assert.equal(f.records.get(f.binding.secretArn).get(flow.flowId).body, body);
 });
+test('Companion enrollment requires authenticated coexistence before encoding or any candidate write', async t => {
+  const observations = [
+    { is_on_biz_app: false, platform_type: 'CLOUD_API' },
+    { is_on_biz_app: true, platform_type: 'ON_PREMISE' },
+    { is_on_biz_app: true, platform_type: 'NOT_APPLICABLE' },
+    { is_on_biz_app: true, platform_type: 'UNKNOWN' },
+    { is_on_biz_app: null, platform_type: 'CLOUD_API' },
+    { is_on_biz_app: 'true', platform_type: 'CLOUD_API' },
+    { platform_type: 'CLOUD_API' },
+    { is_on_biz_app: true },
+    {},
+  ];
+  for (const observation of observations) await t.test(JSON.stringify(observation), async t => {
+    const f = onboarding(t, options);
+    f.state.afterGraph = (req, value) => req.action === 'inspect' ? broaden(value)
+      : req.action === 'phone_state' ? { id: req.id, ...observation } : value;
+    const flow = await f.begin(); await assert.rejects(f.finish(flow), { code: 'scope_denied' });
+    const row = f.current.store.db.prepare('SELECT * FROM whatsapp_onboarding_flows WHERE id=?').get(flow.flowId);
+    assert.equal(row.state, 'interrupted'); assert.equal(row.secret_digest, null); assert.equal(row.credential_metadata, null);
+    assert.equal(f.current.store.db.prepare('SELECT COUNT(*) n FROM whatsapp_onboarding_phone_observations WHERE flow_id=?').get(flow.flowId).n, 0);
+    assert.equal(f.current.store.db.prepare('SELECT COUNT(*) n FROM whatsapp_onboarding_assets').get().n, 0);
+    assert.equal(f.state.codes, 1); assert.equal(f.state.puts, 0); assert(!f.records.get(f.binding.secretArn).has(flow.flowId));
+    assert(f.state.httpCalls.every(call => ['inspect','waba_owner','phones','phone_state'].includes(call.action)));
+    for (const secret of [TOKEN, APP, flow.code, flow.payload.state]) assert(!f.snapshot().includes(secret));
+  });
+});
+test('Default strict enrollment preserves Cloud candidates without the companion coexistence policy', async t => {
+  const f = onboarding(t, { customer: { selectionOnly: true }, scopes: WA_SCOPES });
+  f.state.afterGraph = (req, value) => req.action === 'phone_state'
+    ? { id: req.id, is_on_biz_app: false, platform_type: 'CLOUD_API' } : value;
+  const flow = await f.begin(), result = await f.finish(flow);
+  assert.equal(result.data.status, 'staged'); assert.equal(result.data.phoneState.isOnBizApp, false);
+  assert.equal(result.data.phoneState.coexistenceAvailable, false); assert.equal(f.state.puts, 1);
+  assert.equal(JSON.parse(f.records.get(f.binding.secretArn).get(flow.flowId).body).version, 1);
+});
 test('V1 bytes are unchanged and v2 cannot be downgraded or adopted under a policy-less binding', async t => {
   const legacy = onboarding(t, { customer: { selectionOnly: true }, scopes: WA_SCOPES }), oldFlow = await legacy.begin();
   await legacy.finish(oldFlow); const oldRow = legacy.current.store.db.prepare('SELECT * FROM whatsapp_onboarding_flows WHERE id=?').get(oldFlow.flowId);

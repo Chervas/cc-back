@@ -108,6 +108,9 @@ function response(result, name, row, b, requestId, selection) {
         || p.registrationAttempted !== false || !Number.isSafeInteger(p.observedAt) || p.observedAt <= 0
         || d.candidate && d.candidate.phoneId !== p.phoneId) throw Error();
     }
+    if (b.customer?.providerGrantPolicy === C.PROVIDER_GRANT_POLICY && d.status === 'staged'
+      && !(d.phoneState?.isOnBizApp === true && d.phoneState.platformType === 'CLOUD_API'
+        && d.phoneState.coexistenceAvailable === true)) throw Error();
     return { ...structuredClone(d), channelRole: S.channelRole(d.channelRole), phoneState: d.phoneState ?? null };
   } catch { fail('whatsapp_onboarding_result_unknown', true); }
 }

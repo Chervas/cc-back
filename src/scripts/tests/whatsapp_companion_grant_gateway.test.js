@@ -53,3 +53,14 @@ test('An identical mixed grant still fails closed without explicit server policy
   assert.equal((await g.client.status(row)).status,'interrupted');
   assert.equal(g.f.state.puts,0);
 });
+test('The scoped coexistence policy rejects absent or consistently Cloud-only phone observations',async t=>{
+  const {g,row,finish}=setup(t);await g.client.begin(row);await g.client.finish(row,finish);
+  for(const mutate of [data=>{delete data.phoneState},data=>{data.phoneState=null},
+    data=>{data.phoneState={...data.phoneState,isOnBizApp:false,platformType:'CLOUD_API',coexistenceAvailable:false}},
+    data=>{data.phoneState={...data.phoneState,isOnBizApp:null,platformType:null,coexistenceAvailable:false}}]){
+    g.state.after=(command,value)=>{mutate(value.data);return value};
+    await assert.rejects(g.client.status(row),{code:'whatsapp_onboarding_result_unknown'});
+  }
+  g.state.after=null;assert.equal((await g.client.status(row)).phoneState.coexistenceAvailable,true);
+  assert.equal(g.f.state.codes,1);assert.equal(g.f.state.puts,1);
+});
