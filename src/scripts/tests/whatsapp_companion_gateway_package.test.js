@@ -13,7 +13,7 @@ function setup(policy=true){
   const b=P.publicBinding(template,'clinic:123',[123]);
   const row={requestId:randomUUID(),status:'claimed',scope:{type:'clinic',id:123},clinicIds:[123],
     expiresAt:new Date(Date.now()+600000).toISOString(),scopeDigest:C.hash('FICTITIOUS_GATEWAY_SNAPSHOT'),clinicSetDigest:C.hash('[123]')};
-  const state={calls:0,mutate:null};
+  const state={calls:0,mutate:null,mutateData:null};
   const client=createWhatsappOnboardingBrokerClient({guard(){},loadBinding:async()=>b,client:{async execute(command){
     state.calls++;assert.equal(command.operation,C.OPERATIONS.status);
     const candidate={versionId:row.requestId,appId:'101',subjectId:'201',wabaId:'301',phoneId:'401',tokenType:'SYSTEM_USER',
@@ -21,9 +21,12 @@ function setup(policy=true){
       providerGrant:{version:1,granularScopes:[...['whatsapp_business_management','whatsapp_business_messaging'].map(scope=>({scope,targetIds:['301']})),
         ...extras.map((scope,i)=>({scope,targetIds:scope==='business_management'?null:[String(900+i)]}))].sort((a,b)=>a.scope.localeCompare(b.scope))}};
     state.mutate?.(candidate);
-    return {requestId:command.requestId,replayed:false,data:{flowId:row.requestId,status:'staged',expiresAt:Date.parse(row.expiresAt),expired:false,
+    const data={flowId:row.requestId,status:'staged',expiresAt:Date.parse(row.expiresAt),expired:false,
       scopeKey:b.scopeKey,scopeDigest:row.scopeDigest,clinicCount:1,clinicSetDigest:row.clinicSetDigest,
-      configurationChanged:false,accessBlocked:false,connected:false,channelRole:'primary',candidate}};
+      configurationChanged:false,accessBlocked:false,connected:false,channelRole:'primary',candidate,
+      phoneState:{phoneId:'401',isOnBizApp:true,platformType:'CLOUD_API',coexistenceAvailable:true,registrationAttempted:false,observedAt:Date.now()}};
+    state.mutateData?.(data);
+    return {requestId:command.requestId,replayed:false,data};
   }}});
   return {client,row,state};
 }
@@ -43,4 +46,13 @@ test('Packaged gateway rejects malformed or inconsistent WhatsApp authority with
 });
 test('A provider receipt cannot opt a strict gateway binding into the compatibility policy',async()=>{
   const {client,row}=setup(false);await assert.rejects(client.status(row),{code:'whatsapp_onboarding_result_unknown'});
+});
+test('The gateway never accepts a Cloud-only or absent phone observation for its coexistence policy',async()=>{
+  const {client,row,state}=setup();
+  for(const mutate of [data=>{delete data.phoneState},data=>{data.phoneState=null},
+    data=>{data.phoneState={...data.phoneState,isOnBizApp:false,coexistenceAvailable:false}},
+    data=>{data.phoneState={...data.phoneState,isOnBizApp:null,platformType:null,coexistenceAvailable:false}}]){
+    state.mutateData=mutate;await assert.rejects(client.status(row),{code:'whatsapp_onboarding_result_unknown'});
+  }
+  assert.equal(state.calls,4);
 });
