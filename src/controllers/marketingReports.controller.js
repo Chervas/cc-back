@@ -945,6 +945,9 @@ async function aggregateForms(scope, range) {
     where: {
       ...scopedWhere('clinic_id', scope),
       ...buildSequelizeDateWhere('submitted_at', range),
+      // These counters describe website reception. Native Meta form responses
+      // remain private lead evidence, including when recovered much later.
+      [Op.and]: literal("LEFT(COALESCE(`source_detail`, ''), 13) <> 'meta_leadgen:'"),
     },
   });
 }
@@ -2786,6 +2789,7 @@ async function aggregateWebPages(scope, range, seoPages = [], loadedLeads = null
                     COUNT(*) AS formularios
                FROM FormSubmissionEvents
               WHERE submitted_at >= :startTs AND submitted_at < :endTs ${formClinicSql}
+                AND LEFT(COALESCE(source_detail, ''), 13) <> 'meta_leadgen:'
               GROUP BY COALESCE(NULLIF(page_url, ''), 'Sin página')
              UNION ALL
              SELECT COALESCE(NULLIF(page_url, ''), 'Sin página') AS url,

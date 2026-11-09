@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Op } = require('sequelize');
+const { Op, literal } = require('sequelize');
 const db = require('../../models');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
@@ -5666,6 +5666,9 @@ exports.getRecentFormMatches = async (req, res) => {
     const rows = await FormSubmissionEvent.findAll({
       where: {
         clinic_id: { [Op.in]: clinicIds },
+        // Suggestions feed the web-form wait node. Native Meta reception does
+        // not emit that resume event, including during historical enrichment.
+        [Op.and]: literal("LEFT(COALESCE(`source_detail`, ''), 13) <> 'meta_leadgen:'"),
       },
       attributes: ['clinic_id', 'page_url', 'form_id', 'form_name', 'form_selector', 'submitted_at'],
       order: [['submitted_at', 'DESC']],
