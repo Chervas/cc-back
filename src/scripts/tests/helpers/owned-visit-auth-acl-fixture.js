@@ -58,7 +58,12 @@ async function createOwnedVisitAuthAclFixture({ sql, models: db, report, registe
   assert(sql.options.dialectOptions?.socketPath?.startsWith('/tmp/cc-campaign-opt-mysql-'));
   const [[owned]] = await sql.query('SELECT @@skip_networking AS isolated, DATABASE() AS name');
   assert.equal(Number(owned.isolated), 1); assert.equal(owned.name, 'campaign_optimization_qa');
+  const net = require('node:net');
+  const ownedFactories = { connect: net.connect, createConnection: net.createConnection };
   require('../fixtures/security_offline_runtime.cjs');
+  // Keep the launcher's owned-socket guard on Socket.prototype.connect.
+  // Pool expansion must still reach it; all foreign Unix/TCP sockets stay denied.
+  Object.assign(net, ownedFactories);
   let externalFetchAttempts = 0;
   const rejectedFetch = global.fetch;
   global.fetch = (...args) => { externalFetchAttempts++; return rejectedFetch(...args); };
