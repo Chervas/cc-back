@@ -16,6 +16,7 @@ const { createAvailabilityLocalInstantResolver } = require('../lib/availability-
 const { solveBookingProfile, isFree } = require('../lib/booking-profile-solver');
 const { resourceForConfirmedOverlap } = require('../lib/booking-attention');
 const { incompatibleStart, appendStartInterval } = require('../lib/booking-grid-diagnostics');
+const { hasProgramPreviewQuery, resolveProgramCatalogPreview } = require('../services/programCatalogAvailability.service');
 
 function confirmedOverlapRows(rows, start, end, clinicId) {
   const resource = {
@@ -73,7 +74,7 @@ function assertGridProfile(profile) {
   }
 }
 
-function profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds, completePlan = false,
+function profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds, completePlan = false, catalogPreview = false,
   resolveInstant = createAvailabilityLocalInstantResolver() }) {
   // Only the explicit matrix contract may constrain the STARTING phase while
   // solving the complete visit. Flat /slots and /check remain mono-phase.
@@ -97,7 +98,7 @@ function profileSlotsPayload({ query, profile, context, clinic, additionalStaffI
     const unavailable = [];
     const includeUnavailable = parseBool(query.include_unavailable) && query.summary_only !== true;
     // Skip incompatible columns before iterating times; no SQL per column/slot.
-    if (query.summary_only === true && ((doctor && !phase.professionals.ids.includes(doctor))
+    if ((query.summary_only === true || catalogPreview) && ((doctor && !phase.professionals.ids.includes(doctor))
       || (installation && !phase.installation_ids.includes(installation)))) {
       const conflict = incompatibleStart({ ...profile, phases: [phase] }, doctor, installation);
       if (completePlan && profile.phases.length > 1) {
@@ -204,6 +205,7 @@ function requestedAdditionalStaff(req) {
 }
 
 exports.treatmentSlots = asyncHandler(async (req, res) => {
+  if (hasProgramPreviewQuery(req.query)) throw bookingError('program_preview_use_grid', 'Consulta la disponibilidad del programa en la agenda o en su planificador.', null, 400);
   const clinicId = Number(req.query?.clinica_id);
   if (!Number.isSafeInteger(clinicId) || clinicId <= 0) return res.status(400).json({ message: 'clinica_id requerido' });
   await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId });
@@ -673,6 +675,7 @@ const buildUnavailableIntervals = ({
  * Contrato canónico: ver Documentacion/17.6-disponibilidad-recursos.md
  */
 exports.check = asyncHandler(async (req, res) => {
+  if (hasProgramPreviewQuery(req.query)) throw bookingError('program_preview_use_grid', 'Comprueba y reserva las sesiones desde el planificador del programa.', null, 400);
   const {
     clinica_id,
     inicio_local,
@@ -1083,6 +1086,12 @@ exports.slots = asyncHandler(async (req, res) => {
   if (!clinicaId) return res.status(400).json({ message: 'clinica_id requerido' });
   if (!fecha_local || typeof fecha_local !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(fecha_local)) {
     return res.status(400).json({ message: 'fecha_local requerido (YYYY-MM-DD)' });
+  }
+
+  if (hasProgramPreviewQuery(req.query)) {
+    res.set('Cache-Control', 'private, no-store');
+    const getPayload = await prepareRangePayloads(req, [fecha_local], [req.query]);
+    return res.json({ ...getPayload(req.query), program_preview: getPayload.programMetadata });
   }
 
   const durMin = parseIntSafe(duracion_min);
@@ -1656,7 +1665,7 @@ function validateDoctorOnlyColumns(query, columnIds) {
   const ids = doctorOnlyColumnIds(query);
   const explicitRoom = value => value != null && value !== '' && value !== 'todos';
   if (!ids.length || ids.length > 80 || ids.some(id => !columnIds.includes(id))
-    || query.mode !== 'doctor' || query.tratamiento_id
+    || query.mode !== 'doctor' || query.tratamiento_id || hasProgramPreviewQuery(query)
     || explicitRoom(query.context_instalacion_id) || explicitRoom(query.preferred_instalacion_id)
     || explicitRoom(query.instalacion_id)
     || ['instalacion_ids', 'instalacion_ids[]', 'doctor_ids', 'doctor_ids[]'].some(key => query[key] != null)) {
@@ -1681,15 +1690,39 @@ function matrixColumnQuery(baseQuery, query, columnId) {
       : peers.length ? { instalacion_ids: peers } : {}) };
   }
   const peers = parseIntArray(query.peer_doctor_ids || query['peer_doctor_ids[]']);
-  return { ...baseQuery, instalacion_id: String(contextInstallationId || columnId),
+  return { ...baseQuery, instalacion_id: String(hasProgramPreviewQuery(query) ? columnId : contextInstallationId || columnId),
     ...(contextDoctorId ? { doctor_id: String(contextDoctorId) } : peers.length ? { doctor_ids: peers } : {}) };
 }
 
+function assertProgramPreviewBudget(profile, dates, queries, step) {
+  const first = profile.version === 4
+    ? profile.phases.reduce((a, b) => b.start_offset_minutes < a.start_offset_minutes ? b : a) : profile.phases[0];
+  let compatiblePairs = 0;
+  for (const query of queries) {
+    const doctor = parseIntSafe(query.doctor_id), room = parseIntSafe(query.instalacion_id);
+    const rooms = parseIntArray(query.instalacion_ids || query['instalacion_ids[]']);
+    const doctors = parseIntArray(query.doctor_ids || query['doctor_ids[]']);
+    const candidates = rooms.length ? rooms.map(id => [doctor, id]) : doctors.length ? doctors.map(id => [id, room]) : [[doctor, room]];
+    for (const [staff, installation] of candidates) {
+      if (staff && !first.professionals.ids.includes(staff) || installation && !first.installation_ids.includes(installation)) continue;
+      // The ordinary matrix evaluates each visible team-member column. It has
+      // no cross-column solver cache, so budget those calls independently too.
+      compatiblePairs++;
+    }
+  }
+  const minutes = value => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
+  const query = queries[0] || {};
+  const span = (query.to_local ? minutes(query.to_local) : 1440) - (query.from_local ? minutes(query.from_local) : 0);
+  if (dates.length * compatiblePairs * Math.ceil(span / step) > 50000) throw bookingError('program_grid_too_large',
+    'Reduce los días o recursos visibles para revisar la disponibilidad de esta sesión.', null, 400);
+}
+
 async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) {
-  const completePlan = grid && parseBool(req.query.complete_plan);
+  const programPreview = hasProgramPreviewQuery(req.query);
+  const completePlan = programPreview || grid && parseBool(req.query.complete_plan);
   const clinicId = parseIntSafe(req.query.clinica_id);
   if (!clinicId || clinicId <= 0) throw availabilityInputError('clinica_id requerido');
-  if (!(parseIntSafe(req.query.duracion_min) > 0) && !req.query.tratamiento_id) throw availabilityInputError('duracion_min requerido');
+  if (!(parseIntSafe(req.query.duracion_min) > 0) && !req.query.tratamiento_id && !programPreview) throw availabilityInputError('duracion_min requerido');
   const requestStep = req.query.granularity_min == null ? 15 : parseIntSafe(req.query.granularity_min);
   if (!(requestStep > 0 && requestStep <= 120)) throw availabilityInputError('granularity_min debe estar entre 1 y 120');
   await assertUserCanAccessFeature({ actorId: Number(req.userData?.userId), featureKey: 'appointments.view', clinicId });
@@ -1698,17 +1731,24 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
   const additionalStaffIds = requestedAdditionalStaff(req);
   let profile = null;
   let bookingContext = {};
-  if (req.query.tratamiento_id) {
+  let programMetadata = null;
+  if (programPreview) {
+    const preview = await resolveProgramCatalogPreview({ clinicId, query: req.query });
+    profile = preview.profile; programMetadata = preview.metadata;
+    bookingContext = await requestTreatmentBookingContext(req, null, clinic);
+  } else if (req.query.tratamiento_id) {
     const treatment = await loadScopedTreatment({ db, treatmentId: req.query.tratamiento_id, clinic });
     bookingContext = await requestTreatmentBookingContext(req, treatment, clinic);
     profile = await requestOperationalProfile(treatment, req, clinic);
-    if (profile) {
-      if (!completePlan) assertGridProfile(profile);
-      const step = parseIntSafe(req.query.granularity_min) || 15;
-      if (step < 5 || step > 120 || queries.some(query => parseIntArray(query.instalacion_ids).length > 50 || parseIntArray(query.doctor_ids).length > 50)) {
-        throw availabilityInputError('Rango o recursos de disponibilidad inválidos');
-      }
+  }
+  if (profile) {
+    if (!completePlan) assertGridProfile(profile);
+    const step = parseIntSafe(req.query.granularity_min) || 15;
+    if (step < 5 || step > 120 || queries.some(query => parseIntArray(query.instalacion_ids || query['instalacion_ids[]']).length > 50
+      || parseIntArray(query.doctor_ids || query['doctor_ids[]']).length > 50)) {
+      throw availabilityInputError('Rango o recursos de disponibilidad inválidos');
     }
+    if (programPreview) assertProgramPreviewBudget(profile, dates, queries, step);
   }
   if (!profile && !(parseIntSafe(req.query.duracion_min) > 0)) throw availabilityInputError('duracion_min requerido');
   const timeZone = resolveClinicTimezone(clinic), sortedDates = [...dates].sort();
@@ -1743,7 +1783,8 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
         patientId: bookingContext.patientId,
         includeDiagnosticLabels: grid, readableBlockClinicIds: await readablePersonalBlockClinics(req) });
       if (grid) personalBlocks.push(...(context.personalBlocks || []));
-      const getPayload = query => profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds, completePlan, resolveInstant });
+      const getPayload = query => profileSlotsPayload({ query, profile, context, clinic, additionalStaffIds, completePlan,
+        catalogPreview: programPreview, resolveInstant });
       group.forEach(date => byDate.set(date, getPayload));
     } else {
       const snapshot = await loadLegacyAvailabilitySnapshot({ db, clinic, dates: group, doctorIds: doctors,
@@ -1753,11 +1794,12 @@ async function prepareRangePayloads(req, dates, queries, { grid = false } = {}) 
       group.forEach(date => byDate.set(date, query => legacySnapshotPayload(snapshot, query)));
     }
   }
-  return Object.assign(query => byDate.get(query.fecha_local)(query), { personalBlocks,
+  return Object.assign(query => byDate.get(query.fecha_local)(query), { personalBlocks, programMetadata,
     durationMinutes: profile ? bookingProfileDurationMinutes(profile) : parseIntSafe(req.query.duracion_min) });
 }
 
 exports.grid = asyncHandler(async (req, res) => {
+  if (hasProgramPreviewQuery(req.query)) res.set('Cache-Control', 'private, no-store');
   const {
     clinica_id,
     dates,
@@ -1781,7 +1823,7 @@ exports.grid = asyncHandler(async (req, res) => {
   }
 
   const durMin = parseIntSafe(duracion_min);
-  if ((!durMin || durMin <= 0) && !req.query.tratamiento_id) return res.status(400).json({ message: 'duracion_min requerido' });
+  if ((!durMin || durMin <= 0) && !req.query.tratamiento_id && !hasProgramPreviewQuery(req.query)) return res.status(400).json({ message: 'duracion_min requerido' });
 
   const stepMin = parseIntSafe(granularity_min) || 15;
   const columnIds = parseIntArray(req.query.column_ids || req.query['column_ids[]']);
@@ -1865,11 +1907,13 @@ exports.grid = asyncHandler(async (req, res) => {
     granularity_min: stepMin,
     columns: columnIds.map((id) => String(id)),
     personal_blocks: getPayload.personalBlocks,
+    ...(getPayload.programMetadata ? { program_preview: getPayload.programMetadata } : {}),
     rows,
   });
 });
 
 exports.summary = asyncHandler(async (req, res) => {
+  if (hasProgramPreviewQuery(req.query)) res.set('Cache-Control', 'private, no-store');
   const { dates, duracion_min } = req.query || {};
   const dateList = parseDateArray(dates || req.query['dates[]']);
 
@@ -1881,7 +1925,7 @@ exports.summary = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'dates[] excede el máximo (42)' });
   }
 
-  if (!(parseIntSafe(duracion_min) > 0) && !req.query.tratamiento_id) {
+  if (!(parseIntSafe(duracion_min) > 0) && !req.query.tratamiento_id && !hasProgramPreviewQuery(req.query)) {
     return res.status(400).json({ message: 'duracion_min requerido' });
   }
 
@@ -1927,5 +1971,6 @@ exports.summary = asyncHandler(async (req, res) => {
   return res.json({
     by_day: byDay,
     dates: uniqueDates,
+    ...(getPayload.programMetadata ? { program_preview: getPayload.programMetadata } : {}),
   });
 });
