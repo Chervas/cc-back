@@ -225,7 +225,11 @@ async function assertPhoneEndpointCurrent(to, clinicConfig, { commercial = false
     const rows = await queryFor()(`SELECT c.id,root.contact_id current_contact FROM Conversations c JOIN WhatsappConversationLinks l ON l.conversation_id=c.id AND l.clinic_id=c.clinic_id JOIN Conversations root ON root.id=l.canonical_id AND root.clinic_id=c.clinic_id WHERE c.clinic_id=? AND c.channel='whatsapp' AND c.contact_id IN (${candidates.map(() => '?').join(',')})`, [clinicId, ...candidates]);
     if (rows.some(r => require('../lib/phone').normalizePhoneE164(r.current_contact) !== require('../lib/phone').normalizePhoneE164(to)))
         throw Object.assign(Error('whatsapp_contact_identity_conflict'), { code: 'whatsapp_contact_identity_conflict', status: 409, retryable: false });
-    const restrictions = await queryFor()(`SELECT i.restrictions FROM WhatsappContactIdentities i JOIN Conversations c ON c.id=i.conversation_id AND c.clinic_id=i.clinic_id WHERE i.clinic_id=? AND c.contact_id IN (${candidates.map(() => '?').join(',')}) AND i.restrictions IS NOT NULL`, [clinicId, ...candidates]);
+    const restrictions = await queryFor()(`SELECT i.restrictions FROM WhatsappContactIdentities i
+      JOIN Conversations c ON c.id=i.conversation_id AND c.clinic_id=i.clinic_id
+      LEFT JOIN WhatsappConversationLinks l ON l.conversation_id=c.id AND l.clinic_id=c.clinic_id
+      JOIN Conversations root ON root.id=COALESCE(l.canonical_id,c.id) AND root.clinic_id=c.clinic_id
+      WHERE i.clinic_id=? AND root.contact_id IN (${candidates.map(() => '?').join(',')}) AND i.restrictions IS NOT NULL`, [clinicId, ...candidates]);
     if (restrictions.some(row => { const r = typeof row.restrictions === 'string' ? JSON.parse(row.restrictions) : row.restrictions || {}; return r.channel || r.wrong_recipient || commercial && r.marketing; }))
         throw Object.assign(Error('whatsapp_recipient_restricted'), { code: 'WHATSAPP_RECIPIENT_NUMBER_RESTRICTED', status: 409, retryable: false });
 }

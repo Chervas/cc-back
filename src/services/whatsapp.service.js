@@ -711,7 +711,7 @@ class WhatsAppService {
             }
         }
         await this.assertClinicNonOperationalAllowed(payload, clinicConfig, storedMessage);
-        if(identityContact && payload.type==='template')await require('./whatsappContactIdentity.service').assertDestination(identityContact,clinicConfig,{commercial:true});
+        if(identityContact && (payload.type==='template' || require('./marketingOptOut.service').isMarketingOutboundMessage?.(storedMessage)===true))await require('./whatsappContactIdentity.service').assertDestination(identityContact,clinicConfig,{commercial:true});
         await this.assertPrivacyCommercialAllowed(payload, clinicConfig, storedMessage);
         if (payload.type === 'template') {
             await require('./whatsappTemplateScope.service').assertTemplateInWaba({

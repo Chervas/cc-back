@@ -69,6 +69,11 @@ test('patient edits atomically unite presentation, retain reads and stop only th
         assert.equal(review.source_message_id, 1);
         assert.equal(review.manual_action_required, true);
         assert.equal(await service.reviewSupersededInbound({ message: late, conversation: destination }), false, 'the current endpoint is unaffected');
+        await sql.transaction(async transaction=>{
+          await I.bind(service.queryFor(transaction),{clinicId:71,businessId:'301',type:'bsuid',value:'ES.RestrictedProfile',conversationId:old.id,wabaId:'101',phoneId:'201'});
+        });
+        await service.restrict({conversation:{clinic_id:71,contact_id:'bsuid:301:ES.RestrictedProfile'},inboundMessage:{id:1},scope:'all'});
+        await assert.rejects(service.assertPhoneEndpointCurrent('+19995550102',{clinicId:71}),e=>e.code==='WHATSAPP_RECIPIENT_NUMBER_RESTRICTED','a phone change never drops the identity channel refusal');
         // A failed edit rolls back its profile, new endpoint, event and presentation.
         await assert.rejects(sql.transaction(async (transaction) => {
             await models.Paciente.update({ telefono_movil: '+19995550103' }, { where: { id_paciente: 1 }, transaction });
