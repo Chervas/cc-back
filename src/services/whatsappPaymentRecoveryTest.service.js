@@ -5,6 +5,7 @@ const paymentProbe = require('../lib/whatsapp-payment-recovery-probe');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const TEST_SENDER = 'Clinicaclick (prueba, ignora este mensaje)';
+const CONFIGURATION_TEMPLATE_FAMILY = 'clinicaclick_prueba_configuracion';
 const fail = (code, status = 409, details = {}) => { throw Object.assign(Error(code), { code, status, statusCode:status, details }); };
 const plain = value => value?.get ? value.get({plain:true}) : value;
 const object = value => value && typeof value === 'object' ? value : {};
@@ -12,6 +13,7 @@ const object = value => value && typeof value === 'object' ? value : {};
 function createService({ db = require('../../models'), bulk = require('./marketingBulkSends.service'),
   broker = require('../lib/whatsappAuthorizedBrokerClient'), health = require('./whatsappAccountHealth.service'),
   payment = require('./whatsappPaymentStatus.service'), manual = require('../lib/whatsappManualDisconnect'),
+  evidence = require('./whatsappConfigurationTestEvidence.service'),
   authorize, now = () => new Date() } = {}) {
   async function context({ clinicId, phoneNumberId, userId }) {
     if (!Number.isSafeInteger(clinicId) || clinicId <= 0 || !/^[1-9][0-9]{0,31}$/.test(String(phoneNumberId || ''))
@@ -22,43 +24,61 @@ function createService({ db = require('../../models'), bulk = require('./marketi
     if (!asset || !clinic || !(asset.assignmentScope === 'clinic' && Number(asset.clinicaId) === clinicId
       || asset.assignmentScope === 'group' && Number(asset.grupoClinicaId) === Number(clinic.grupoClinicaId) && Number(clinic.grupoClinicaId)>0)) fail('payment_test_phone_not_found',404);
     const binding = await broker.binding(clinicId,Number(asset.id),asset);
+    const sendingEnabled = binding?.sendEnabled === true && !manual.current(asset,binding);
     const snapshot = health.summarizeAssetHealth(asset);
     const paymentSnapshot = payment.derivePaymentSnapshot(asset.additionalData || {});
     let availability = paymentProbe.availability({asset,health:snapshot,now:now()});
-    if (!binding || binding.sendEnabled !== true || manual.current(asset,binding)) availability = {allowed:false,reason:'payment_probe_sender_unavailable'};
+    if (!sendingEnabled) availability = {allowed:false,reason:'payment_probe_sender_unavailable'};
     const localBinding = await db.WhatsappChannelBinding.findOne({where:{clinic_id:clinicId,asset_id:asset.id,is_active:true},raw:true});
     if (localBinding?.role === 'secondary' && !(localBinding.purposes || []).includes('bulk_campaigns')) availability = {allowed:false,reason:'payment_probe_purpose_unavailable'};
-    const template = await db.WhatsappTemplate.findOne({where:{waba_id:asset.wabaId,catalog_template_id:114,language:'es',status:'APPROVED',is_active:true},order:[['id','DESC']]});
+    const configurationTest = await evidence.createService({db,now}).read(asset,binding);
+    const mode = paymentSnapshot.status === 'missing_payment_method' || paymentSnapshot.status === 'active' ? 'recovery' : 'configuration';
+    const dedicatedCatalog = await db.WhatsappTemplateCatalog?.findOne({where:{family_key:CONFIGURATION_TEMPLATE_FAMILY,locale:'es',is_active:true},raw:true});
+    let template = dedicatedCatalog ? await db.WhatsappTemplate.findOne({where:{waba_id:asset.wabaId,
+      catalog_template_id:dedicatedCatalog.id,language:'es',status:'APPROVED',is_active:true},order:[['id','DESC']]}) : null;
+    const dedicated = !!template;
+    if (!template) template = await db.WhatsappTemplate.findOne({where:{waba_id:asset.wabaId,catalog_template_id:114,language:'es',status:'APPROVED',is_active:true},order:[['id','DESC']]});
     const components = Array.isArray(template?.components) ? template.components : [];
     const body = components.find(part => String(part.type).toUpperCase() === 'BODY')?.text;
     const variables = buildWhatsappTemplateVariableContract(plain(template));
-    const compatible = !!body && components.length === 1 && variables.length === 3
-      && variables.map(variable => variable.name).join(',') === 'nombre_paciente,usuario_nombre,nombre_clinica'
-      && [...body.matchAll(/\{\{\s*([0-9]+)\s*\}\}/g)].map(match => match[1]).join(',') === '1,2,3';
+    const compatible = !!body && components.length === 1
+      && variables.map(variable => variable.name).join(',') === (dedicated ? 'nombre_clinica' : 'nombre_paciente,usuario_nombre,nombre_clinica')
+      && [...body.matchAll(/\{\{\s*([0-9]+)\s*\}\}/g)].map(match => match[1]).join(',') === (dedicated ? '1' : '1,2,3');
     if (!compatible) availability = {allowed:false,reason:'payment_probe_template_unavailable'};
-    const params = ['Prueba',TEST_SENDER,clinic.nombre_clinica];
+    const params = dedicated ? [clinic.nombre_clinica] : ['Prueba',TEST_SENDER,clinic.nombre_clinica];
     const preview = compatible ? body.replace(/\{\{\s*([0-9]+)\s*\}\}/g,(_,index) => params[Number(index)-1]) : null;
-    return { asset,clinic,template,availability,paymentSnapshot,health:snapshot,preview };
+    return { asset,clinic,template,availability,paymentSnapshot,health:snapshot,preview,mode,configurationTest,sendingEnabled };
   }
-  async function previous(input, asset) {
-    if (!input.requestId) return null;
-    if (typeof input.requestId !== 'string' || !UUID.test(input.requestId)) fail('payment_test_request_invalid',400);
+  async function previous(input, asset, latest = false) {
+    if (!input.requestId && !latest) return null;
+    if (input.requestId && (typeof input.requestId !== 'string' || !UUID.test(input.requestId))) fail('payment_test_request_invalid',400);
     const list = await db.MarketingPatientList.findOne({where:{clinica_id:input.clinicId,created_by:input.userId,
-      source:'whatsapp_payment_recovery_test','criteria.request_id':input.requestId},order:[['id','DESC']]});
+      source:'whatsapp_payment_recovery_test',...(input.requestId ? {'criteria.request_id':input.requestId}
+        : {'criteria.sender_origin_id':Number(asset.id),'criteria.phone_number_id':asset.phoneNumberId,
+          'criteria.waba_id':asset.wabaId,'criteria.authorization_id':asset.whatsappAuthorizationId || null})},order:[['id','DESC']]});
     if (!list) return null;
     if (Number(list.criteria?.sender_origin_id) !== Number(asset.id) || list.criteria?.phone_number_id !== asset.phoneNumberId
-      || list.criteria?.waba_id !== asset.wabaId) fail('payment_test_binding_changed');
+      || list.criteria?.waba_id !== asset.wabaId
+      || Object.hasOwn(list.criteria || {},'authorization_id') && list.criteria.authorization_id !== (asset.whatsappAuthorizationId || null)
+      || !Object.hasOwn(list.criteria || {},'authorization_id') && asset.whatsappAuthorizationId) fail('payment_test_binding_changed');
     if (input.to && normalizePhoneDigits(input.to) !== list.criteria?.probe_to) fail('payment_test_request_conflict');
     const message = await db.Message.findOne({where:{'metadata.list_id':list.id,'metadata.kind':'mass_campaign_test'},order:[['id','DESC']]});
+    if (message && (Number(message.metadata?.sender_origin_id) !== Number(asset.id)
+      || message.metadata?.phoneNumberId !== asset.phoneNumberId || message.metadata?.wabaId !== asset.wabaId)) fail('payment_test_binding_changed');
     return {list,message};
   }
   function result(state, previousTest = null) {
     const message = plain(previousTest?.message);
     const metadata = object(message?.metadata);
     const error = Array.isArray(metadata.wa_error) ? metadata.wa_error[0] : metadata.error?.error || metadata.error;
+    const mode = previousTest?.list.criteria?.payment_test_mode || state.mode;
     return { success:true,available:state.availability,health:state.health,payment_status:state.paymentSnapshot.status,
-      recovered:state.paymentSnapshot.status === 'active' && state.health.can_send === true,
-      sender: { phone_number_id:state.asset.phoneNumberId, phone:state.asset.additionalData?.display_phone_number || state.asset.metaAssetName,
+      mode,configuration_test:state.configurationTest,
+      delivery_confirmed:state.configurationTest.verified === true
+        && (!previousTest || Number(state.configurationTest.app_message_id) === Number(message?.id)),
+      recovered:mode === 'recovery' && state.paymentSnapshot.status === 'active' && state.health.can_send === true,
+      sender: { asset_id:Number(state.asset.id),waba_id:state.asset.wabaId,authorization_id:state.asset.whatsappAuthorizationId || null,
+        sending_enabled:state.sendingEnabled,phone_number_id:state.asset.phoneNumberId, phone:state.asset.additionalData?.display_phone_number || state.asset.metaAssetName,
         name:state.asset.waVerifiedName || state.clinic.nombre_clinica },
       preview:state.preview,template_name:state.template?.name || null,template_category:state.template?.category || null,
       ...(previousTest ? {request_id:previousTest.list.criteria.request_id,app_message_id:message?.id || null,
@@ -66,7 +86,7 @@ function createService({ db = require('../../models'), bulk = require('./marketi
   }
   async function get(input) {
     const state = await context(input);
-    return result(state,await previous(input,state.asset));
+    return result(state,await previous(input,state.asset,true));
   }
   async function send(input) {
     if (typeof input.requestId !== 'string' || !UUID.test(input.requestId)) fail('payment_test_request_invalid',400);
@@ -88,6 +108,7 @@ function createService({ db = require('../../models'), bulk = require('./marketi
           source:'whatsapp_payment_recovery_test',status:'archived',scope_type:'clinic',clinica_id:input.clinicId,
           created_by:input.userId,channel:'whatsapp',counters:{total:0,ready:0},criteria:{record_kind:'campaign',
             whatsapp_payment_recovery_test:true,request_id:input.requestId,probe_to:to,sender_origin_id:Number(state.asset.id),
+            payment_test_mode:state.mode,authorization_id:state.asset.whatsappAuthorizationId || null,
             phone_number_id:state.asset.phoneNumberId,waba_id:state.asset.wabaId,whatsapp_template_id:state.template.id,
             template_usage:'manual_patient_contact',template_commercial:false,sender_name:TEST_SENDER}});
         const item = await db.MarketingPatientListItem.create({list_id:list.id,clinica_id:input.clinicId,paciente_id:null,

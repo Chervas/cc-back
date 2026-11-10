@@ -4,7 +4,7 @@ const fs = require('node:fs'), vm = require('node:vm');
 const { createService } = require('../../services/whatsappPaymentRecoveryTest.service');
 const now = new Date('2030-01-02T10:00:00Z');
 const input = { clinicId:56,userId:1,phoneNumberId:'123456',requestId:'11111111-1111-4111-8111-111111111111',to:'+34 600 000 001' };
-function fixture() {
+function fixture({evidence} = {}) {
   const lists=[], items=[], messages=[], calls=[], locks=new Set(); let allowed=true, behavior=null;
   const asset={id:404,assetType:'whatsapp_phone_number',isActive:true,assignmentScope:'clinic',clinicaId:56,
     phoneNumberId:'123456',wabaId:'TEST-WABA',metaAssetName:'+34 600 000 002',waVerifiedName:'TESTONLY clinic',additionalData:{
@@ -16,7 +16,8 @@ function fixture() {
   const db={
     ClinicMetaAsset:{findOne:async()=>asset},Clinica:{findByPk:async()=>({id_clinica:56,nombre_clinica:'TESTONLY clinic'})},
     WhatsappChannelBinding:{findOne:async()=>local},WhatsappTemplate:{findOne:async()=>template},
-    MarketingPatientList:{findOne:async({where})=>lists.find(row=>row.clinica_id===where.clinica_id&&row.created_by===where.created_by&&row.criteria.request_id===where['criteria.request_id']),
+    MarketingPatientList:{findOne:async({where})=>lists.find(row=>row.clinica_id===where.clinica_id&&row.created_by===where.created_by
+      && Object.entries(where).filter(([key])=>key.startsWith('criteria.')).every(([key,value])=>row.criteria[key.slice(9)]===value)),
       create:async row=>{const record={...row,id:lists.length+1};lists.push(record);return record;}},
     MarketingPatientListItem:{create:async row=>{const record={...row,id:items.length+1};items.push(record);return record;}},
     Message:{findOne:async({where})=>messages.find(row=>row.metadata.list_id===where['metadata.list_id']&&row.metadata.kind===where['metadata.kind'])},
@@ -25,13 +26,14 @@ function fixture() {
       locks.delete(lock);return [[]];}},
   };
   const bulk={sendTest:async(scope,id,body)=>{
-    calls.push({scope,id,body}); const message={id:messages.length+1,status:'pending',metadata:{list_id:id,kind:'mass_campaign_test'}};
+    calls.push({scope,id,body}); const message={id:messages.length+1,status:'pending',metadata:{list_id:id,kind:'mass_campaign_test',
+      sender_origin_id:asset.id,phoneNumberId:asset.phoneNumberId,wabaId:asset.wabaId}};
     messages.push(message); asset.additionalData.payment.last_probe_at=now.toISOString();
     if(behavior)await behavior(message);
   }};
   const service=createService({db,bulk,broker:{binding:async()=>binding},manual:{current:()=>asset.manualDisconnect===true},
     health:{summarizeAssetHealth:()=>health},payment:{derivePaymentSnapshot:data=>data.payment},
-    authorize:async ({clinicId,userId})=>allowed&&clinicId===56&&userId===1,now:()=>now});
+    authorize:async ({clinicId,userId})=>allowed&&clinicId===56&&userId===1,now:()=>now,...(evidence?{evidence}:{})});
   return {service,asset,template,binding,local,health,db,lists,items,messages,calls,locks,
     deny:()=>{allowed=false;},behavior:fn=>{behavior=fn;}};
 }
@@ -54,6 +56,52 @@ test('same UUID returns its stored result despite cooldown, without another send
   const f=fixture();const first=await f.service.send(input),second=await f.service.send(input);
   assert.equal(first.app_message_id,second.app_message_id);assert.equal(f.calls.length,1);assert.equal(f.lists.length,1);
   await assert.rejects(f.service.send({...input,to:'+34 600 000 003'}),{code:'payment_test_request_conflict'});
+});
+test('healthy unknown configuration uses the same isolated command and reopening adopts its durable request',async()=>{
+  const f=fixture();f.asset.whatsappAuthorizationId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  f.asset.additionalData.payment={};Object.assign(f.health,{state:'healthy',can_send:true,reason_code:'provider_connected'});
+  const first=await f.service.send(input);assert.equal(first.mode,'configuration');assert.equal(first.recovered,false);
+  assert.equal(first.delivery_confirmed,false);assert.equal(f.lists[0].criteria.payment_test_mode,'configuration');
+  const reloaded=await f.service.get({...input,requestId:undefined});assert.equal(reloaded.request_id,input.requestId);
+  assert.equal(reloaded.app_message_id,first.app_message_id);assert.equal(f.calls.length,1);
+  f.messages[0].status='sent';assert.equal((await f.service.get(input)).delivery_confirmed,false);
+  f.messages[0].status='delivered';const delivered=await f.service.get(input);
+  assert.equal(delivered.delivery_confirmed,false);assert.equal(delivered.recovered,false); // A status alone has no current-authority proof in this fixture.
+  assert.equal(f.asset.additionalData.payment.status,undefined);assert.equal(f.asset.additionalData.payment.last_success_at,undefined);
+  f.asset.whatsappAuthorizationId='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  await assert.rejects(f.service.get(input),{code:'payment_test_binding_changed'});
+  assert.equal((await f.service.get({...input,requestId:undefined})).request_id,undefined);
+  assert.equal(f.calls.length,1);
+});
+test('a legacy diagnostic request without an authority binding is not adopted after a managed authorization',async()=>{
+  const f=fixture();await f.service.send(input);delete f.lists[0].criteria.authorization_id;
+  f.asset.whatsappAuthorizationId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';f.messages[0].status='delivered';
+  await assert.rejects(f.service.get(input),{code:'payment_test_binding_changed'});assert.equal(f.calls.length,1);
+});
+test('a diagnostic result cannot adopt a message from another sender even if the list ID matches',async()=>{
+  const f=fixture();await f.service.send(input);f.messages[0].metadata.wabaId='OTHER';
+  await assert.rejects(f.service.get(input),{code:'payment_test_binding_changed'});
+  assert.equal(f.calls.length,1);
+});
+test('an older verified manual send does not confirm delivery of a new pending or failed request',async()=>{
+  const proof={verified:true,app_message_id:999,message_status:'delivered'};
+  const f=fixture({evidence:{createService:()=>({read:async()=>proof})}});
+  f.asset.whatsappAuthorizationId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';f.asset.additionalData.payment={};
+  Object.assign(f.health,{state:'healthy',can_send:true,reason_code:'provider_connected'});
+  const pending=await f.service.send(input);assert.equal(pending.configuration_test.verified,true);
+  assert.equal(pending.delivery_confirmed,false);assert.equal(pending.message_status,'pending');
+  f.messages[0].status='failed';assert.equal((await f.service.get(input)).delivery_confirmed,false);
+});
+test('the approved dedicated configuration family is preferred with its exact one-variable preview',async()=>{
+  const f=fixture();f.db.WhatsappTemplateCatalog={findOne:async({where})=>{
+    assert.deepEqual(where,{family_key:'clinicaclick_prueba_configuracion',locale:'es',is_active:true});return {id:123};}};
+  const dedicated={id:6135,name:'TESTONLY-configuration',language:'es',status:'APPROVED',category:'MARKETING',
+    variables:[{name:'nombre_clinica',index:1}],components:[{type:'BODY',text:'Hola, prueba de configuración para {{1}}.'}]};
+  f.db.WhatsappTemplate.findOne=async({where})=>where.catalog_template_id===123?dedicated:f.template;
+  const state=await f.service.get(input);assert.equal(state.template_name,dedicated.name);
+  assert.equal(state.preview,'Hola, prueba de configuración para TESTONLY clinic.');
+  f.db.WhatsappTemplate.findOne=async({where})=>where.catalog_template_id===123?null:f.template;
+  assert.equal((await f.service.get(input)).template_name,f.template.name);
 });
 test('payment rejection is reported without recovering or sending again',async()=>{
   const f=fixture();f.behavior(async message=>{message.status='failed';message.metadata.wa_error=[{code:131042}];throw Error('provider failure');});

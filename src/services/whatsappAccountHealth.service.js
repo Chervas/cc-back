@@ -532,6 +532,15 @@ async function assertCanSend({
     additionalData: clinicConfig.additionalData || {},
     quality_rating: clinicConfig.quality_rating || null,
   });
+  // Diagnostic sends on a healthy, newly configured number must claim the
+  // same durable cooldown. They are not a bypass of ordinary sender gates.
+  if (asset && allowPaymentRecoveryProbe === true && health.can_send === true
+    && !isBlockingState(health.base_state || health.state)) {
+    const probe = await claimPaymentRecoveryProbe({ assetId: asset.id, messageId, source });
+    if (!probe.allowed) throw Object.assign(new Error(probe.reason), {
+      code: probe.reason, status: 409, details: { retry_after_seconds: probe.retry_after_seconds || null } });
+    return { allowed: true, asset_id: asset.id, health, payment_recovery_probe: probe };
+  }
   if (health.can_send === false || isBlockingState(health.base_state || health.state)) {
     if (asset && allowPaymentRecoveryProbe === true) {
       const probe = await claimPaymentRecoveryProbe({

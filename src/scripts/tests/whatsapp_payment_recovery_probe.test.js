@@ -25,3 +25,16 @@ test('five-minute minimum and thirty-minute cooldown remain authoritative, with 
   f.now = new Date('2030-01-02T10:15:01Z'); assert.equal(availability(f).allowed, true);
   f.asset.additionalData.payment.last_detected_at = 'invalid'; assert.equal(availability(f).allowed, false);
 });
+test('unknown payment on a healthy managed sender permits an explicit configuration test without a fictitious prior failure', () => {
+  const f = fixture(); f.asset.whatsappAuthorizationId = '11111111-1111-4111-8111-111111111111';
+  f.asset.additionalData.payment = {}; f.health = { state: 'healthy', can_send: true, provider_status: 'CONNECTED' };
+  assert.equal(availability(f).allowed, true);
+  f.asset.additionalData.payment.last_probe_at = '2030-01-02T09:59:00Z';
+  assert.equal(availability(f).reason, 'payment_probe_cooldown');
+  f.now = new Date('2030-01-02T10:29:00Z'); assert.equal(availability(f).allowed, true);
+  f.health.can_send = false; assert.equal(availability(f).allowed, false);
+  f.health.can_send = true; f.asset.additionalData.whatsappManualDisconnect = { state: 'pending' };
+  assert.equal(availability(f).allowed, false);
+  delete f.asset.additionalData.whatsappManualDisconnect; delete f.asset.whatsappAuthorizationId;
+  assert.equal(availability(f).reason, 'payment_probe_configuration_unsupported');
+});

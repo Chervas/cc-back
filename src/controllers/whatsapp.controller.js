@@ -2235,6 +2235,7 @@ exports.listPhones = async (req, res) => {
 
     const authorizedBroker = require('../lib/whatsappAuthorizedBrokerClient');
     const configuredBindings = authorizedBroker.configuration()?.bindings || [];
+    const configurationTestBindings = new Map();
     for (const p of phones) {
       if (p.additionalData?.whatsappArchive?.archivedAt) continue;
       const managementClinicId = routingScopeClinicId || clinicIdFilter || Number(p.clinicaId)
@@ -2242,6 +2243,7 @@ exports.listPhones = async (req, res) => {
           && (isAggregateAllowed || clinicIds.map(Number).includes(Number(binding.clinicId))))?.clinicId || null;
       let managementBinding = null;
       try { if (managementClinicId) managementBinding = await require('../lib/whatsappAuthorizedBrokerClient').binding(managementClinicId, Number(p.id), p); } catch { /* Keep unverified capabilities closed. */ }
+      configurationTestBindings.set(Number(p.id), managementBinding);
       const manualDisconnect = require('../lib/whatsappManualDisconnect').current(p, managementBinding);
       if (managementClinicId && !permissionStatuses.has(Number(p.id))) {
         const checked = await whatsappPermissionInventoryService.read({ clinicId: managementClinicId, phones: [p] });
@@ -2388,6 +2390,9 @@ exports.listPhones = async (req, res) => {
       });
     }
 
+    const configurationTests = await require('../services/whatsappConfigurationTestEvidence.service').forAssets(
+      phones, { bindings: configurationTestBindings });
+    for (const phone of payload) phone.configuration_test = configurationTests.get(Number(phone.id)) || null;
     return res.json({ phones: payload, preverified_enabled: PREVERIFIED_ENABLED, routing_enabled: true });
   } catch (err) {
     if (err?.statusCode === 403) return res.status(403).json({ error: 'whatsapp_clinic_scope_forbidden' });
@@ -3858,6 +3863,7 @@ exports.refreshPhoneStatus = async (req, res) => {
       });
       return res.json({ success: true, mode: 'authorized', health: result.health,
         checked_at: new Date().toISOString(), permission_status: result.profile ? 'connected' : 'disconnected',
+        configuration_test: await require('../services/whatsappConfigurationTestEvidence.service').read(phone, binding),
         payment_status: whatsappPaymentStatusService.derivePaymentSnapshot(phone.additionalData || {}).status });
     }
 

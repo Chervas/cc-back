@@ -184,6 +184,36 @@ test('la recuperación de pago solo admite una prueba manual reciente y respeta 
   assert.equal(automation.reason, 'payment_probe_message_ineligible');
 });
 
+test('healthy configuration diagnostics claim a durable cooldown while ordinary sends and invalid sources cannot claim it', async () => {
+  let saves=0,events=0;
+  const now=new Date(),asset={id:411,assetType:'whatsapp_phone_number',isActive:true,quality_rating:'GREEN',
+    whatsappAuthorizationId:'11111111-1111-4111-8111-111111111111',phoneNumberId:'123456',wabaId:'TESTONLY-WABA',
+    additionalData:{registration:{status:'registered',phoneStatus:'CONNECTED'},whatsappHealth:{state:'healthy',can_send:true,
+      reason_code:'provider_connected',provider_status:'CONNECTED',observed_at:now.toISOString()}},
+    changed(){},async save(){saves++;}};
+  const message={id:1200,direction:'outbound',status:'pending',createdAt:new Date(now.getTime()-1000),metadata:{
+    kind:'mass_campaign_test',sender_origin_id:411,payment_recovery_probe:true}};
+  const restores=[patchProperty(db.ClinicMetaAsset,'findOne',async()=>asset),patchProperty(db.ClinicMetaAsset,'findByPk',async()=>asset),
+    patchProperty(db.Message,'findByPk',async()=>message),
+    patchProperty(db.WhatsappAccountHealthEvent,'findOrCreate',async()=>{events++;return[null,true];}),
+    patchProperty(db.sequelize,'transaction',async fn=>fn({LOCK:{UPDATE:'UPDATE'}}))];
+  try{
+    assert.equal((await whatsappAccountHealthService.assertCanSend({clinicConfig:{originId:411},messageId:1200})).allowed,true);
+    assert.equal(saves,0);
+    await assert.rejects(whatsappAccountHealthService.assertCanSend({clinicConfig:{originId:411},messageId:1200,
+      allowPaymentRecoveryProbe:true,source:'flow_send_whatsapp'}),{code:'payment_probe_source_invalid'});
+    assert.equal(saves,0);
+    const result=await whatsappAccountHealthService.assertCanSend({clinicConfig:{originId:411},messageId:1200,
+      allowPaymentRecoveryProbe:true,source:'marketing_bulk_send_test_payment_recovery_probe'});
+    assert.equal(result.allowed,true);assert.equal(saves,1);assert.equal(events,1);
+    assert.equal(asset.additionalData.payment.last_probe_message_id,1200);
+    assert.equal(asset.additionalData.payment.status,undefined);
+    await assert.rejects(whatsappAccountHealthService.assertCanSend({clinicConfig:{originId:411},messageId:1200,
+      allowPaymentRecoveryProbe:true,source:'marketing_bulk_send_test_payment_recovery_probe'}),{code:'payment_probe_cooldown'});
+    assert.equal(saves,1);assert.equal(events,1);
+  }finally{restores.reverse().forEach(fn=>fn());}
+});
+
 test('131042 persiste el bloqueo, notifica el ámbito secundario y una entrega posterior lo recupera', async () => {
   const notificationsService = require('../../services/notifications.service');
   const asset = {

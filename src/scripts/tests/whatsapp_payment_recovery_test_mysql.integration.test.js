@@ -25,7 +25,8 @@ test('payment dialog command uses real SQL locks, JSON replay and isolated nativ
       calls++;assert.equal(scope.clinicIds[0],56);assert.equal(body.payment_recovery_probe,true);
       const item=await models.MarketingPatientListItem.findByPk(body.item_id);
       assert.equal(item.paciente_id,null);assert.equal(item.selected,false);assert.equal(item.phone,null);
-      await models.Message.create({status:'pending',metadata:{kind:'mass_campaign_test',list_id:listId}});
+      await models.Message.create({status:'pending',metadata:{kind:'mass_campaign_test',list_id:listId,
+        sender_origin_id:asset.id,phoneNumberId:asset.phoneNumberId,wabaId:asset.wabaId}});
       await new Promise(resolve=>setTimeout(resolve,25));
     }}});
   const input={clinicId:56,userId:1,phoneNumberId:'123456',to:'+34 600 000 001',requestId:'11111111-1111-4111-8111-111111111111'};
