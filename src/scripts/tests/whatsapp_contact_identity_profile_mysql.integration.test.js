@@ -59,6 +59,13 @@ test('patient edits atomically unite presentation, retain reads and stop only th
         assert.equal(enriched.whatsapp_identity.matched_previous_phone, true);
         assert.deepEqual(await service.searchClause('19995550101', [71]), [destination.id]);
         assert.deepEqual(await service.searchClause('19995550101', [72]), [], 'another clinic is never disclosed through aliases');
+        const joined=await service.aggregatePending([destination],async()=>new Map([
+          [old.id,{automationProcessingStatus:'review',automationManualActionRequired:true,automationNeedsResponse:true,automationResponseProcessingMessageId:1,requiresAutomationAttention:true,automationAttentionCount:2,automationAttentionMessageId:1}],
+          [destination.id,{automationProcessingStatus:null,automationManualActionRequired:false,requiresAutomationAttention:true,automationAttentionCount:3,automationAttentionMessageId:2}]
+        ]),44);
+        assert.equal(joined.get(destination.id).automationProcessingStatus,'review');
+        assert.equal(joined.get(destination.id).automationManualActionRequired,true,'the old endpoint review survives the visible union');
+        assert.equal(joined.get(destination.id).automationAttentionCount,5,'the chosen review cannot overwrite the combined attention count');
         const late = { id: 1, metadata: { fresh_realtime_status: 'received' }, async update(patch, { transaction }) { await sql.query('UPDATE Messages SET metadata=? WHERE id=?', { replacements: [JSON.stringify(patch.metadata), this.id], transaction }); Object.assign(this, patch); } };
         await sql.transaction(async (transaction) => assert.equal(await service.reviewSupersededInbound({ message: late, conversation: old, transaction }), true));
         assert.equal(late.metadata.automatic_actions_allowed, false);

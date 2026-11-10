@@ -160,10 +160,13 @@ async function aggregatePending(rows, getPending, userId) {
             base.automationAttentionMessageId = attention.automationAttentionMessageId;
         // Preserve a live analysis on its actual endpoint instead of inventing a
         // completed result for the presentation root.
-        const processing = states.find(s => s.isAutomationResponseProcessing);
-        if (processing) {
-            for (const [k, v] of Object.entries(processing))
-                if (k.startsWith('automation') || k === 'isAutomationResponseProcessing')
+        const projection = states.find(s => s.isAutomationResponseProcessing)
+            || states.find(s => s.automationPossibleUrgency)
+            || states.find(s => s.automationManualActionRequired)
+            || states.find(s => ['review','failed'].includes(s.automationProcessingStatus));
+        if (projection) {
+            for (const [k, v] of Object.entries(projection))
+                if ((k.startsWith('automation') && !['automationAttentionCount','automationAttentionMessageId'].includes(k)) || k === 'isAutomationResponseProcessing')
                     base[k] = v;
         }
         result.set(Number(row.id), base);

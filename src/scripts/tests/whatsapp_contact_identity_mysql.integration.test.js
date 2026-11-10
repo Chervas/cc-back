@@ -102,6 +102,15 @@ test('scoped provider identities and linked histories preserve endpoints, owners
             assert.equal(after.length, 1);
             assert.equal(+new Date(after[0].sent_at), +new Date(before.sent_at));
             await assert.rejects(Importer.importLease(c, lease({ ...video, video: { ...video.video, id: '1002' } }, { wa_id: '19995550101' }), scope), /review_required/);
+            const renewed = { ...video, id: 'wamid.videoRenewal', video: { ...video.video, sha256: 'a'.repeat(64) } };
+            await Importer.importLease(c, lease(renewed, { wa_id: '19995550101' }), scope);
+            const priorRenewal=await q("SELECT * FROM Messages WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.wamid'))='wamid.videoRenewal'");
+            const priorClock=await q('SELECT unread_count,last_inbound_at,last_message_at FROM Conversations WHERE id=?',[priorRenewal[0].conversation_id]);
+            await Importer.importLease(c, lease({ ...renewed, timestamp: String(Number(renewed.timestamp)+3), video: { ...renewed.video, id:'1002' } }, { wa_id: '19995550101' }), scope);
+            assert.deepEqual(await q("SELECT * FROM Messages WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.wamid'))='wamid.videoRenewal'"),priorRenewal,'renewed file ID preserves the original transport row and metadata');
+            assert.deepEqual(await q('SELECT unread_count,last_inbound_at,last_message_at FROM Conversations WHERE id=?',[priorRenewal[0].conversation_id]),priorClock,'renewed file ID never reopens a window or repeats unread');
+            await assert.rejects(Importer.importLease(c, lease({ ...renewed, video: { ...renewed.video, id:'1002',sha256:'b'.repeat(64) } }, { wa_id: '19995550101' }), scope), /review_required/);
+            await assert.rejects(Importer.importLease(c, lease({ ...renewed, video: { ...renewed.video, id:'1002',mime_type:'video/other' } }, { wa_id: '19995550101' }), scope), /review_required/);
             await q("UPDATE ClinicMetaAssets SET additionalData=JSON_OBJECT() WHERE id=1");
             await Importer.importLease(c, lease(m('legacyUnscoped', 'ES.unlearnedPerson', '19995550106'), { wa_id: '19995550106' }), scope);
             assert.equal((await q("SELECT COUNT(*) n FROM WhatsappContactIdentities WHERE identity_value='ES.unlearnedPerson'"))[0].n, 0);
@@ -137,6 +146,21 @@ test('scoped provider identities and linked histories preserve endpoints, owners
             const previews = await require('../../services/whatsappContactIdentity.service').recentMessages([{ id: destination.id }]);
             assert.equal(previews.get(destination.id)[0].content, 'Fictitious latest alias preview');
             assert.equal(previews.get(destination.id)[0].conversation_id, originalId, 'the list preview uses the shared history without rewriting its endpoint');
+            // The real inbox account has table grants, unlike the fixture owner.
+            // MySQL FOR UPDATE needs UPDATE even on the dedicated lock table.
+            await q("CREATE USER 'identity_qa'@'localhost' IDENTIFIED BY 'FictitiousOnly_Identity1'");
+            for(const table of ['Clinicas','ClinicMetaAssets'])await q("GRANT SELECT ON campaign_optimization_qa."+table+" TO 'identity_qa'@'localhost'");
+            for(const table of ['Conversations','Messages','WhatsappContactIdentities','WhatsappConversationLinks'])await q("GRANT SELECT,INSERT,UPDATE ON campaign_optimization_qa."+table+" TO 'identity_qa'@'localhost'");
+            for(const table of ['WhatsappInboxImports','WhatsappInboxContactKeys','WhatsappInboxMessageKeys','WhatsappContactIdentityLocks'])await q("GRANT SELECT,INSERT ON campaign_optimization_qa."+table+" TO 'identity_qa'@'localhost'");
+            const limited=await require('mysql2/promise').createConnection({socketPath:sql.options.dialectOptions.socketPath,user:'identity_qa',password:'FictitiousOnly_Identity1',database:'campaign_optimization_qa'});
+            try {
+              await assert.rejects(limited.query('SELECT 1 FROM WhatsappContactIdentityLocks LIMIT 0 FOR UPDATE'),e=>e.code==='ER_TABLEACCESS_DENIED_ERROR');
+              await q("GRANT UPDATE ON campaign_optimization_qa.WhatsappContactIdentityLocks TO 'identity_qa'@'localhost'");
+              await limited.query('SELECT 1 FROM WhatsappContactIdentityLocks LIMIT 0 FOR UPDATE');
+              const privilegedReceipt=lease(m('scopedPrivilege','ES.ScopedPrivilege'));
+              await Importer.importLease(limited,privilegedReceipt,scope);
+              assert.equal((await q("SELECT COUNT(*) n FROM Conversations WHERE contact_id='bsuid:301:ES.ScopedPrivilege'"))[0].n,1);
+            }finally{await limited.end();}
             const snap = await require('../../lib/securitySchemaContract').snapshot(async (s) => (await sql.query(s))[0]);
             const baseline = require('../../../ops/security/schema-contract.json');
             const tables = Object.fromEntries(['WhatsappContactIdentities', 'WhatsappConversationLinks', 'WhatsappContactIdentityLocks'].map(name => [name, baseline.tables[name]]));

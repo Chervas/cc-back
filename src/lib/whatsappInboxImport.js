@@ -127,7 +127,10 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
     const row=rows[0],meta=typeof row.metadata==='string'?JSON.parse(row.metadata):row.metadata;
     return row.direction===m.direction && row.content===m.content && Identity.phone(row.contact_id)===Identity.phone(m.peer)
       && !!Identity.phone(m.peer) && meta?.wamid===m.wamid && meta.phone_number_id===scope.phoneId && meta.waba_id===scope.wabaId
-      && meta.provider_type===m.providerType && meta.media?.id===m.details.media.id
+      && meta.provider_type===m.providerType
+      // Meta may renew the file ID for the same WAMID. A matching complete
+      // SHA-256 proves the bytes; missing/malformed hashes require the same ID.
+      && (meta.media?.id===m.details.media.id || /^(?:[a-fA-F0-9]{64}|[A-Za-z0-9+/]{43}=)$/.test(m.details.media.sha256||''))
       && meta.media?.sha256===m.details.media.sha256 && meta.media?.mime_type===m.details.media.mime_type
       && JSON.stringify(meta.context||null)===JSON.stringify(m.details.context||null);
   };
