@@ -13,6 +13,14 @@ function details(message) {
   if(message?.context?.id) result.context={id:clean(message.context.id,512)};
   if(kind==='button' && value) result.button={payload:clean(value.payload,512),text:clean(value.text,1024)};
   if(kind==='interactive') result.interactive=Object.fromEntries(['type','button_reply','list_reply'].filter(k=>value?.[k]).map(k=>[k,typeof value[k]==='string'?clean(value[k],32):{id:clean(value[k].id,512),title:clean(value[k].title,1024)}]));
+  if(message?.referral && typeof message.referral==='object' && !Array.isArray(message.referral)) {
+    const referral={};
+    for(const [key,limit] of Object.entries({source_id:128,source_type:32,source_url:2048,ctwa_clid:512,headline:512,body:4096})) {
+      const field=clean(message.referral[key],limit);
+      if(field)referral[key]=field;
+    }
+    if(Object.keys(referral).length)result.referral=referral;
+  }
   return result;
 }
 function errors(status) {

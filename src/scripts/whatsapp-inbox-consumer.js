@@ -103,6 +103,7 @@ async function main(env=process.env) {
   const stop=()=>{stopping=true;clearTimeout(timer);active?.();};process.once('SIGTERM',stop);process.once('SIGINT',stop);
   try{
     const tables = ['WhatsappInboxImports','WhatsappInboxMessageKeys','WhatsappInboxContactKeys'];
+    if(env.WHATSAPP_CONTACT_IDENTITIES_ENABLED==='true')tables.push('WhatsappContactIdentityLocks','WhatsappContactIdentities','WhatsappConversationLinks');
     if(env.WHATSAPP_INBOX_ADMIN_SYNC_ENABLED==='true')tables.push('WhatsappInboxAdminSync');
     if(env.WHATSAPP_INBOX_PLAYBACK_ENABLED==='true')tables.push('WhatsappInboxPlaybackImports');
     if(env.WHATSAPP_INBOX_ROUTING_REVIEW_ENABLED==='true')tables.push('WhatsappInboxRoutingReviews','WhatsappInboxRoutingReviewReceipts');

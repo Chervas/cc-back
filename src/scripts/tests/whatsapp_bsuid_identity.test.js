@@ -24,3 +24,11 @@ test('provider aliases need a unique matching contact; display names and other v
     assert.equal(I.providerIdentity(card, minimal).phone, null);
     assert.equal(I.providerIdentity({ ...card, contacts: [{ ...card.contacts[0], origin: 'contact_request' }] }, minimal).phone, '19995550102');
 });
+
+test('the native importer preserves provider ad evidence without inventing an organic source',()=>{
+ const D=require('../../lib/whatsappInboundDetails');
+ const referral={source_type:'ad',source_id:'9001',source_url:'https://example.invalid/ad',ctwa_clid:'fictitious-click',headline:'Fictitious ad',body:'Fictitious description',untrusted_extra:'discard'};
+ const result=D.details({type:'text',text:{body:'Fictitious reply'},referral}).referral;
+ assert.equal(result.source_id,'9001');assert.equal(result.ctwa_clid,'fictitious-click');assert.equal(result.untrusted_extra,undefined);
+ assert.equal(D.details({type:'text',text:{body:'Fictitious direct reply'}}).referral,undefined);
+});
