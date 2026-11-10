@@ -70,7 +70,11 @@ test('payment dialog command uses real SQL locks, JSON replay and isolated nativ
     resolveWhatsappChannelRole:()=> 'primary',OBJECTIVE_ID:'mass_sends',
     whatsappService:{normalizePhoneNumber:require('../../lib/phone').normalizePhoneDigits,sendMessage:async args=>{
       calls++;assert.equal(args.to,'34600000001');assert.equal(args.clinicConfig.originId,1);
-      assert.equal(args.healthContext.allowPaymentRecoveryProbe,true);assert.match(args.templateParams[1],/prueba, ignora este mensaje/);
+      assert.equal(args.healthContext.allowPaymentRecoveryProbe,true);
+      if(template.catalog_template_id===123){
+        assert.equal(args.templateName,'TESTONLY-configuration-v2');assert.equal(args.templateLanguage,'es');
+        assert.deepEqual(Array.from(args.templateParams),['TESTONLY clinic']);
+      }else assert.match(args.templateParams[1],/prueba, ignora este mensaje/);
       return {messages:[{id:'TESTONLY-accepted'}]};}},
     whatsappDeliveryGovernanceService:{recordImmediateSendResponse:async()=>({status:'accepted',providerMessageId:'TESTONLY-accepted'})},
   };
@@ -90,4 +94,37 @@ test('payment dialog command uses real SQL locks, JSON replay and isolated nativ
   assert.equal(sample.sent_at,null);assert.equal(sample.dispatch_status,null);
   await assert.rejects(nativeSend({clinicIds:[56]},diagnostic.id,{payment_recovery_probe:true}),{code:'payment_test_not_dispatchable'});
   report.checks.push('Native sendTest and native template-variable resolver with owned SQL records, exact diagnostic sender/recipient, pending acceptance, unchanged sample statistics, isolated audit and rejection of direct campaign endpoint replay. Only transport simulated.');
+  // The approved dedicated family uses a different variable contract from
+  // fallback114. Exercise the real native resolver and sender with one slot.
+  models.WhatsappTemplateCatalog={findOne:async({where})=>{
+    assert.deepEqual(where,{family_key:'clinicaclick_prueba_configuracion',locale:'es',is_active:true});return{id:123};}};
+  Object.assign(template,{id:2,catalog_template_id:123,name:'TESTONLY-configuration-v2',
+    variables:[{name:'nombre_clinica',index:1,position:1}],components:[{type:'BODY',
+      text:'Hola, este es un mensaje de prueba de configuración de Clinicaclick para {{1}}. No es necesario responder.'}]});
+  models.WhatsappTemplate.findOne=async({where})=>{
+    assert.equal(where.waba_id,asset.wabaId);assert.equal(where.catalog_template_id,123);
+    assert.equal(where.status,'APPROVED');assert.equal(where.language,'es');return template;};
+  asset.whatsappAuthorizationId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';asset.additionalData.payment={};
+  const configuration=createService({db:models,authorize:async()=>true,now:()=>new Date('2030-01-02T10:00:00Z'),
+    broker:{binding:async()=>({sendEnabled:true})},manual:{current:()=>false},payment:{derivePaymentSnapshot:data=>data.payment},
+    health:{summarizeAssetHealth:()=>({state:'healthy',reason_code:'provider_connected',provider_status:'CONNECTED',can_send:true})},
+    bulk:{sendTest:nativeSend}});
+  const dedicatedInput={...input,requestId:'33333333-3333-4333-8333-333333333333'};
+  const dedicated=await configuration.send(dedicatedInput);
+  assert.equal(dedicated.mode,'configuration');assert.equal(dedicated.template_name,template.name);
+  assert.equal(dedicated.preview,'Hola, este es un mensaje de prueba de configuración de Clinicaclick para TESTONLY clinic. No es necesario responder.');
+  const dedicatedMessage=await models.Message.findByPk(dedicated.app_message_id);
+  assert.equal(dedicatedMessage.content,dedicated.preview);assert.equal(dedicatedMessage.metadata.template_id,2);
+  assert.deepEqual(dedicatedMessage.metadata.template_params,['TESTONLY clinic']);
+  assert.equal(dedicatedMessage.metadata.template_name,template.name);assert.equal(dedicated.message_status,'pending');
+  assert.equal(dedicated.delivery_confirmed,false);assert.equal(dedicated.recovered,false);
+  assert.equal(asset.additionalData.payment.status,undefined);assert.equal(calls,3);
+  const dedicatedList=await models.MarketingPatientList.findByPk(dedicatedMessage.metadata.list_id);
+  const dedicatedSample=await models.MarketingPatientListItem.findByPk(dedicatedMessage.metadata.item_id);
+  assert.equal(dedicatedList.criteria.authorization_id,asset.whatsappAuthorizationId);
+  assert.equal(dedicatedList.criteria.payment_test_mode,'configuration');assert.equal(dedicatedList.status,'archived');
+  assert.equal(dedicatedSample.paciente_id,null);assert.equal(dedicatedSample.phone,null);assert.equal(dedicatedSample.selected,false);
+  assert.equal((await configuration.send(dedicatedInput)).app_message_id,dedicated.app_message_id);assert.equal(calls,3);
+  assert.equal(await models.MarketingPatientContactEvent.count(),2);
+  report.checks.push('Approved dedicated configuration family selects its exact WABA instance; native variable resolver supplies one nombre_clinica slot and persisted content equals service preview. Real diagnostic SQL retains authority, archived list, nonpatient sample and UUID replay; accepted remains pending without billing certification. Transport simulated only; no provider calls.');
 }));
