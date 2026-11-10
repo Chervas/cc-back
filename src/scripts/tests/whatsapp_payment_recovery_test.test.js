@@ -16,7 +16,7 @@ function fixture({evidence} = {}) {
   const db={
     ClinicMetaAsset:{findOne:async()=>asset},Clinica:{findByPk:async()=>({id_clinica:56,nombre_clinica:'TESTONLY clinic'})},
     WhatsappChannelBinding:{findOne:async()=>local},WhatsappTemplate:{findOne:async()=>template},
-    MarketingPatientList:{findOne:async({where})=>lists.find(row=>row.clinica_id===where.clinica_id&&row.created_by===where.created_by
+    MarketingPatientList:{findOne:async({where})=>lists.slice().reverse().find(row=>row.clinica_id===where.clinica_id&&row.created_by===where.created_by
       && Object.entries(where).filter(([key])=>key.startsWith('criteria.')).every(([key,value])=>row.criteria[key.slice(9)]===value)),
       create:async row=>{const record={...row,id:lists.length+1};lists.push(record);return record;}},
     MarketingPatientListItem:{create:async row=>{const record={...row,id:items.length+1};items.push(record);return record;}},
@@ -91,6 +91,54 @@ test('an older verified manual send does not confirm delivery of a new pending o
   const pending=await f.service.send(input);assert.equal(pending.configuration_test.verified,true);
   assert.equal(pending.delivery_confirmed,false);assert.equal(pending.message_status,'pending');
   f.messages[0].status='failed';assert.equal((await f.service.get(input)).delivery_confirmed,false);
+});
+test('a later payment failure starts recovery instead of automatically adopting an old configuration request',async()=>{
+  for(const terminal of ['delivered','failed']){
+  const f=fixture();f.asset.whatsappAuthorizationId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';f.asset.additionalData.payment={};
+  Object.assign(f.health,{state:'healthy',can_send:true,reason_code:'provider_connected'});
+  await f.service.send(input);f.messages[0].status=terminal;
+  f.asset.additionalData.payment={status:'missing_payment_method',last_error_code:131042,last_message_id:100,
+    last_detected_at:'2030-01-02T09:00:00Z'};
+  Object.assign(f.health,{state:'blocked',can_send:false,reason_code:'meta_error_131042_payment_missing'});
+  const recovery=await f.service.get({...input,requestId:undefined});
+  assert.equal(recovery.mode,'recovery');assert.equal(recovery.request_id,undefined);assert.equal(f.calls.length,1);
+  const history=await f.service.get(input);assert.equal(history.mode,'configuration');assert.equal(history.request_id,input.requestId);
+  assert.equal(history.message_status,terminal);assert.equal(history.delivery_confirmed,false);assert.equal(f.calls.length,1);
+  }
+});
+test('an older terminal recovery does not capture a later failure cycle, but its explicit UUID remains readable',async()=>{
+  for(const terminal of ['delivered','read','failed']){
+    const f=fixture();await f.service.send(input);f.messages[0].status=terminal;
+    f.asset.additionalData.payment.last_message_id=100;
+    const state=await f.service.get({...input,requestId:undefined});
+    assert.equal(state.mode,'recovery');assert.equal(state.request_id,undefined);
+    assert.equal((await f.service.get(input)).request_id,input.requestId);assert.equal(f.calls.length,1);
+  }
+});
+test('the current failed recovery and uncertain requests keep their UUID without repeating a send',async()=>{
+  for(const status of ['failed','pending','sent']){
+    const f=fixture();await f.service.send(input);f.messages[0].status=status;
+    f.asset.additionalData.payment.last_message_id=status==='failed'?f.messages[0].id:100;
+    assert.equal((await f.service.get({...input,requestId:undefined})).request_id,input.requestId);
+    assert.equal((await f.service.send(input)).request_id,input.requestId);assert.equal(f.calls.length,1);
+  }
+});
+test('a new explicit failed recovery request replaces the prior cycle for automatic adoption without duplicating either send',async()=>{
+  const f=fixture();await f.service.send(input);f.messages[0].status='delivered';
+  f.asset.additionalData.payment.last_message_id=100;f.asset.additionalData.payment.last_probe_at='2030-01-02T09:00:00Z';
+  assert.equal((await f.service.get({...input,requestId:undefined})).request_id,undefined);
+  f.behavior(async message=>{message.status='failed';message.metadata.wa_error=[{code:131042}];
+    f.asset.additionalData.payment.last_message_id=message.id;throw Error('TESTONLY-current-payment-failure');});
+  const next={...input,requestId:'22222222-2222-4222-8222-222222222222'};
+  assert.equal((await f.service.send(next)).message_status,'failed');
+  assert.equal((await f.service.get({...input,requestId:undefined})).request_id,next.requestId);
+  await f.service.send(next);assert.equal(f.calls.length,2);assert.equal(f.lists.length,2);
+});
+test('terminal recovery history with no comparable message ID uses the later provider-failure clock',async()=>{
+  const f=fixture();await f.service.send(input);f.messages[0].status='delivered';f.messages[0].updatedAt='2030-01-02T08:59:00Z';
+  assert.equal((await f.service.get({...input,requestId:undefined})).request_id,undefined);
+  f.messages[0].status='failed';f.messages[0].updatedAt='2030-01-02T09:00:00Z';
+  assert.equal((await f.service.get({...input,requestId:undefined})).request_id,input.requestId);assert.equal(f.calls.length,1);
 });
 test('the approved dedicated configuration family is preferred with its exact one-variable preview',async()=>{
   const f=fixture();f.db.WhatsappTemplateCatalog={findOne:async({where})=>{

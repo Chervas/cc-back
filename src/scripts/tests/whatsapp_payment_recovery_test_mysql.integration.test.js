@@ -35,6 +35,8 @@ test('payment dialog command uses real SQL locks, JSON replay and isolated nativ
   const replay=await service.send(input);assert.equal(replay.message_status,'pending');assert.equal(calls,1);
   assert.equal(await models.MarketingPatientList.count(),1);assert.equal(await models.Message.count(),1);
   assert.equal((await service.get(input)).app_message_id,replay.app_message_id);
+  const reopened=await service.get({...input,requestId:undefined});
+  assert.equal(reopened.request_id,input.requestId);assert.equal(reopened.mode,'recovery');assert.equal(reopened.message_status,'pending');
   await assert.rejects(service.send({...input,to:'+34 600 000 003'}),{code:'payment_test_request_conflict'});
   const [locks]=await sql.query("SELECT IS_FREE_LOCK('cc-wa-payment-test:1') AS available");assert.equal(Number(locks[0].available),1);
   report.checks.push('Real SQL GET_LOCK/release, concurrent duplicate prevention, durable JSON request replay, explicit recipient conflict, archived list and nonpatient sample. Transport simulated; no host/provider sockets.');
@@ -125,6 +127,9 @@ test('payment dialog command uses real SQL locks, JSON replay and isolated nativ
   assert.equal(dedicatedList.criteria.payment_test_mode,'configuration');assert.equal(dedicatedList.status,'archived');
   assert.equal(dedicatedSample.paciente_id,null);assert.equal(dedicatedSample.phone,null);assert.equal(dedicatedSample.selected,false);
   assert.equal((await configuration.send(dedicatedInput)).app_message_id,dedicated.app_message_id);assert.equal(calls,3);
+  const reopenedConfiguration=await configuration.get({...dedicatedInput,requestId:undefined});
+  assert.equal(reopenedConfiguration.request_id,dedicatedInput.requestId);assert.equal(reopenedConfiguration.mode,'configuration');
+  assert.equal(reopenedConfiguration.message_status,'pending');
   assert.equal(await models.MarketingPatientContactEvent.count(),2);
   report.checks.push('Approved dedicated configuration family selects its exact WABA instance; native variable resolver supplies one nombre_clinica slot and persisted content equals service preview. Real diagnostic SQL retains authority, archived list, nonpatient sample and UUID replay; accepted remains pending without billing certification. Transport simulated only; no provider calls.');
 }));

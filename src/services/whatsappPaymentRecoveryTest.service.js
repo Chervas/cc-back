@@ -49,13 +49,14 @@ function createService({ db = require('../../models'), bulk = require('./marketi
     const preview = compatible ? body.replace(/\{\{\s*([0-9]+)\s*\}\}/g,(_,index) => params[Number(index)-1]) : null;
     return { asset,clinic,template,availability,paymentSnapshot,health:snapshot,preview,mode,configurationTest,sendingEnabled };
   }
-  async function previous(input, asset, latest = false) {
+  async function previous(input, asset, latest = false, state = null) {
     if (!input.requestId && !latest) return null;
     if (input.requestId && (typeof input.requestId !== 'string' || !UUID.test(input.requestId))) fail('payment_test_request_invalid',400);
     const list = await db.MarketingPatientList.findOne({where:{clinica_id:input.clinicId,created_by:input.userId,
       source:'whatsapp_payment_recovery_test',...(input.requestId ? {'criteria.request_id':input.requestId}
         : {'criteria.sender_origin_id':Number(asset.id),'criteria.phone_number_id':asset.phoneNumberId,
-          'criteria.waba_id':asset.wabaId,'criteria.authorization_id':asset.whatsappAuthorizationId || null})},order:[['id','DESC']]});
+          'criteria.waba_id':asset.wabaId,'criteria.authorization_id':asset.whatsappAuthorizationId || null,
+          'criteria.payment_test_mode':state.mode})},order:[['id','DESC']]});
     if (!list) return null;
     if (Number(list.criteria?.sender_origin_id) !== Number(asset.id) || list.criteria?.phone_number_id !== asset.phoneNumberId
       || list.criteria?.waba_id !== asset.wabaId
@@ -65,6 +66,18 @@ function createService({ db = require('../../models'), bulk = require('./marketi
     const message = await db.Message.findOne({where:{'metadata.list_id':list.id,'metadata.kind':'mass_campaign_test'},order:[['id','DESC']]});
     if (message && (Number(message.metadata?.sender_origin_id) !== Number(asset.id)
       || message.metadata?.phoneNumberId !== asset.phoneNumberId || message.metadata?.wabaId !== asset.wabaId)) fail('payment_test_binding_changed');
+    if (!input.requestId && state?.mode === 'recovery' && ['delivered','read','failed'].includes(message?.status)) {
+      const payment = asset.additionalData?.payment || {};
+      const failureId = Number(payment.last_message_id), testId = Number(message.id);
+      const failureAt = Date.parse(payment.last_detected_at || '');
+      const terminalAt = Date.parse(message.updatedAt || message.createdAt || '');
+      const idsKnown = Number.isSafeInteger(failureId) && failureId > 0 && Number.isSafeInteger(testId) && testId > 0;
+      // A later normal-send rejection starts a new recovery cycle. Keep the
+      // current failed attempt and uncertain outcomes pinned to their UUID.
+      const laterFailure = idsKnown ? failureId > testId
+        : Number.isFinite(failureAt) && Number.isFinite(terminalAt) && failureAt > terminalAt;
+      if (laterFailure) return null;
+    }
     return {list,message};
   }
   function result(state, previousTest = null) {
@@ -86,7 +99,7 @@ function createService({ db = require('../../models'), bulk = require('./marketi
   }
   async function get(input) {
     const state = await context(input);
-    return result(state,await previous(input,state.asset,true));
+    return result(state,await previous(input,state.asset,true,state));
   }
   async function send(input) {
     if (typeof input.requestId !== 'string' || !UUID.test(input.requestId)) fail('payment_test_request_invalid',400);
