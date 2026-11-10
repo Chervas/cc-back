@@ -215,6 +215,9 @@ async function updateOwnedState(params, options = {}) {
   if (Object.prototype.hasOwnProperty.call(options, 'expectedJobRequestId')) {
     where.job_request_id = positiveInt(options.expectedJobRequestId);
   }
+  if (Object.prototype.hasOwnProperty.call(options, 'expectedSourceMessageId')) {
+    where.source_message_id = positiveInt(options.expectedSourceMessageId);
+  }
   const transaction = options.transaction || null;
   const patch = buildStatePatch({ ...params, clinicId: normalizedClinicId });
   const [affected] = await db.ConversationAutomationState.update(patch, {

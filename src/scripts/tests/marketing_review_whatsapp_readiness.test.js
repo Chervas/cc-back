@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const service = require('../../services/marketingBulkSends.service');
 const whatsappService = require('../../services/whatsapp.service');
+const db = require('../../../models');
 
 const {
   getReviewWabaIdForScope,
@@ -126,6 +127,41 @@ test('an approved admin review template may keep the category accepted by Meta',
   };
 
   assert.equal(isAllowedReviewRequestTemplateCopy(template), true);
+});
+
+test('an admin review copy binds the sender contract without requiring singular wording', () => {
+  const template = {
+    origin: 'custom', created_by_user_id: 1, category: 'UTILITY',
+    name: 'cc_custom_fictitious_review',
+    variables: [
+      { position: 1, name: 'nombre_paciente', template_usage: 'solicitud_resena' },
+      { position: 2, name: 'firma_resenas', template_usage: 'solicitud_resena' },
+    ],
+    components: [{ type: 'BODY', text: '¡Hola {{1}}! Somos {{2}} de Clínica ficticia.\n¿Cómo valorarías la atención recibida? Responde con un número:\n5 ⭐⭐⭐⭐⭐\n4 ⭐⭐⭐⭐\n3 ⭐⭐⭐\n2 ⭐⭐\n1 ⭐' }],
+  };
+  assert.equal(isAllowedReviewRequestTemplateCopy(template), true);
+  assert.equal(isAllowedReviewRequestTemplateCopy({ ...template, created_by_user_id: 123456 }), false);
+  assert.equal(isAllowedReviewRequestTemplateCopy({ ...template, origin: 'external' }), false);
+  assert.equal(isAllowedReviewRequestTemplateCopy({ ...template, variables: template.variables.map(v => ({ ...v, template_usage: 'promocion' })) }), false);
+  assert.equal(isAllowedReviewRequestTemplateCopy({ ...template, variables: template.variables.filter(v => v.name !== 'firma_resenas') }), false);
+  assert.equal(isAllowedReviewRequestTemplateCopy({ ...template, components: [{ type: 'BODY', text: 'Hola {{1}}. ¿Cómo valorarías la atención?\n5 ⭐⭐⭐⭐⭐\n4 ⭐⭐⭐⭐\n3 ⭐⭐⭐\n2 ⭐⭐\n1 ⭐' }] }), false);
+  assert.equal(isAllowedReviewRequestTemplateCopy({ ...template, components: [...template.components, { type: 'BUTTONS', buttons: [] }] }), false);
+  assert.equal(isAllowedReviewRequestTemplateCopy({ ...template, components: [{ type: 'BODY', text: template.components[0].text.replace('4 ⭐⭐⭐⭐', '') }] }), false);
+});
+
+test('prepare rejects an incompatible explicit review template before writing a preparation', async t => {
+  const list = { id: 99, clinica_id: 56, objective_id: 'mass_sends', channel: 'whatsapp',
+    criteria: { template_usage: 'solicitud_resena', whatsapp_template_id: 101 },
+    update: async () => { throw Error('No preparation may be persisted'); } };
+  t.mock.method(db.MarketingPatientList, 'findByPk', async () => list);
+  t.mock.method(whatsappService, 'getClinicConfig', async () => ({ wabaId: 'fictitious-waba' }));
+  t.mock.method(db.WhatsappTemplate, 'findByPk', async () => ({ id: 101, clinic_id: 56,
+    waba_id: 'fictitious-waba', name: 'custom', origin: 'custom', created_by_user_id: 1,
+    status: 'APPROVED', is_active: true, category: 'UTILITY',
+    components: [{ type: 'BODY', text: 'A different message {{1}}.' }], variables: [] }));
+  await assert.rejects(service.prepareCampaign({ scope: 'clinic', clinicIds: [56] }, 99), error =>
+    error.status === 409 && error.code === 'review_whatsapp_template_ineligible');
+  assert.equal(list.criteria.whatsapp_template_id, 101);
 });
 
 test('a clinic-specific approved photo template wins over the generic catalog copy', () => {

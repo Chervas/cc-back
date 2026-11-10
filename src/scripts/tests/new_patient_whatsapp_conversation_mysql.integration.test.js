@@ -16,7 +16,8 @@ test('new registration links only an unambiguous unowned chat before the real is
   db.Conversation=define('Conversation',{id:{type:D.INTEGER,primaryKey:true,autoIncrement:true},clinic_id:D.INTEGER,channel:D.STRING,
    contact_id:D.STRING,patient_id:D.INTEGER,lead_id:D.INTEGER,last_message_at:D.DATE,updatedAt:D.DATE,unread_count:D.INTEGER},'Conversations');
   db.Message=define('Message',{conversation_id:D.INTEGER,content:D.STRING},'Messages');
-  db.CitaPaciente=define('CitaPaciente',{clinica_id:D.INTEGER,paciente_id:D.INTEGER,estado:D.STRING},'CitasPacientes');
+  db.CitaPaciente=define('CitaPaciente',{id_cita:{type:D.INTEGER,primaryKey:true,autoIncrement:true},
+   clinica_id:D.INTEGER,paciente_id:D.INTEGER,lead_intake_id:D.INTEGER,estado:D.STRING},'CitasPacientes');
   db.PatientOperationalEvent=define('PatientOperationalEvent',{patient_id:D.INTEGER,event_type:D.STRING},'PatientOperationalEvents');
   await sql.sync();await db.Clinica.bulkCreate([{id_clinica:35},{id_clinica:72}]);
   const canonical=loadSource('../lib/canonical-conversation',{'../../models':db,'./phone':require('../../lib/phone'),
@@ -42,6 +43,19 @@ test('new registration links only an unambiguous unowned chat before the real is
   await t.test('registration without an existing chat does not create one; isolated sender creates it once',async()=>{
    await reset();const p=await patient();await sql.transaction(transaction=>link({db,patient:p,clinicId:35,transaction}));
    assert.equal(await db.Conversation.count(),0);const c=await lookup();assert.equal((await lookup()).id,c.id);
+   assert.equal(await db.Conversation.count(),1);
+  });
+  await t.test('a persisted booking proves the patient/lead relation without changing either chat or history',async()=>{
+   await reset();await patient();const c=await chat({patient_id:1,lead_id:20});
+   const m=await db.Message.create({conversation_id:c.id,content:'Fictitious lead history'});
+   await db.CitaPaciente.create({id_cita:501,clinica_id:35,paciente_id:1,lead_intake_id:20,estado:'info_enviada'});
+   const before=(await c.reload()).toJSON();
+   await assert.rejects(lookup(),e=>e.code==='whatsapp_contact_identity_conflict');
+   assert.equal((await lookup({linkedAppointmentId:501})).id,c.id);
+   assert.deepEqual((await c.reload()).toJSON(),before);
+   assert.equal((await m.reload()).content,'Fictitious lead history');
+   await db.CitaPaciente.update({lead_intake_id:21},{where:{id_cita:501}});
+   await assert.rejects(lookup({linkedAppointmentId:501}),e=>e.code==='whatsapp_contact_identity_conflict');
    assert.equal(await db.Conversation.count(),1);
   });
   for(const kind of ['foreign','lead','duplicate','shared_patient','other_clinic','foreign_suffix'])await t.test(kind+' cannot be silently attached',async()=>{

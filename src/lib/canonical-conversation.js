@@ -218,6 +218,7 @@ async function findCanonicalWhatsappConversation({
   createIfMissing = false,
   requireExactContact = false,
   isolatePatientContact = false,
+  linkedAppointmentId = null,
   readOnly = false,
   lastMessageAt = null,
   transaction = null,
@@ -241,6 +242,7 @@ async function findCanonicalWhatsappConversation({
     if (!transaction) return db.sequelize.transaction(owned => findCanonicalWhatsappConversation({
       clinicId, contactId, patientId, leadId, preserveExistingLead, createIfMissing, requireExactContact,
       isolatePatientContact, lastMessageAt, transaction: owned,
+      linkedAppointmentId,
     }));
     await db.Clinica.findByPk(normalizedClinicId, { transaction, lock: transaction.LOCK.SHARE });
     const patient = await db.Paciente.findByPk(patientId, { transaction, lock: transaction.LOCK.UPDATE });
@@ -319,8 +321,26 @@ async function findCanonicalWhatsappConversation({
   const requestedPhone = normalizePhoneE164(contactId);
   const exact = conversations.filter(c => normalizePhoneE164(c.contact_id) === requestedPhone);
   if (isolatePatientContact) {
+    // A booked patient's chat can retain its original lead link. Ordinary
+    // appointment sends may reuse it only when that exact booking proves the
+    // same patient/clinic/lead relationship. Mobile verification stays strict.
+    let bookedLeadMatches = false;
+    if (conversations.length === 1 && exact.length === 1 && exact[0].lead_id
+      && Number(exact[0].patient_id) === Number(patientId)
+      && Number.isSafeInteger(Number(linkedAppointmentId)) && Number(linkedAppointmentId) > 0) {
+      const appointment = await db.CitaPaciente.findOne({ where: {
+        id_cita: Number(linkedAppointmentId), clinica_id: normalizedClinicId,
+        paciente_id: Number(patientId), lead_intake_id: Number(exact[0].lead_id),
+      }, attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id'],
+      transaction, lock: transaction.LOCK.SHARE, raw: true });
+      bookedLeadMatches = !!appointment
+        && Number(appointment.id_cita) === Number(linkedAppointmentId)
+        && Number(appointment.clinica_id) === normalizedClinicId
+        && Number(appointment.paciente_id) === Number(patientId)
+        && Number(appointment.lead_intake_id) === Number(exact[0].lead_id);
+    }
     if (conversations.length !== 1 || exact.length !== 1
-      || Number(exact[0].patient_id) !== Number(patientId) || exact[0].lead_id) {
+      || Number(exact[0].patient_id) !== Number(patientId) || (exact[0].lead_id && !bookedLeadMatches)) {
       throw Object.assign(new Error('Es necesario revisar la conversación del nuevo teléfono.'),
         { code: 'whatsapp_contact_identity_conflict', status: 409 });
     }

@@ -4445,6 +4445,7 @@ async function handleSendWhatsapp(node, context, runtime) {
   conversation = await findCanonicalWhatsappConversation({
     requireExactContact: true,
     isolatePatientContact: !!operational || isolateAppointmentContact,
+    linkedAppointmentId: !operational && isolateAppointmentContact ? targets.appointment_id : null,
     clinicId,
     contactId: recipientData.recipient,
     patientId: targetPatientId,
@@ -4490,6 +4491,7 @@ async function handleSendWhatsapp(node, context, runtime) {
     conversation = await findCanonicalWhatsappConversation({
       requireExactContact: true,
       isolatePatientContact: !!operational || isolateAppointmentContact,
+      linkedAppointmentId: !operational && isolateAppointmentContact ? targets.appointment_id : null,
       clinicId,
       contactId: recipientData.recipient,
       patientId: targetPatientId,
@@ -5643,6 +5645,13 @@ async function handleSendSystemNotification(node, context, runtime) {
   const config = node?.config && typeof node.config === 'object' ? node.config : {};
   let targets = resolveRuntimeTargets(runtime?.execution, context);
   targets = await backfillRuntimeTargets(runtime?.execution, targets);
+
+  const responseConversationId = toIntOrNull(context?.last_response_context?.response_conversation_id);
+  if (responseConversationId && responseConversationId !== toIntOrNull(targets.conversation_id)) {
+    const owned = await require('../lib/automation-response-conversation')
+      .ownedResponseConversation(db, runtime?.execution, context, targets.conversation_id);
+    if (owned) targets.conversation_id = owned.conversationId;
+  }
 
   const clinicId = toIntOrNull(targets.clinic_id);
   if (!clinicId) {
@@ -7896,7 +7905,7 @@ async function resumeWaitingNode(execution, node, context, {
         );
       const inboundMessage = inboundMessageId
         ? await Message.findByPk(inboundMessageId, {
-            attributes: ['id', 'message_type', 'content', 'metadata', 'sent_at', 'createdAt'],
+            attributes: ['id', 'conversation_id', 'message_type', 'content', 'metadata', 'sent_at', 'createdAt'],
             raw: true,
           })
         : null;
@@ -7977,6 +7986,7 @@ async function resumeWaitingNode(execution, node, context, {
           response_rating: responseRating,
           response_rating_reason: responseRatingReason,
           response_message_id: toIntOrNull(inboundMessage?.id),
+          response_conversation_id: toIntOrNull(inboundMessage?.conversation_id),
           response_message_type: cleanString(inboundMessage?.message_type) || null,
           response_message_preview: cleanString(inboundMessage?.content) || null,
           response_media_kind: mediaKind || null,
@@ -8286,16 +8296,30 @@ function hasExternallyResolvedAppointmentIntent(context = {}, normalizedIntent =
 async function syncConversationAutomationStateAfterExecution(execution, { nodes = execution?.templateVersion?.nodes } = {}) {
   if (!execution || !db.ConversationAutomationState) return;
   const context = execution.context && typeof execution.context === 'object' ? execution.context : {};
-  const conversationId = toIntOrNull(
+  let conversationId = toIntOrNull(
     context?.conversation?.id
     || context?.trigger?.data?.conversation_id
     || (cleanString(execution.trigger_entity_type) === 'conversation' ? execution.trigger_entity_id : null)
   );
   if (!conversationId) return;
-  const state = await db.ConversationAutomationState.findOne({
+  let state = await db.ConversationAutomationState.findOne({
     where: { conversation_id: conversationId },
   });
+  let responseOwned = false;
+  const responseConversationId = toIntOrNull(context?.last_response_context?.response_conversation_id);
+  if (!state || (responseConversationId && responseConversationId !== conversationId)) {
+    const owned = await require('../lib/automation-response-conversation')
+      .ownedResponseConversation(db, execution, context, conversationId);
+    if (owned) {
+      conversationId = owned.conversationId;
+      state = owned.state;
+      responseOwned = true;
+    }
+  }
   if (!state || Number(state.execution_id) !== Number(execution.id)) return;
+
+  const stateWriteOptions = { expectedExecutionId: execution.id,
+    ...(responseOwned ? { expectedSourceMessageId: state.source_message_id } : {}) };
 
   const executionStatus = cleanString(execution.status)?.toLowerCase();
   if (executionStatus === 'cancelled' && execution.last_error === 'inbound_recovery_requires_review') return;
@@ -8303,10 +8327,10 @@ async function syncConversationAutomationStateAfterExecution(execution, { nodes 
     // Stopping a flow must not mark an unanswered patient reply as attended.
     if (state.source_message_id || context?.last_response_context?.response_message_id) {
       await conversationAutomationState.failState({ clinicId: execution.clinic_id, conversationId,
-        failureCode: 'automation_deactivated' }, { expectedExecutionId: execution.id });
+        failureCode: 'automation_deactivated' }, stateWriteOptions);
     } else {
       await conversationAutomationState.completeState({ clinicId: execution.clinic_id, conversationId,
-        failureCode: 'automation_deactivated' }, { expectedExecutionId: execution.id });
+        failureCode: 'automation_deactivated' }, stateWriteOptions);
     }
     return;
   }
@@ -8341,9 +8365,7 @@ async function syncConversationAutomationStateAfterExecution(execution, { nodes 
         needsResponse: false,
         manualActionRequired: false,
         completedAt: new Date(),
-      }, {
-        expectedExecutionId: execution.id,
-      });
+      }, stateWriteOptions);
     }
     return;
   }
@@ -8352,9 +8374,7 @@ async function syncConversationAutomationStateAfterExecution(execution, { nodes 
       clinicId: execution.clinic_id,
       conversationId,
       failureCode: `flow_${executionStatus}`,
-    }, {
-      expectedExecutionId: execution.id,
-    });
+    }, stateWriteOptions);
     return;
   }
   if (!['completed', 'cancelled'].includes(executionStatus)) return;
@@ -8452,9 +8472,7 @@ async function syncConversationAutomationStateAfterExecution(execution, { nodes 
       needsResponse: pendingResponse,
       manualActionRequired: true,
       completedAt: new Date(),
-    }, {
-      expectedExecutionId: execution.id,
-    });
+    }, stateWriteOptions);
     return;
   }
   await conversationAutomationState.completeState({
@@ -8469,9 +8487,7 @@ async function syncConversationAutomationStateAfterExecution(execution, { nodes 
       : (confirmationOutcome || rebookingOutcome ? false : undefined),
     needsResponse: normalized || confirmationOutcome || rebookingOutcome ? false : undefined,
     failureCode: normalized || confirmationOutcome || rebookingOutcome ? null : undefined,
-  }, {
-    expectedExecutionId: execution.id,
-  });
+  }, stateWriteOptions);
 }
 
 async function resolveSingleNoticeRuntime(execution, template, latest) {

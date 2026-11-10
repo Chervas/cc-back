@@ -4303,9 +4303,22 @@ function reviewTemplateMatchesCurrentCatalogBody(template) {
 
 function isAdminCustomReviewTemplate(template) {
   const plain = template?.get ? template.get({ plain: true }) : (template || {});
-  return String(plain.origin || '').toLowerCase() === 'custom'
-    && isGlobalAdmin(plain.created_by_user_id)
-    && isStarTextReviewBody(extractBodyText(plain.components));
+  if (String(plain.origin || '').toLowerCase() !== 'custom'
+    || !isGlobalAdmin(plain.created_by_user_id)) return false;
+  const body = extractBodyText(plain.components);
+  if (isStarTextReviewBody(body)) return true;
+
+  // A global administrator may use another approved wording (e.g. "Somos").
+  // Bind the sender by its declared variable contract, not a literal phrase.
+  const declaredUsage = Array.isArray(plain.variables)
+    ? plain.variables.some(variable => isReviewTemplateUsage(variable?.template_usage || variable?.usage))
+    : isReviewTemplateUsage(plain.variables?.template_usage);
+  if (!declaredUsage || templateHasButtonComponents(plain)) return false;
+  const sender = buildWhatsappTemplateVariableContract(plain)
+    .find(variable => variable.name === 'firma_resenas');
+  if (!sender || !new RegExp(`\\{\\{\\s*${Number(sender.index || sender.position)}\\s*\\}\\}`).test(body)) return false;
+  const positions = [5, 4, 3, 2, 1].map(rating => body.search(new RegExp(`${rating}\\s*[⭐★]{${rating}}`)));
+  return positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1]));
 }
 
 function isApprovedExternalReviewRequestTemplate(template) {
@@ -8129,6 +8142,13 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     template = await findApprovedReviewWhatsappTemplate(scope, selectedTemplateId || null, {
       preferPhoto: isHttpsUrl(reviewTeamPhotoUrlForSelection),
     });
+    if (needsWhatsappTemplate && selectedTemplateId && !template) {
+      const error = new Error('La plantilla de reseñas seleccionada no es compatible con este envío. Revisa su aprobación, el número emisor y la imagen antes de volver a preparar la prueba.');
+      error.code = 'review_whatsapp_template_ineligible';
+      error.status = 409;
+      error.details = { template_id: Number(selectedTemplateId) };
+      throw error;
+    }
   } else {
     template = selectedTemplateId
       ? await resolveWhatsappTemplate(selectedTemplateId, scope)
