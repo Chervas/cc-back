@@ -13,6 +13,22 @@ const identity = { account_id: '500', campaign_id: '600', ad_id: '400', adset_id
 const notification = (patch = {}) => ({ object: 'page', entry: [{ id: '200', changes: [{ field: 'leadgen', value: {
   leadgen_id: '100', page_id: '200', form_id: '300', ad_id: '400', ...patch,
 } }] }] });
+
+test('a native lead invalidation happens after commit, never on rollback', async () => {
+  const h = harness();
+  const retrieved = await retrieveMetaLead({ models: h.models, event, reader: h.reader, receiptRef, pageAssetId: 10, accountAssetId: 11 });
+  const original = h.models.sequelize.transaction;
+  let committed = false, published = 0;
+  h.models.sequelize.transaction = async fn => { const value = await original(fn); committed = true; return value; };
+  await persistMetaLead({ models: h.models, event, retrieved, publishCreated: result => {
+    assert.equal(committed, true); assert.equal(result.duplicate, false); published++;
+  } });
+  assert.equal(published, 1);
+  const failed = harness({ auditError: true });
+  const other = await retrieveMetaLead({ models: failed.models, event, reader: failed.reader, receiptRef, pageAssetId: 10, accountAssetId: 11 });
+  await assert.rejects(persistMetaLead({ models: failed.models, event, retrieved: other, publishCreated: () => assert.fail('uncommitted lead') }));
+  assert.equal(failed.state.leads.length, 0);
+});
 function harness(patch = {}) {
   const state = { leads: [], audits: [], forms: [], notifications: [], graph: [], rollback: 0,
     page: { id: 10, metaAssetId: '200', metaConnectionId: 1, pageAccessToken: 'page-secret',

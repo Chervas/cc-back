@@ -144,8 +144,8 @@ async function receivingClinic({ models, context, identity, transaction = null }
   return clinic;
 }
 
-async function persistGoogleLead({ models, context, parsed, now = new Date(), beforePersist = null }) {
-  return models.sequelize.transaction(async transaction => {
+async function persistGoogleLead({ models, context, parsed, now = new Date(), beforePersist = null, publishCreated = require('./leadCreatedRealtime.service').publishLeadCreated }) {
+  const result = await models.sequelize.transaction(async transaction => {
     await beforePersist?.();
     const fresh = await receptionAccount({ models, settingId: context.setting.id, accountId: parsed.identity.account_id, transaction, now,
       expectedBrokerGrant: context.brokerGrant });
@@ -185,6 +185,8 @@ async function persistGoogleLead({ models, context, parsed, now = new Date(), be
     await beforePersist?.();
     return { lead, duplicate: false };
   });
+  publishCreated(result);
+  return result;
 }
 
 function managedReceptionGate(env, now) {

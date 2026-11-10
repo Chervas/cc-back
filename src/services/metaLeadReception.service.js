@@ -248,9 +248,9 @@ function contactFields(lead) {
     email: validEmail, telefono: validPhone, email_hash: hash(validEmail), phone_hash: hash(validPhone) };
 }
 
-async function persistMetaLead({ models, event, retrieved, now = new Date() }) {
+async function persistMetaLead({ models, event, retrieved, now = new Date(), publishCreated = require('./leadCreatedRealtime.service').publishLeadCreated }) {
   const contact = contactFields(retrieved.lead);
-  return models.sequelize.transaction(async transaction => {
+  const result = await models.sequelize.transaction(async transaction => {
     const clinic = await resolveMetaLeadClinic({ models, event, ...retrieved, transaction });
     if (Number(clinic.id_clinica) !== Number(retrieved.clinic.id_clinica)) fail('meta_lead_clinic_scope_mismatch');
     const existing = await models.LeadIntake.findOne({ where: { external_source: 'meta_leadgen', external_id: event.lead_id },
@@ -286,6 +286,8 @@ async function persistMetaLead({ models, event, retrieved, now = new Date() }) {
     });
     return { lead, duplicate: false };
   });
+  publishCreated(result);
+  return result;
 }
 
 async function runMetaLeadReceptionJob(payload, job = null, overrides = {}) {
