@@ -7,7 +7,7 @@ const { loadWorkspaceInventory } = require('./campaignWorkspace.service');
 const { accountAliases } = require('./campaignWorkspaceReport.service');
 const { settingScope, campaignIncluded } = require('./campaignWorkspaceSettings.service');
 const { assignmentClinics, createReviewedAssignment } = require('./campaignWorkspaceAssignment.service');
-const { findManagedCampaignAssociationAccountScope } = require('./managedCampaignAssociationScopes.service');
+const { findManagedCampaignAssociationAccountScope, prepareAssociationTransaction } = require('./managedCampaignAssociationScopes.service');
 
 const fail = (code, status = 409) => { throw Object.assign(new Error(code), { code, status }); };
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -98,7 +98,9 @@ async function assignSharedAccountCampaigns(options) {
   const { models, scope, actorId, input } = options;
   if (!validateAssignment(input) || new Set(input.campaigns.map(row => row.campaign_id)).size !== input.campaigns.length) fail('invalid_shared_account_assignment', 400);
   const reference = sharedAccountReference({ provider: input.provider, account_id: input.account_id });
+  const lockAuthority = await prepareAssociationTransaction({ models, provider: reference.provider, accountId: reference.account_id });
   return models.sequelize.transaction(async transaction => {
+    if (lockAuthority) await lockAuthority(transaction);
     const context = await sharedAccountContext({ ...options, reference, transaction });
     if (context.revision !== input.revision) fail('workspace_shared_account_changed');
     if (!assignmentClinics(context.clinics).some(row => row.id === input.clinic_id)) fail('workspace_assignment_clinic_forbidden', 403);

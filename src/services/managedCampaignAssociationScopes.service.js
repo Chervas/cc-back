@@ -5,6 +5,54 @@ const db = require('../../models');
 
 const SUPPORTED_PROVIDERS = new Set(['google_ads', 'meta_ads']);
 const VISIBLE_AUTHORIZATION_STATUSES = new Set(['active', 'reauthorization_required']);
+const brokerMappingAuthorization = new WeakMap();
+
+async function prepareAssociationTransaction({ models, provider, accountId }) {
+  if (provider !== 'meta_ads' || !models.MetaMarketingBrokerBinding) return null;
+  const rows = await models.MetaMarketingBrokerBinding.findAll({
+    where: { asset_ref: `meta-ad_account:${cleanAccountId(accountId)}` },
+    attributes: ['enrollment_id'], raw: true, logging: false,
+  });
+  if (!rows.length) return null;
+  const ids = [...new Set(rows.map(row => row.enrollment_id))];
+  const unavailable = () => { throw Object.assign(Error('workspace_meta_authority_changed'), { code: 'workspace_meta_authority_changed', status: 409 }); };
+  if (ids.length !== 1 || !ids[0]) unavailable();
+  const order = require('./metaMarketingTransactionOrder.service').createOrder({ models, unavailable });
+  const prepared = await order.prepareEnrollment(ids[0]);
+  if (!prepared) unavailable();
+  return transaction => order.lockPrepared(prepared, transaction);
+}
+
+async function authorizeBrokerMetaMappings({ models, mappings, transaction = null, createScope = null }) {
+  if (!mappings.length || !models.MetaMarketingBrokerBinding) return;
+  const bindings = await models.MetaMarketingBrokerBinding.findAll({
+    where: { mapping_id: { [Op.in]: mappings.map(row => row.id) } },
+    attributes: ['mapping_id'], raw: true, transaction, logging: false,
+  });
+  const registered = new Set(bindings.map(row => Number(row.mapping_id)));
+  if (!registered.size) return;
+  const factory = createScope || (() => {
+    const metadata = require('./metaMarketingBrokerScope.service');
+    return metadata.createMetaMarketingBrokerScope(metadata.createMetaMarketingScopeRepository(() => models, { transaction }));
+  });
+  const scope = factory();
+  for (const mapping of mappings) {
+    if (!registered.has(Number(mapping.id))) continue;
+    // A broker mapping never falls back to a legacy user grant. Reuse the
+    // canonical metadata authority (including revocation/enrollment checks),
+    // within the caller's transaction; no token or provider request is needed.
+    brokerMappingAuthorization.set(mapping, null);
+    try {
+      const context = await scope.prepare(Number(mapping.id));
+      const current = await scope.assertContext(context);
+      if (current.kind !== 'ad_account' || current.id !== cleanAccountId(mapping.metaAssetId)
+        || current.connectionId !== Number(mapping.metaConnectionId)) continue;
+      brokerMappingAuthorization.set(mapping, {
+        origin: mapping.assignmentScope === 'group' ? 'group' : 'clinic', status: 'active',
+      });
+    } catch (_) { /* Missing/expired/revoked authority remains unselectable. */ }
+  }
+}
 
 function positiveInt(value) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -91,7 +139,9 @@ function accountCandidate({ mapping, provider, groupId, eligibleClinicIds, assig
     : mapping?.metaAssetId ?? mapping?.meta_asset_id;
   const accountId = cleanAccountId(rawAccountId);
   if (!accountId) return null;
-  const authorization = authorizationForMapping({ mapping, provider, groupId, eligibleClinicIds, assignments });
+  const authorization = provider === 'meta_ads' && brokerMappingAuthorization.has(mapping)
+    ? brokerMappingAuthorization.get(mapping)
+    : authorizationForMapping({ mapping, provider, groupId, eligibleClinicIds, assignments });
   if (!authorization) return null;
 
   const accountName = cleanString(provider === 'google_ads'
@@ -374,7 +424,7 @@ async function listAssociationOptions({
     () => models.ClinicMetaAsset.findAll({
       where: { isActive: true, assetType: 'ad_account', ...scopeWhere },
       attributes: [
-        'clinicaId', 'grupoClinicaId', 'assignmentScope', 'metaConnectionId',
+        'id', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'metaConnectionId',
         'assetType', 'metaAssetId', 'metaAssetName', 'isActive',
       ],
       raw: true,
@@ -413,6 +463,7 @@ async function listAssociationOptions({
     loaded.push(...await Promise.all(loaders.map((load) => load())));
   }
   const [groups, googleAccounts, metaAssets, googleAssignments, metaAssignments] = loaded;
+  await authorizeBrokerMetaMappings({ models, mappings: metaAssets, transaction });
 
   return buildAssociationOptions({
     groups,
@@ -511,7 +562,7 @@ async function findManagedCampaignAssociationAccountScope({
         'customerId', 'descriptiveName', 'isActive',
       ]
     : [
-        'clinicaId', 'grupoClinicaId', 'assignmentScope', 'metaConnectionId',
+        'id', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'metaConnectionId',
         'assetType', 'metaAssetId', 'metaAssetName', 'isActive',
       ];
   const assignmentAttributes = normalizedProvider === 'google_ads'
@@ -549,6 +600,7 @@ async function findManagedCampaignAssociationAccountScope({
     [mappings, assignments] = await Promise.all([loadMappings(), loadAssignments()]);
   }
   const eligibleClinicIds = new Set([normalizedClinicId]);
+  if (normalizedProvider === 'meta_ads') await authorizeBrokerMetaMappings({ models, mappings, transaction });
   const account = dedupeAccountCandidates(mappings.map((mapping) => accountCandidate({
     mapping,
     provider: normalizedProvider,
@@ -599,6 +651,8 @@ async function upsertInventoryWithinScope({
 }
 
 module.exports = {
+  authorizeBrokerMetaMappings,
+  prepareAssociationTransaction,
   buildAssociationOptions,
   findAssociationAccountInOptions,
   findAssociationAccountScope,

@@ -431,6 +431,9 @@ async function runLeadCallbackReminderJob(payload = {}, jobRequest = null) {
     data: {
       link: '/marketing/leads',
       useRouter: true,
+      kind: 'lead_callback_reminder',
+      displayMode: 'persistent_alert',
+      requiresAcknowledgement: true,
       leadId: lead.id,
       clinicId: lead.clinica_id || null,
       reminderAt: reminderAt.toISOString(),

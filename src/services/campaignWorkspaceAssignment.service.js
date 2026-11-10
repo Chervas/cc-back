@@ -4,7 +4,7 @@ const Ajv = require('ajv');
 const { Op } = require('sequelize');
 const { loadWorkspaceInventory } = require('./campaignWorkspace.service');
 const { settingScope, campaignIncluded } = require('./campaignWorkspaceSettings.service');
-const { findAssociationAccountScope, saveAssignmentWithinScope } = require('./managedCampaignAssociationScopes.service');
+const { findAssociationAccountScope, saveAssignmentWithinScope, prepareAssociationTransaction } = require('./managedCampaignAssociationScopes.service');
 const { appendAssignmentAudit, buildChanges, AUDIT_EVENT_TYPES } = require('./externalCampaignAssignmentTargets.service');
 const { accountAliases } = require('./campaignWorkspaceReport.service');
 
@@ -30,7 +30,9 @@ async function assignWorkspaceCampaign({ models, scope, actorId, input, loadInve
   if (!Number.isSafeInteger(actorId) || actorId <= 0) fail('unauthenticated', 401);
   if (!validate(input)) fail('invalid_workspace_assignment', 400);
   if (!scope.groupId || scope.isAll) fail('workspace_assignment_group_required', 400);
+  const lockAuthority = await prepareAssociationTransaction({ models, provider: input.provider, accountId: input.account_id });
   return models.sequelize.transaction(async transaction => {
+    if (lockAuthority) await lockAuthority(transaction);
     if (!await models.GrupoClinica.findByPk(scope.groupId, { transaction, lock: transaction.LOCK.UPDATE })) fail('scope_not_found', 404);
     const clinics = await models.Clinica.findAll({ where: { grupoClinicaId: scope.groupId },
       attributes: ['id_clinica', 'nombre_clinica', 'estado_clinica'], raw: true, transaction, lock: transaction.LOCK.UPDATE });

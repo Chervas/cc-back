@@ -62,6 +62,16 @@ function packetFor(event, payload) {
       body.data.requiresAcknowledgement = true;
       body.data.clinicId = Number(body.clinicaId);
     }
+    if (body.event === 'crm.call_back_reminder'
+      && payload.data?.kind === 'lead_callback_reminder'
+      && payload.data?.displayMode === 'persistent_alert'
+      && payload.data?.requiresAcknowledgement === true
+      && positive(body.data.leadId) && positive(body.clinicaId)) {
+      body.data.kind = 'lead_callback_reminder';
+      body.data.displayMode = 'persistent_alert';
+      body.data.requiresAcknowledgement = true;
+      body.data.clinicId = Number(body.clinicaId);
+    }
     if (mobileReview) {
       // This domain review opens its exact patient, never an inherited chat.
       // Reconstruct the local URL rather than permitting arbitrary query strings.

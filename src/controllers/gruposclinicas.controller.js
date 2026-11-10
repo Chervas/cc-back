@@ -273,7 +273,9 @@ exports.updateGroup = async (req, res) => {
     if (clinicIds.length && payload.ads && payload.ads.mode) {
       const { job: metaJob } = await jobRequestsService.enqueueUniqueJobRequest({
         type: 'meta_ads_recent',
-        payload: { clinicIds },
+        // Group assets have no representative clinic after broker enrollment.
+        // The existing group filter also covers clinic-owned assets in it.
+        payload: { groupIds: [groupId] },
         priority: 'high',
         origin: 'group:update',
         requestedBy: req.userData?.userId || null,
