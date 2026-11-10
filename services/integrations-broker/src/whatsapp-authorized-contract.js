@@ -35,8 +35,10 @@ function definitionComponents(raw) {
 }
 function templateDigest(raw) { return createHash('sha256').update(canonical(definitionComponents(raw))).digest('hex'); }
 function validateMessage(message, { provider = false } = {}) {
-  requireValue(keys(message, ['messaging_product','to','type', message?.type], ['recipient_type']) && message.messaging_product === 'whatsapp'
-    && typeof message.to === 'string' && /^\+?[1-9][0-9]{6,14}$/.test(message.to) && (!Object.hasOwn(message, 'recipient_type') || message.recipient_type === 'individual'));
+  const byUser=typeof message?.recipient==='string' && /^[A-Z]{2}\.[A-Za-z0-9]{1,128}$/.test(message.recipient);
+  const destination=byUser?'recipient':'to';
+  requireValue(keys(message, ['messaging_product',destination,'type', message?.type], ['recipient_type']) && message.messaging_product === 'whatsapp'
+    && (byUser || typeof message.to === 'string' && /^\+?[1-9][0-9]{6,14}$/.test(message.to)) && (!Object.hasOwn(message, 'recipient_type') || message.recipient_type === 'individual'));
   if (message.type === 'text') requireValue(keys(message.text, ['body'], ['preview_url']) && text(message.text.body)
     && (!Object.hasOwn(message.text, 'preview_url') || typeof message.text.preview_url === 'boolean'));
   else if (message.type === 'image') {

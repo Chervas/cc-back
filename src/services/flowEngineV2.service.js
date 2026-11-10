@@ -2042,14 +2042,14 @@ function deriveConfirmAppointmentOutput(signalOutput = {}, { patientText = '', r
     .replace(/\s+/g, ' ').replace(/\s+([.,!?;:])/g, '$1').trim();
   const text = normalizeEvidence(patientText);
   const confirmationEvidence = normalizeEvidence(signalOutput.evidencia_confirmacion);
-  const hasWrittenEvidence = !!confirmationEvidence && text.includes(confirmationEvidence);
+  const hasWrittenEvidence = require('../lib/automation-literal-evidence').matches(patientText,signalOutput.evidencia_confirmacion);
   const reactionId = Number(signalOutput.id_confirmacion_por_reaccion);
   // The event ID is verified directly; certainty of its meaning is checked below.
   const hasReactionEvidence = Number.isSafeInteger(reactionId) && reactionId > 0
     && responseItems.some(item => item.content_type === 'reaction' && Number(item.message_id) === reactionId
       && item.emoji && item.target_message_preview);
   const pendingEvidence = normalizeEvidence(signalOutput.evidencia_asunto_pendiente);
-  const hasPendingEvidence = !!pendingEvidence && text.includes(pendingEvidence);
+  const hasPendingEvidence = require('../lib/automation-literal-evidence').matches(patientText,signalOutput.evidencia_asunto_pendiente);
   // A quote from outside the current patient batch invalidates the proposed decision.
   const evidenceVerified = (hasWrittenEvidence || hasReactionEvidence) && (!pendingEvidence || hasPendingEvidence);
   const certainDecision = evidenceVerified && signalOutput.confirmacion_condicionada_o_incierta === false

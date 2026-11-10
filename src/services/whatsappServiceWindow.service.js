@@ -151,10 +151,11 @@ async function resolveWhatsappServiceWindow({
   }
 
   const nowMs = timestampMs(now) || Date.now();
-  const windowStart = new Date(nowMs - windowMs);
+  const identityWindow=await require('./whatsappContactIdentity.service').windowContext(conversation,{transaction});
+  const windowStart = new Date(Math.max(nowMs-windowMs,identityWindow.notBefore ? +new Date(identityWindow.notBefore) : 0));
   const messages = await messageModel.findAll({
     where: {
-      conversation_id: conversationId,
+      conversation_id: { [Op.in]: identityWindow.ids },
       direction: 'inbound',
       [Op.or]: [
         { sent_at: { [Op.gte]: windowStart } },
@@ -175,7 +176,7 @@ async function resolveWhatsappServiceWindow({
   return evaluateWhatsappServiceWindow({
     messages,
     activePhoneNumberId,
-    conversationLastInboundAt: conversation?.last_inbound_at || null,
+    conversationLastInboundAt: identityWindow.allowLegacy ? conversation?.last_inbound_at || null : null,
     now,
     windowMs,
   });

@@ -693,6 +693,7 @@ async function applyCommunicationOptOut({
     return { applied: false, reason: 'missing_context' };
   }
 
+  if(require('../lib/whatsapp-contact-identity').parseContact(conversation.contact_id))return require('./whatsappContactIdentity.service').restrict({conversation,inboundMessage,scope:normalizedScope});
   const normalized = normalizePhone(conversation?.contact_id || inboundMessage?.metadata?.from || '');
   if (!normalized.phoneDigits) return { applied: false, reason: 'phone_not_found' };
 
@@ -834,6 +835,7 @@ async function applyInboundOptOutIfNeeded({ clinicId, conversation, inboundMessa
     return { applied: false, reason: 'keyword_not_found' };
   }
 
+  if(require('../lib/whatsapp-contact-identity').parseContact(conversation.contact_id))return require('./whatsappContactIdentity.service').restrict({conversation,inboundMessage,scope:classification.intent==='wrong_recipient'?'wrong_recipient':'marketing'});
   return applyInboundContactClassification({
     clinicId,
     conversation,

@@ -3,7 +3,7 @@
 const { normalizePhoneE164 } = require('../lib/phone');
 const EVENT = 'patient.whatsapp_phone_changed';
 
-// The patient's number changes; an existing conversation's identity never does.
+// Transport identities stay immutable; QuickChat presents one linked history.
 // This event is committed with the patient edit and does not send a WhatsApp.
 async function record({ db, patientId, clinicId, previousPhone, nextPhone, actorId, transaction, emit }) {
   const previous = normalizePhoneE164(previousPhone), next = normalizePhoneE164(nextPhone);
@@ -22,6 +22,10 @@ async function record({ db, patientId, clinicId, previousPhone, nextPhone, actor
     event_type: EVENT, source: 'patient_contact_change', channel: 'internal', occurred_at: new Date(),
     metadata: { version: 1, previous_phone: previous, current_phone: next },
   }, { transaction }));
+  if(db.sequelize && db.Conversation?.sequelize===db.sequelize) {
+    const identityService=require('./whatsappContactIdentity.service');
+    for(const id of clinics) await identityService.reconcilePatientChange({patientId,clinicId:id,previousPhone:previous,nextPhone:next,actorId,transaction,database:db});
+  }
   transaction.afterCommit(() => {
     if(emit)return emit({patientId,clinics,conversations});
     const io = require('./socket.service').getIO();

@@ -31,6 +31,7 @@ async function tick() {
         const conversation = message && await db.Conversation.findByPk(message.conversation_id, { transaction });
         const b = bindings.find(b => b.clinicId === Number(conversation?.clinic_id)
           && b.phoneId === message?.metadata?.phone_number_id && b.wabaId === message?.metadata?.waba_id);
+        if(eligible(message,conversation,b,cutoff) && await require('./whatsappContactIdentity.service').reviewSupersededInbound({message,conversation,transaction})) {held++;return;}
         const currentHealth = reception.read();
         const messageHealth = await reception.forConversation(currentHealth, conversation, bindings,
           (...args) => db.sequelize.query(...args), { transaction });

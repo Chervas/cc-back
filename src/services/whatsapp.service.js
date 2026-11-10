@@ -334,6 +334,10 @@ class WhatsAppService {
     }
 
     async assertRecipientCanReceive({ to, clinicConfig = {} }) {
+        if(require('../lib/whatsapp-contact-identity').parseContact(to)) {
+            await require('./whatsappContactIdentity.service').assertDestination(to,clinicConfig); return;
+        }
+        await require('./whatsappContactIdentity.service').assertPhoneEndpointCurrent(to,clinicConfig);
         const phoneDigits = String(this.normalizePhoneNumber(to) || to || '').replace(/\D+/g, '');
         const clinicId = Number(clinicConfig.clinicId || clinicConfig.clinicaId || 0);
         if (!phoneDigits || !clinicId) return;
@@ -669,6 +673,7 @@ class WhatsAppService {
             } else commercial ||= metaMarketing;
         }
         if (!commercial) return;
+        await require('./whatsappContactIdentity.service').assertPhoneEndpointCurrent(payload.to,clinicConfig,{commercial:true});
         let patientId = null;
         if (message?.conversation_id) {
             const conversation = await db.Conversation.findByPk(message.conversation_id, { attributes: ['clinic_id', 'patient_id'], raw: true });
@@ -682,9 +687,17 @@ class WhatsAppService {
     }
 
     async dispatchMessage(payload, clinicConfig = {}, healthContext = {}) {
+        const identityContact=require('../lib/whatsapp-contact-identity').parseContact(payload.to) ? payload.to : null;
+        if(require('../lib/whatsapp-contact-identity').parseContact(payload.to)) {
+            const destination=await require('./whatsappContactIdentity.service').assertDestination(payload.to,clinicConfig);
+            // Meta's BSUID contract uses recipient, not to. Never strip opaque
+            // identifiers to digits or send both fields with a different phone.
+            const {to,...message}=payload;payload={...message,recipient:destination.recipient};
+        }
+
         // This final boundary covers manual sends, templates, direct callers
         // and both transports; absence of a LOPD is never a channel refusal.
-        await this.assertRecipientCanReceive({ to: payload.to, clinicConfig });
+        await this.assertRecipientCanReceive({ to: identityContact || payload.to, clinicConfig });
         let storedMessage = null;
         if (healthContext.messageId) {
             const message = await db.Message.findByPk(healthContext.messageId);
@@ -698,6 +711,7 @@ class WhatsAppService {
             }
         }
         await this.assertClinicNonOperationalAllowed(payload, clinicConfig, storedMessage);
+        if(identityContact && payload.type==='template')await require('./whatsappContactIdentity.service').assertDestination(identityContact,clinicConfig,{commercial:true});
         await this.assertPrivacyCommercialAllowed(payload, clinicConfig, storedMessage);
         if (payload.type === 'template') {
             await require('./whatsappTemplateScope.service').assertTemplateInWaba({

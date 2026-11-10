@@ -1,6 +1,7 @@
 'use strict';
 const { createHash, randomUUID } = require('node:crypto');
 const D = require('./whatsappInboundDetails');
+const Identity = require('./whatsapp-contact-identity');
 const { factualSentAt, projectProviderStatus } = require('./whatsapp-provider-status');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
@@ -26,8 +27,11 @@ function ownedEnvelope(raw, scope) {
 function normalize(raw, scope, now = Date.now()) {
   const body = ownedEnvelope(raw, scope);
   const messages = []; const statuses = [];
-  const add = (m, peer, direction, historical, sourceEvent) => {
-    contact(peer);
+  const add = (m, peer, direction, historical, sourceEvent, contacts) => {
+    let identity;
+    try { identity=Identity.providerIdentity(m,contacts,direction); } catch { held('review_required','identity_conflict'); }
+    if (!peer && identity?.bsuid) peer=identity.bsuid;
+    if (!identity?.bsuid) contact(peer);
     if (!m || typeof m.id !== 'string' || !/^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(m.id)
       || typeof m.timestamp !== 'string' || !/^[0-9]{1,12}$/.test(m.timestamp)) held();
     const at = Number(m.timestamp) * 1000;
@@ -43,7 +47,7 @@ function normalize(raw, scope, now = Date.now()) {
     if (typeof content !== 'string' || Buffer.byteLength(content) > 50000) held();
     const key = hash(JSON.stringify([scope.wabaId,scope.phoneId,m.id]));
     const digest = hash(JSON.stringify([peer,direction,m.type,content,at]));
-    messages.push({ key,digest,peer,direction,at,content,type,wamid:m.id,providerType:m.type,historical,sourceEvent,details:D.details(m) });
+    messages.push({ key,digest,peer,direction,at,content,type,wamid:m.id,providerType:m.type,historical,sourceEvent,identity:identity?.bsuid?identity:null,details:D.details(m) });
     if (messages.length > 2000) held();
   };
   for (const entry of body.entry) {
@@ -51,7 +55,7 @@ function normalize(raw, scope, now = Date.now()) {
       const value = change?.value;
       if (change.field === 'messages') {
         if (!Array.isArray(value.messages) && !Array.isArray(value.statuses)) held();
-        for (const m of value.messages || []) add(m,m.from,'inbound',false,'messages');
+        for (const m of value.messages || []) add(m,m.from,'inbound',false,'messages',value.contacts);
         for (const s of value.statuses || []) {
           if (typeof s?.id !== 'string' || !/^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(s.id)) held();
           if (!['sent','delivered','read','failed'].includes(s.status)) held(s.status === 'played' ? 'unsupported_event' : 'review_required');
@@ -62,11 +66,11 @@ function normalize(raw, scope, now = Date.now()) {
             const at = Number(s.timestamp) * 1000;
             if (!Number.isSafeInteger(at) || at < Date.UTC(2000,0,1) || at > now + 300000) held('review_required', 'invalid_status_timestamp');
           }
-          statuses.push({ wamid:s.id,status:s.status,timestamp:s.timestamp,errors:D.errors(s) }); if (statuses.length > 2000) held();
+          statuses.push({ wamid:s.id,status:s.status,timestamp:s.timestamp,errors:D.errors(s),identity:Identity.BSUID.test(s.recipient_user_id||'')?{bsuid:s.recipient_user_id,phone:Identity.phone(s.recipient_id)}:null }); if (statuses.length > 2000) held();
         }
       } else if (change.field === 'smb_message_echoes') {
         if (!Array.isArray(value.message_echoes)) held();
-        for (const m of value.message_echoes) add(m,m.to,'outbound',false,'smb_message_echoes');
+        for (const m of value.message_echoes) add(m,m.to,'outbound',false,'smb_message_echoes',value.contacts);
       } else if (change.field === 'history') {
         if (!Array.isArray(value.history)) held();
         for (const h of value.history) {
@@ -106,7 +110,7 @@ const SCHEMA = [
  clinic_ids JSON NOT NULL,event_count INT NOT NULL,created_at DATETIME(3) NOT NULL,
  PRIMARY KEY(receipt,phone_id)) ENGINE=InnoDB`,
 ];
-async function importLease(connection, lease, scope, now = Date.now(), { validateScope } = {}) {
+async function importLease(connection, lease, scope, now = Date.now(), { validateScope, contactIdentityEnabled=process.env.WHATSAPP_CONTACT_IDENTITIES_ENABLED==='true' } = {}) {
   if (!uuid(lease?.receipt) || !uuid(lease?.lease) || lease.automaticActionsAllowed !== false
     || !Buffer.isBuffer(lease.raw) || lease.raw.length > 3 * 1024 * 1024 || !validScope(scope)) held();
   // Replay never relaxes current envelope/account/phone ownership. Only event
@@ -116,12 +120,27 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
   const lock = 'wa-inbox:' + hash(JSON.stringify([scope.clinicId,scope.phoneId])).slice(0,48);
   let locked = false; let tx = false;
   const query = async (sql, values=[]) => (await connection.execute(sql,values))[0];
+  const equivalentMediaRetry = async (messageId,m) => {
+    if(!D.MEDIA.has(m.providerType) || !m.details.media?.id) return false;
+    const rows=await query("SELECT m.direction,m.content,m.metadata,c.contact_id FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE m.id=? AND c.clinic_id=? AND c.channel='whatsapp' FOR UPDATE",[messageId,scope.clinicId]);
+    if(rows.length!==1) return false;
+    const row=rows[0],meta=typeof row.metadata==='string'?JSON.parse(row.metadata):row.metadata;
+    return row.direction===m.direction && row.content===m.content && Identity.phone(row.contact_id)===Identity.phone(m.peer)
+      && !!Identity.phone(m.peer) && meta?.wamid===m.wamid && meta.phone_number_id===scope.phoneId && meta.waba_id===scope.wabaId
+      && meta.provider_type===m.providerType && meta.media?.id===m.details.media.id
+      && meta.media?.sha256===m.details.media.sha256 && meta.media?.mime_type===m.details.media.mime_type
+      && JSON.stringify(meta.context||null)===JSON.stringify(m.details.context||null);
+  };
   const recoverPlaceholder = async (messageId, m) => {
     const rows = await query("SELECT m.id,m.content,m.message_type,m.metadata FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE m.id=? AND m.direction=? AND c.clinic_id=? AND c.channel='whatsapp' AND c.contact_id IN (?,?) AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wamid'))=? AND JSON_EXTRACT(m.metadata,'$.passive_recovery')=CAST('true' AS JSON) AND JSON_EXTRACT(m.metadata,'$.fresh_inbound_dispatched_at') IS NULL FOR UPDATE",
       [messageId,m.direction,scope.clinicId,m.peer,'+'+m.peer,m.wamid]);
     if (rows.length !== 1) return false;
     const previous = typeof rows[0].metadata === 'string' ? JSON.parse(rows[0].metadata) : rows[0].metadata;
-    if (rows[0].content === m.content && rows[0].message_type === m.type && previous.provider_type === m.providerType) return true;
+    if (rows[0].content === m.content && rows[0].message_type === m.type && previous.provider_type === m.providerType) {
+      if(D.MEDIA.has(m.providerType))return !!m.details.media?.id && previous.media?.id===m.details.media.id
+        && previous.media?.sha256===m.details.media.sha256 && previous.media?.mime_type===m.details.media.mime_type;
+      return true;
+    }
     if (m.providerType === 'unsupported' && previous.provider_type !== 'unsupported') return true; // Late placeholder never downgrades content.
     if (rows[0].message_type !== 'event' || previous.provider_type !== 'unsupported') return false;
     // Meta can first report an unsupported placeholder and later provide its
@@ -135,7 +154,11 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
     const result = await query('SELECT GET_LOCK(?,2) AS acquired',[lock]); if (result[0]?.acquired !== 1) held(); locked = true;
     await connection.beginTransaction(); tx = true;
     await validateScope?.(connection);
-    const old = await query('SELECT * FROM WhatsappInboxImports WHERE receipt=? FOR SHARE',[lease.receipt]);
+    if(contactIdentityEnabled && await Identity.available(query))await Identity.lockClinic(query,scope.clinicId);
+    // The scoped advisory lock already serializes this receipt. Locking a
+    // missing UUID with FOR SHARE also locks its index gap, which can deadlock
+    // unrelated receipts from two emitters when both later insert their ACK.
+    const old = await query('SELECT * FROM WhatsappInboxImports WHERE receipt=?',[lease.receipt]);
     if (old.length) {
       if (old[0].digest !== digest || old[0].clinic_id !== scope.clinicId || old[0].phone_id !== scope.phoneId) held();
       await validateScope?.(connection);
@@ -150,14 +173,29 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
     for (const m of batch.messages) {
       const seen=await query('SELECT digest,message_id FROM WhatsappInboxMessageKeys WHERE message_key=?',[m.key]);
       if (seen.length) {
-        if (seen[0].digest !== m.digest) {
-          if (!await recoverPlaceholder(seen[0].message_id,m)) held();
+        if (seen[0].digest !== m.digest || D.MEDIA.has(m.providerType)) {
+          if (!await equivalentMediaRetry(seen[0].message_id,m) && !await recoverPlaceholder(seen[0].message_id,m)) held();
         }
         continue;
       }
+      let identityConversation=null;
+      if(m.identity && !contactIdentityEnabled && !Identity.phone(m.peer))held('review_required','identity_support_not_enabled');
+      if(m.identity && contactIdentityEnabled) {
+        // An older authorized phone binding can still receive phone-addressed
+        // messages before its portfolio metadata has been reconciled. Do not
+        // learn an opaque alias in that case, or turn it into a global outage.
+        let learnIdentity=true;
+        try { await Identity.businessForScope(query,scope); }
+        catch(error) {
+          if(error.message==='whatsapp_identity_scope_required' && Identity.phone(m.peer))learnIdentity=false;
+          else held('review_required',error.message);
+        }
+        try { if(learnIdentity)identityConversation=await Identity.resolveInbound(query,scope,m.identity); }
+        catch(error) { held('review_required',error.message); }
+      }
       const contactKey=hash(JSON.stringify([scope.clinicId,scope.phoneId,m.peer]));
       const bound=await query('SELECT conversation_id FROM WhatsappInboxContactKeys WHERE contact_key=?',[contactKey]);
-      let conversationId=bound[0]?.conversation_id;
+      let conversationId=identityConversation?.id || bound[0]?.conversation_id;
       if (!conversationId) {
         const candidates=await query("SELECT id FROM Conversations WHERE clinic_id=? AND channel='whatsapp' AND contact_id IN (?,?) ORDER BY id LIMIT 2 FOR UPDATE",[scope.clinicId,m.peer,'+'+m.peer]);
         if (candidates.length > 1) held(); conversationId=candidates[0]?.id;
@@ -166,8 +204,13 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
         }
         await query('INSERT INTO WhatsappInboxContactKeys VALUES(?,?,NOW(3))',[contactKey,conversationId]);
       }
+      if(identityConversation && bound.length && Number(bound[0].conversation_id)!==conversationId) {
+        const linked=await Identity.members(query,bound[0].conversation_id,scope.clinicId);
+        if(!linked.ids.includes(conversationId)) held('review_required','contact_binding_mismatch');
+      }
+      if(identityConversation && !bound.length) await query('INSERT INTO WhatsappInboxContactKeys VALUES(?,?,NOW(3))',[contactKey,conversationId]);
       const c=await query("SELECT id FROM Conversations WHERE id=? AND clinic_id=? AND channel='whatsapp' AND contact_id IN (?,?) FOR UPDATE",[conversationId,scope.clinicId,m.peer,'+'+m.peer]);
-      if (c.length !== 1) held('review_required', 'contact_binding_mismatch');
+      if (c.length !== 1 && !identityConversation) held('review_required', 'contact_binding_mismatch');
       // Legacy messages lack the new unique key. Adopt only one matching WAMID
       // in this exact conversation; never import it twice on a history replay.
       const legacy=await query("SELECT id,direction,content FROM Messages WHERE conversation_id=? AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.wamid'))=? LIMIT 2",[conversationId,m.wamid]);
@@ -178,6 +221,7 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
         const metadata=JSON.stringify({ wamid:m.wamid,phone_number_id:scope.phoneId,waba_id:scope.wabaId,passive_recovery:true,
           historical:m.historical,provider_type:m.providerType,automatic_actions_allowed:false,inbox_receipt:lease.receipt,
           source_event:m.sourceEvent,coexistence:{source_event:m.sourceEvent},
+          ...(identityConversation ? {whatsapp_identity:{...m.identity,businessId:identityConversation.businessId}} : {}),
           recovery_without_automation: lease.recoveryWithoutAutomation === true, ...m.details });
         const row=await query("INSERT INTO Messages(conversation_id,direction,content,message_type,status,metadata,sent_at,createdAt,updatedAt) VALUES(?,?,?,?,'sent',?,?,?,NOW(3))",[conversationId,m.direction,m.content,m.type,metadata,new Date(m.at),new Date(m.at)]);
         messageId=row.insertId; inserted++;
@@ -187,9 +231,19 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
       await query('INSERT INTO WhatsappInboxMessageKeys VALUES(?,?,?,NOW(3))',[m.key,m.digest,messageId]);
     }
     for (const s of batch.statuses) {
-      const rows=await query("SELECT m.id,m.status,m.metadata,m.sent_at FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE c.clinic_id=? AND c.channel='whatsapp' AND m.direction='outbound' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wamid'))=? LIMIT 2 FOR UPDATE",[scope.clinicId,s.wamid]);
+      const rows=await query("SELECT m.id,m.conversation_id,m.status,m.metadata,m.sent_at FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE c.clinic_id=? AND c.channel='whatsapp' AND m.direction='outbound' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wamid'))=? LIMIT 2 FOR UPDATE",[scope.clinicId,s.wamid]);
       if (rows.length !== 1) held(rows.length === 0 ? 'unmatched_status' : 'review_required');
       const old=rows[0]; if (typeof old.metadata === 'string') old.metadata=JSON.parse(old.metadata);
+      if(contactIdentityEnabled && s.identity && (old.metadata.phone_number_id || old.metadata.phoneNumberId)===scope.phoneId && await Identity.available(query)) {
+        const contactRows=await query("SELECT contact_id FROM Conversations WHERE id=? AND clinic_id=? AND channel='whatsapp' FOR SHARE",[old.conversation_id,scope.clinicId]);
+        const recipient=contactRows.length===1?Identity.phone(contactRows[0].contact_id):null;
+        if(recipient && (!s.identity.phone || s.identity.phone===recipient)) {
+          // Exact provider-message ownership proves this alias; a nickname does not.
+          const businessId=await Identity.businessForScope(query,scope);
+          await Identity.bind(query,{clinicId:scope.clinicId,businessId,type:'bsuid',value:s.identity.bsuid,conversationId:old.conversation_id,wabaId:scope.wabaId,phoneId:scope.phoneId});
+          await Identity.bind(query,{clinicId:scope.clinicId,businessId,type:'phone',value:recipient,conversationId:old.conversation_id,wabaId:scope.wabaId,phoneId:scope.phoneId});
+        }
+      }
       const projected=projectProviderStatus(old,s,{recoverFailed:true});
       if (projected) {
         if (s.status==='failed') Object.assign(projected.metadata,{error_code:s.errors[0]?.code||null,delivery_failed:true});

@@ -47,6 +47,27 @@ test('the current preset includes reference grounding without duplicating it at 
   assert.equal(buildClassifyIntentInstruction(buildClassifyIntentInstruction(instruction)), instruction);
 });
 
+test('literal evidence tolerates spacing before punctuation without changing its words', () => {
+  const answer = {
+    intencion_principal: 'confirmar_cita', confianza_intencion_principal: .99,
+    lectura_respuesta: 'acuse_confirmacion_solicitada', confianza_lectura_respuesta: .99,
+    asunto_preguntado: 'asistencia', decision_pospuesta: false, confianza_decision_pospuesta: .99,
+    requiere_verificar_gestion_o_condicion: false, confianza_requiere_verificar_gestion_o_condicion: .99,
+    hay_asunto_por_resolver: false, confianza_hay_asunto_por_resolver: .99,
+    evidencia_decision_actual: 'Si, gracias',
+  };
+  for (const patientText of ['Si , gracias', 'Si\n, gracias', 'Si\u00a0, gracias']) {
+    assert.equal(projectClassifyIntentReferenceOutput(answer, { patientText }).intencion_principal, 'confirmar_cita');
+  }
+  for (const patientText of ['No, gracias', 'Si, pero no puedo', 'Gracias', 'Si gracias']) {
+    const held = projectClassifyIntentReferenceOutput(answer, { patientText });
+    assert.equal(held.intencion_principal, 'otra');
+    assert(held._ai_reference_failure_reasons.includes('current_evidence_missing'));
+  }
+  assert.equal(projectClassifyIntentReferenceOutput({ ...answer, confianza_lectura_respuesta: .4 },
+    { patientText: 'Si , gracias' }).intencion_principal, 'otra');
+});
+
 test('clinical actions require a compatible AI reading and evidence, not just high intent confidence', () => {
   for (const [intent, reading] of [
     ['confirmar_cita', 'compromiso_asistencia'],
@@ -564,4 +585,17 @@ test('classification preserves a single text item even when response_text is abs
     assert.match(request.inputText, /No las necesito, gracias/);
     assert.equal(request.inputText.split('No las necesito, gracias').length - 1, 1);
   } finally { ai.analyzeStructured = original; }
+});
+
+test('multiple literal quotes preserve order and never fabricate patient evidence',()=>{
+ const {matches}=require('../../lib/automation-literal-evidence');
+ const patient='Sí\nGracias\nNos vemos mañana\nUn saludo a todas';
+ assert.equal(matches(patient,'Sí\nNos vemos mañana'),true);
+ for(const quote of ['Nos vemos mañana\nSí','Sí\nNos vemos ayer','Sí Nos vemos mañana','Sí\nSí','No\nNos vemos mañana'])assert.equal(matches(patient,quote),false);
+ assert.equal(matches('Si , gracias','Si, gracias'),true);
+ assert.equal(matches('Mañana nos vemos 👍🏻🙋🏻‍♂️','Mañana nos vemos 👍🏳🕊'),false);
+ const answer={intencion_principal:'confirmar_cita',confianza_intencion_principal:.99,lectura_respuesta:'compromiso_asistencia',confianza_lectura_respuesta:.99,asunto_preguntado:'asistencia',decision_pospuesta:false,confianza_decision_pospuesta:.99,requiere_verificar_gestion_o_condicion:false,confianza_requiere_verificar_gestion_o_condicion:.99,hay_asunto_por_resolver:false,confianza_hay_asunto_por_resolver:.99,evidencia_decision_actual:'Sí\nNos vemos mañana'};
+ assert.equal(projectClassifyIntentReferenceOutput(answer,{patientText:patient}).intencion_principal,'confirmar_cita');
+ assert.equal(projectClassifyIntentReferenceOutput({...answer,decision_pospuesta:true},{patientText:patient}).intencion_principal,'otra');
+ assert.equal(projectClassifyIntentReferenceOutput({...answer,requiere_verificar_gestion_o_condicion:true},{patientText:patient}).intencion_principal,'otra');
 });

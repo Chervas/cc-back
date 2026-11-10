@@ -29,6 +29,25 @@ function sameScope(row, scope) {
     && JSON.stringify(json(row.scope_clinics)) === JSON.stringify(scope.clinicIds);
 }
 
+async function matchesContact(connection,row,conversation) {
+  if(keyFor(row.phone_id,String(conversation.contact_id).replace(/^\+/,''))===row.routing_key)return true;
+  const I=require('./whatsapp-contact-identity'),q=async(sql,v=[]) =>(await connection.execute(sql,v))[0];
+  if(!await I.available(q))return false;
+  const businessId=await I.businessForScope(q,{phoneId:row.phone_id,wabaId:row.waba_id});
+  const group=await I.members(q,conversation.id,conversation.clinic_id);
+  const identities=await q("SELECT identity_value FROM WhatsappContactIdentities WHERE clinic_id=? AND business_id=? AND identity_type='bsuid' AND conversation_id IN ("+group.ids.map(()=>'?').join(',')+')',[conversation.clinic_id,businessId,...group.ids]);
+  return identities.some(i=>keyFor(row.phone_id,i.identity_value)===row.routing_key);
+}
+async function candidateRows(connection,part) {
+  const I=require('./whatsapp-contact-identity'),marks=part.scope.clinicIds.map(()=>'?').join(',');
+  if(I.BSUID.test(part.route.peer||'')) {
+    const q=async(sql,v=[]) =>(await connection.execute(sql,v))[0];if(!await I.available(q))return [];
+    const businessId=await I.businessForScope(q,part.scope);
+    return q("SELECT DISTINCT c.id,c.clinic_id FROM WhatsappContactIdentities i JOIN Conversations c ON c.id=i.conversation_id AND c.clinic_id=i.clinic_id WHERE c.clinic_id IN ("+marks+") AND c.channel='whatsapp' AND i.business_id=? AND i.identity_type='bsuid' AND i.identity_value=? ORDER BY c.clinic_id,c.id",[...part.scope.clinicIds,businessId,part.route.peer]);
+  }
+  return (await connection.execute("SELECT id,clinic_id FROM Conversations WHERE clinic_id IN ("+marks+") AND channel='whatsapp' AND contact_id IN (?,?) ORDER BY clinic_id,id FOR SHARE",[...part.scope.clinicIds,part.route.peer,'+'+part.route.peer]))[0];
+}
+
 async function decision(connection, part, { receipt, partIndex } = {}) {
   const [rows] = await connection.execute('SELECT * FROM WhatsappInboxRoutingReviews WHERE routing_key=?',
     [keyFor(part.scope.phoneId, part.route.peer)]);
@@ -37,7 +56,7 @@ async function decision(connection, part, { receipt, partIndex } = {}) {
   if (!sameScope(row, part.scope) || !part.scope.clinicIds.includes(row.selected_clinic_id)) fail('routing_scope_changed');
   const [conversations] = await connection.execute("SELECT id,clinic_id,contact_id FROM Conversations WHERE id=? AND clinic_id=? AND channel='whatsapp'",
     [row.selected_conversation_id, row.selected_clinic_id]);
-  if (conversations.length !== 1 || keyFor(row.phone_id, String(conversations[0].contact_id).replace(/^\+/, '')) !== row.routing_key)
+  if (conversations.length !== 1 || !await matchesContact(connection,row,conversations[0]))
     fail('routing_conversation_changed');
   const [retained] = receipt ? await connection.execute('SELECT digest FROM WhatsappInboxRoutingReviewReceipts WHERE receipt=? AND part_index=? AND review_id=?',
     [receipt, partIndex, row.id]) : [[]];
@@ -55,9 +74,7 @@ async function retain(connection, part, lease, partIndex, now) {
   try {
     await connection.beginTransaction(); transaction = true;
     await require('./whatsappInboxScopes').assertScope(connection, part.scope, { lock: true });
-    const [rows] = await connection.execute("SELECT id,clinic_id FROM Conversations WHERE clinic_id IN (" + marks
-      + ") AND channel='whatsapp' AND contact_id IN (?,?) ORDER BY clinic_id,id FOR SHARE",
-    [...part.scope.clinicIds, part.route.peer, '+' + part.route.peer]);
+    const rows=await candidateRows(connection,part);
     // Only an actual multi-clinic ambiguity belongs in this UI. Unknown contacts,
     // broken bindings and mixed events remain technical reviews.
     if (new Set(rows.map(row => row.clinic_id)).size < 2 || rows.length > 128) fail('routing_candidates_unavailable');
@@ -103,7 +120,7 @@ async function pending(connection, conversationIds, authorize) {
     let allowed = true;
     for (const conversation of conversations) {
       if (!candidates.some(c => c.conversationId === conversation.id && c.clinicId === conversation.clinic_id)
-        || keyFor(row.phone_id, String(conversation.contact_id).replace(/^\+/, '')) !== row.routing_key
+        || !await matchesContact(connection,row,conversation)
         || !await authorize(conversation)) { allowed = false; break; }
     }
     if (!allowed) continue;
@@ -130,13 +147,18 @@ async function resolve(connection, { conversationId, reviewId, clinicId, revisio
     if (!scope || !sameScope(row, scope)) fail('routing_scope_changed');
     await require('./whatsappInboxScopes').assertScope(connection, scope, { lock: true });
     const candidates = json(row.candidates);
-    if (!candidates.some(c => c.conversationId === conversationId)) fail('routing_review_forbidden');
+    if (!candidates.some(c => c.conversationId === conversationId)) {
+      const I=require('./whatsapp-contact-identity'),q=async(sql,v=[]) =>(await connection.execute(sql,v))[0];
+      if(!await I.available(q))fail('routing_review_forbidden');
+      let linked=false;for(const candidate of candidates)if((await I.members(q,candidate.conversationId,candidate.clinicId)).canonicalId===conversationId)linked=true;
+      if(!linked)fail('routing_review_forbidden');
+    }
     const [conversations] = await connection.execute("SELECT id,clinic_id,contact_id,patient_id,lead_id FROM Conversations WHERE id IN ("
       + candidates.map(() => '?').join(',') + ') FOR SHARE', candidates.map(c => c.conversationId));
     if (conversations.length !== candidates.length) fail('routing_conversation_changed');
     for (const conversation of conversations) {
       if (!candidates.some(c => c.conversationId === conversation.id && c.clinicId === conversation.clinic_id)
-        || keyFor(row.phone_id, String(conversation.contact_id).replace(/^\+/, '')) !== row.routing_key) fail('routing_conversation_changed');
+        || !await matchesContact(connection,row,conversation)) fail('routing_conversation_changed');
       if (!await authorize(conversation)) fail('routing_review_forbidden');
     }
     const selected = conversations.filter(c => c.clinic_id === clinicId);

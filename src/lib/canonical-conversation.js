@@ -51,6 +51,9 @@ async function mergeDuplicateConversations(canonical, duplicates, { transaction 
       mergeDuplicateConversations(canonical, duplicates, { transaction: owned }));
   }
 
+  const identity=require('../services/whatsappContactIdentity.service');
+  const linkedHistory=await identity.enabled(transaction);
+  if(linkedHistory)await require('./whatsapp-contact-identity').lockClinic(identity.queryFor(transaction),canonical.clinic_id);
   const locked = await Conversation.findAll({
     where: { id: { [Op.in]: [Number(canonical.id), ...duplicateIds] } },
     order: [['id', 'ASC']], transaction, lock: transaction.LOCK.UPDATE,
@@ -68,6 +71,13 @@ async function mergeDuplicateConversations(canonical, duplicates, { transaction 
   // Use the locked rows, not instances cached before a rollback or new message.
   canonical = target;
   duplicates = locked.filter(row => Number(row.id) !== Number(target.id));
+
+  if(linkedHistory) {
+    await require('./whatsapp-contact-identity').unite(identity.queryFor(transaction),{
+      ids:[Number(canonical.id),...duplicateIds],canonicalId:Number(canonical.id),clinicId:Number(canonical.clinic_id),
+      source:'duplicate_phone',providerPhone:normalizePhoneE164(canonical.contact_id)?.slice(1),patientId:canonical.patient_id||null});
+    return canonical;
+  }
 
   // Import bindings must follow the surviving chat in the same transaction.
   const [tables] = await db.sequelize.query(

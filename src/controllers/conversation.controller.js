@@ -1,6 +1,7 @@
 'use strict';
 const { Op } = require('sequelize');
 const db = require('../../models');
+const contactIdentity=require('../services/whatsappContactIdentity.service');
 const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
 const whatsappService = require('../services/whatsapp.service');
@@ -74,12 +75,13 @@ async function routingAuthorizer(userId) {
 }
 async function attachRoutingReviews(conversations, userId) {
   if (!routingReview.enabled()) return conversations;
-  const ids = conversations.filter(c => c.channel === 'whatsapp').map(c => Number(c.id));
+  const groups=await Promise.all(conversations.filter(c=>c.channel==='whatsapp').map(c=>contactIdentity.cluster(c)));
+  const ids=[...new Set(groups.flatMap(g=>g.ids))];
   if (!ids.length) return conversations;
   const authorize = await routingAuthorizer(userId);
   const reviews = await routingReview.withConnection(db.sequelize, c => routingReview.pending(c, ids, authorize));
   return conversations.map(conversation => ({ ...conversation, routing_reviews: reviews
-    .filter(review => review.conversationIds.includes(Number(conversation.id)))
+    .filter(review => review.conversationIds.some(id=>groups.find(g=>g.canonicalId===Number(conversation.id))?.ids.includes(id)))
     .map(({ conversationIds, ...review }) => review) }));
 }
 
@@ -339,7 +341,7 @@ function resolveMessagePageRequest(query = {}) {
 
 async function getConversationMessagePage(conversation, query = {}) {
   const { limit, beforeMessageId } = resolveMessagePageRequest(query);
-  const where = { conversation_id: conversation.id };
+  const where = { conversation_id: { [Op.in]: await contactIdentity.memberIds(conversation) } };
   if (beforeMessageId) {
     where.id = { [Op.lt]: beforeMessageId };
   }
@@ -816,7 +818,7 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
     return plain;
   }
 
-  const pendingStates = await getPendingReplyStatesByConversationIds([conversationId], { userId });
+  const pendingStates = await contactIdentity.aggregatePending([plain],getPendingReplyStatesByConversationIds,userId);
   const pendingState = pendingStates.get(conversationId);
   plain.unread_count = pendingState?.unreadCount ?? 0;
   plain.pending_automation_attention = pendingState?.requiresAutomationAttention === true;
@@ -918,7 +920,7 @@ function buildPhoneOnlyConversationSearchClause(searchQuery) {
   const phoneValuesSql = phoneCandidates.map((value) => db.sequelize.escape(value)).join(', ');
   const digitValuesSql = digitCandidates.map((value) => db.sequelize.escape(value)).join(', ');
   const localDigitsSql = localDigits ? db.sequelize.escape(localDigits) : null;
-  const conversationPhoneDigits = sqlPhoneDigitsExpression('`Conversation`.`contact_id`');
+  const conversationPhoneDigits = "(CASE WHEN `Conversation`.`contact_id` LIKE 'bsuid:%' THEN '' ELSE "+sqlPhoneDigitsExpression('`Conversation`.`contact_id`')+" END)";
   const patientPhoneDigits = sqlPhoneDigitsExpression('`paciente`.`telefono_movil`');
   const leadPhoneDigits = sqlPhoneDigitsExpression('`lead`.`telefono`');
   const externalConversationSql = '(`Conversation`.`patient_id` IS NULL AND `Conversation`.`lead_id` IS NULL)';
@@ -1478,6 +1480,9 @@ exports.listConversations = async (req, res) => {
           },
         },
       ];
+      if(await contactIdentity.enabled())where[Op.or].push({id:{[Op.in]:db.sequelize.literal(
+        "(SELECT COALESCE(wl.canonical_id,wi.conversation_id) FROM WhatsappContactIdentities wi LEFT JOIN WhatsappConversationLinks wl ON wl.conversation_id=wi.conversation_id AND wl.clinic_id=wi.clinic_id WHERE wi.identity_type='bsuid')"
+      )}});
     } else if (filter === 'pacientes') {
       where.patient_id = { [Op.not]: null };
     } else if (filter === 'equipo') {
@@ -1496,12 +1501,11 @@ exports.listConversations = async (req, res) => {
       const searchClause = await buildConversationSearchClause(searchQuery, {
         clinicIds: scope.clinicIds,
       });
-      where[Op.and] = [
-        ...(where[Op.and] || []),
-        searchClause,
-      ];
+      const identityMatches=await contactIdentity.searchClause(searchQuery,scope.clinicIds);
+      where[Op.and] = [...(where[Op.and] || []), identityMatches?.length ? {[Op.or]:[searchClause,{id:{[Op.in]:identityMatches}}]} : searchClause];
     }
 
+    if(await contactIdentity.enabled())where[Op.and]=[...(where[Op.and]||[]),db.Sequelize.literal('NOT EXISTS (SELECT 1 FROM WhatsappConversationLinks wi WHERE wi.conversation_id=`Conversation`.`id` AND wi.clinic_id=`Conversation`.`clinic_id` AND wi.canonical_id<>wi.conversation_id)')];
     const conversationsPlusOne = await Conversation.findAll({
       where,
       order: [['last_message_at', 'DESC'], ['createdAt', 'DESC'], ['id', 'DESC']],
@@ -1524,12 +1528,13 @@ exports.listConversations = async (req, res) => {
     const conversations = hasMore ? conversationsPlusOne.slice(0, limit) : conversationsPlusOne;
 
     const conversationIds = conversations.map((c) => c.id);
-    const pendingStates = await getPendingReplyStatesByConversationIds(conversationIds, { userId });
+    const pendingStates = await contactIdentity.aggregatePending(conversations,getPendingReplyStatesByConversationIds,userId);
+    const sharedRecent = await contactIdentity.recentMessages(conversations);
 
     const rawPayload = await Promise.all(conversations.map(async (c) => {
       const data = c.toJSON();
       const recentMessages = await hydrateTemplateMessagePreviews(
-        filterQuickChatVisibleMessages(data.messages),
+        filterQuickChatVisibleMessages(sharedRecent.get(Number(data.id)) || data.messages),
         { clinicId: data.clinic_id }
       );
       data.lastMessage = recentMessages.find((message) => !isTechnicalWhatsappFailureNotice(message))
@@ -1552,7 +1557,7 @@ exports.listConversations = async (req, res) => {
     const withLeadAppointments = await enrichQuickChatLeadAppointments(withRestrictions);
     const withPatientDirection = await enrichPatientDirectionAssignments(withLeadAppointments, userId);
     const withRouting = await attachRoutingReviews(await hydrateMarketingContactFallbacks(withPatientDirection, { searchQuery }), userId);
-    const payload = await attachTemporaryQuickChatEligibility(withRouting, req.userData, CitaPaciente);
+    const payload = await contactIdentity.enrich(await attachTemporaryQuickChatEligibility(withRouting, req.userData, CitaPaciente),{searchQuery});
     const totalUnread = payload.reduce((total, item) => {
       if (item.quickchat_list_eligible === false) return total;
       const unread = Number(item?.unread_count || 0);
@@ -1682,7 +1687,8 @@ exports.getMessages = async (req, res) => {
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
     const [withRouting] = await attachRoutingReviews([conversationPayload], userId);
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([withRouting], req.userData, CitaPaciente);
-    return res.json({ conversation: focusedPayload, messages, messages_page: messagesPage });
+    const [identified]=await contactIdentity.enrich([focusedPayload]);
+    return res.json({ conversation: identified, messages, messages_page: messagesPage });
   } catch (err) {
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getMessages', err);
@@ -1808,7 +1814,8 @@ exports.getConversationByPatient = async (req, res) => {
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload], userId);
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([conversationPayload], req.userData, CitaPaciente);
-    return res.json({ conversation: focusedPayload, messages, messages_page: messagesPage });
+    const [identified]=await contactIdentity.enrich([focusedPayload]);
+    return res.json({ conversation: identified, messages, messages_page: messagesPage });
   } catch (err) {
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getConversationByPatient', err);
@@ -1871,7 +1878,8 @@ exports.getConversationByLead = async (req, res) => {
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload], userId);
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([conversationPayload], req.userData, CitaPaciente);
-    return res.json({ conversation: focusedPayload, messages, messages_page: messagesPage });
+    const [identified]=await contactIdentity.enrich([focusedPayload]);
+    return res.json({ conversation: identified, messages, messages_page: messagesPage });
   } catch (err) {
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getConversationByLead', err);
@@ -2009,11 +2017,8 @@ exports.markAsRead = async (req, res) => {
       return sendQuickChatCategoryForbidden(res, accessError);
     }
 
-    await ConversationRead.upsert({
-      conversation_id: conversation.id,
-      user_id: userId,
-      last_read_at: new Date(),
-    });
+    const readAt=new Date();
+    for(const id of await contactIdentity.memberIds(conversation))await ConversationRead.upsert({conversation_id:id,user_id:userId,last_read_at:readAt});
 
     const io = getIO();
     if (io) {
@@ -2072,11 +2077,13 @@ exports.resolveAutomationAttention = async (req, res) => {
       return sendQuickChatCategoryForbidden(res, accessError);
     }
 
-    const result = await resolveAutomationAttentionForConversation(conversationId, userId, {
-      allUsers: true,
-      reason: 'operator_action_completed',
-    });
-    const automationState = await completeManualAutomationStateForConversation(conversationId);
+    const result={updated:0};const automationState={completed:false};
+    for(const id of await contactIdentity.memberIds(conversation)) {
+      const resolved=await resolveAutomationAttentionForConversation(id,userId,{allUsers:true,reason:'operator_action_completed'});
+      result.updated+=Number(resolved.updated||0);
+      const state=await completeManualAutomationStateForConversation(id);
+      if(state.completed)Object.assign(automationState,state);
+    }
     const io = getIO();
     if ((result.updated > 0 || automationState.completed) && io) {
       io.to(`clinic:${conversation.clinic_id}`).emit('conversation:updated', {
@@ -2202,12 +2209,12 @@ exports.postMessage = async (req, res) => {
       }
       to = whatsappService.normalizePhoneNumber(preferredPhone)
         || whatsappService.normalizePhoneNumber(conversation.contact_id)
-        || null;
+        || (require('../lib/whatsapp-contact-identity').parseContact(conversation.contact_id) ? conversation.contact_id : null);
       if (!to) {
         await transaction.rollback();
         return res.status(400).json({ error: 'contacto_sin_numero' });
       }
-      await whatsappService.assertRecipientCanReceive({ to, clinicConfig: { clinicId: conversation.clinic_id } });
+      if(!require('../lib/whatsapp-contact-identity').parseContact(to))await whatsappService.assertRecipientCanReceive({ to, clinicConfig: {clinicId:conversation.clinic_id} });
       if (conversation.contact_id !== to) {
         if (whatsappService.normalizePhoneNumber(conversation.contact_id) !== to) {
           await transaction.rollback();
@@ -2219,7 +2226,7 @@ exports.postMessage = async (req, res) => {
       }
       senderPolicy = await patientDirectionService.resolveOutboundPolicy({
         clinicId: conversation.clinic_id,
-        phone: to,
+        phone: require('../lib/whatsapp-contact-identity').parseContact(to) ? null : to,
         conversationId: conversation.id,
         leadId: conversation.lead_id,
         patientId: conversation.patient_id,
@@ -2243,6 +2250,7 @@ exports.postMessage = async (req, res) => {
         });
       }
       clinicConfig = senderPolicy.clinicConfig;
+      if(require('../lib/whatsapp-contact-identity').parseContact(to))await whatsappService.assertRecipientCanReceive({to,clinicConfig:{...clinicConfig,clinicId:conversation.clinic_id}});
       if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
         await transaction.rollback();
         return res.status(500).json({ error: 'whatsapp_config_missing' });

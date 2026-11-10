@@ -12,7 +12,7 @@ function cleanString(value) {
 
 function extractPhoneCandidates(raw, { defaultCountryCode = DEFAULT_COUNTRY_CODE } = {}) {
   const value = cleanString(raw);
-  if (!value) return [];
+  if (!value || /^(?:bsuid:|[A-Za-z]{2}\.\S+$)/.test(value)) return [];
 
   const matches = value.match(/(?:\+|00)?\d(?:[\s()./-]*\d){8,14}/g) || [];
   const seeds = matches.length ? matches : [value];
@@ -96,6 +96,7 @@ function normalizePhoneE164(raw, options = {}) {
 
 function getPhoneLookupCandidates(raw, options = {}) {
   const rawValue = cleanString(raw);
+  if (/^(?:bsuid:|[A-Za-z]{2}\.\S+$)/.test(rawValue || '')) return [];
   const digitsOnly = rawValue ? rawValue.replace(/\D/g, '') : null;
   const normalizedDigits = normalizePhoneDigits(rawValue, options);
   const normalizedE164 = normalizePhoneE164(rawValue, options);

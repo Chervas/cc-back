@@ -66,12 +66,16 @@ test('command line never permits a public migration target or mixed actions', ()
   assert.throws(()=>parse(['plan-dev','--out','/tmp/o']));
 });
 test('gated schema requirements are omitted only while every declared gate is closed', () => {
+  for(const group of Object.values(schema.featureGroups))for(const name of group.migrations||[]) {
+    assert.equal(typeof name,'string');
+    assert(schema.migrations.some(m=>m.name===name&&/^[a-f0-9]{64}$/.test(m.sha256)),'every feature migration is pinned in the release contract');
+  }
   const disabled = effectiveContract(schema, {});
   for (const table of ['BusinessProfileMutations', 'BusinessProfileMutationLocks', 'BusinessProfileCacheStates']) {
     assert.equal(Object.hasOwn(disabled.tables, table), false);
   }
   assert.equal(disabled.migrations.some(m => m.name.startsWith('202609192')), false);
-  assert.deepEqual(disabled.disabledFeatureGroups, ['meta_marketing_recovery','google_ads_goal_policy_writes','delegated_sessions','whatsapp_inbox_routing_reviews','google_business_profile_writes','infrastructure_notifications','search_console_analytics']);
+  assert.deepEqual(disabled.disabledFeatureGroups, ['whatsapp_contact_identities','meta_marketing_recovery','google_ads_goal_policy_writes','delegated_sessions','whatsapp_inbox_routing_reviews','google_business_profile_writes','infrastructure_notifications','search_console_analytics']);
   assert(Object.hasOwn(disabled.tables,'MetaMarketingCredentialRenewals'));
   assert(Object.hasOwn(disabled.tables,'MetaMarketingEffectiveCredentials'));
   assert.equal(Object.hasOwn(disabled.tables, 'WhatsappInboxRoutingReviews'), false);
@@ -80,6 +84,7 @@ test('gated schema requirements are omitted only while every declared gate is cl
   assert.equal(Object.hasOwn(partiallyEnabled.tables, 'BusinessProfileMutations'), false);
 
   const enabled = effectiveContract(schema, {
+    WHATSAPP_CONTACT_IDENTITIES_ENABLED:'true',
     META_MARKETING_LEGACY_RECOVERY_ENABLED:'true',
     GOOGLE_ADS_GOAL_POLICY_BROKER_ENABLED:'true',
     GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED: 'true',
@@ -90,6 +95,8 @@ test('gated schema requirements are omitted only while every declared gate is cl
     JOB_RUNTIME_NAMESPACE: 'staging',
     SC_ANALYTICS_READ_ENABLED: 'true',
   });
+  assert.equal(Object.hasOwn(enabled.tables, 'WhatsappContactIdentities'), true);
+  assert.equal(Object.hasOwn(enabled.tables, 'WhatsappConversationLinks'), true);
   assert.equal(Object.hasOwn(enabled.tables, 'BusinessProfileMutations'), true);
   assert.equal(Object.hasOwn(enabled.tables, 'BusinessProfileCacheStates'), true);
   assert.equal(enabled.migrations.filter(m => m.name.startsWith('202609192')).length, 2);

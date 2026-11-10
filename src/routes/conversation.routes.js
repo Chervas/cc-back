@@ -5,6 +5,14 @@ const authMiddleware = require('./auth.middleware');
 const conversationController = require('../controllers/conversation.controller');
 
 router.use(authMiddleware);
+router.param('id',async(req,res,next,id)=>{
+  try {
+    const db=require('../../models');const service=require('../services/whatsappContactIdentity.service');
+    const conversation=await db.Conversation.findByPk(id);
+    if(conversation)req.params.id=String((await service.canonical(conversation)).id);
+    next();
+  }catch(error){next(error);}
+});
 
 router.get('/conversations', conversationController.listConversations);
 router.get('/conversations/permissions', conversationController.getConversationPermissions);

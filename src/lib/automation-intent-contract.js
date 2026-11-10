@@ -103,11 +103,12 @@ function projectClassifyIntentReferenceOutput(value = {}, {
   patientText = '', responseItems = [], allowIndependentWrittenAction = false,
 } = {}) {
   const output = { ...value };
-  const normalizeEvidence = (text) => String(text || '').normalize('NFC').replace(/\s+/g, ' ').trim();
+  const normalizeEvidence = (text) => String(text || '').normalize('NFC')
+    .replace(/\s+/g, ' ').replace(/\s+([.,!?;:])/g, '$1').trim();
   const text = normalizeEvidence(patientText);
   const evidence = normalizeEvidence(output.evidencia_decision_actual);
   // Verify provenance, not meaning: semantic interpretation stays with the model.
-  const hasWrittenEvidence = !!evidence && text.includes(evidence);
+  const hasWrittenEvidence = require('./automation-literal-evidence').matches(patientText,output.evidencia_decision_actual);
   const reactionId = Number(output.id_confirmacion_por_reaccion);
   // Verify which current event the model selected, not the meaning of its emoji.
   const hasReactionEvidence = output.intencion_principal === 'confirmar_cita'
@@ -116,7 +117,7 @@ function projectClassifyIntentReferenceOutput(value = {}, {
     && responseItems.some((item) => item.content_type === 'reaction'
       && Number(item.message_id) === reactionId && item.emoji && item.target_message_preview);
   const pendingEvidence = normalizeEvidence(output.evidencia_asunto_pendiente);
-  const hasPendingEvidence = !!pendingEvidence && text.includes(pendingEvidence);
+  const hasPendingEvidence = require('./automation-literal-evidence').matches(patientText,output.evidencia_asunto_pendiente);
   const replyConfidence = Number(output.confianza_hay_asunto_por_resolver) || 0;
   const decisionNotPostponed = output.decision_pospuesta === false
     && Number(output.confianza_decision_pospuesta) >= AUTO_APPLY_CONFIDENCE_THRESHOLD;

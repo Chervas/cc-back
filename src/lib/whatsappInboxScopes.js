@@ -140,11 +140,11 @@ function splitLease(lease, config) {
       };
       if (change.field === 'messages') {
         if (!Array.isArray(value.messages) && !Array.isArray(value.statuses)) held();
-        for (const message of value.messages || []) add({messages:[message],statuses:[]},{peer:message.from});
+        for (const message of value.messages || []) add({messages:[message],statuses:[]},{peer:message.from || message.from_user_id});
         for (const status of value.statuses || []) add({messages:[],statuses:[status]},{wamid:status.id});
       } else if (change.field === 'smb_message_echoes') {
         if (!Array.isArray(value.message_echoes)) held();
-        for (const message of value.message_echoes) add({message_echoes:[message]},{peer:message.to});
+        for (const message of value.message_echoes) add({message_echoes:[message]},{peer:message.to || message.to_user_id});
       } else if (change.field === 'history') {
         if (!Array.isArray(value.history)) held();
         for (const h of value.history) {
@@ -164,6 +164,20 @@ async function routeClinic(connection, part, { routingReviewEnabled = false, lea
     if (typeof part.route.wamid !== 'string' || !/^wamid\.[A-Za-z0-9+/=_:.-]{1,500}$/.test(part.route.wamid)) held();
     [rows] = await connection.execute("SELECT DISTINCT c.clinic_id FROM Messages m JOIN Conversations c ON c.id=m.conversation_id WHERE c.clinic_id IN ("+marks+") AND c.channel='whatsapp' AND m.direction='outbound' AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata,'$.wamid'))=? LIMIT 2",[...ids,part.route.wamid]);
   } else {
+    const Identity=require('./whatsapp-contact-identity');
+    if(Identity.BSUID.test(part.route.peer || '')) {
+      if(process.env.WHATSAPP_CONTACT_IDENTITIES_ENABLED!=='true')held('review_required');
+      const query=async(sql,values=[]) => (await connection.execute(sql,values))[0];
+      if(!await Identity.available(query)) held('review_required');
+      const businessId=await Identity.businessForScope(query,part.scope);
+      if(routingReviewEnabled){const decision=await require('./whatsappInboxRoutingReview').decision(connection,part,{receipt:lease?.receipt,partIndex});if(decision){part.recoveredRoutingReview=decision.recovered;return decision.clinicId;}}
+      const [known]=await connection.execute('SELECT DISTINCT clinic_id FROM WhatsappContactIdentities WHERE clinic_id IN ('+marks+") AND business_id=? AND identity_type='bsuid' AND identity_value=?",[...ids,businessId,part.route.peer]);
+      if(known.length!==1) {
+        if(routingReviewEnabled && known.length>1)await require('./whatsappInboxRoutingReview').retain(connection,part,lease,partIndex,now);
+        held('review_required');
+      }
+      return known[0].clinic_id;
+    }
     if (typeof part.route.peer !== 'string' || !/^[1-9][0-9]{6,14}$/.test(part.route.peer)) held();
     if (routingReviewEnabled) {
       const decision = await require('./whatsappInboxRoutingReview').decision(connection, part, { receipt: lease?.receipt, partIndex });
