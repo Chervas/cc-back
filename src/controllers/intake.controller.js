@@ -2549,7 +2549,8 @@ const enrichLeadsForUi = async (leadRows = []) => {
   const withPatientMatches = await enrichLeadsWithPatientMatches(withAttribution);
   const withAppointments = await enrichLeadsWithLinkedAppointments(withPatientMatches);
   const withConversations = await enrichLeadsWithConversationState(withAppointments);
-  return require('../services/leadPatientContext.service').enrich(withConversations);
+  const withPatientContext = await require('../services/leadPatientContext.service').enrich(withConversations);
+  return require('../services/leadContactSummary.service').enrichContactSummary({ models: db, leads: withPatientContext });
 };
 
 const resolveClinicIdsForSocket = async ({ clinicId, groupId }) => {
