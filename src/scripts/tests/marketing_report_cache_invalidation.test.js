@@ -91,21 +91,22 @@ function fixture(clinics = []) {
     invalidate: input => api.invalidateOverviewCacheForScope(input) };
 }
 
-test('nightly refresh and interactive reads share validated identities; queued work cannot repopulate a changed binding', async () => {
+for (const sourceMode of ['false', 'true']) test(`nightly refresh and interactive reads share validated identities; queued work cannot repopulate a changed binding (normalized source ${sourceMode})`, async () => {
   const oldGate = process.env.SC_ANALYTICS_READ_ENABLED;
-  process.env.SC_ANALYTICS_READ_ENABLED = 'true';
+  process.env.SC_ANALYTICS_READ_ENABLED = sourceMode;
   try {
     const { prepareValidatedReportSnapshot } = require('../../lib/validated-report-snapshot');
     const f = fixture([{ id_clinica: 71, grupoClinicaId: 9 }]);
     const range = { startLabel: '2026-10-01', endLabel: '2026-10-30', previous: { startLabel: '2026-09-01', endLabel: '2026-09-30' } };
-    let context = 'binding-1', generated = 0;
+    let context = 'Arenal-location-2059408182723799157', generated = 0;
     const prepare = ({ scope, range, section }) => prepareValidatedReportSnapshot({
       capture: async () => context,
       buildIdentity: contextKey => f.api.buildOverviewCacheIdentity({ scope, range, section, contextKey }),
       cache: f.api.overviewCache,
-      generate: async () => ({ success: true, generation: ++generated }),
+      generate: async () => ({ success: true, generation: ++generated,
+        businessProfile: { locationId: context, reviewsCount: context.startsWith('Arenal') ? 291 : 0 } }),
     });
-    const inputs = { buildRange: () => range, buildOverviewPayload: () => assert.fail('SC workers must use guarded generation'),
+    const inputs = { buildRange: () => range, buildOverviewPayload: () => assert.fail('All workers must use guarded generation'),
       prepareOverviewSnapshot: prepare, prune: false };
     const night = await f.api.refreshOverviewSnapshots(inputs);
     assert.equal(night.processed, 1); assert.equal(generated, 1);
@@ -113,10 +114,22 @@ test('nightly refresh and interactive reads share validated identities; queued w
     assert.equal(interactive.identity.cache_key, night.refreshed[0].cacheKey);
     assert.equal((await interactive.read()).generation, 1); assert.equal(generated, 1);
     const lease = await f.api.overviewCache.acquire(interactive.identity);
-    context = 'binding-2';
+    context = 'Ajuriaguerra-location-15765789532715328937';
     const queued = await f.api.refreshOverviewSnapshots({ ...inputs, cacheKey: interactive.identity.cache_key,
       identity: interactive.identity, refreshToken: lease.token });
     assert.equal(queued.reason, 'cache_context_changed'); assert.equal(generated, 1);
+    const nextNight = await f.api.refreshOverviewSnapshots(inputs);
+    assert.equal(nextNight.processed, 1); assert.equal(generated, 2);
+    assert.notEqual(nextNight.refreshed[0].cacheKey, night.refreshed[0].cacheKey);
+    assert.equal(f.rows.get(nextNight.refreshed[0].cacheKey).payload.businessProfile.reviewsCount, 0);
+    assert.equal(f.rows.get(night.refreshed[0].cacheKey).payload.businessProfile.reviewsCount, 291);
+    // A queued pre-context legacy entry also cannot be filled with observations
+    // from the currently selected profile after rollout.
+    const oldIdentity = f.identity({ scope: 'clinic', clinicIds: [71] });
+    const legacyLease = await f.api.overviewCache.acquire(oldIdentity);
+    const legacy = await f.api.refreshOverviewSnapshots({ ...inputs, cacheKey: oldIdentity.cache_key,
+      identity: oldIdentity, refreshToken: legacyLease.token });
+    assert.equal(legacy.reason, 'cache_context_changed'); assert.equal(generated, 2);
   } finally {
     if (oldGate === undefined) delete process.env.SC_ANALYTICS_READ_ENABLED;
     else process.env.SC_ANALYTICS_READ_ENABLED = oldGate;
@@ -230,7 +243,8 @@ test('revoked queued jobs are terminally skipped and cannot claim a replacement 
     { code: 'OVERVIEW_CACHE_REFRESH_LEASE_LOST' });
   assert.equal(generated, 1, 'a generation already dispatched with an old token can finish, but cannot persist');
   const result = await f.api.refreshOverviewSnapshots({ cacheKey: identity.cache_key, identity, refreshToken: lease.token,
-    prune: false, buildRange: () => ({}), buildOverviewPayload: async () => { generated++; return {}; } });
+    prune: false, buildRange: () => ({}), buildOverviewPayload: async () => { generated++; return {}; },
+    prepareOverviewSnapshot: async () => ({ identity, generate: async () => assert.fail('obsolete job cannot generate'), validate: async () => {} }) });
   assert.equal(result.status, 'completed'); assert.equal(result.reason, 'cache_refresh_superseded');
   assert.equal(result.processed, 0); assert.equal(generated, 1, 'the revoked queued job must not dispatch another generation');
   assert.deepEqual(f.rows.get(identity.cache_key), row);

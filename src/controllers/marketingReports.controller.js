@@ -4166,16 +4166,28 @@ function forceRefreshRequested(req) {
 
 async function prepareOverviewSnapshot({ scope, range, section = 'overview' }) {
   const { prepareValidatedReportSnapshot } = require('../lib/validated-report-snapshot');
+  const sourceMode = process.env.SC_ANALYTICS_READ_ENABLED === 'true';
+  const assertSourceMode = () => {
+    if ((process.env.SC_ANALYTICS_READ_ENABLED === 'true') !== sourceMode) {
+      throw Object.assign(Error('sc_analytics_configuration_changed'), { code: 'sc_analytics_configuration_changed', status: 409 });
+    }
+  };
   return prepareValidatedReportSnapshot({
     capture: async () => {
-      if (process.env.SC_ANALYTICS_READ_ENABLED !== 'true') {
-        throw Object.assign(Error('sc_analytics_configuration_changed'), { code: 'sc_analytics_configuration_changed' });
-      }
+      assertSourceMode();
       const state = await resolveReportMarketingState(scope);
-      const siteUrls = await currentSearchConsoleSiteUrls(scope, state);
-      const revisions = await require('../services/searchConsoleAnalytics.service').readRevisions({ siteUrls });
+      let revisions;
+      if (sourceMode) {
+        const siteUrls = await currentSearchConsoleSiteUrls(scope, state);
+        revisions = await require('../services/searchConsoleAnalytics.service').readRevisions({ siteUrls });
+      }
+      assertSourceMode();
       // Explicit safe metadata only: no tracking secrets, raw records or tokens.
-      return { scope: state?.scope || { clinicIds: scope.clinicIds, isAll: scope.isAll }, revisions,
+      // Keep the normalized-source identity unchanged. Legacy reads need the
+      // same live asset identity (including the exact GBP mapping), without
+      // accessing the disabled Search Console source or its revision tables.
+      return { scope: state?.scope || { clinicIds: scope.clinicIds, isAll: scope.isAll },
+        ...(sourceMode ? { revisions } : { sourceMode: 'legacy' }),
         google: { accounts: effectiveGoogleAccounts(state), properties: effectiveGoogleProperties(state) },
         meta: effectiveMetaAssets(state) };
     },
@@ -4260,20 +4272,8 @@ exports.getOverview = async (req, res) => {
       });
       return res.json(overviewNavigationResponse(req, response, scope.isAll ? null : snapshotIdentity));
     }
-    if (!overviewCache) {
-      const response = await buildOverviewPayload({ scope, range });
-      if ((process.env.SC_ANALYTICS_READ_ENABLED === 'true') !== sourceMode) throw Object.assign(Error('sc_analytics_configuration_changed'), { code: 'sc_analytics_configuration_changed' });
-      return res.json(response);
-    }
-
-    const identity = buildOverviewCacheIdentity({ scope, range });
-    const response = await overviewCache.readOrGenerate({
-      identity,
-      forceRefresh: forceRefreshRequested(req),
-      staleWhileRefresh: true,
-      generate: () => buildOverviewPayload({ scope, range }),
-    });
-    if ((process.env.SC_ANALYTICS_READ_ENABLED === 'true') !== sourceMode) throw Object.assign(Error('sc_analytics_configuration_changed'), { code: 'sc_analytics_configuration_changed' });
+    const prepared = await prepareOverviewSnapshot({ scope, range });
+    const response = await prepared.read({ forceRefresh: forceRefreshRequested(req), staleWhileRefresh: true });
     return res.json(response);
   } catch (error) {
     const storageFailure = require('../lib/searchConsoleReadSource').storageError(error);

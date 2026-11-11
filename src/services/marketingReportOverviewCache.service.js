@@ -589,9 +589,8 @@ async function refreshOverviewSnapshots({
       }
       const range = buildRange(requestedIdentity.period_start, requestedIdentity.period_end, 30);
       const scope = scopeFromCacheIdentity(requestedIdentity);
-      const prepared = process.env.SC_ANALYTICS_READ_ENABLED === 'true'
-        ? await prepareCurrentSnapshot(prepareOverviewSnapshot, { scope, range, section: requestedIdentity.section }) : null;
-      if (prepared && prepared.identity.cache_key !== cacheKey) {
+      const prepared = await prepareCurrentSnapshot(prepareOverviewSnapshot, { scope, range, section: requestedIdentity.section });
+      if (prepared.identity.cache_key !== cacheKey) {
         if (refreshToken) await overviewCache.release(requestedIdentity, refreshToken);
         return { status: 'completed', processed: 0, deleted, skipped: true, reason: 'cache_context_changed' };
       }
@@ -604,8 +603,8 @@ async function refreshOverviewSnapshots({
           error: new Error('Otro worker está refrescando este informe'),
         };
       }
-      await overviewCache.generateAndPersist(requestedIdentity, claim.token, prepared?.generate || (() => buildOverviewPayload({ scope, range })));
-      await prepared?.validate();
+      await overviewCache.generateAndPersist(requestedIdentity, claim.token, prepared.generate);
+      await prepared.validate();
       return {
         status: 'completed',
         processed: 1,
@@ -624,12 +623,9 @@ async function refreshOverviewSnapshots({
     for (const clinic of clinics) {
       const scope = defaultClinicScope(clinic.id_clinica, clinic.grupoClinicaId);
       try {
-        const prepared = process.env.SC_ANALYTICS_READ_ENABLED === 'true'
-          ? await prepareCurrentSnapshot(prepareOverviewSnapshot, { scope, range, section }) : null;
-        const snapshotIdentity = prepared?.identity || buildOverviewCacheIdentity({ scope, range, section });
-        if (prepared) await prepared.read({ forceRefresh: true, staleWhileRefresh: false });
-        else await overviewCache.readOrGenerate({ identity: snapshotIdentity, forceRefresh: true, staleWhileRefresh: false,
-          generate: () => buildOverviewPayload({ scope, range }) });
+        const prepared = await prepareCurrentSnapshot(prepareOverviewSnapshot, { scope, range, section });
+        const snapshotIdentity = prepared.identity;
+        await prepared.read({ forceRefresh: true, staleWhileRefresh: false });
         refreshed.push({
           clinicId: Number(clinic.id_clinica),
           cacheKey: snapshotIdentity.cache_key,

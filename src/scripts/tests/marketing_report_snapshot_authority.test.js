@@ -60,9 +60,109 @@ test('GBP replacement never relabels old clinic metrics as observations from the
 });
 
 const range = { startLabel: '2026-10-01', endLabel: '2026-10-30', previous: { startLabel: '2026-09-01', endLabel: '2026-09-30' } };
-const cacheModule = () => loadDiscoverySource('services/marketingReportOverviewCache.service.js', {
+const cacheModule = (sourceMode = true) => loadDiscoverySource('services/marketingReportOverviewCache.service.js', {
   crypto: require('node:crypto'), sequelize, '../../models': {}, './jobRequests.service': {},
-}, { env: { SC_ANALYTICS_READ_ENABLED: 'true' } });
+}, { env: { SC_ANALYTICS_READ_ENABLED: String(sourceMode) } });
+
+function businessProfileSnapshotFixture(sourceMode) {
+  const f = { mappingId: 51, locationId: '2059408182723799157', revisionReads: 0, rows: new Map(), generations: 0 };
+  const scope = { scope: 'clinic', clinicIds: [71], isAll: false };
+  const inventory = () => ({ scope: { clinic_ids: [71] }, google: { available_assets: { business_profile: [
+    { mapping_id: f.mappingId, clinic_id: 71, connection_id: 81, location_id: f.locationId },
+  ] } } });
+  const identity = cacheModule(sourceMode).buildOverviewCacheIdentity;
+  const cache = { readOrGenerate: async ({ identity, generate, forceRefresh }) => {
+    if (!f.rows.has(identity.cache_key) || forceRefresh) f.rows.set(identity.cache_key, await generate());
+    const payload = f.rows.get(identity.cache_key);
+    await f.afterRead?.();
+    return payload;
+  } };
+  const controller = loadDiscoverySource('controllers/marketingReports.controller.js', {
+    sequelize, '../../models': { Sequelize: sequelize },
+    // Keep the production capture/identity/guard/cache flow. The report's SQL
+    // aggregation is covered above; this closed generator supplies observations
+    // keyed to the selected mapping, without bootstrapping models or providers.
+    '../lib/validated-report-snapshot': { prepareValidatedReportSnapshot: input => prepareValidatedReportSnapshot({ ...input,
+      generate: async () => {
+        f.generations++;
+        const payload = { success: true, businessProfile: { reviewsCount: f.mappingId === 51 ? 291 : 0,
+          locationId: f.locationId } };
+        await f.duringGenerate?.();
+        return payload;
+      },
+    }) },
+    '../services/effectiveMarketingAssets.service': { resolveEffectiveMarketingAssetInventory: async () => inventory() },
+    '../services/searchConsoleAnalytics.service': { readRevisions: async () => { f.revisionReads++; return []; } },
+    '../services/marketingReportOverviewCache.service': { buildOverviewCacheIdentity: identity, overviewCache: cache },
+    '../lib/clinicScope': { resolveClinicScope: async () => ({ ...scope, isValid: true }) },
+    '../lib/marketingScopeAccess': { hasMarketingClinicScopeAccess: async () => f.allowed !== false },
+    '../lib/role-helpers': { isGlobalAdmin: () => false },
+    '../lib/searchConsoleReadSource': sourceReads,
+  }, { env: { SC_ANALYTICS_READ_ENABLED: String(sourceMode) } });
+  f.prepare = () => controller.__testing.prepareOverviewSnapshot({ scope, range });
+  f.legacyIdentity = identity({ scope, range });
+  f.switchProfile = () => { f.mappingId = 52; f.locationId = '15765789532715328937'; };
+  f.expectedSourceContext = () => ({ scope: inventory().scope, revisions: [], google: { accounts: [], properties: {
+    searchConsole: [], analytics: [], businessProfiles: inventory().google.available_assets.business_profile,
+  } }, meta: { adAccounts: [], facebookPages: [], instagramAccounts: [] } });
+  f.identity = identity;
+  f.request = async () => {
+    const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+    await controller.getOverview({ query: { clinicId: '71', startDate: range.startLabel, endDate: range.endLabel }, userData: { userId: 501 } }, res);
+    return res;
+  };
+  return f;
+}
+
+test('both report sources invalidate Arenal cached observations when Ajuriaguerra becomes the effective GBP mapping', async () => {
+  for (const sourceMode of [false, true]) {
+    const f = businessProfileSnapshotFixture(sourceMode);
+    f.rows.set(f.legacyIdentity.cache_key, { success: true, businessProfile: { reviewsCount: 291, locationId: f.locationId } });
+    const old = await f.prepare();
+    assert.equal((await old.read()).businessProfile.reviewsCount, 291);
+    const oldPayload = f.rows.get(old.identity.cache_key);
+    f.switchProfile();
+    const current = await f.prepare();
+    assert.notEqual(current.identity.cache_key, old.identity.cache_key);
+    assert.notEqual(current.identity.cache_key, f.legacyIdentity.cache_key, 'old cache rows without a source context are never reused');
+    const payload = await current.read();
+    assert.equal(payload.businessProfile.locationId, '15765789532715328937');
+    assert.equal(payload.businessProfile.reviewsCount, 0);
+    assert.equal(f.generations, 2);
+    assert.equal(f.rows.get(old.identity.cache_key), oldPayload, 'historical cache data is not moved or relabelled');
+    assert.equal(f.revisionReads === 0, !sourceMode, 'legacy reads never touch the disabled normalized Search Console source');
+    if (sourceMode) assert.equal(current.identity.cache_key,
+      f.identity({ scope: { scope: 'clinic', clinicIds: [71], isAll: false }, range, contextKey: digest(f.expectedSourceContext()) }).cache_key,
+      'the existing normalized-source key stays compatible');
+  }
+});
+
+test('GBP replacement during either generation or a cached read blocks stale report disclosure in both source modes', async () => {
+  for (const sourceMode of [false, true]) {
+    for (const hit of [false, true]) {
+      const f = businessProfileSnapshotFixture(sourceMode);
+      const prepared = await f.prepare();
+      if (hit) { await prepared.read(); f.afterRead = f.switchProfile; }
+      else f.duringGenerate = f.switchProfile;
+      await assert.rejects(prepared.read(), { code: 'sc_analytics_configuration_changed', status: 409 });
+      if (!hit) assert.equal(f.rows.has(prepared.identity.cache_key), false, 'a crossed-source generation cannot be persisted');
+    }
+  }
+});
+
+test('legacy overview HTTP reads also use the validated GBP identity and preserve the existing clinic authority check', async () => {
+  const f = businessProfileSnapshotFixture(false);
+  assert.equal((await f.request()).body.businessProfile.reviewsCount, 291);
+  f.switchProfile();
+  const current = await f.request();
+  assert.equal(current.statusCode, 200); assert.equal(current.body.businessProfile.reviewsCount, 0);
+  f.afterRead = () => { f.mappingId = 53; };
+  const raced = await f.request();
+  assert.equal(raced.statusCode, 409); assert.equal(raced.body.businessProfile, undefined);
+  f.allowed = false;
+  assert.equal((await f.request()).statusCode, 403);
+  assert.equal(f.revisionReads, 0);
+});
 
 test('restart/navigation reuses committed snapshot; source revision, clinic, period and binding changes cannot reuse it', async () => {
   const rows = new Map(); let generations = 0, revision = '1', clinicId = 71, connectionId = 81;
