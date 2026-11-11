@@ -41,6 +41,16 @@ test('identity, credential custody and original mapping are pinned independently
     const s = snapshot(); mutate(s); assert.throws(() => setup.validateSnapshot(config(), s));
   }
 });
+test('mysql2 bigNumberStrings custody booleans accept exactly one, retaining strict identity checks', () => {
+  const s = snapshot(); s.connection.credentials_external = '1';
+  assert.equal(setup.validateSnapshot(config(), s).connection_ref, oauth.connection_ref);
+  for (const value of ['0','01','true',0,true,null,undefined]) {
+    const invalid = snapshot(); invalid.connection.credentials_external = value;
+    assert.throws(() => setup.validateSnapshot(config(), invalid), /identity_changed/);
+  }
+  s.connection.googleUserId = '999';
+  assert.throws(() => setup.validateSnapshot(config(), s), /identity_changed/);
+});
 test('setup never overwrites an existing authority; reconciliation only accepts the exact installed tuple', () => {
   const c = config(), s = snapshot(); s.scope = setup.desired(c);
   assert.throws(() => setup.validateSnapshot(c, s));

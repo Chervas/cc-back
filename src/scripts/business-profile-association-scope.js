@@ -35,7 +35,9 @@ function validateSnapshot(config, snapshot, allowInstalled = false) {
     && row.google_user_id === config.googleUserId && row.connection_ref === config.connectionRef && C.digest(row) === config.oauthBindingDigest
     && row.confirmed_at && Number.isFinite(new Date(row.confirmed_at).getTime()) && new Date(row.confirmed_at).getTime() <= Date.now(),
   'gbp_scope_setup_identity_changed');
-  need(snapshot.clinic?.id_clinica === config.clinicId && snapshot.connection?.credentials_external === 1
+  // mysql2 returns a computed SQL boolean as BIGINT text when the operator
+  // enables bigNumberStrings to preserve external identifiers.
+  need(snapshot.clinic?.id_clinica === config.clinicId && [1,'1'].includes(snapshot.connection?.credentials_external)
     && snapshot.connection.id === config.connectionId && snapshot.connection.googleUserId === config.googleUserId,
   'gbp_scope_setup_identity_changed');
   const keys = ['clinic:' + config.clinicId, ...(snapshot.clinic.grupoClinicaId ? ['group:' + snapshot.clinic.grupoClinicaId] : [])];
