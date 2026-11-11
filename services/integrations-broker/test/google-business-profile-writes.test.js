@@ -331,7 +331,7 @@ test('actual adapter and HTTPS runtime recover a severed response after restart 
   const location = { id: 51, clinica_id: 123, google_connection_id: 81, location_id: 'locations/456', is_active: true,
     broker_read_connection_ref: 'connection:test', broker_read_asset_ref: ASSET };
   const consumer = createBusinessProfileBroker({ client: {}, writerClient, enabled: () => true, writesEnabled: () => true,
-    loadLocation: async () => location, loadManagedBinding: async () => ({ external_location_id: '456', connection_ref: 'connection:test',
+    loadLocation: async () => location, loadManagedBinding: async () => ({ external_location_id: '456', state: 'active', connection_ref: 'connection:test',
       asset_ref: ASSET, clinica_id: 123, google_connection_id: 81 }) });
   const context = await consumer.prepare(location, () => { throw Error('LEGACY_TOKEN_FORBIDDEN'); }, new Map());
   let response; app.server.prependListener('request', (_req, res) => { response = res; });

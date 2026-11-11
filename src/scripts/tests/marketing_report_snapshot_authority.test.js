@@ -38,6 +38,27 @@ test('Google global-rating observations never count as profile traffic or make p
   assert.equal(result.metrics.views, 0);
 });
 
+
+test('GBP replacement never relabels old clinic metrics as observations from the new effective location', async () => {
+  const old = { business_location_id: 51, clinica_id: 71, date: '2026-11-02', metric_type: 'BUSINESS_IMPRESSIONS_TOTAL', value: 12345 };
+  const definitions = { profile_views: { preferred: ['BUSINESS_IMPRESSIONS_TOTAL'], fallback: [] } };
+  let reads=0;
+  const controller = loadDiscoverySource('controllers/marketingReports.controller.js', {
+    sequelize, '../../models': { Sequelize: sequelize,
+      ClinicBusinessLocation: { findOne: async ({where}) => {assert.equal(where.id,52);return {id:52};}, count: async () => 1 },
+      BusinessProfileReview: { findOne: async ({where}) => {assert.equal(where.business_location_id,52);return {};}, count: async () => 0 },
+      BusinessProfileDailyMetric: { findAll: async ({where}) => {reads++;assert.equal(where.business_location_id,52);assert.equal(where[sequelize.Op.or],undefined);return Number(where.business_location_id)===old.business_location_id?[old]:[];} },
+    }, '../services/businessProfileLocal.service': { METRIC_DEFINITIONS: definitions, collapseMetricRows: rows => rows, metricValueByDate: rows => rows.map(row=>({value:row.value})) },
+  });
+  const scope={scope:'clinic',clinicIds:[71]};
+  const interval={startLabel:'2026-11-01',endLabel:'2026-11-02',start:new Date('2026-11-01'),endExclusive:new Date('2026-11-03')};
+  const state={google:{available_assets:{business_profile:[{mapping_id:52}]}}};
+  const result=await controller.__testing.aggregateBusinessProfile(scope,interval,state);
+  assert.equal(result.connected,true);assert.equal(result.metrics.views,0);assert.equal(result.metrics.performanceStatus,'empty');assert.equal(result.metrics.latestPerformanceDate,null);assert.equal(reads,1);
+  const empty=await controller.__testing.aggregateBusinessProfile(scope,interval,{google:{available_assets:{business_profile:[]}}});
+  assert.equal(empty.connected,false);assert.equal(empty.metrics.performanceStatus,'empty');assert.equal(reads,1);
+});
+
 const range = { startLabel: '2026-10-01', endLabel: '2026-10-30', previous: { startLabel: '2026-09-01', endLabel: '2026-09-30' } };
 const cacheModule = () => loadDiscoverySource('services/marketingReportOverviewCache.service.js', {
   crypto: require('node:crypto'), sequelize, '../../models': {}, './jobRequests.service': {},

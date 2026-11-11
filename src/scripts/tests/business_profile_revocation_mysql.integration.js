@@ -13,6 +13,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await require('../../../migrations/20260913003000-add-platform-audit-result-part').up(qi, D);
   const migration = require('../../../migrations/20260913010000-create-business-profile-broker-revocations');
   await migration.up(qi, D); await migration.down(qi); await migration.up(qi, D);
+  await require('../../../migrations/20261111150000-business-profile-managed-associations').up(qi, D);
   for (const [name, file] of [['ClinicBusinessLocation','clinicbusinesslocation'], ['BusinessProfileBrokerBinding','businessprofilebrokerbinding'],
     ['BusinessProfileBrokerRevocation','businessprofilebrokerrevocation'], ['PlatformAuditEvent','platformauditevent']]) models[name] = require('../../../models/' + file)(sql, D);
   const R = models.BusinessProfileBrokerRevocation; const A = models.PlatformAuditEvent; const B = models.BusinessProfileBrokerBinding; const L = models.ClinicBusinessLocation;

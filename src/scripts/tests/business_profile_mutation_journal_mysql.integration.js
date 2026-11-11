@@ -75,7 +75,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
   } };
   const broker = require('../../services/businessProfileBroker.service').createBusinessProfileBroker({ client: {}, writerClient,
     enabled: () => enabled, writesEnabled: () => enabled, loadLocation: async () => scopeChanged ? { ...location, clinica_id: 999 } : location,
-    loadManagedBinding: async () => ({ external_location_id: '456', connection_ref: 'connection:test', asset_ref: 'gbp:123:456', clinica_id: 71, google_connection_id: 81 }) });
+    loadManagedBinding: async () => ({ external_location_id: '456', state: 'active', connection_ref: 'connection:test', asset_ref: 'gbp:123:456', clinica_id: 71, google_connection_id: 81 }) });
   const { createBusinessProfileMutationJournal } = require('../../services/businessProfileMutationJournal.service');
   const make = audit => createBusinessProfileMutationJournal({ models, sessions, audit, now: () => at, enabled: () => enabled, namespace: () => 'staging' });
   let journal = make();

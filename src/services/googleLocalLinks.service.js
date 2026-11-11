@@ -57,6 +57,11 @@ function extractRawPayload(location) {
 }
 
 function buildQueryLabel(location, clinic = {}) {
+  const raw = extractRawPayload(location);
+  if (raw.clinicaclick_association_attempt_id) {
+    const address = raw.storefrontAddress || {};
+    return [cleanString(location?.location_name), ...(Array.isArray(address.addressLines) ? address.addressLines.map(cleanString) : []), cleanString(address.postalCode), cleanString(address.locality)].filter(Boolean).join(', ');
+  }
   return cleanString(location?.location_name)
     || cleanString(location?.name)
     || cleanString(clinic?.nombre_clinica)
@@ -256,12 +261,14 @@ async function resolveClinicGoogleLocalLinks(clinicOrId) {
   const manualUrl = cleanString(clinic?.url_ficha_local);
   const location = await findActiveBusinessLocation(clinicId);
   const googleLinks = location ? buildLinksFromBusinessLocation(location, clinic) : null;
-  const manualDirectionsUrl = buildGoogleMapsDirectionsUrl({ query: buildClinicDirectionsQuery(clinic) });
-  const profileUrl = cleanString(googleLinks?.url_perfil_google) || manualUrl;
-  const directionsUrl = cleanString(googleLinks?.url_como_llegar) || manualDirectionsUrl || profileUrl || manualUrl;
+  const managedAssociation = Boolean(location && extractRawPayload(location).clinicaclick_association_attempt_id);
+  const manualDirectionsUrl = managedAssociation ? '' : buildGoogleMapsDirectionsUrl({ query: buildClinicDirectionsQuery(clinic) });
+  const profileUrl = cleanString(googleLinks?.url_perfil_google) || (managedAssociation ? '' : manualUrl);
+  const directionsUrl = cleanString(googleLinks?.url_como_llegar) || manualDirectionsUrl || profileUrl || (managedAssociation ? '' : manualUrl);
 
   return {
-    source: googleLinks?.source || (manualDirectionsUrl ? 'manual_google_maps_directions' : (manualUrl ? 'manual_url_ficha_local' : null)),
+    source: googleLinks?.source || (managedAssociation && directionsUrl ? 'google_business_profile' : null) || (manualDirectionsUrl ? 'manual_google_maps_directions' : (manualUrl ? 'manual_url_ficha_local' : null)),
+    ...(managedAssociation ? { association_managed: true } : {}),
     business_location_id: googleLinks?.business_location_id || null,
     location_id: googleLinks?.location_id || null,
     location_name: googleLinks?.location_name || null,
@@ -278,10 +285,11 @@ async function resolveClinicGoogleLocalLinks(clinicOrId) {
 function mergeClinicLinksIntoContext(clinicPatch, links) {
   const base = clinicPatch && typeof clinicPatch === 'object' ? clinicPatch : {};
   const safeLinks = links && typeof links === 'object' ? links : {};
+  const manualFallback = safeLinks.association_managed === true ? '' : cleanString(base.url_ficha_local);
   const effectiveDirectionsUrl =
     cleanString(safeLinks.url_como_llegar)
     || cleanString(safeLinks.url_perfil_google)
-    || cleanString(base.url_ficha_local);
+    || manualFallback;
   const effectiveAddress =
     cleanString(base.direccion)
     || cleanString(safeLinks.location_name)
@@ -290,8 +298,8 @@ function mergeClinicLinksIntoContext(clinicPatch, links) {
     ...base,
     direccion: effectiveAddress,
     url_ficha_local_manual: cleanString(safeLinks.url_ficha_local_manual) || cleanString(base.url_ficha_local),
-    url_ficha_local: cleanString(safeLinks.url_ficha_local) || cleanString(base.url_ficha_local),
-    url_perfil_google: cleanString(safeLinks.url_perfil_google) || cleanString(safeLinks.url_ficha_local) || cleanString(base.url_ficha_local),
+    url_ficha_local: cleanString(safeLinks.url_ficha_local) || manualFallback,
+    url_perfil_google: cleanString(safeLinks.url_perfil_google) || cleanString(safeLinks.url_ficha_local) || manualFallback,
     url_como_llegar: effectiveDirectionsUrl,
     url_dejar_resena: cleanString(safeLinks.url_dejar_resena),
     perfil_google_conectado: safeLinks.has_google_business_profile === true,

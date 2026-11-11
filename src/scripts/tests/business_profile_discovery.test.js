@@ -7,7 +7,7 @@ const { createBusinessProfileBroker } = require('../../services/businessProfileB
 const { loadDiscoverySource, unusedMetaSurfaceDependencies } = require('./fixtures/business_profile_discovery.fixture');
 const { connectionForTestServer } = require('./fixtures/campaign_offline_runtime.cjs');
 const clone = value => JSON.parse(JSON.stringify(value));
-const record = { external_location_id: '456', connection_ref: 'connection:test', asset_ref: 'gbp:123:456', clinica_id: 71, google_connection_id: 81 };
+const record = { external_location_id: '456', state: 'active', connection_ref: 'connection:test', asset_ref: 'gbp:123:456', clinica_id: 71, google_connection_id: 81 };
 const mapping = { id: 51, clinica_id: 71, google_connection_id: 81, location_id: 'locations/456', is_active: true,
   broker_read_connection_ref: record.connection_ref, broker_read_asset_ref: record.asset_ref };
 const SENTINEL = 'FICTITIOUS_DISCOVERY_LEGACY_CREDENTIAL';
@@ -92,6 +92,9 @@ async function routeFixture(t, options = {}) {
   const router = loadDiscoverySource('routes/oauth.routes.js', {
     ...unusedMetaSurfaceDependencies(),
     express, sequelize, '../../models': models, './auth.middleware': auth,
+    // This fixture isolates the legacy discovery boundary, not process-wide
+    // cutover admission (covered by its own contract tests).
+    '../lib/googleCutoverAdmission': { application: { run: async (_kind, work) => work() } },
     '../services/accessSession.service': sessionService,
     // This fixture models an installation with no OAuth cohort binding.
     '../services/googleOAuthBroker.service': require('../../services/googleOAuthBroker.service').createGoogleOAuthBroker({

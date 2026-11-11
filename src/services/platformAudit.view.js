@@ -73,6 +73,7 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
           delegation: v.version === 27 ? { adminUserId: v.adminUserId, effectiveUserId: v.effectiveActor.id,
             delegationId: v.delegationId, parentSessionRef: v.parentSessionRef, requestCorrelationId: v.requestCorrelationId,
             runtimeNamespace: v.runtimeNamespace, expiresAt: v.expiresAt, http: v.http, socket: v.socket, job: v.job, sourceEvent: v.sourceEvent } : null,
+          businessProfileAssociation: v.version === 31 ? { attemptId: v.correlationId, mappingId: v.mappingId, previousMappingId: v.previousMappingId, assetRef: v.assetRef, previousAssetRef: v.previousAssetRef, state: v.state } : null,
           businessProfileMutation: v.version === 25 ? { operationRef: v.operationRef, mappingId: v.mappingId,
             assetRef: v.assetRef, family: v.family, executionRef: v.executionRef, nodeRef: v.nodeRef,
             initiatorUserId: v.initiatorUserId, clinicCount: v.clinicCount } : null,

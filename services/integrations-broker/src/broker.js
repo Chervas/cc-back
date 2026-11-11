@@ -14,7 +14,7 @@ const publicMediaLimits = require('./public-media-limits');
 const { canonical } = require('./canonical');
 const { canonicalDigest } = require('./canonical-digest');
 class Broker {
-  constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, policyResolver, admission, now = () => Date.now(), timeoutMs = 10000, transportProfile = 'default' }) {
+  constructor({ store, policy, secrets, operations = OPERATIONS, adsEnrollment, gbpEnrollment, policyResolver, admission, now = () => Date.now(), timeoutMs = 10000, transportProfile = 'default' }) {
     if (!['default', 'ai', 'email', 'public-media', 'whatsapp-authorized','meta-marketing'].includes(transportProfile)
       || transportProfile==='meta-marketing'&&Object.keys(operations).some(op=>!op.startsWith('meta.marketing.'))
       || transportProfile === 'whatsapp-authorized' && Object.keys(operations).some(op => !op.startsWith('meta.whatsapp.authorized.'))
@@ -27,7 +27,8 @@ class Broker {
       : transportProfile === 'email' ? emailLimits.MAX_REQUEST_BYTES
         : transportProfile === 'public-media' ? publicMediaLimits.MAX_REQUEST_BYTES
           : transportProfile === 'whatsapp-authorized' ? require('./whatsapp-image').MAX_REQUEST_BYTES : transportProfile==='meta-marketing'?131072:32768;
-    this.operations = operations; this.adsEnrollment = adsEnrollment; this.policyResolver = policyResolver; this.admission = admission; this.now = now;
+    if (adsEnrollment && gbpEnrollment) fail('invalid_request');
+    this.operations = operations; this.adsEnrollment = adsEnrollment; this.resourceEnrollment = adsEnrollment || gbpEnrollment; this.policyResolver = policyResolver; this.admission = admission; this.now = now;
     this.timeoutMs = Math.min(transportProfile === 'ai' ? aiLimits.MAX_TIMEOUT_MS : 30000, Math.max(1, timeoutMs));
     this.active = new Map(); this.activeAssets = new Map();
     for (const item of policy.connections) {
@@ -62,7 +63,7 @@ class Broker {
     }
     let operation; let binding; let resolved = this.policy;
     try {
-      resolved = this.policyResolver?.resolve(request, principal, this.policy) || this.adsEnrollment?.resolve(request, principal, this.policy) || this.policy;
+      resolved = this.policyResolver?.resolve(request, principal, this.policy) || this.resourceEnrollment?.resolve(request, principal, this.policy) || this.policy;
       authorize(principal, request, resolved);
       operation = this.operations[request.operation];
       if (!operation || !Object.hasOwn(this.operations, request.operation)) fail('operation_denied');
@@ -70,8 +71,9 @@ class Broker {
       if (!binding || binding.provider !== operation.provider) fail('scope_denied');
       operation.validate(request.payload);
       operation.authorize?.({ request, binding, principal, policy: resolved });
-      this.adsEnrollment?.assert(request, principal, this.policy);
-      if (!['revoke_asset','google_oauth','whatsapp_onboarding','meta_marketing_oauth','google_ads_enrollment_status','google_ads_enrollment_revoke','whatsapp_authorized_status'].includes(operation.control)) {
+      this.resourceEnrollment?.assert(request, principal, this.policy);
+      if (!['revoke_asset','google_oauth','whatsapp_onboarding','meta_marketing_oauth','google_ads_enrollment_status','google_ads_enrollment_revoke',
+        'google_business_profile_enrollment_status','google_business_profile_enrollment_retire','google_business_profile_enrollment_abort','whatsapp_authorized_status'].includes(operation.control)) {
         this.store.connection(request.connectionRef, now);
         this.store.assertAssetActive(request);
       }
@@ -118,7 +120,8 @@ class Broker {
     const cached = this.store.reserve(principal.id, request.requestId, digest,
       eventFor(request, principal, resolved, 'integration.requested', 'accepted', 'authorized', now), this.policy.maxBacklog, now);
     if (cached) return { ...cached, replayed: true };
-    const metadataOnly = ['google_ads_enrollment_status','google_ads_enrollment_revoke','whatsapp_authorized_status'].includes(operation.control) && operation.secretless === true;
+    const metadataOnly = ['google_ads_enrollment_status','google_ads_enrollment_revoke',
+      'google_business_profile_enrollment_status','google_business_profile_enrollment_retire','google_business_profile_enrollment_abort','whatsapp_authorized_status'].includes(operation.control) && operation.secretless === true;
     const revision = metadataOnly ? null : this.store.connection(request.connectionRef, now).revision;
     const controller = new AbortController();
     const active = this.active.get(request.connectionRef) || new Set(); active.add(controller); this.active.set(request.connectionRef, active);
@@ -137,7 +140,7 @@ class Broker {
           if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
           this.store.assertAssetActive(request);
         }
-        this.adsEnrollment?.assert(request, principal, this.policy);
+        this.resourceEnrollment?.assert(request, principal, this.policy);
       };
       const execute = async secret => {
         assertActive();
@@ -149,7 +152,7 @@ class Broker {
           if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
           this.store.assertAssetActive(request);
         }
-        this.adsEnrollment?.assert(request, principal, this.policy);
+        this.resourceEnrollment?.assert(request, principal, this.policy);
         const data = operation.project(rawResult);
         if (secret && JSON.stringify(data).includes(secret.toString('utf8'))) fail('provider_failed');
         return data;
@@ -167,7 +170,7 @@ class Broker {
         if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
         this.store.assertAssetActive(request);
       }
-      this.adsEnrollment?.assert(request, principal, this.policy);
+      this.resourceEnrollment?.assert(request, principal, this.policy);
       const result = { requestId: request.requestId, data, replayed: false };
       const completedAudit = operation.completionAudit?.(data) || ['integration.completed', 'success', 'completed'];
       this.store.complete(principal.id, request.requestId, result,
@@ -179,7 +182,7 @@ class Broker {
             if (this.store.connection(request.connectionRef, this.now()).revision !== revision) fail('connection_blocked');
             this.store.assertAssetActive(request);
           }
-          this.adsEnrollment?.assert(request, principal, this.policy);
+          this.resourceEnrollment?.assert(request, principal, this.policy);
           operation.commit?.({ request, principal, policy: this.policy, result });
         } });
       return result;

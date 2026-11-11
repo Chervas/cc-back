@@ -1388,6 +1388,13 @@ router.use('/meta/marketing', (req, res, next) => {
     metaMarketingEnrollmentRoutes ||= require('./metaMarketingEnrollment.routes').createRouter({ sessions: accessSessions });
     return metaMarketingEnrollmentRoutes(req, res, next);
 });
+let businessProfileAssociationRoutes;
+router.use('/google/local/association', (req, res, next) => {
+    businessProfileAssociationRoutes ||= require('./businessProfileAssociation.routes').createRouter({
+        sessions: accessSessions, authorizeScope: authorizeExplicitConnectionScope, resolveConnection: resolveGoogleRequestConnection,
+    });
+    return businessProfileAssociationRoutes(req, res, next);
+});
 router.use('/google/ads/enrollment', (req, res, next) => {
     adsEnrollmentRoutes ||= require('./googleAdsEnrollment.routes').createRouter({
         service: require('../services/googleAdsEnrollment.service'), sessions: accessSessions,

@@ -564,11 +564,105 @@ async function loadAppointments({
   };
 }
 
-async function countTasks({ clinicIds, clinicMap, todayDate }) {
+function reviewSourceError(code, status = 503) {
+  return Object.assign(new Error(code), { code, status, statusCode: status });
+}
+
+// Only GBP metadata is read, in batches. Reuse the canonical property selector
+// over this request's bounded snapshot instead of resolving every integration
+// separately for every clinic/card. No grant or sensitive patient data is cached.
+async function captureDashboardReviewSources(clinicIds, dependencies = {}) {
+  clinicIds = uniqueInts(clinicIds).sort((a, b) => a - b);
+  if (!clinicIds.length) return { clinicIds, locationIds: [], consumers: new Map(), fingerprint: '[]' };
+  if (clinicIds.length > 1000) throw reviewSourceError('dashboard_google_reviews_scope_invalid');
+  const models = dependencies.models || db;
+  const select = dependencies.listScopedGoogleProperties
+    || require('./effectiveMarketingAssets.service').listScopedGoogleProperties;
+  const bounded = rows => {
+    if (!Array.isArray(rows) || rows.length > 1000) throw reviewSourceError('dashboard_google_reviews_source_unavailable');
+    return rows;
+  };
+  const clinics = bounded(await models.Clinica.findAll({ where: { id_clinica: { [Op.in]: clinicIds } },
+    attributes: ['id_clinica', 'grupoClinicaId'], order: [['id_clinica', 'ASC']], limit: 1001, raw: true }));
+  if (clinics.length !== clinicIds.length || clinicIds.some(id => !clinics.some(row => Number(row.id_clinica) === id))) {
+    throw reviewSourceError('dashboard_google_reviews_source_changed', 409);
+  }
+  const groupIds = uniqueInts(clinics.map(row => row.grupoClinicaId));
+  const [groups, assignments] = await Promise.all([
+    groupIds.length ? models.GrupoClinica.findAll({ where: { id_grupo: { [Op.in]: groupIds } },
+      attributes: ['id_grupo', 'business_profile_assignment_mode', 'business_profile_primary_location_id'],
+      order: [['id_grupo', 'ASC']], limit: 1001, raw: true }).then(bounded) : [],
+    groupIds.length ? models.GroupAssetClinicAssignment.findAll({ where: { assetType: 'google.business_profile',
+      grupoClinicaId: { [Op.in]: groupIds }, clinicaId: { [Op.in]: clinicIds } },
+      attributes: ['assetType', 'assetId', 'clinicaId', 'grupoClinicaId'], order: [['id', 'ASC']], limit: 1001, raw: true }).then(bounded) : [],
+  ]);
+  const candidateIds = uniqueInts([...groups.map(row => row.business_profile_primary_location_id), ...assignments.map(row => row.assetId)]);
+  const locations = bounded(await models.ClinicBusinessLocation.findAll({ where: { is_active: true,
+    [Op.or]: [{ clinica_id: { [Op.in]: clinicIds } }, ...(candidateIds.length ? [{ id: { [Op.in]: candidateIds } }] : [])] },
+    attributes: ['id', 'clinica_id', 'google_connection_id', 'location_id', 'location_name', 'is_active', 'updated_at',
+      'broker_read_connection_ref', 'broker_read_asset_ref'], order: [['id', 'ASC']], limit: 1001, raw: true }));
+  const groupMap = new Map(groups.map(row => [Number(row.id_grupo), row]));
+  const consumers = new Map();
+  for (const clinic of clinics) {
+    const clinicId = Number(clinic.id_clinica), groupId = toInt(clinic.grupoClinicaId);
+    const source = await select({ clinic_id: clinicId, group_id: groupId, clinic_ids: [clinicId], assignment_scope: 'clinic' }, {
+      sections: ['business_profile'],
+      groupModel: { findByPk: async id => groupMap.get(Number(id)) || null },
+      assignmentModel: { findAll: async () => assignments.filter(row => Number(row.clinicaId) === clinicId && Number(row.grupoClinicaId) === groupId) },
+      propertyModels: { business_profile: { findAll: async ({ where }) => {
+        // This is precisely the narrow query emitted by the canonical selector.
+        // If that contract grows, stop rather than ignoring a new restriction.
+        if (where?.is_active !== true || Reflect.ownKeys(where).length !== 2 || !Array.isArray(where[Op.or])) {
+          throw reviewSourceError('dashboard_google_reviews_source_unavailable');
+        }
+        const predicates = where[Op.or].map(clause => {
+          if (Reflect.ownKeys(clause).length !== 1) throw reviewSourceError('dashboard_google_reviews_source_unavailable');
+          if (toInt(clause.clinica_id)) return row => Number(row.clinica_id) === Number(clause.clinica_id);
+          if (clause.id && Reflect.ownKeys(clause.id).length === 1 && Array.isArray(clause.id[Op.in])) {
+            const ids = uniqueInts(clause.id[Op.in]); return row => ids.includes(Number(row.id));
+          }
+          throw reviewSourceError('dashboard_google_reviews_source_unavailable');
+        });
+        return locations.filter(row => (row.is_active === true || Number(row.is_active) === 1) && predicates.some(test => test(row)));
+      } } },
+    });
+    if (!Array.isArray(source?.business_profile)) throw reviewSourceError('dashboard_google_reviews_source_unavailable');
+    for (const asset of source.business_profile) {
+      const id = toInt(asset.mapping_id);
+      if (!id || !locations.some(row => Number(row.id) === id)) throw reviewSourceError('dashboard_google_reviews_source_unavailable');
+      if (!consumers.has(id)) consumers.set(id, []);
+      consumers.get(id).push(clinicId);
+    }
+  }
+  const locationIds = [...consumers.keys()].sort((a, b) => a - b);
+  const fingerprint = JSON.stringify(locationIds.map(id => {
+    const row = locations.find(location => Number(location.id) === id);
+    return [id, Number(row.clinica_id), Number(row.google_connection_id), row.location_id,
+      row.broker_read_connection_ref || null, row.broker_read_asset_ref || null, consumers.get(id).sort((a, b) => a - b)];
+  }));
+  return { clinicIds, locationIds, consumers, fingerprint };
+}
+
+async function resolveDashboardReviewSources(clinicIds, dependencies = {}) {
+  const captured = await captureDashboardReviewSources(clinicIds, dependencies);
+  return { ...captured, async validate() {
+    const current = await captureDashboardReviewSources(clinicIds, dependencies);
+    if (current.fingerprint !== captured.fingerprint) throw reviewSourceError('dashboard_google_reviews_source_changed', 409);
+  } };
+}
+
+function reviewSourceIds(sources, clinicIds) {
+  const allowed = new Set(uniqueInts(clinicIds));
+  return sources.locationIds.filter(id => sources.consumers.get(id)?.some(clinic => allowed.has(clinic)));
+}
+
+async function countTasks({ clinicIds, clinicMap, todayDate, reviewSources = null }) {
   if (!clinicIds.length) {
     return { leadsPending: 0, pendingConsents: 0, pendingReviews: 0 };
   }
 
+  const sources = reviewSources || await resolveDashboardReviewSources(clinicIds);
+  const reviewLocationIds = reviewSourceIds(sources, clinicIds);
   const [leadsPending, pendingConsents, pendingReviews] = await Promise.all([
     LeadIntake
       ? LeadIntake.count({
@@ -588,10 +682,10 @@ async function countTasks({ clinicIds, clinicMap, todayDate }) {
           },
         })
       : 0,
-    BusinessProfileReview
+    BusinessProfileReview && reviewLocationIds.length
       ? BusinessProfileReview.count({
           where: {
-            ...scopedWhere('clinica_id', clinicIds),
+            ...scopedWhere('business_location_id', reviewLocationIds),
             google_missing_at: null,
             has_reply: false,
           },
@@ -609,6 +703,7 @@ async function countTasks({ clinicIds, clinicMap, todayDate }) {
       })
     : 0;
 
+  if (!reviewSources) await sources.validate();
   return { leadsPending, pendingConsents, pendingReviews, unconfirmedToday };
 }
 
@@ -737,12 +832,15 @@ function locationPublicUrl(location) {
   return raw.metadata?.mapsUri || raw.mapsUri || null;
 }
 
-async function loadUnansweredReviewCards({ clinicIds, clinicMap, limit = 4 }) {
+async function loadUnansweredReviewCards({ clinicIds, clinicMap, limit = 4, reviewSources = null }) {
   if (!clinicIds.length || !BusinessProfileReview) return [];
+  const sources = reviewSources || await resolveDashboardReviewSources(clinicIds);
+  const reviewLocationIds = reviewSourceIds(sources, clinicIds);
+  if (!reviewLocationIds.length) return [];
 
   const reviews = await BusinessProfileReview.findAll({
     where: {
-      ...scopedWhere('clinica_id', clinicIds),
+      ...scopedWhere('business_location_id', reviewLocationIds),
       google_missing_at: null,
       has_reply: false,
     },
@@ -766,14 +864,17 @@ async function loadUnansweredReviewCards({ clinicIds, clinicMap, limit = 4 }) {
     raw: true,
   });
 
-  if (!reviews.length) return [];
+  if (!reviews.length) { if (!reviewSources) await sources.validate(); return []; }
 
   const locationIds = uniqueInts(reviews.map((review) => review.business_location_id));
-  const patientIds = uniqueInts(reviews.map((review) => review.matched_paciente_id));
+  // A shared public profile does not grant access to another clinic's matched
+  // patients. Preserve the existing sensitive-clinic boundary for enrichment.
+  const patientIds = uniqueInts(reviews.filter(review => clinicIds.includes(Number(review.clinica_id)))
+    .map((review) => review.matched_paciente_id));
   const [locations, patients] = await Promise.all([
     locationIds.length && ClinicBusinessLocation
       ? ClinicBusinessLocation.findAll({
-          where: scopedWhere('id', locationIds),
+          where: { ...scopedWhere('id', locationIds), is_active: true },
           attributes: ['id', 'location_name', 'raw_payload'],
           raw: true,
         })
@@ -790,17 +891,25 @@ async function loadUnansweredReviewCards({ clinicIds, clinicMap, limit = 4 }) {
   const locationMap = new Map(locations.map((row) => [Number(row.id), row]));
   const patientMap = new Map(patients.map((row) => [Number(row.id_paciente), row]));
 
+  if (!reviewSources) await sources.validate();
   return reviews.map((review) => {
-    const clinic = clinicMap.get(Number(review.clinica_id));
+    const consumers = sources.consumers.get(Number(review.business_location_id)) || [];
+    const clinicId = consumers.includes(Number(review.clinica_id)) && clinicIds.includes(Number(review.clinica_id))
+      ? Number(review.clinica_id) : consumers.find(id => clinicIds.includes(id));
+    const clinic = clinicMap.get(clinicId);
     const location = locationMap.get(Number(review.business_location_id));
-    const patient = patientMap.get(Number(review.matched_paciente_id));
+    if (!clinicId || !location) throw reviewSourceError('dashboard_google_reviews_source_changed', 409);
+    const sensitiveAllowed = clinicIds.includes(Number(review.clinica_id));
+    const patient = sensitiveAllowed ? patientMap.get(Number(review.matched_paciente_id)) : null;
     const reviewId = Number(review.id);
     return {
       id: String(reviewId),
       reviewId,
       reviewName: review.review_name || null,
-      clinicId: Number(review.clinica_id) || null,
-      clinicName: clinic?.nombre_clinica || `Clínica ${review.clinica_id}`,
+      clinicId,
+      clinicName: clinic?.nombre_clinica || `Clínica ${clinicId}`,
+      sourceClinicId: Number(review.clinica_id) || null,
+      businessLocationId: Number(review.business_location_id),
       locationName: location?.location_name || null,
       reviewerName: review.reviewer_name || 'Paciente de Google',
       reviewerAvatar: review.reviewer_profile_photo_url || null,
@@ -808,15 +917,15 @@ async function loadUnansweredReviewCards({ clinicIds, clinicMap, limit = 4 }) {
       comment: review.comment || '',
       createdAt: review.create_time || review.update_time || null,
       isNegative: review.is_negative === true || Number(review.star_rating || 0) <= 3,
-      matchedPatientId: Number(review.matched_paciente_id) || null,
+      matchedPatientId: sensitiveAllowed ? Number(review.matched_paciente_id) || null : null,
       matchedPatientName: patient ? fullName(patient, null) : null,
-      matchConfidence: review.match_confidence != null ? Number(review.match_confidence) : null,
+      matchConfidence: sensitiveAllowed && review.match_confidence != null ? Number(review.match_confidence) : null,
       replyExternalUrl: locationPublicUrl(location),
       link: '/marketing/perfil-google',
       queryParams: {
         reviews: 'unanswered',
         review_id: reviewId,
-        clinica_id: Number(review.clinica_id) || null,
+        clinica_id: clinicId,
       },
     };
   });
@@ -1485,11 +1594,14 @@ async function getMainDashboard({ userId, query = {} }) {
     manageClinicIds: appointmentManageClinicIds,
     consentClinicIds: dashboardAccess.consentClinicIds,
   });
+  const reviewSources = sections.operations
+    ? await resolveDashboardReviewSources(unionClinicIds(dashboardAccess.reviewClinicIds, dashboardAccess.taskClinicIds)) : null;
   const counts = sections.operations
     ? await countTasks({
         clinicIds: dashboardAccess.taskClinicIds,
         clinicMap: scope.clinicMap,
         todayDate: today.date,
+        reviewSources,
       })
     : { leadsPending: 0, pendingConsents: 0, pendingReviews: 0, unconfirmedToday: 0 };
 
@@ -1504,7 +1616,7 @@ async function getMainDashboard({ userId, query = {} }) {
     staffPresence,
   ] = await Promise.all([
     sections.operations ? loadPendingConsentCards({ clinicIds: dashboardAccess.consentClinicIds, limit: 6 }) : [],
-    sections.operations ? loadUnansweredReviewCards({ clinicIds: dashboardAccess.reviewClinicIds, clinicMap: scope.clinicMap, limit: 4 }) : [],
+    sections.operations ? loadUnansweredReviewCards({ clinicIds: dashboardAccess.reviewClinicIds, clinicMap: scope.clinicMap, limit: 4, reviewSources }) : [],
     doctorId ? loadPendingConsentCards({ clinicIds: dashboardAccess.consentClinicIds, doctorId, limit: 6 }) : [],
     doctorId ? loadWeeklySchedule({ clinicIds: dashboardAccess.appointmentClinicIds, clinicMap: scope.clinicMap, userId: doctorId, todayIso: today.date }) : [],
     sections.shared ? loadWhatsappStatus({ clinicIds: scope.clinicIds, groupIds: scope.groupIds }) : { connected: null, paymentReady: null, paymentMissing: false },
@@ -1528,7 +1640,6 @@ async function getMainDashboard({ userId, query = {} }) {
       return null;
     }) : null,
   ]);
-
   const setup = sections.operations
     ? await loadSetupStatus({
         clinicIds: dashboardAccess.operationalClinicIds,
@@ -1537,6 +1648,7 @@ async function getMainDashboard({ userId, query = {} }) {
         whatsappStatus,
       })
     : { total: 0, completed: 0, items: [] };
+  if (reviewSources) await reviewSources.validate();
 
   const doctorAppointments = doctorId
     ? appointments.today
@@ -1677,6 +1789,10 @@ module.exports = {
   getMainDashboard,
   getDoctorDay,
   __testing: {
+    captureDashboardReviewSources,
+    resolveDashboardReviewSources,
+    countTasks,
+    loadUnansweredReviewCards,
     loadWeeklySchedule,
     loadSetupStatus,
     isExpectedTodayAppointment,

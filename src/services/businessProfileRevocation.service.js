@@ -21,7 +21,15 @@ async function enqueue({ models, transaction, connectionId, clinicIds, actorId, 
   if (!transaction || !positive(String(connectionId)) || !Array.isArray(clinicIds) || clinicIds.some(id => !positive(String(id)))) fail('gbp_revocation_unavailable');
   if (!clinicIds.length) return 0;
   const where = { google_connection_id: Number(connectionId), clinica_id: { [Op.in]: clinicIds } };
-  const bindings = await models.BusinessProfileBrokerBinding.findAll({ where, transaction, lock: transaction.LOCK.UPDATE,
+  // A prepared resource may not yet exist in the remote ownership ledger.
+  // Finish/cancel that same association before scope disconnection; never mint
+  // an asset-wide revocation merely from its location ID.
+  if (models.BusinessProfileAssociationRequest) {
+    const pending = await models.BusinessProfileAssociationRequest.findOne({ where: { ...where, state: { [Op.notIn]: ['active', 'cancelled'] } },
+      attributes: ['attempt_id'], transaction, lock: transaction.LOCK.UPDATE, logging: false });
+    if (pending) throw Object.assign(Error('Antes de desconectar Google, termina o cancela el cambio de ficha pendiente y consulta su resultado.'), { code: 'gbp_association_pending', httpStatus: 409 });
+  }
+  const bindings = await models.BusinessProfileBrokerBinding.findAll({ where: { ...where, state: 'active' }, transaction, lock: transaction.LOCK.UPDATE,
     order: [['external_location_id', 'ASC']], limit: 101, raw: true });
   const previous = await models.BusinessProfileBrokerRevocation.findAll({ where, transaction, lock: transaction.LOCK.UPDATE,
     order: [['external_location_id', 'ASC']], limit: 101, raw: true });

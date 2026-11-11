@@ -37,7 +37,7 @@ function createBusinessProfileBroker({ client, writerClient, loadLocation, loadM
     if (await loadRevocation(externalLocationId(location), options)) fail('asset_revoked');
     const record = await loadManagedBinding(externalLocationId(location), options);
     if (!record && !marked(location)) return null;
-    if (!record || !marked(location)) fail('broker_binding_invalid');
+    if (!record || !marked(location) || record.state !== 'active') fail('broker_binding_invalid');
     const scope = binding(location);
     if (record.external_location_id !== externalLocationId(location) || record.connection_ref !== scope.connectionRef || record.asset_ref !== scope.assetRef
       || Number(record.clinica_id) !== Number(location.clinica_id) || Number(record.google_connection_id) !== Number(location.google_connection_id)) fail('broker_binding_invalid');

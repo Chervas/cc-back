@@ -50,6 +50,6 @@ test('HTTP observed status and queued handler return cannot be misrepresented as
 test('reader paths explicitly accept deployed v26 and new v27, but reject future or malformed generations', () => {
   const row = pack(fixture()), ref = { key: keyFor(row), digest: row.digest, versionId: 'fictitious-version' };
   assert.equal(refFor({ ...ref, key: ref.key.replace('/v27/', '/v26/') }, 'confirmed').digest, row.digest);
-  for (const version of ['31', '027', '0', '../27']) assert.throws(() => refFor({ ...ref, key: ref.key.replace('/v27/', `/v${version}/`) }, 'confirmed'));
+  for (const version of ['32', '027', '0', '../27']) assert.throws(() => refFor({ ...ref, key: ref.key.replace('/v27/', `/v${version}/`) }, 'confirmed'));
 });
 module.exports = { fixture };

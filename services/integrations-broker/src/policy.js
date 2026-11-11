@@ -39,6 +39,8 @@ const validate = new Ajv({ strict: true }).compile(object({
     googleAdsOptimization: require('./google-optimization-write-contract').bindingSchema,
     googleAdsGoalPolicy: require('./google-goal-policy-write-contract').bindingSchema,
     googleBusinessProfileWrites: require('./google-business-profile-write-contract').bindingSchema,
+    googleBusinessProfileEnrollmentScopes: { type: 'array', minItems: 1, maxItems: 100,
+      items: require('./google-business-profile-enrollment-contract').scopeSchema },
     oauth: require('./google-oauth-contract').bindingSchema }, ['connectionRef', 'provider', 'initialState']) },
   grants: { type: 'array', maxItems: 100000, items: object({ principalId: ref, tenantRef: ref, connectionRef: ref, assetRef: ref, operations: strings }) },
 }));

@@ -31,6 +31,7 @@ const migrationNames = [
   '20260918220000-create-google-destination-journal.js',
   '20260918224500-index-google-destination-recovery.js',
   '20260918235000-index-google-receipt-review.js',
+  '20261111150000-business-profile-managed-associations.js',
 ];
 const historicalMigrations = ['20260711003000-create-google-ads-conversion-upload-attempts.js',
   '20260711012000-add-google-ads-conversion-destination-key.js',
@@ -43,6 +44,7 @@ const legacyModels = [
   ['ClinicGoogleAdsAccount', 'clinicgoogleadsaccount'], ['GoogleConnectionAssignment', 'googleconnectionassignment'],
 ];
 const registryModels = [
+  ['BusinessProfileAssociationScope', 'businessprofileassociationscope'], ['BusinessProfileAssociationRequest', 'businessprofileassociationrequest'],
   ['BusinessProfileBrokerBinding', 'businessprofilebrokerbinding'], ['BusinessProfileBrokerRevocation', 'businessprofilebrokerrevocation'],
   ['GoogleOAuthBrokerBinding', 'googleoauthbrokerbinding'], ['GoogleOAuthBrokerRequest', 'googleoauthbrokerrequest'],
   ['SearchConsoleBrokerBinding', 'searchconsolebrokerbinding'], ['AnalyticsBrokerBinding', 'analyticsbrokerbinding'],

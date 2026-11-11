@@ -16,6 +16,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const migration = require('../../../migrations/20260913000000-add-business-profile-broker-read-binding');
   await migration.up(qi);
   await require('../../../migrations/20260913010000-create-business-profile-broker-revocations').up(qi, D);
+  await require('../../../migrations/20261111150000-business-profile-managed-associations').up(qi, D);
   models.BusinessProfileBrokerRevocation = require('../../../models/businessprofilebrokerrevocation')(sql, D);
   models.BusinessProfileBrokerBinding = require('../../../models/businessprofilebrokerbinding')(sql, D);
   models.ClinicBusinessLocation = require('../../../models/clinicbusinesslocation')(sql, D);

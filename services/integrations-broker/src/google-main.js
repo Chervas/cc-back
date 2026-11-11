@@ -21,6 +21,8 @@ const { createGoogleAdsOperations } = require('./google-ads');
 const { createGoogleAdsDeveloperSecret } = require('./google-ads-developer-secret');
 const enrollmentContract = require('./google-ads-enrollment-contract');
 const { createGoogleAdsEnrollment } = require('./google-ads-enrollment');
+const gbpEnrollmentContract = require('./google-business-profile-enrollment-contract');
+const { createBusinessProfileEnrollment } = require('./google-business-profile-enrollment');
 const dmContract = require('./google-data-manager-contract');
 const { createDataManagerOperations } = require('./google-data-manager');
 const actionContract = require('./google-action-management-contract');
@@ -78,6 +80,8 @@ function validateConfig(config) {
     || !net.isIP(config.listenAddress) || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535
     || typeof config.stateFile !== 'string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   validatePolicy(config.policy);
+  if (!['google-business-profile-read-v1', gbpWriteContract.COHORT].includes(config.cohort)
+    && config.policy.connections.some(c => c.googleBusinessProfileEnrollmentScopes)) fail('invalid_request');
   const businessProfileWrites = config.cohort === gbpWriteContract.COHORT;
   if (!businessProfileWrites && config.policy.connections.some(c => c.googleBusinessProfileWrites)
     || businessProfileWrites && !config.policy.connections.some(c => c.googleBusinessProfileWrites)) fail('invalid_request');
@@ -186,7 +190,7 @@ function validateConfig(config) {
   if (!config.policy.connections.length || config.policy.connections.some(c => c.provider !== PROVIDER || !c.secretArn || !c.clientSecretArn)
     || config.policy.connections.some(c => c.searchConsoleSites || c.googleSubject || c.analyticsProperties)
     || config.policy.grants.some(g => !/^clinic:[1-9]\d{0,9}$/.test(g.tenantRef) || g.operations.some(op => !OPERATIONS.includes(op) && !writeOperations.includes(op) && op !== REVOKE_OPERATION
-      && !Object.values(oauthContract.OPERATIONS).includes(op)))) fail('invalid_request');
+      && !Object.values(oauthContract.OPERATIONS).includes(op) && !gbpEnrollmentContract.isOperation(op)))) fail('invalid_request');
   const readers = new Set(config.policy.grants.filter(g => g.operations.some(op => OPERATIONS.includes(op))).map(g => g.principalId));
   const keyFor = id => {
     try { return createPublicKey(config.policy.principals.find(p => p.id === id).publicKey).export({ type: 'spki', format: 'der' }).toString('base64'); }
@@ -212,7 +216,16 @@ function validateConfig(config) {
     if (priorControls.has(grant.principalId) || priorKeys.has(keyFor(grant.principalId))) fail('invalid_request');
     oauthContract.bindingFor(config.policy.connections.find(c => c.connectionRef === grant.connectionRef));
   }
-  for (const grant of config.policy.grants) asset(grant.assetRef);
+  for (const grant of config.policy.grants) {
+    if (grant.assetRef.startsWith('gbp-enroll:')) {
+      if (grant.operations.some(op => !gbpEnrollmentContract.isOperation(op))) fail('invalid_request');
+      gbpEnrollmentContract.scopeFor(config.policy.connections.find(c => c.connectionRef === grant.connectionRef), grant.assetRef, grant.tenantRef);
+    } else {
+      if (grant.operations.some(op => gbpEnrollmentContract.isOperation(op))) fail('invalid_request');
+      asset(grant.assetRef);
+    }
+  }
+  if (config.policy.connections.some(c => c.googleBusinessProfileEnrollmentScopes)) gbpEnrollmentContract.validatePolicy(config.policy);
   return config;
 }
 async function connectAws() {
@@ -251,7 +264,7 @@ async function main(filename, { awsFactory = connectAws, http } = {}) {
     businessProfileWritesEnabled: config.cohort === gbpWriteContract.COHORT });
   const cert = privateFile(config.tlsCertFile, 65536); const key = privateFile(config.tlsKeyFile, 65536);
   const cursorKey = privateFile(config.cursorKeyFile, 32); const cursor = cursorCodec(cursorKey);
-  const store = new BrokerStore(config.stateFile); let aws; let secrets; let oauth; let adsEngine; let actionManagement; let optimizationWrites; let adsEnrollment; let server; let timer; let draining;
+  const store = new BrokerStore(config.stateFile); let aws; let secrets; let oauth; let adsEngine; let actionManagement; let optimizationWrites; let adsEnrollment; let gbpEnrollment; let server; let timer; let draining;
   try {
     aws = await awsFactory();
     const searchConsole = config.cohort === 'google-search-console-read-v1';
@@ -259,6 +272,9 @@ async function main(filename, { awsFactory = connectAws, http } = {}) {
     const ads = config.cohort === 'google-ads-read-v1' || config.cohort === dmContract.COHORT || config.cohort === optimizationContract.COHORT || config.cohort === goalContract.COHORT;
     const businessProfileWrites = config.cohort === gbpWriteContract.COHORT ? createBusinessProfileWrites({ store, http }) : null;
     let dataManager, destinations, goalWrites;
+    if (config.policy.connections.some(c => c.googleBusinessProfileEnrollmentScopes?.length)) {
+      gbpEnrollment = createBusinessProfileEnrollment({ store, http, cursor });
+    }
     secrets = createGoogleSecretStore({ client: aws.secrets, http, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY,
       provider: searchConsole ? scContract.PROVIDER : analytics ? gaContract.PROVIDER : ads ? adsContract.PROVIDER : PROVIDER });
     if (ads) {
@@ -284,10 +300,10 @@ async function main(filename, { awsFactory = connectAws, http } = {}) {
     if (config.policy.connections.some(c => c.oauth)) oauth = createGoogleOAuth({ store, policy: config.policy, http,
       secrets: createGoogleOAuthSecrets({ client: aws.secrets, accountId: ACCOUNT, prefix: '/clinicaclick/integrations/prod/', kmsKeyArn: SECRET_KEY }),
       onActivated: ref => { secrets.invalidate(ref); for (const controller of broker.active.get(ref) || []) controller.abort(); } });
-    broker = new Broker({ store, policy: config.policy, secrets, adsEnrollment,
+    broker = new Broker({ store, policy: config.policy, secrets, adsEnrollment, gbpEnrollment,
       operations: ads ? { ...adsEngine.operations, ...goalWrites?.operations, ...adsEnrollment?.operations, ...dataManager?.operations, ...actionManagement?.operations, ...optimizationWrites?.operations, ...destinations?.operations, ...oauthContract.controlsFor(adsContract.PROVIDER, oauth) }
         : searchConsole ? createSearchConsoleOperations({ http, cursor, oauth }) : analytics ? createAnalyticsOperations({ http, cursor, oauth })
-          : { ...createGoogleBusinessProfileOperations({ http, cursor, oauth }), ...businessProfileWrites?.operations }, timeoutMs: 25000 });
+          : { ...createGoogleBusinessProfileOperations({ http, cursor, oauth }), ...businessProfileWrites?.operations, ...gbpEnrollment?.operations }, timeoutMs: 25000 });
     let inFlight = 0;
     server = createServer({ async execute(...args) {
       if (inFlight >= (searchConsole ? 1 : 8)) fail('rate_limited'); inFlight++;
@@ -302,13 +318,13 @@ async function main(filename, { awsFactory = connectAws, http } = {}) {
     tick(); timer = setInterval(tick, 1000); timer.unref();
     let closing;
     const close = () => closing ||= (async () => {
-      clearInterval(timer); oauth?.close(); adsEngine?.close(); adsEnrollment?.close(); secrets.close();
+      clearInterval(timer); oauth?.close(); adsEngine?.close(); adsEnrollment?.close(); gbpEnrollment?.close(); secrets.close();
       for (const controllers of broker.active.values()) for (const controller of controllers) controller.abort();
       await new Promise(resolve => { server.close(resolve); server.closeIdleConnections?.(); });
       await draining; aws.close(); cursorKey.fill(0); store.close();
     })();
     return { server, store, broker, close };
-  } catch (error) { clearInterval(timer); server?.close(); oauth?.close(); adsEngine?.close(); adsEnrollment?.close(); secrets?.close(); aws?.close(); cursorKey.fill(0); store.close(); throw error; }
+  } catch (error) { clearInterval(timer); server?.close(); oauth?.close(); adsEngine?.close(); adsEnrollment?.close(); gbpEnrollment?.close(); secrets?.close(); aws?.close(); cursorKey.fill(0); store.close(); throw error; }
 }
 if (require.main === module) main(process.argv[2]).then(runtime => {
   const stop = () => runtime.close().catch(() => { process.exitCode = 1; });

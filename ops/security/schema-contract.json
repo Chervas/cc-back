@@ -2,6 +2,7 @@
   "version": 1,
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
   "featureGroups": {
+    "google_business_profile_associations": {"required":true,"tables":["BusinessProfileAssociationScopes","BusinessProfileAssociationRequests"],"migrations":["20261111150000-business-profile-managed-associations.js"]},
     "whatsapp_contact_identities": {"enabledWhenAll":{"WHATSAPP_CONTACT_IDENTITIES_ENABLED":"true"},"tables":["WhatsappContactIdentityLocks","WhatsappConversationLinks","WhatsappContactIdentities"],"migrations":["20261110210000-whatsapp-contact-identities.js"]},
     "meta_marketing_credentials": {"required":true,"enabledWhenAny":{"DB_TLS_REQUIRED":"true","META_MARKETING_BROKER_ENABLED":"true","META_MARKETING_CREDENTIAL_RENEWAL_ENABLED":"true"},"tables":["MetaMarketingCredentialRenewals","MetaMarketingEffectiveCredentials","MetaMarketingBusinessHandovers","MetaMarketingCredentialMaintenances","MetaMarketingBusinessDrains"],"migrations":["20261107203000-create-meta-marketing-credential-renewals.js","20261107223000-create-meta-marketing-business-continuity.js"]},
     "meta_marketing_recovery": {
@@ -69,6 +70,574 @@
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
+    "BusinessProfileAssociationScopes": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {
+          "COLUMN_NAME": "scope_key",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clinica_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "google_connection_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "google_user_id",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "account_ids",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "location_ids",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "enum('blocked','active')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "blocked",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "scope_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": []
+    },
+    "BusinessProfileAssociationRequests": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {
+          "COLUMN_NAME": "attempt_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_key",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clinica_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "google_connection_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "google_user_id",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "account_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "location_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "previous_asset_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "source_mapping_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "target_mapping_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "source_fingerprint",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "authority_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "oauth_binding_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "current_snapshot",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "target_snapshot",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "actor_user_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "session_ref",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "session_expires_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "prepare_request_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "activate_request_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "retire_request_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "abort_request_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "command_history",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "enum('prepare_pending','prepared','activate_pending','broker_active','retire_pending','active','cancel_pending','cancelled')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "requested_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updated_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "next_attempt_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "attempts",
+          "COLUMN_TYPE": "int unsigned",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "0",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "lease_token",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_bin",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "lease_until",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "last_error",
+          "COLUMN_TYPE": "varchar(64)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "abort_request_id",
+          "columns": [
+            {
+              "INDEX_NAME": "abort_request_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "abort_request_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "activate_request_id",
+          "columns": [
+            {
+              "INDEX_NAME": "activate_request_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "activate_request_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_gbp_association_location",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_gbp_association_location",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "location_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_gbp_association_location",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_gbp_association_scope",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_gbp_association_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "scope_key",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_gbp_association_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "requested_at",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_gbp_association_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 3,
+              "COLUMN_NAME": "attempt_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "prepare_request_id",
+          "columns": [
+            {
+              "INDEX_NAME": "prepare_request_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "prepare_request_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "attempt_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "retire_request_id",
+          "columns": [
+            {
+              "INDEX_NAME": "retire_request_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "retire_request_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": []
+    },
     "WhatsappContactIdentityLocks": {"ENGINE":"InnoDB","TABLE_COLLATION":"utf8mb4_0900_ai_ci","columns":[{"COLUMN_NAME":"clinic_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}],"indexes":[{"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"clinic_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}],"checks":[],"foreignKeys":[]},
     "WhatsappContactIdentities": {"ENGINE":"InnoDB","TABLE_COLLATION":"utf8mb4_0900_ai_ci","columns":[{"COLUMN_NAME":"identity_key","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"clinic_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"business_id","COLUMN_TYPE":"varchar(30)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"identity_type","COLUMN_TYPE":"enum('phone','bsuid')","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"identity_value","COLUMN_TYPE":"varchar(160)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"conversation_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"waba_id","COLUMN_TYPE":"varchar(30)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"phone_id","COLUMN_TYPE":"varchar(30)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"display_name","COLUMN_TYPE":"varchar(160)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"username","COLUMN_TYPE":"varchar(160)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_0900_ai_ci","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"restrictions","COLUMN_TYPE":"json","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"source","COLUMN_TYPE":"varchar(40)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"created_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"updated_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}],"indexes":[{"name":"cc_wa_identity_conversation","columns":[{"INDEX_NAME":"cc_wa_identity_conversation","NON_UNIQUE":1,"SEQ_IN_INDEX":1,"COLUMN_NAME":"conversation_id","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"cc_wa_identity_conversation","NON_UNIQUE":1,"SEQ_IN_INDEX":2,"COLUMN_NAME":"clinic_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},{"name":"cc_wa_identity_search","columns":[{"INDEX_NAME":"cc_wa_identity_search","NON_UNIQUE":1,"SEQ_IN_INDEX":1,"COLUMN_NAME":"clinic_id","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"cc_wa_identity_search","NON_UNIQUE":1,"SEQ_IN_INDEX":2,"COLUMN_NAME":"identity_type","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"cc_wa_identity_search","NON_UNIQUE":1,"SEQ_IN_INDEX":3,"COLUMN_NAME":"identity_value","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},{"name":"cc_wa_identity_username","columns":[{"INDEX_NAME":"cc_wa_identity_username","NON_UNIQUE":1,"SEQ_IN_INDEX":1,"COLUMN_NAME":"clinic_id","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"cc_wa_identity_username","NON_UNIQUE":1,"SEQ_IN_INDEX":2,"COLUMN_NAME":"username","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},{"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"identity_key","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}],"checks":[],"foreignKeys":[]},
     "WhatsappConversationLinks": {"ENGINE":"InnoDB","TABLE_COLLATION":"utf8mb4_0900_ai_ci","columns":[{"COLUMN_NAME":"conversation_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"canonical_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"clinic_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"source","COLUMN_TYPE":"varchar(40)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},{"COLUMN_NAME":"actor_user_id","COLUMN_TYPE":"int","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"created_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},{"COLUMN_NAME":"updated_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}],"indexes":[{"name":"cc_wa_link_canonical","columns":[{"INDEX_NAME":"cc_wa_link_canonical","NON_UNIQUE":1,"SEQ_IN_INDEX":1,"COLUMN_NAME":"canonical_id","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"cc_wa_link_canonical","NON_UNIQUE":1,"SEQ_IN_INDEX":2,"COLUMN_NAME":"clinic_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},{"name":"cc_wa_link_clinic","columns":[{"INDEX_NAME":"cc_wa_link_clinic","NON_UNIQUE":1,"SEQ_IN_INDEX":1,"COLUMN_NAME":"clinic_id","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"cc_wa_link_clinic","NON_UNIQUE":1,"SEQ_IN_INDEX":2,"COLUMN_NAME":"conversation_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},{"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"conversation_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}],"checks":[],"foreignKeys":[]},
@@ -1391,15 +1960,115 @@
       "ENGINE": "InnoDB",
       "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
       "columns": [
-        {"COLUMN_NAME": "external_location_id","COLUMN_TYPE": "varchar(30)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
-        {"COLUMN_NAME": "connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
-        {"COLUMN_NAME": "asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
-        {"COLUMN_NAME": "clinica_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
-        {"COLUMN_NAME": "google_connection_id","COLUMN_TYPE": "int","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null}
+        {
+          "COLUMN_NAME": "external_location_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci"
+        },
+        {
+          "COLUMN_NAME": "connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci"
+        },
+        {
+          "COLUMN_NAME": "asset_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci"
+        },
+        {
+          "COLUMN_NAME": "clinica_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null
+        },
+        {
+          "COLUMN_NAME": "google_connection_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "enum('active','staged','retired')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "active",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "association_attempt_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_bin",
+          "GENERATION_EXPRESSION": ""
+        }
       ],
       "indexes": [
-        {"name": "idx_gbp_binding_scope","columns": [{"INDEX_NAME": "idx_gbp_binding_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "google_connection_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_gbp_binding_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "clinica_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_gbp_binding_scope","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "external_location_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
-        {"name": "PRIMARY","columns": [{"INDEX_NAME": "PRIMARY","NON_UNIQUE": 0,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "external_location_id","SUB_PART": null,"INDEX_TYPE": "BTREE"}]}
+        {
+          "name": "idx_gbp_binding_scope",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_gbp_binding_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "google_connection_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "idx_gbp_binding_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "clinica_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "idx_gbp_binding_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 3,
+              "COLUMN_NAME": "external_location_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "external_location_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
       ]
     },
     "BusinessProfileBrokerRevocations": {
@@ -5864,67 +6533,245 @@
     }
   },
   "migrations": [
-    {"name":"20261110210000-whatsapp-contact-identities.js","sha256":"f44c4d2f72fd3426325b2b120d72ef436006741d05a1337b48811c0bb2925caa"},
-    {"name":"20261107223000-create-meta-marketing-business-continuity.js","sha256":"08f933656e3df9f7a3ca08d549932ae1193b80ea2ca4e61c8b95e0092ef48d90"},
-    {"name":"20261107203000-create-meta-marketing-credential-renewals.js","sha256":"be252e98d8b67c0f09a7aefbf41bf897c3064b900aa3fafbd072f8986e5daf62"},
-    {"name":"20261104123000-create-meta-marketing-recoveries.js","sha256":"d007846d028cdac980d2ddd8f1969dde0539203f96f3a8502b49527af4c9c00f"},
-    {"name":"20261030090000-create-google-ads-goal-policy-journals.js","sha256":"d08956c1f381a27f6df4f7c15c02bcd91c7e5a9f3ab2d5a981fa4c37e1b628b3"},
-    {"name":"20261028110000-create-delegated-sessions.js","sha256":"d186aa13eee725796d0939b56d6c3fa9d1dfc2fc71eab30cde3012b7d66e0d10"},
-    {"name":"20261020170000-add-patient-program-enrollment-snapshot.js","sha256":"e0a2b86deacc6d896f1c69f16dfae61acb1da45505a13d2fd56dbd69b2e6a208"},
-    {"name":"20261006120000-whatsapp-inbox-routing-reviews.js","sha256":"c6d27ade24eb4f8f3dd076ac281893b50ee5df289ef47c3f78a553ea56c3c546"},
-    {"name": "20260912230000-index-platform-audit-view.js","sha256": "dbbcad72b966056df5ca098c00cee3bf620dc46516d1bd43819b8de56ea30ae2"},
-    {"name": "20260912210000-create-platform-audit-events.js", "sha256": "f70ed09874aba16b29e052e59508cd1febdf6e885d62dbf5288da08775f7b132"},
-    {"name": "20260912213000-create-platform-audit-delivery-states.js", "sha256": "43a4f3cad139610dafbf36f6d9fc6ddf4595117cf1b6a8d25053031c3614b69c"},
-    {"name": "20260912220000-create-auth-sessions.js", "sha256": "0e9b99b66a562fd027c1db47c7cfc53d959207eda77af02b1e1a1f8ecc1da1f6"},
-    {"name": "20260913003000-add-platform-audit-result-part.js", "sha256": "7d0c90f2a6a75878b91cca67435a07148ba1f72e9cc7c4309420e87a4da302fe"},
-    {"name": "20260913130000-create-auth-email-challenges.js", "sha256": "b770bdaf82aad32c5ee63f8bf89cf93e4d60eb99e9fa0bff6d5d1b19a2df8f15"},
-    {"name": "20260914220000-create-auth-trusted-devices.js", "sha256": "2c3ef4cd699a408ee2876f7bff59494f1022fc0adef71522d2720f9ba0d7e1cf"},
-    {"name": "20260913140000-create-meta-scope-blocks.js", "sha256": "1bfc270254b866f2f7eaf9daa6943b3cc4a4fb7074134be4980ecaa67e14a15e"},
-    {"name": "20260913150000-create-whatsapp-authorization-states.js", "sha256": "0516245b18fa1d7ec384c599569ff03e230382d85f3e4e372f6e60e4bf27a8a9"},
-    {"name": "20260915190000-add-whatsapp-authorization-channel-role.js", "sha256": "760f4cc3097ab25aa89d0b584674b99cb6f2932d8885a6ce2c36f34b34f46f78"},
-    {"name": "20260915040000-create-whatsapp-inbox-imports.js", "sha256": "4a35e8e039fc1a141356e8c029b9f6d7eb57e62caec5c72503ba1cd6dafbfe41"},
-    {"name": "20260916103000-security-monitoring-and-ai-prices.js", "sha256": "0ee3aaab634875e4acc19cffc5ede7cd2de4aeef6e07b7d26cea1a2ab134245e"},
-    {"name": "20260913000000-add-business-profile-broker-read-binding.js","sha256": "d25f098ff761bd32f8ca3d0f587c064ebad58988fbaa49f85aec0f8970ca1914"},
-    {"name": "20260913010000-create-business-profile-broker-revocations.js","sha256": "0a66a2cc9e63b46cc82ac996b98033cbf19bd5d6b02e24329cfb6f02f409df55"},
-    {"name": "20260913020000-create-google-oauth-broker-flows.js","sha256": "49eea8afb6e6d73a3ca72571ceb332395202fa0b28c5cef165a02060a17ed1bb"},
-    {"name": "20260913030000-add-search-console-broker-read-binding.js","sha256": "2f9a6d20757683fb5bc81e0d65f7e0c835a62cd37b30aeacba1f76e61ae12161"},
-    {"name": "20260913040000-add-analytics-broker-read-binding.js","sha256": "bd0e88f1d3ea08ace4e943ce23e2157062ae3e3a7c1f651e903cf48670a74798"},
-    {"name": "20260913050000-scope-search-console-bindings-by-mapping.js","sha256": "40fe91ec374864696387be65c0295420034f3e7d63a41b12aa7904a3ed61cb1d"},
-    {"name": "20260913060000-create-google-property-broker-revocations.js","sha256": "c9639364a46ceb1ebd3b4302d5e7c71bca0cda00027dbc01bf62fa7c2a80f402"},
-    {"name": "20260913070000-scope-google-oauth-by-service.js","sha256": "b702afe94bc5b1f36bb8c11777f1d7fad2c568ffdc3f7d5ec0c73ee1a93848d0"},
-    {"name": "20260913080000-add-google-ads-broker-bindings.js","sha256": "fa03dbfba3b41e0ab154013d647598695fa2a78b2d380e16e6dc99de895e3787"},
-    {"name": "20260913090000-create-google-ads-broker-revocations.js","sha256": "f42a15411c33d0ee154c013b8d34da03b68a287f394ef532996b39d6f25c14ea"},
-    {"name": "20260913100000-add-ads-google-oauth-cohort.js","sha256": "7be428f8dcac4dd5cdd4d94dabcea17c13581d3bd3373e6e28416486c94d43de"},
-    {"name": "20260913110000-stage-google-ads-broker-mappings.js","sha256": "e558102c69af164879edbc99a0ca14f670a4940fb2890d6697c3d7054bc9379e"},
-    {"name": "20260913120000-create-google-ads-enrollment.js","sha256": "d6f45168727272f70664836fac37b8493a805b29bbd9878e60d14729d3dcaf59"},
-    {"name": "20260711003000-create-google-ads-conversion-upload-attempts.js","sha256": "592ca0404b110b88225525413047eb5bdd4c3c863aedaabdd7a9464965cc015d"},
-    {"name": "20260711012000-add-google-ads-conversion-destination-key.js","sha256": "96f796ba207c1dbe553447fd8c4d5ef080b3aa4f117889579a5163d42d99f520"},
-    {"name": "20260712090000-add-data-manager-conversion-statuses.js","sha256": "535379bba4e5d1a8e2194559ac222d4abcc8dd69799f1af695bc2064a69c703f"},
-    {"name": "20260918110000-create-google-conversion-submissions.js","sha256": "91b44f36f7a542c89c23de28391134e60f8fddaade0fdeaaaedf49f7b9878c70"},
-    {"name": "20260918190000-create-google-ads-action-journal.js","sha256": "28bc9df36d9915253db783e7a68737b0008c7cb2f903e1ec8215dbcf833d5df7"},
-    {"name": "20260918203000-google-action-recovery-ownership.js","sha256": "680b4457f49e641c9bc79ae44a2fcc6d4ab66e0c14ba5175423b5349a4e9c8b2"},
-    {"name": "20260918220000-create-google-destination-journal.js","sha256": "245b2a00a272bfd031480bfe07fac1701b92252aa45f57f605ac30179dc236a3"},
-    {"name": "20260918224500-index-google-destination-recovery.js","sha256": "02bb1af1afddd008ae97269a64243cf5e4eb90b22ee89730005a1ea421c32f99"},
-    {"name": "20260918235000-index-google-receipt-review.js","sha256": "2ed2c79f6707a1433b9125d5f2e1a86822bb316e77b3fcd20081d2e67f12c9e1"},
-    {"name":"20260919040000-meta-marketing-broker-registry.js","sha256":"375f6994beef8032bb69aaf5c39a1f8b525fcdcef774ea4d520850a78f573595"},
-    {"name":"20260919050000-meta-marketing-broker-revocations.js","sha256":"886828648b18a378da53ef8859fa2a67d6fa4f7323c8a3edf21b630a173f0efb"},
-    {"name":"20260919060000-meta-marketing-oauth.js","sha256":"023ee8974a2e9195d0dee4a981d0e364633bea61672589ae817e778610afd58a"},
-    {"name":"20260919070000-meta-marketing-parent-identity-indexes.js","sha256":"b563de4f6c221e6e9c3f063c81f2033c43516d8b76c0213e15ce9dce3937772f"},
-    {"name":"20260919080000-meta-marketing-enrollment-journal.js","sha256":"5d4b9fa1fa1347f8ab794a3cf4bd62178cb144a095cd5819a42233421a9d4408"},
-    {"name":"20260919090000-meta-marketing-enrollment-binding-owner.js","sha256":"5ea51cff3eb6d7a0c0521e5516046d69ace876d320da6d08d56daacb600edda0"},
-    {"name":"20260919100000-meta-marketing-enrollment-delivery-markers.js","sha256":"f6a41057f0271be81e1535f2418cf3edcb52a664c29c138fee5dd34672985218"},
-    {"name":"20260919110000-meta-marketing-enrollment-due-index.js","sha256":"9dfa04628ef1ea25920c42168c9080f22a3abe763e527ad1a9b5a0c5490394e6"},
-    {"name":"20260919120000-meta-marketing-enrollment-scope-latest.js","sha256":"3daff36382d7f0c649bce200b6e901d2551ecd0a114c5dc78acf7f2b386d2a99"},
-    {"name": "20260919200000-create-business-profile-mutation-journal.js", "sha256": "3c13134c86ab24e753115e1292e473504ebbf6307f2b4a9582f0c79d08ab055b"},
-    {"name": "20260919210000-create-business-profile-cache-coordination.js", "sha256": "d05ec2f4efb1deea3a9c8a5aeb889d5202d0bcd45f915458f2f709adc34e6825"},
-    {"name": "20260922153000-create-whatsapp-phone-activations.js", "sha256": "243e65409413549b47a1befc2570d1f2164235324592b93465ff12c2ad003d12"},
-    {"name": "20260925113000-whatsapp-activation-history.js", "sha256": "44befbf80817e894c95cbc0429c221f671b9e77cab13b7ec52bf768ceddcb0bc"},
-    {"name": "20261004180000-program-commercial-price-profile.js", "sha256": "c25968779c302bcf22504d39668718f4f55e836f42e0485af7d987a0a65e37e5"},
-    {"name": "20261024160000-create-infrastructure-notification-receipts.js", "sha256": "d2994a3db213b0e9378cab35458033dfde8c77ba2986c3984e984d3c76627984"},
-    {"name": "20261028150000-add-room-icons.js", "sha256": "945f2ce578c60673f7365a878e0c0b3cd916e808940f2b5a55e86e7b3c68d91b"},
+    {
+      "name": "20261110210000-whatsapp-contact-identities.js",
+      "sha256": "f44c4d2f72fd3426325b2b120d72ef436006741d05a1337b48811c0bb2925caa"
+    },
+    {
+      "name": "20261107223000-create-meta-marketing-business-continuity.js",
+      "sha256": "08f933656e3df9f7a3ca08d549932ae1193b80ea2ca4e61c8b95e0092ef48d90"
+    },
+    {
+      "name": "20261107203000-create-meta-marketing-credential-renewals.js",
+      "sha256": "be252e98d8b67c0f09a7aefbf41bf897c3064b900aa3fafbd072f8986e5daf62"
+    },
+    {
+      "name": "20261104123000-create-meta-marketing-recoveries.js",
+      "sha256": "d007846d028cdac980d2ddd8f1969dde0539203f96f3a8502b49527af4c9c00f"
+    },
+    {
+      "name": "20261030090000-create-google-ads-goal-policy-journals.js",
+      "sha256": "d08956c1f381a27f6df4f7c15c02bcd91c7e5a9f3ab2d5a981fa4c37e1b628b3"
+    },
+    {
+      "name": "20261028110000-create-delegated-sessions.js",
+      "sha256": "d186aa13eee725796d0939b56d6c3fa9d1dfc2fc71eab30cde3012b7d66e0d10"
+    },
+    {
+      "name": "20261020170000-add-patient-program-enrollment-snapshot.js",
+      "sha256": "e0a2b86deacc6d896f1c69f16dfae61acb1da45505a13d2fd56dbd69b2e6a208"
+    },
+    {
+      "name": "20261006120000-whatsapp-inbox-routing-reviews.js",
+      "sha256": "c6d27ade24eb4f8f3dd076ac281893b50ee5df289ef47c3f78a553ea56c3c546"
+    },
+    {
+      "name": "20260912230000-index-platform-audit-view.js",
+      "sha256": "dbbcad72b966056df5ca098c00cee3bf620dc46516d1bd43819b8de56ea30ae2"
+    },
+    {
+      "name": "20260912210000-create-platform-audit-events.js",
+      "sha256": "f70ed09874aba16b29e052e59508cd1febdf6e885d62dbf5288da08775f7b132"
+    },
+    {
+      "name": "20260912213000-create-platform-audit-delivery-states.js",
+      "sha256": "43a4f3cad139610dafbf36f6d9fc6ddf4595117cf1b6a8d25053031c3614b69c"
+    },
+    {
+      "name": "20260912220000-create-auth-sessions.js",
+      "sha256": "0e9b99b66a562fd027c1db47c7cfc53d959207eda77af02b1e1a1f8ecc1da1f6"
+    },
+    {
+      "name": "20260913003000-add-platform-audit-result-part.js",
+      "sha256": "7d0c90f2a6a75878b91cca67435a07148ba1f72e9cc7c4309420e87a4da302fe"
+    },
+    {
+      "name": "20260913130000-create-auth-email-challenges.js",
+      "sha256": "b770bdaf82aad32c5ee63f8bf89cf93e4d60eb99e9fa0bff6d5d1b19a2df8f15"
+    },
+    {
+      "name": "20260914220000-create-auth-trusted-devices.js",
+      "sha256": "2c3ef4cd699a408ee2876f7bff59494f1022fc0adef71522d2720f9ba0d7e1cf"
+    },
+    {
+      "name": "20260913140000-create-meta-scope-blocks.js",
+      "sha256": "1bfc270254b866f2f7eaf9daa6943b3cc4a4fb7074134be4980ecaa67e14a15e"
+    },
+    {
+      "name": "20260913150000-create-whatsapp-authorization-states.js",
+      "sha256": "0516245b18fa1d7ec384c599569ff03e230382d85f3e4e372f6e60e4bf27a8a9"
+    },
+    {
+      "name": "20260915190000-add-whatsapp-authorization-channel-role.js",
+      "sha256": "760f4cc3097ab25aa89d0b584674b99cb6f2932d8885a6ce2c36f34b34f46f78"
+    },
+    {
+      "name": "20260915040000-create-whatsapp-inbox-imports.js",
+      "sha256": "4a35e8e039fc1a141356e8c029b9f6d7eb57e62caec5c72503ba1cd6dafbfe41"
+    },
+    {
+      "name": "20260916103000-security-monitoring-and-ai-prices.js",
+      "sha256": "0ee3aaab634875e4acc19cffc5ede7cd2de4aeef6e07b7d26cea1a2ab134245e"
+    },
+    {
+      "name": "20260913000000-add-business-profile-broker-read-binding.js",
+      "sha256": "d25f098ff761bd32f8ca3d0f587c064ebad58988fbaa49f85aec0f8970ca1914"
+    },
+    {
+      "name": "20260913010000-create-business-profile-broker-revocations.js",
+      "sha256": "0a66a2cc9e63b46cc82ac996b98033cbf19bd5d6b02e24329cfb6f02f409df55"
+    },
+    {
+      "name": "20260913020000-create-google-oauth-broker-flows.js",
+      "sha256": "49eea8afb6e6d73a3ca72571ceb332395202fa0b28c5cef165a02060a17ed1bb"
+    },
+    {
+      "name": "20260913030000-add-search-console-broker-read-binding.js",
+      "sha256": "2f9a6d20757683fb5bc81e0d65f7e0c835a62cd37b30aeacba1f76e61ae12161"
+    },
+    {
+      "name": "20260913040000-add-analytics-broker-read-binding.js",
+      "sha256": "bd0e88f1d3ea08ace4e943ce23e2157062ae3e3a7c1f651e903cf48670a74798"
+    },
+    {
+      "name": "20260913050000-scope-search-console-bindings-by-mapping.js",
+      "sha256": "40fe91ec374864696387be65c0295420034f3e7d63a41b12aa7904a3ed61cb1d"
+    },
+    {
+      "name": "20260913060000-create-google-property-broker-revocations.js",
+      "sha256": "c9639364a46ceb1ebd3b4302d5e7c71bca0cda00027dbc01bf62fa7c2a80f402"
+    },
+    {
+      "name": "20260913070000-scope-google-oauth-by-service.js",
+      "sha256": "b702afe94bc5b1f36bb8c11777f1d7fad2c568ffdc3f7d5ec0c73ee1a93848d0"
+    },
+    {
+      "name": "20260913080000-add-google-ads-broker-bindings.js",
+      "sha256": "fa03dbfba3b41e0ab154013d647598695fa2a78b2d380e16e6dc99de895e3787"
+    },
+    {
+      "name": "20260913090000-create-google-ads-broker-revocations.js",
+      "sha256": "f42a15411c33d0ee154c013b8d34da03b68a287f394ef532996b39d6f25c14ea"
+    },
+    {
+      "name": "20260913100000-add-ads-google-oauth-cohort.js",
+      "sha256": "7be428f8dcac4dd5cdd4d94dabcea17c13581d3bd3373e6e28416486c94d43de"
+    },
+    {
+      "name": "20260913110000-stage-google-ads-broker-mappings.js",
+      "sha256": "e558102c69af164879edbc99a0ca14f670a4940fb2890d6697c3d7054bc9379e"
+    },
+    {
+      "name": "20260913120000-create-google-ads-enrollment.js",
+      "sha256": "d6f45168727272f70664836fac37b8493a805b29bbd9878e60d14729d3dcaf59"
+    },
+    {
+      "name": "20260711003000-create-google-ads-conversion-upload-attempts.js",
+      "sha256": "592ca0404b110b88225525413047eb5bdd4c3c863aedaabdd7a9464965cc015d"
+    },
+    {
+      "name": "20260711012000-add-google-ads-conversion-destination-key.js",
+      "sha256": "96f796ba207c1dbe553447fd8c4d5ef080b3aa4f117889579a5163d42d99f520"
+    },
+    {
+      "name": "20260712090000-add-data-manager-conversion-statuses.js",
+      "sha256": "535379bba4e5d1a8e2194559ac222d4abcc8dd69799f1af695bc2064a69c703f"
+    },
+    {
+      "name": "20260918110000-create-google-conversion-submissions.js",
+      "sha256": "91b44f36f7a542c89c23de28391134e60f8fddaade0fdeaaaedf49f7b9878c70"
+    },
+    {
+      "name": "20260918190000-create-google-ads-action-journal.js",
+      "sha256": "28bc9df36d9915253db783e7a68737b0008c7cb2f903e1ec8215dbcf833d5df7"
+    },
+    {
+      "name": "20260918203000-google-action-recovery-ownership.js",
+      "sha256": "680b4457f49e641c9bc79ae44a2fcc6d4ab66e0c14ba5175423b5349a4e9c8b2"
+    },
+    {
+      "name": "20260918220000-create-google-destination-journal.js",
+      "sha256": "245b2a00a272bfd031480bfe07fac1701b92252aa45f57f605ac30179dc236a3"
+    },
+    {
+      "name": "20260918224500-index-google-destination-recovery.js",
+      "sha256": "02bb1af1afddd008ae97269a64243cf5e4eb90b22ee89730005a1ea421c32f99"
+    },
+    {
+      "name": "20260918235000-index-google-receipt-review.js",
+      "sha256": "2ed2c79f6707a1433b9125d5f2e1a86822bb316e77b3fcd20081d2e67f12c9e1"
+    },
+    {
+      "name": "20260919040000-meta-marketing-broker-registry.js",
+      "sha256": "375f6994beef8032bb69aaf5c39a1f8b525fcdcef774ea4d520850a78f573595"
+    },
+    {
+      "name": "20260919050000-meta-marketing-broker-revocations.js",
+      "sha256": "886828648b18a378da53ef8859fa2a67d6fa4f7323c8a3edf21b630a173f0efb"
+    },
+    {
+      "name": "20260919060000-meta-marketing-oauth.js",
+      "sha256": "023ee8974a2e9195d0dee4a981d0e364633bea61672589ae817e778610afd58a"
+    },
+    {
+      "name": "20260919070000-meta-marketing-parent-identity-indexes.js",
+      "sha256": "b563de4f6c221e6e9c3f063c81f2033c43516d8b76c0213e15ce9dce3937772f"
+    },
+    {
+      "name": "20260919080000-meta-marketing-enrollment-journal.js",
+      "sha256": "5d4b9fa1fa1347f8ab794a3cf4bd62178cb144a095cd5819a42233421a9d4408"
+    },
+    {
+      "name": "20260919090000-meta-marketing-enrollment-binding-owner.js",
+      "sha256": "5ea51cff3eb6d7a0c0521e5516046d69ace876d320da6d08d56daacb600edda0"
+    },
+    {
+      "name": "20260919100000-meta-marketing-enrollment-delivery-markers.js",
+      "sha256": "f6a41057f0271be81e1535f2418cf3edcb52a664c29c138fee5dd34672985218"
+    },
+    {
+      "name": "20260919110000-meta-marketing-enrollment-due-index.js",
+      "sha256": "9dfa04628ef1ea25920c42168c9080f22a3abe763e527ad1a9b5a0c5490394e6"
+    },
+    {
+      "name": "20260919120000-meta-marketing-enrollment-scope-latest.js",
+      "sha256": "3daff36382d7f0c649bce200b6e901d2551ecd0a114c5dc78acf7f2b386d2a99"
+    },
+    {
+      "name": "20260919200000-create-business-profile-mutation-journal.js",
+      "sha256": "3c13134c86ab24e753115e1292e473504ebbf6307f2b4a9582f0c79d08ab055b"
+    },
+    {
+      "name": "20260919210000-create-business-profile-cache-coordination.js",
+      "sha256": "d05ec2f4efb1deea3a9c8a5aeb889d5202d0bcd45f915458f2f709adc34e6825"
+    },
+    {
+      "name": "20260922153000-create-whatsapp-phone-activations.js",
+      "sha256": "243e65409413549b47a1befc2570d1f2164235324592b93465ff12c2ad003d12"
+    },
+    {
+      "name": "20260925113000-whatsapp-activation-history.js",
+      "sha256": "44befbf80817e894c95cbc0429c221f671b9e77cab13b7ec52bf768ceddcb0bc"
+    },
+    {
+      "name": "20261004180000-program-commercial-price-profile.js",
+      "sha256": "c25968779c302bcf22504d39668718f4f55e836f42e0485af7d987a0a65e37e5"
+    },
+    {
+      "name": "20261024160000-create-infrastructure-notification-receipts.js",
+      "sha256": "d2994a3db213b0e9378cab35458033dfde8c77ba2986c3984e984d3c76627984"
+    },
+    {
+      "name": "20261028150000-add-room-icons.js",
+      "sha256": "945f2ce578c60673f7365a878e0c0b3cd916e808940f2b5a55e86e7b3c68d91b"
+    },
     {
       "name": "20261018150000-create-search-console-analytics.js",
       "sha256": "1b9f609ee4388a552d4e0a727ee47c16e56e1aa53ef317ebd0b1ee581ddaf858"
+    },
+    {
+      "name": "20261111150000-business-profile-managed-associations.js",
+      "sha256": "5d74be56109cf2c93def72651731b3f447270e640c031124459c61de8cd00c79"
     }
   ]
 }

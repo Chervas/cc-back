@@ -93,7 +93,7 @@ async function consumers(models, kind, binding, options) {
       properties.validate(revoked);
       if (id(revoked.google_connection_id) !== id(record.google_connection_id) || revoked.google_user_id !== record.google_user_id) C.fail();
     }
-    const available = !revocations.length && (gbp || record.state === 'active');
+    const available = !revocations.length && record.state === 'active';
     if (selected && available) {
       affected.add(id(record.clinica_id));
       if (!gbp) mappingIds.add(id(record.mapping_id));

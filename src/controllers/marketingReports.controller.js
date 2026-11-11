@@ -2854,6 +2854,10 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
   if (!ClinicBusinessLocation || !BusinessProfileDailyMetric || !BusinessProfileReview) return empty;
 
   const effectiveLocationIds = effectiveBusinessLocationIds(marketingState);
+  // A current association is a resource selection, not an ownership transfer
+  // of the clinic's historical metrics. An authoritative empty inventory does
+  // not fall back to observations from a retired Google location.
+  if (marketingState && !scope?.isAll && !effectiveLocationIds.length) return empty;
   const locationWhere = {
     ...buildEffectiveSnapshotWhere(scope, 'clinica_id', 'id', effectiveLocationIds),
     is_active: true,
@@ -2865,7 +2869,7 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
     // Rating snapshots share the daily cache, but are not traffic/performance.
     metric_type: { [Op.in]: [...new Set(Object.values(BUSINESS_PROFILE_LOCAL_METRIC_DEFINITIONS)
       .flatMap(definition => [...definition.preferred, ...definition.fallback]))] },
-    ...buildHistoricalOrEffectiveWhere(
+    ...buildEffectiveSnapshotWhere(
       scope,
       'clinica_id',
       'business_location_id',

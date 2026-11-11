@@ -5,7 +5,7 @@
 const { Op } = require('sequelize');
 const broker = require('./businessProfileBroker.service');
 const fail = code => { throw Object.assign(new Error(code), { code }); };
-const FIELDS = ['external_location_id', 'connection_ref', 'asset_ref', 'clinica_id', 'google_connection_id'];
+const FIELDS = ['external_location_id', 'connection_ref', 'asset_ref', 'clinica_id', 'google_connection_id', 'state'];
 const LOCATION_FIELDS = ['id', 'clinica_id', 'google_connection_id', 'location_id', 'is_active', 'broker_read_connection_ref', 'broker_read_asset_ref'];
 const fingerprint = rows => JSON.stringify(rows.map(row => FIELDS.map(key => row[key])));
 const CONFLICT_CODES = new Set(['broker_binding_invalid', 'broker_legacy_discovery_blocked', 'broker_discovery_scope_unconfigured', 'broker_discovery_limit']);
@@ -87,7 +87,7 @@ const service = createBusinessProfileDiscovery({ broker,
   hasManagedBindings: async () => !!await require('../../models').BusinessProfileBrokerBinding.findOne({ attributes: ['external_location_id'], raw: true })
     || !!await require('../../models').BusinessProfileBrokerRevocation.findOne({ attributes: ['external_location_id'], raw: true }),
   listBindings: (clinicIds, connectionId) => require('../../models').BusinessProfileBrokerBinding.findAll({
-    where: { clinica_id: { [Op.in]: clinicIds }, google_connection_id: connectionId }, attributes: FIELDS,
+    where: { clinica_id: { [Op.in]: clinicIds }, google_connection_id: connectionId, state: 'active' }, attributes: FIELDS,
     order: [['external_location_id', 'ASC']], limit: 21, raw: true,
   }),
   loadLocation: async binding => {

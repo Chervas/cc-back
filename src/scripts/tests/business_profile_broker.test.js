@@ -4,7 +4,7 @@ const { createBusinessProfileBroker, binding } = require('../../services/busines
 const { loadBusinessProfileJobs } = require('./fixtures/business_profile_jobs.fixture');
 const managed = { id: 51, clinica_id: 71, google_connection_id: 81, location_id: 'locations/456', is_active: true,
   broker_read_connection_ref: 'connection:test', broker_read_asset_ref: 'gbp:123:456' };
-const record = { external_location_id: '456', connection_ref: 'connection:test', asset_ref: 'gbp:123:456', clinica_id: 71, google_connection_id: 81 };
+const record = { external_location_id: '456', state: 'active', connection_ref: 'connection:test', asset_ref: 'gbp:123:456', clinica_id: 71, google_connection_id: 81 };
 test('persistent managed markers bypass token loader and fail closed on disable, forged context or changed mapping', async () => {
   let enabled = true; let current = { ...managed }; let calls = 0; let tokenReads = 0;
   const service = createBusinessProfileBroker({ client: { async execute(command) { calls++; assert.equal(command.tenantRef, 'clinic:71'); return { data: { name: 'locations/456' } }; } },

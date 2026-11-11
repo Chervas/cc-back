@@ -34,6 +34,23 @@ class BrokerStore {
         principal TEXT NOT NULL, tenant TEXT NOT NULL, connection TEXT NOT NULL, scope TEXT NOT NULL,
         customer TEXT NOT NULL, clinic_count INTEGER NOT NULL, clinic_digest TEXT NOT NULL, created_at INTEGER NOT NULL,
         UNIQUE(tenant,connection,customer));
+      CREATE TABLE IF NOT EXISTS google_business_profile_enrollments (id TEXT PRIMARY KEY,
+        principal TEXT NOT NULL, tenant TEXT NOT NULL, connection TEXT NOT NULL, scope TEXT NOT NULL,
+        account TEXT NOT NULL, location TEXT NOT NULL, previous_asset TEXT,
+        clinic_count INTEGER NOT NULL, clinic_digest TEXT NOT NULL, config_digest TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('prepared','active','cancelled','retired')),
+        verified INTEGER NOT NULL CHECK(verified IN (0,1)),
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, completed_at INTEGER);
+      CREATE INDEX IF NOT EXISTS google_business_profile_enrollment_scope ON google_business_profile_enrollments(tenant,connection,scope);
+      CREATE INDEX IF NOT EXISTS google_business_profile_enrollment_history ON google_business_profile_enrollments(location,verified);
+      CREATE UNIQUE INDEX IF NOT EXISTS google_business_profile_enrollment_live_location ON google_business_profile_enrollments(location) WHERE state IN ('prepared','active');
+      CREATE TABLE IF NOT EXISTS google_business_profile_scope_heads (tenant TEXT NOT NULL, connection TEXT NOT NULL,
+        scope TEXT NOT NULL, asset TEXT, enrollment_id TEXT, revision INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY(tenant,connection,scope));
+      CREATE TABLE IF NOT EXISTS google_business_profile_retirements (tenant TEXT NOT NULL, connection TEXT NOT NULL,
+        asset TEXT NOT NULL, location TEXT NOT NULL, enrollment_id TEXT NOT NULL, retired_at INTEGER NOT NULL,
+        PRIMARY KEY(tenant,connection,asset));
+      CREATE INDEX IF NOT EXISTS google_business_profile_retired_location ON google_business_profile_retirements(location);
       CREATE TABLE IF NOT EXISTS google_oauth_flows (id TEXT PRIMARY KEY, principal TEXT NOT NULL, tenant TEXT NOT NULL,
         connection TEXT NOT NULL, asset TEXT NOT NULL, state_hash TEXT NOT NULL UNIQUE, config_digest TEXT NOT NULL,
         created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, state TEXT NOT NULL,

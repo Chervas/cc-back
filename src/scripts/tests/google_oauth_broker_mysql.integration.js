@@ -28,6 +28,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await require('../../../migrations/20260913003000-add-platform-audit-result-part').up(qi, D);
   await require('../../../migrations/20260912220000-create-auth-sessions').up(qi, D);
   await require('../../../migrations/20260913130000-create-auth-email-challenges').up(qi, D);
+  // Keep the session fixture aligned with the deployed trusted-device columns.
+  await require('../../../migrations/20260914220000-create-auth-trusted-devices').up(qi, D);
   for (const [name, file] of [['GoogleOAuthBrokerBinding', 'googleoauthbrokerbinding'], ['GoogleOAuthBrokerRequest', 'googleoauthbrokerrequest'],
     ['PlatformAuditEvent', 'platformauditevent'], ['AuthSession', 'authsession']]) models[name] = require('../../../models/' + file)(sql, D);
   table('GoogleConnectionAssignment', 'GoogleConnectionAssignments', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true },
@@ -38,7 +40,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   }
   table('ClinicBusinessLocation', 'ClinicBusinessLocations', { id: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER,
     google_connection_id: D.INTEGER, location_id: D.STRING, broker_read_connection_ref: D.STRING, broker_read_asset_ref: D.STRING, is_active: D.BOOLEAN });
-  table('BusinessProfileBrokerBinding', 'BusinessProfileBrokerBindings', { external_location_id: { type: D.STRING, primaryKey: true },
+  table('BusinessProfileBrokerBinding', 'BusinessProfileBrokerBindings', { state: {type:D.STRING(16),allowNull:false,defaultValue:'active'}, external_location_id: { type: D.STRING, primaryKey: true },
     clinica_id: D.INTEGER, google_connection_id: D.INTEGER, connection_ref: D.STRING, asset_ref: D.STRING });
   table('BusinessProfileBrokerRevocation', 'BusinessProfileBrokerRevocations', { external_location_id: { type: D.STRING, primaryKey: true } });
   for (const name of ['GoogleConnectionAssignment', 'ClinicBusinessLocation', 'BusinessProfileBrokerBinding', 'BusinessProfileBrokerRevocation']) await models[name].sync();
