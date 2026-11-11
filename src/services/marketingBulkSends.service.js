@@ -4489,6 +4489,17 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
       const explicitHasAllowedCopy = explicitIsDefault
         ? reviewTemplateMatchesCurrentCatalogBody(explicit)
         : isAllowedReviewRequestTemplateCopy(explicit);
+      if (options.strictExplicitSelection === true) {
+        // A new human selection is a choice of copy and media, not permission
+        // to choose another review template. Cross-WABA resolution may only
+        // return the same exact approved contract for the target sender.
+        if (!explicitMatchesMedia || !explicitHasAllowedCopy) return null;
+        const exact = await resolveWhatsappTemplateForClinic(explicit, clinicIds[0], { wabaId: targetWabaId });
+        return exact && isPrimaryReviewRequestWhatsappTemplateCandidate(exact)
+          && isAllowedReviewRequestTemplateCopy(exact)
+          && matchesReviewTemplateMedia({ hasImageHeader: templateHasImageHeader(exact), hasPhoto: preferPhoto })
+          ? exact : null;
+      }
       if (explicitMatchesWaba && explicitMatchesMedia && explicitHasAllowedCopy) {
         return explicit;
       }
@@ -4542,12 +4553,15 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
         return null;
       }
     }
+    if (options.strictExplicitSelection === true) return null;
     if (explicit && isDefaultReviewRequestWhatsappTemplateIdentity(explicit)) {
       const fallback = await findApprovedReviewWhatsappTemplate(scope, null, options);
       if (fallback) return fallback;
     }
     return null;
   }
+
+  if (options.strictExplicitSelection === true) return null;
 
   const candidates = await WhatsappTemplate.findAll({
     where: {
@@ -4586,6 +4600,26 @@ async function findApprovedReviewWhatsappTemplate(scope, explicitTemplateId = nu
     targetWabaId,
     preferPhoto,
   });
+}
+
+function explicitReviewTemplateSelectionError(templateId) {
+  const error = new Error('La plantilla de reseñas elegida no está disponible con la imagen y el número emisor actuales. Revisa la imagen y selecciona una plantilla aprobada para ese número.');
+  error.code = 'review_whatsapp_template_ineligible';
+  error.status = 409;
+  error.details = { template_id: Number(templateId) || null };
+  return error;
+}
+
+function resolveReviewTeamPhotoSelection(body = {}, previous = null, fallback = null) {
+  if (body.whatsapp_template_id || body.template_id) {
+    // Choosing a text template may explicitly remove the previous image. An
+    // empty own field is a deliberate choice; an omitted field retains the
+    // existing historical fallback behavior.
+    for (const key of ['review_team_photo_url', 'reviewTeamPhotoUrl']) {
+      if (Object.prototype.hasOwnProperty.call(body, key)) return normalizeText(body[key] || '') || null;
+    }
+  }
+  return normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || previous || fallback || '') || null;
 }
 
 async function waitForReviewRequestDispatchAnchor(campaignId, timeoutMs = 6000) {
@@ -5615,23 +5649,25 @@ async function upsertReviewRequestAutomationForClinic(scope, body = {}, userId =
   const reviewGiftDescription = normalizeText(body.review_gift_description || body.reviewGiftDescription || '');
   const reviewDisplayClinicName = normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '');
   const reviewSenderName = normalizeText(body.review_sender_name || body.reviewSenderName || '');
-  const reviewTeamPhotoUrl = normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || '');
+  const reviewTeamPhotoUrl = resolveReviewTeamPhotoSelection(body);
   const reviewTeamPhotoOverlayColor = publicMediaPersonalizationService.normalizeHexColor(
     body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor
   );
   const reviewTeamMembersText = normalizeText(body.review_team_members_text || body.reviewTeamMembersText || '');
   const reviewTemplateSelectionOptions = {
     preferPhoto: isHttpsUrl(reviewTeamPhotoUrl),
+    strictExplicitSelection: !!(body.whatsapp_template_id || body.template_id),
   };
 
   let approvedTemplate = null;
-  if (whatsappTemplateId) {
+  if (whatsappTemplateId || reviewTemplateSelectionOptions.strictExplicitSelection) {
     approvedTemplate = await findApprovedReviewWhatsappTemplate(
       scope,
       whatsappTemplateId,
       reviewTemplateSelectionOptions
     );
     if (!approvedTemplate) {
+      if (reviewTemplateSelectionOptions.strictExplicitSelection) throw explicitReviewTemplateSelectionError(whatsappTemplateId);
       const err = reviewTemplateSelectionOptions.preferPhoto
         ? new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta.')
         : new Error('Selecciona una plantilla de reseñas aprobada por Meta.');
@@ -6640,7 +6676,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         review_gift_description: isReviewRequest ? normalizeText(body.review_gift_description || body.reviewGiftDescription || '') || null : null,
         review_display_clinic_name: isReviewRequest ? normalizeText(body.review_display_clinic_name || body.reviewDisplayClinicName || '') || null : null,
         review_sender_name: reviewSenderName,
-        review_team_photo_url: isReviewRequest ? normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || '') || null : null,
+        review_team_photo_url: isReviewRequest ? resolveReviewTeamPhotoSelection(body) : null,
         review_team_photo_overlay_color: isReviewRequest
           ? publicMediaPersonalizationService.normalizeHexColor(body.review_team_photo_overlay_color || body.reviewTeamPhotoOverlayColor)
           : null,
@@ -6978,6 +7014,11 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   if (channels) nextCriteria.channels = channels;
   if (body.whatsapp_template_id !== undefined || body.template_id !== undefined) {
     nextCriteria.whatsapp_template_id = Number(body.whatsapp_template_id || body.template_id || 0) || null;
+    if ((body.whatsapp_template_id || body.template_id)
+      && (Object.prototype.hasOwnProperty.call(body, 'review_team_photo_url')
+        || Object.prototype.hasOwnProperty.call(body, 'reviewTeamPhotoUrl'))) {
+      nextCriteria.review_team_photo_url = resolveReviewTeamPhotoSelection(body, nextCriteria.review_team_photo_url);
+    }
   }
   if (body.email_template_id !== undefined) {
     nextCriteria.email_template_id = Number(body.email_template_id || 0) || null;
@@ -8136,18 +8177,15 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       || list.template_snapshot?.id
       || list.template_id);
   const requestedTemplateUsage = normalizeTemplateUsage(body.template_usage || list.criteria?.template_usage || 'promocion');
-  const reviewTeamPhotoUrlForSelection = normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || list.criteria?.review_team_photo_url || '') || null;
+  const reviewTeamPhotoUrlForSelection = resolveReviewTeamPhotoSelection(body, list.criteria?.review_team_photo_url);
   let template = null;
   if (isReviewTemplateUsage(requestedTemplateUsage)) {
     template = await findApprovedReviewWhatsappTemplate(scope, selectedTemplateId || null, {
       preferPhoto: isHttpsUrl(reviewTeamPhotoUrlForSelection),
+      strictExplicitSelection: !!(body.whatsapp_template_id || body.template_id),
     });
     if (needsWhatsappTemplate && selectedTemplateId && !template) {
-      const error = new Error('La plantilla de reseñas seleccionada no es compatible con este envío. Revisa su aprobación, el número emisor y la imagen antes de volver a preparar la prueba.');
-      error.code = 'review_whatsapp_template_ineligible';
-      error.status = 409;
-      error.details = { template_id: Number(selectedTemplateId) };
-      throw error;
+      throw explicitReviewTemplateSelectionError(selectedTemplateId);
     }
   } else {
     template = selectedTemplateId
@@ -8370,7 +8408,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
         : null,
       review_sender_name: reviewSenderName,
       review_team_photo_url: isReviewRequest
-        ? normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || list.criteria?.review_team_photo_url || '') || null
+        ? reviewTeamPhotoUrlForSelection
         : null,
       review_team_photo_overlay_color: isReviewRequest
         ? publicMediaPersonalizationService.normalizeHexColor(
@@ -8476,6 +8514,7 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
     return marketingEmailDispatchService.sendTest(list, body);
   }
   let listCriteria = asPlainObject(list?.criteria);
+  const storedCriteria = JSON.stringify(listCriteria);
   const hasExplicitCampaignSender = body.sender_name !== undefined
     || body.senderName !== undefined
     || body.usuario_nombre !== undefined;
@@ -8485,7 +8524,6 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
     ) || null;
     if ((listCriteria.sender_name || null) !== nextSenderName) {
       listCriteria = { ...listCriteria, sender_name: nextSenderName };
-      await list.update({ criteria: listCriteria });
     }
   }
   const templateUsage = normalizeTemplateUsage(body.template_usage || listCriteria.template_usage || 'promocion');
@@ -8524,12 +8562,8 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
       nextCriteria.review_sender_name = fallbackTemplate.review_sender_name;
     }
     if (body.review_team_photo_url !== undefined || body.reviewTeamPhotoUrl !== undefined) {
-      nextCriteria.review_team_photo_url = pickReviewText(
-        body.review_team_photo_url,
-        body.reviewTeamPhotoUrl,
-        listCriteria.review_team_photo_url,
-        fallbackTemplate?.review_team_photo_url
-      ) || null;
+      nextCriteria.review_team_photo_url = resolveReviewTeamPhotoSelection(body,
+        listCriteria.review_team_photo_url, fallbackTemplate?.review_team_photo_url);
     } else if (!normalizeText(nextCriteria.review_team_photo_url || '') && fallbackTemplate?.review_team_photo_url) {
       nextCriteria.review_team_photo_url = fallbackTemplate.review_team_photo_url;
     }
@@ -8554,7 +8588,6 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
       nextCriteria.review_team_members_text = fallbackTemplate.review_team_members_text;
     }
     if (JSON.stringify(nextCriteria) !== JSON.stringify(listCriteria)) {
-      await list.update({ criteria: nextCriteria });
       listCriteria = nextCriteria;
     }
     requireReviewSenderName(listCriteria.review_sender_name || listCriteria.reviewSenderName);
@@ -8565,7 +8598,7 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
     || listCriteria.whatsapp_template_id
     || list.template_snapshot?.id
     || list.template_id;
-  const reviewTeamPhotoUrlForSelection = normalizeText(body.review_team_photo_url || body.reviewTeamPhotoUrl || listCriteria.review_team_photo_url || '') || null;
+  const reviewTeamPhotoUrlForSelection = resolveReviewTeamPhotoSelection(body, listCriteria.review_team_photo_url);
   const reviewTeamPhotoOverlayColorForSelection = publicMediaPersonalizationService.normalizeHexColor(
     body.review_team_photo_overlay_color
     || body.reviewTeamPhotoOverlayColor
@@ -8574,9 +8607,13 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
   let template = isReviewTemplateUsage(templateUsage)
     ? await findApprovedReviewWhatsappTemplate(scope, selectedTemplateId || null, {
       preferPhoto: isHttpsUrl(reviewTeamPhotoUrlForSelection),
+      strictExplicitSelection: !!(body.whatsapp_template_id || body.template_id),
     })
     : await resolveWhatsappTemplate(selectedTemplateId, scope);
   if (!template) {
+    if (isReviewTemplateUsage(templateUsage) && (body.whatsapp_template_id || body.template_id)) {
+      throw explicitReviewTemplateSelectionError(selectedTemplateId);
+    }
     const err = isReviewTemplateUsage(templateUsage) && isHttpsUrl(reviewTeamPhotoUrlForSelection)
       ? new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta. Cuando se apruebe, la prueba se enviará con foto.')
       : new Error('Selecciona una plantilla WhatsApp aprobada para enviar una prueba real.');
@@ -8598,6 +8635,11 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
     const err = new Error('La foto está configurada, pero la plantilla de reseñas con imagen todavía no está aprobada por Meta. Cuando se apruebe, la prueba se enviará con foto.');
     err.status = 409;
     throw err;
+  }
+  // Build context in memory until the selected copy, its approval and media
+  // have passed validation. A rejected test must not alter the saved campaign.
+  if (JSON.stringify(listCriteria) !== storedCriteria) {
+    await list.update({ criteria: listCriteria });
   }
   let item = body.item_id
     ? await MarketingPatientListItem.findOne({ where: { id: body.item_id, list_id: list.id } })
@@ -11246,6 +11288,8 @@ module.exports = {
     hasWhatsappConfigForClinic,
     isWhatsappRoutingConfigAvailable,
     getReviewWabaIdForScope,
+    findApprovedReviewWhatsappTemplate,
+    resolveReviewTeamPhotoSelection,
     isAllowedReviewRequestTemplateCopy,
     selectApprovedReviewTemplateCandidate,
     partitionItemsByTemplateVariableAvailability,
