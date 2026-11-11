@@ -27,28 +27,60 @@ const GBP = Object.freeze({ migration: '20261111150000-business-profile-managed-
     '5ffd3aa9108f5faf0a15e444099ab633eb0e3568f78ad8831f59b0e7ca39433b']),
   requestCreateSha256: '08cca87641f509449b0e12cff074b955660ee3183e79c1ae3edda9c734a41125',
 });
+const ZERO = Object.freeze({ operationNonce: 'b29a37c6-7483-4ece-9ef9-f83cb64a9979',
+  planSha256: '8ab0f742c401e3f75750497c71745799230d74bf0921736b2eb9d06c5ce8c8f5',
+  sourceRevision: 'a093dfd2e73a37092a9851cecc55706dcf1d7c16' });
 const GBP_OPERATOR_UPGRADE = Object.freeze({
+  'src/lib/rdsSchemaMigrationTransport.js': '7bb67ff3d0dd5594c1cac24022d3ffb960555f6e682d87bd35417269674a7729',
   'src/lib/rdsSchemaFirstCreateReconciliation.js': 'f27b1e0a5156a1ad4a44fc7dfe530a99845f662efe6317d6ec79c0af22ac1d1a',
   'src/lib/rdsSchemaMigration.js': '534f6379f50d5dcdbd074911c9526ac4542a5638ba95303028fabf6c5db3c5f9',
   'src/lib/rdsSchemaWarningPolicy.js': '38368cf6e0b46e199fa6cb59409d719374ee51b7efd1bbf6df8c712d4f37c40f',
 });
+const ZERO_OPERATOR_UPGRADE = Object.freeze({
+  'src/lib/rdsSchemaFirstCreateReconciliation.js': 'b2b171adcca395ef7afb7e96fbdfc47b5da262addbfb849a2dd11afff5a45e90',
+  'src/lib/rdsSchemaMigration.js': 'f71a6ea95fef211cdcdbc3e50e2c6a3f48ea20d638ca8e81ba4736f4c2e3c4b3',
+  'src/lib/rdsSchemaMigrationTransport.js': '7bb67ff3d0dd5594c1cac24022d3ffb960555f6e682d87bd35417269674a7729',
+});
 const isGbp = plan => plan.selected?.length === 1 && plan.selected[0].name === GBP.migration;
 function assertOriginalRequirements(plan, info, selected, originalPlanSha256) {
   if (!isGbp(plan)) return P.assertRequirements(plan, info, selected);
-  P.need(originalPlanSha256 === GBP.originalPlanSha256 && plan.sourceRevision === GBP.sourceRevision
-    && plan.contractDigest === GBP.contractDigest, 'rds_schema_reconciliation_original_run_changed');
+  const zero = plan.continuation && originalPlanSha256 === ZERO.planSha256;
+  const upgrade = zero ? ZERO_OPERATOR_UPGRADE : GBP_OPERATOR_UPGRADE;
+  P.need(originalPlanSha256 === (zero ? ZERO.planSha256 : GBP.originalPlanSha256)
+    && plan.sourceRevision === (zero ? ZERO.sourceRevision : GBP.sourceRevision) && plan.contractDigest === GBP.contractDigest, 'rds_schema_reconciliation_original_run_changed');
   const old = plan.operatorFiles, current = info.operatorFiles || [];
   P.need(Array.isArray(old) && old.length === current.length && new Set(old.map(r => r.path)).size === old.length,
     'rds_schema_operator_source_changed');
   for (let i = 0; i < old.length; i++) {
     const a = old[i], b = current[i];
     P.need(a.path === b.path && /^[a-f0-9]{64}$/.test(b.sha256 || '')
-      && (Object.hasOwn(GBP_OPERATOR_UPGRADE, a.path) ? a.sha256 === GBP_OPERATOR_UPGRADE[a.path] : a.sha256 === b.sha256),
+      && (Object.hasOwn(upgrade, a.path) ? a.sha256 === upgrade[a.path] : a.sha256 === b.sha256),
     'rds_schema_operator_source_changed');
   }
-  // Only these three recovery modules may differ. Every current byte is then
+  // Only explicitly named recovery/diagnostic modules may differ. Every current byte is then
   // pinned into the newly reviewed continuation plan by the ordinary operator.
   return P.assertRequirements({ ...plan, operatorFiles: current }, info, selected);
+}
+function validateZeroWrite({ originalPlan: plan, result, journal, observed, identity, planSha256 }) {
+  P.need(isGbp(plan) && plan.continuation && planSha256 === ZERO.planSha256 && plan.sourceRevision === ZERO.sourceRevision
+    && result.operationNonce === ZERO.operationNonce && result.planRef?.sha256 === ZERO.planSha256
+    && result.status === 'rds_schema_failed_preserve_partial' && result.reason === 'rds_schema_aws_operation_failed'
+    && result.writesDispatched === 0 && result.automaticReplayAllowed === false && result.transportOpened === true
+    && result.closure?.physicalCloseObserved === true && result.closure.physicalStreamDestroyed === true
+    && digest(result.continuation) === digest(plan.continuation)
+    && plan.continuation.priorOperationNonce === GBP.originalOperationNonce
+    && plan.continuation.priorPlanRef?.sha256 === GBP.originalPlanSha256,
+  'rds_schema_reconciliation_zero_write_outcome_changed');
+  P.need(digest(plan.before) === plan.beforeDigest && digest(observed) === plan.beforeDigest && digest(identity) === digest(plan.identity),
+    'rds_schema_reconciliation_metadata_drift');
+  P.need(result.backup?.status === 'available' && result.backup.physicalDbId === identity.physicalDbId
+    && Date.parse(result.backup.createdAt) >= plan.createdAtEpochMs, 'rds_schema_reconciliation_backup_binding');
+  P.need(digest(journal.map(r => r.event)) === digest(['backup_request','backup_create_ack','backup_available','terminal'])
+    && journal.at(-1).accepted === false && journal.at(-1).writesDispatched === 0
+    && journal.at(-1).status === result.status && Object.keys(result.backup).every(k => journal[2][k] === result.backup[k])
+    && journal.slice(0, 2).every(r => r.snapshotId === result.backup.snapshotId),
+  'rds_schema_reconciliation_zero_write_journal_changed');
+  return true;
 }
 async function gbpDefinition(source, plan) {
   const pins = P.migrationFiles(source, [GBP.migration]);
@@ -213,4 +245,4 @@ async function validate({ source, originalPlan, observed, identity, result, jour
     originalWarning: delegated ? 'retained_by_original_operator_hashed_diagnostics' : 'not_retained_by_original_operator_unknown',
     ...(delegated ? { originalDiagnostics } : {}) };
 }
-module.exports = { SUPPORTED, DELEGATED, GBP, GBP_OPERATOR_UPGRADE, isGbp, assertOriginalRequirements, gbpDefinition, definition, validate };
+module.exports = { SUPPORTED, DELEGATED, GBP, ZERO, GBP_OPERATOR_UPGRADE, ZERO_OPERATOR_UPGRADE, isGbp, validateZeroWrite, assertOriginalRequirements, gbpDefinition, definition, validate };

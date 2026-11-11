@@ -43,6 +43,16 @@ function scopeFor(scope = PRIMARY) {
   return Object.freeze({ ...scope });
 }
 
+const AWS_OPERATIONS = new Set(['configure.export-credentials','sts.get-caller-identity','rds.describe-db-instances',
+  'rds.create-db-snapshot','rds.describe-db-snapshots','secretsmanager.get-secret-value']);
+function safeAwsDiagnostic(value) {
+  if (!value || !AWS_OPERATIONS.has(value.operation)) return null;
+  return { operation: value.operation,
+    code: Number.isInteger(value.code) && value.code >= 0 && value.code <= 255 ? value.code
+      : typeof value.code === 'string' && /^E[A-Z0-9_]{1,63}$/.test(value.code) ? value.code : null,
+    signal: typeof value.signal === 'string' && /^SIG[A-Z0-9]{1,12}$/.test(value.signal) ? value.signal : null,
+    killed: value.killed === true };
+}
 function createAws({ profile = 'clinicaclick-prov-temp', execute = promisify(execFile), now = Date.now, pause = sleep, scope: inputScope } = {}) {
   const scope = scopeFor(inputScope);
   need(/^[A-Za-z0-9_-]{1,64}$/.test(profile), 'rds_schema_aws_profile');
@@ -58,7 +68,12 @@ function createAws({ profile = 'clinicaclick-prov-temp', execute = promisify(exe
           AWS_EC2_METADATA_DISABLED: 'true', AWS_MAX_ATTEMPTS: '1' },
       });
       return JSON.parse(result.stdout);
-    } catch { throw Error('rds_schema_aws_operation_failed'); }
+    } catch (error) {
+      const awsDiagnostic = safeAwsDiagnostic({ operation: String(args[0]) + '.' + String(args[1]),
+        code: error?.code, signal: error?.signal, killed: error?.killed });
+      if (error && typeof error === 'object') { error.stdout = ''; error.stderr = ''; }
+      throw Object.assign(Error('rds_schema_aws_operation_failed'), awsDiagnostic ? { awsDiagnostic } : {});
+    }
     finally { if (result) { result.stdout = ''; result.stderr = ''; } }
   }
   async function currentSession(minimumMs = 180000) {
@@ -217,4 +232,4 @@ async function closePhysical(connection) {
   return { physicalCloseObserved: true, physicalStreamDestroyed: true };
 }
 
-module.exports = { HOST, DATABASE, DB_ID, PRIMARY_DBI, CA, CA_SHA, SQL_MODES, PRIMARY, scopeFor, IDENTITY_SQL, TLS_SQL, createAws, connectAdmin, closePhysical };
+module.exports = { HOST, DATABASE, DB_ID, PRIMARY_DBI, CA, CA_SHA, SQL_MODES, PRIMARY, scopeFor, IDENTITY_SQL, TLS_SQL, safeAwsDiagnostic, createAws, connectAdmin, closePhysical };

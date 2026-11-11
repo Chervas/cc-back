@@ -46,3 +46,24 @@ test('original GBP operator upgrade permits only three recovery files; contract/
  for(const mutate of[x=>x.operatorFiles.at(-1).sha256='0'.repeat(64),x=>x.operatorFiles.push({path:'new.js',sha256:'a'.repeat(64)}),x=>x.effectiveContractDigest='0'.repeat(64)]){const x=clone(info);mutate(x);assert.throws(()=>R.assertOriginalRequirements(plan,x,[R.GBP.migration],R.GBP.originalPlanSha256),/rds_schema_/);}
  assert.throws(()=>R.assertOriginalRequirements(plan,info,[R.GBP.migration],'0'.repeat(64)),/original_run_changed/);plan.operatorFiles[0].sha256='0'.repeat(64);assert.throws(()=>R.assertOriginalRequirements(plan,info,[R.GBP.migration],R.GBP.originalPlanSha256),/operator_source_changed/);
 });
+function zeroFixture(f,proof){
+ const plan={...clone(f.originalPlan),sourceRevision:R.ZERO.sourceRevision,before:clone(f.observed),beforeDigest:digest(f.observed),continuation:{schema:'clinicaclick-rds-first-create-continuation/1',priorOperationNonce:R.GBP.originalOperationNonce,priorPlanRef:{sha256:R.GBP.originalPlanSha256},proof}};
+ const backup={snapshotId:'TEST_ONLY_ZERO_SNAPSHOT',status:'available',physicalDbId:f.identity.physicalDbId,createdAt:new Date(plan.createdAtEpochMs).toISOString()};
+ const result={...clone(f.result),operationNonce:R.ZERO.operationNonce,planRef:{sha256:R.ZERO.planSha256},reason:'rds_schema_aws_operation_failed',writesDispatched:0,continuation:clone(plan.continuation),backup};
+ const journal=[{event:'backup_request',snapshotId:backup.snapshotId},{event:'backup_create_ack',snapshotId:backup.snapshotId},{event:'backup_available',...backup},{event:'terminal',status:result.status,accepted:false,writesDispatched:0}];
+ return {originalPlan:plan,result,journal,observed:f.observed,identity:f.identity,planSha256:R.ZERO.planSha256};
+}
+test('exact zero-write successor retains original prefixproof, requires closedtransport and refuses any dispatched statement or metadata change',async t=>{
+ const f=await fixture(t),x=zeroFixture(f,await R.validate(f));assert.equal(R.validateZeroWrite(x),true);
+ for(const mutate of[y=>y.result.writesDispatched=1,y=>y.result.reason='rds_schema_statement_outcome_requires_reconciliation',y=>y.result.closure.physicalCloseObserved=false,y=>y.result.operationNonce='foreign',y=>y.planSha256='0'.repeat(64),y=>y.originalPlan.sourceRevision='0'.repeat(40),y=>y.result.backup.status='pending',y=>y.journal.push({event:'statement_request'}),y=>y.journal[2].status='creating',y=>y.journal.at(-1).writesDispatched=1,y=>y.observed.columns.pop(),y=>y.result.continuation.proof.statements.pop()]){const z=clone(x);mutate(z);assert.throws(()=>R.validateZeroWrite(z),/rds_schema_reconciliation_/);}
+});
+test('zero-write source-pin upgrade excludes warning policy and unrelated operator changes',async t=>{
+ const f=await fixture(t),x=zeroFixture(f,await R.validate(f)),plan=x.originalPlan;
+ plan.operatorFiles=[...Object.entries(R.ZERO_OPERATOR_UPGRADE).map(([path,sha256])=>({path,sha256})),{path:'src/lib/rdsSchemaWarningPolicy.js',sha256:'088df783f1ffd1951d9b3b1f7722bb0340328aa3de5477cc8ca1b3e0963d2baf'}].sort((a,b)=>a.path.localeCompare(b.path));
+ const req=P.effectiveRequirements({contract:{tables:{},migrations:[]}},[R.GBP.migration]);const info={effectiveContract:req.contract,effectiveContractScope:req.scope,effectiveContractDigest:req.digest,operatorFiles:plan.operatorFiles.map(r=>({...r,sha256:Object.hasOwn(R.ZERO_OPERATOR_UPGRADE,r.path)?'d'.repeat(64):r.sha256}))};
+ assert.doesNotThrow(()=>R.assertOriginalRequirements(plan,info,[R.GBP.migration],R.ZERO.planSha256));info.operatorFiles.find(r=>r.path==='src/lib/rdsSchemaWarningPolicy.js').sha256='0'.repeat(64);assert.throws(()=>R.assertOriginalRequirements(plan,info,[R.GBP.migration],R.ZERO.planSha256),/operator_source_changed/);
+});
+test('AWS diagnostics contain only operation category and sanitized process outcome, never command arguments or captured secret output',async()=>{
+ const T=require('../../lib/rdsSchemaMigrationTransport');const out={operation:'secretsmanager.get-secret-value',code:143,signal:'SIGTERM',killed:true,password:'TEST_ONLY_SECRET',stdout:'TEST_ONLY_SECRET',stderr:'TEST_ONLY_SECRET',args:['--secret-id','TEST_ONLY_SECRET']};assert.deepEqual(T.safeAwsDiagnostic(out),{operation:'secretsmanager.get-secret-value',code:143,signal:'SIGTERM',killed:true});assert.equal(T.safeAwsDiagnostic({...out,operation:'TEST_ONLY_SECRET'}),null);
+ let caught;try{await T.createAws({execute:async()=>{throw Object.assign(Error('TEST_ONLY_SECRET'),out);}}).ensureFresh();}catch(e){caught=e;}assert.equal(caught.message,'rds_schema_aws_operation_failed');assert.equal(caught.awsDiagnostic.operation,'configure.export-credentials');assert(!JSON.stringify(caught).includes('TEST_ONLY_SECRET'));assert.deepEqual(Object.keys(caught),['awsDiagnostic']);
+});

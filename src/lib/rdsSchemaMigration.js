@@ -62,6 +62,27 @@ function createStore(root = STATE, owner = 0) {
       const journal = readPrivate(runDirectory + '/journal.jsonl', owner, bytes => bytes.toString().trim().split('\n').map(JSON.parse));
       return { active, result, plan, journal };
     },
+    ancestor(pending) {
+      const descriptor = pending.plan.value.continuation;
+      const runDirectory = root + '/runs/' + R.GBP.originalOperationNonce;
+      P.need(pending.active.value.operationNonce === R.ZERO.operationNonce
+        && pending.active.value.priorOperationNonce === R.GBP.originalOperationNonce
+        && pending.plan.reference.sha256 === R.ZERO.planSha256 && descriptor?.priorRunDirectory === runDirectory
+        && descriptor.priorResultRef?.path === runDirectory + '/result.json'
+        && descriptor.priorJournalRef?.path === runDirectory + '/journal.jsonl', 'rds_schema_reconciliation_ancestor_binding');
+      const result = readPrivate(descriptor.priorResultRef.path, owner), plan = readPrivate(descriptor.priorPlanRef.path, owner);
+      const journal = readPrivate(descriptor.priorJournalRef.path, owner, bytes => bytes.toString().trim().split('\n').map(JSON.parse));
+      P.need(digest(result.reference) === digest(descriptor.priorResultRef) && digest(plan.reference) === digest(descriptor.priorPlanRef)
+        && digest(journal.reference) === digest(descriptor.priorJournalRef) && digest(result.value.planRef) === digest(plan.reference)
+        && plan.reference.sha256 === R.GBP.originalPlanSha256 && result.value.operationNonce === R.GBP.originalOperationNonce,
+      'rds_schema_reconciliation_ancestor_binding');
+      const claim = readPrivate(root + '/claims/' + plan.reference.sha256 + '.json', owner);
+      const successor = readPrivate(runDirectory + '/continuation-claim.json', owner);
+      P.need(claim.value.operationNonce === R.GBP.originalOperationNonce && digest(claim.value.planRef) === digest(plan.reference)
+        && successor.value.operationNonce === R.ZERO.operationNonce && digest(successor.value.planRef) === digest(pending.plan.reference)
+        && digest(successor.value.priorActiveRef) === digest(descriptor.priorActiveRef), 'rds_schema_reconciliation_ancestor_claim_binding');
+      return { plan, result, journal };
+    },
     start(planRef, continuation) {
       if (continuation) {
         const active = readPrivate(root + '/active.json', owner);
@@ -223,13 +244,22 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
     P.need(info.contractDigest === original.contractDigest && digest(moduleFiles) === digest(original.moduleFiles)
       && original.selected.every(row => !row.alreadyApplied && info.migrations[row.name] === row.sha256)
       && digest(original.toApply) === digest(selected), 'rds_schema_reconciliation_source_changed');
-    const proof = await R.validate({ source, originalPlan: original, observed: before, identity,
-      result: pending.result.value, journal: pending.journal.value });
+    let validation = { originalPlan: original, result: pending.result.value, journal: pending.journal.value }, zeroValidation;
+    if (original.continuation && R.isGbp(original)) {
+      zeroValidation = { ...validation, planSha256: pending.plan.reference.sha256 };
+      R.validateZeroWrite({ ...zeroValidation, observed: before, identity });
+      const ancestor = store.ancestor(pending);
+      R.assertOriginalRequirements(ancestor.plan.value, info, selected, ancestor.plan.reference.sha256);
+      validation = { originalPlan: ancestor.plan.value, result: ancestor.result.value, journal: ancestor.journal.value };
+    }
+    const proof = await R.validate({ source, ...validation, observed: before, identity });
+    if (zeroValidation) P.need(digest(proof) === digest(original.continuation.proof), 'rds_schema_reconciliation_ancestor_proof_changed');
     const descriptor = { schema: 'clinicaclick-rds-first-create-continuation/1', priorRunDirectory: runDirectory,
       priorOperationNonce: pending.active.value.operationNonce, priorSourceRevision: original.sourceRevision,
       priorContractDigest: original.contractDigest, priorPlanRef: pending.plan.reference, priorResultRef: pending.result.reference,
-      priorJournalRef: pending.journal.reference, priorActiveRef: pending.active.reference, proof };
-    return { pending, descriptor, selected, moduleFiles };
+      priorJournalRef: pending.journal.reference, priorActiveRef: pending.active.reference, proof,
+      ...(zeroValidation ? { zeroWriteAncestor: original.continuation } : {}) };
+    return { pending, descriptor, selected, moduleFiles, validation, zeroValidation };
   }
   return {
     async plan({ source, selected = [], profile = 'clinicaclick-prov-temp', out }) {
@@ -297,8 +327,10 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         P.need(String(lock[0]?.acquired) === '1', 'rds_schema_migration_busy');
         const before = await schemaSnapshot(admin);
         P.validatePlan(plan, { info, before, identity: admin.identity, moduleFiles, at: now() });
-        if (continuation) await R.validate({ source, originalPlan: continuation.pending.plan.value, observed: before, identity: admin.identity,
-          result: continuation.pending.result.value, journal: continuation.pending.journal.value });
+        if (continuation) {
+          if (continuation.zeroValidation) R.validateZeroWrite({ ...continuation.zeroValidation, observed: before, identity: admin.identity });
+          await R.validate({ source, ...continuation.validation, observed: before, identity: admin.identity });
+        }
         P.need(backup.status === 'available' && backup.physicalDbId === admin.identity.physicalDbId
           && Date.parse(backup.createdAt) >= plan.createdAtEpochMs, 'rds_schema_backup_not_bound_to_plan');
         if (aws.ensureFresh) await aws.ensureFresh(15 * 60 * 1000);
@@ -351,6 +383,7 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
       if (error) {
         const resultRef = run.finish({ status: 'rds_schema_failed_preserve_partial', reason: safeCode(error), planRef,
           backup: backup || null, closure: closure || null, transportOpened: Boolean(admin) || error.transportOpened === true,
+          ...(T.safeAwsDiagnostic(error.awsDiagnostic) ? { awsDiagnostic: T.safeAwsDiagnostic(error.awsDiagnostic) } : {}),
           ...(continuation ? { continuation: plan.continuation } : {}),
           automaticReplayAllowed: false }, false);
         throw Object.assign(Error(safeCode(error)), { resultRef });
