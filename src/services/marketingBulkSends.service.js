@@ -3880,11 +3880,17 @@ async function buildItemsForReviewRequest(scope, body = {}) {
         source,
       });
       const patientFields = buildPatientVariableFields(patient, customByPatient.get(Number(patient.id_paciente)) || []);
+      const storedAttendedDate = formatMarketingDate(patientFields.fecha_ultima_cita_asistida);
+      const generatedAttendedDate = normalizeText(item.custom_fields?.fecha_ultima_cita_asistida);
       return {
         ...item,
         custom_fields: {
           ...patientFields,
           ...(item.custom_fields || {}),
+          // No attended appointment produces an empty generated value. Keep a
+          // valid scoped custom date; a real attended appointment still wins.
+          ...(!generatedAttendedDate && storedAttendedDate
+            ? { fecha_ultima_cita_asistida: storedAttendedDate } : {}),
         },
       };
     });
@@ -11270,6 +11276,7 @@ module.exports = {
     scoreWhatsappTemplateForScope,
     computeCounters,
     mapReviewItemsFromImportedList,
+    buildItemsForReviewRequest,
     attachLatestAttendedAppointmentDate,
     prepareReviewItemsForExclusions,
     resolveVariableValue,
