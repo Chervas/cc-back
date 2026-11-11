@@ -13,6 +13,102 @@ const DELEGATED = Object.freeze({ migration: '20261028110000-create-delegated-se
   originalPlanSha256: '4f77689336cab7b6ec80a8a72ef3f55243cfb224caa27533bd04496615d0bb90',
   originalOperationNonce: 'e12232be-0657-406c-8033-0dc4a99be329',
   diagnosticMessageSha256: 'a947e3875a510823331e22329aacd5cf0733eb3fe3b6116fca640a79d1e0b2fc' });
+// Exact recovery of the two additive GBP columns interrupted on MySQL's
+// deprecated CHAR BINARY syntax. The original run is immutable; no generic
+// schema-compatible skip or operator-pin bypass is permitted.
+const GBP = Object.freeze({ migration: '20261111150000-business-profile-managed-associations.js', table: 'BusinessProfileBrokerBindings',
+  migrationSha256: '5d74be56109cf2c93def72651731b3f447270e640c031124459c61de8cd00c79',
+  sourceRevision: 'bb30c8f833ae312ac256af5ce52d8bc165af6212',
+  contractDigest: 'e0ad1ec0486a1cb19a10b2074db54a0941aef50c11704cec293d95f1f137414e',
+  originalPlanSha256: 'bdc7e7bf3d1c6721ad3ca21f25ced440c521128e83526b29770538a607afb6e0',
+  originalOperationNonce: '14e450ba-86c1-41de-b566-a6418096c8ff',
+  diagnosticMessageSha256: 'a947e3875a510823331e22329aacd5cf0733eb3fe3b6116fca640a79d1e0b2fc',
+  statements: Object.freeze(['1e8ff4a81945b6da471fd1e89f6a3d0e91fbd5c401dec91dd2981d50f5e54001',
+    '5ffd3aa9108f5faf0a15e444099ab633eb0e3568f78ad8831f59b0e7ca39433b']),
+  requestCreateSha256: '08cca87641f509449b0e12cff074b955660ee3183e79c1ae3edda9c734a41125',
+});
+const GBP_OPERATOR_UPGRADE = Object.freeze({
+  'src/lib/rdsSchemaFirstCreateReconciliation.js': 'f27b1e0a5156a1ad4a44fc7dfe530a99845f662efe6317d6ec79c0af22ac1d1a',
+  'src/lib/rdsSchemaMigration.js': '534f6379f50d5dcdbd074911c9526ac4542a5638ba95303028fabf6c5db3c5f9',
+  'src/lib/rdsSchemaWarningPolicy.js': '38368cf6e0b46e199fa6cb59409d719374ee51b7efd1bbf6df8c712d4f37c40f',
+});
+const isGbp = plan => plan.selected?.length === 1 && plan.selected[0].name === GBP.migration;
+function assertOriginalRequirements(plan, info, selected, originalPlanSha256) {
+  if (!isGbp(plan)) return P.assertRequirements(plan, info, selected);
+  P.need(originalPlanSha256 === GBP.originalPlanSha256 && plan.sourceRevision === GBP.sourceRevision
+    && plan.contractDigest === GBP.contractDigest, 'rds_schema_reconciliation_original_run_changed');
+  const old = plan.operatorFiles, current = info.operatorFiles || [];
+  P.need(Array.isArray(old) && old.length === current.length && new Set(old.map(r => r.path)).size === old.length,
+    'rds_schema_operator_source_changed');
+  for (let i = 0; i < old.length; i++) {
+    const a = old[i], b = current[i];
+    P.need(a.path === b.path && /^[a-f0-9]{64}$/.test(b.sha256 || '')
+      && (Object.hasOwn(GBP_OPERATOR_UPGRADE, a.path) ? a.sha256 === GBP_OPERATOR_UPGRADE[a.path] : a.sha256 === b.sha256),
+    'rds_schema_operator_source_changed');
+  }
+  // Only these three recovery modules may differ. Every current byte is then
+  // pinned into the newly reviewed continuation plan by the ordinary operator.
+  return P.assertRequirements({ ...plan, operatorFiles: current }, info, selected);
+}
+async function gbpDefinition(source, plan) {
+  const pins = P.migrationFiles(source, [GBP.migration]);
+  P.need(isGbp(plan) && plan.toApply?.length === 1 && plan.toApply[0] === GBP.migration
+    && plan.selected[0].sha256 === GBP.migrationSha256 && digest(pins) === digest(plan.moduleFiles),
+    'rds_schema_reconciliation_source_changed');
+  const S = require('sequelize'), sequelize = new S({ dialect: 'mysql', logging: false }), sql = [], columns = [];
+  const stop = Error('rds_schema_gbp_prefix_captured');
+  sequelize.query = async value => { P.need(typeof value === 'string', 'rds_schema_reconciliation_sql_changed'); sql.push(value); return []; };
+  sequelize.connectionManager.getConnection = async () => { throw Error('rds_schema_reconciliation_network_forbidden'); };
+  const q = Object.fromEntries(P.METHODS.map(name => [name, async () => { throw stop; }]));
+  q.addColumn = async (table, name, attr) => { P.need(table === GBP.table && columns.length < 2, 'rds_schema_reconciliation_prefix_changed');
+    columns.push({ name, attr }); await sequelize.getQueryInterface().addColumn(table, name, attr); };
+  const loaded = P.loadMigration(source, GBP.migration, pins, S);
+  try { await loaded.migration.up(Object.freeze(q), loaded.facade); } catch (error) { if (error !== stop) throw error; }
+  P.need(sql.length === 2 && digest(sql.map(P.sha)) === digest(GBP.statements)
+    && columns[0]?.name === 'state' && columns[1]?.name === 'association_attempt_id', 'rds_schema_reconciliation_sql_changed');
+  return [{ TABLE_NAME: GBP.table, COLUMN_NAME: 'state', COLUMN_TYPE: "enum('active','staged','retired')", IS_NULLABLE: 'NO',
+    COLUMN_DEFAULT: 'active', EXTRA: '', CHARACTER_SET_NAME: 'utf8mb4', COLLATION_NAME: 'utf8mb4_0900_ai_ci', GENERATION_EXPRESSION: '' },
+  { TABLE_NAME: GBP.table, COLUMN_NAME: 'association_attempt_id', COLUMN_TYPE: 'char(36)', IS_NULLABLE: 'YES', COLUMN_DEFAULT: null,
+    EXTRA: '', CHARACTER_SET_NAME: 'utf8mb4', COLLATION_NAME: 'utf8mb4_bin', GENERATION_EXPRESSION: '' }];
+}
+async function validateGbp({ source, originalPlan: plan, observed, identity, result, journal }) {
+  P.need(result.operationNonce === GBP.originalOperationNonce && result.planRef?.sha256 === GBP.originalPlanSha256
+    && plan.sourceRevision === GBP.sourceRevision && plan.contractDigest === GBP.contractDigest
+    && identity.engineVersion === '8.4.11' && !plan.continuation, 'rds_schema_reconciliation_original_run_changed');
+  P.need(result.status === 'rds_schema_failed_preserve_partial' && result.reason === 'rds_schema_statement_warnings_require_reconciliation'
+    && result.writesDispatched === 2 && result.automaticReplayAllowed === false && result.transportOpened === true
+    && result.closure?.physicalCloseObserved === true && result.closure.physicalStreamDestroyed === true,
+  'rds_schema_reconciliation_unsupported_outcome');
+  P.need(result.backup?.status === 'available' && result.backup.physicalDbId === plan.identity.physicalDbId
+    && Date.parse(result.backup.createdAt) >= plan.createdAtEpochMs, 'rds_schema_reconciliation_backup_binding');
+  P.need(digest(plan.before) === plan.beforeDigest && digest(plan.identity) === digest(identity), 'rds_schema_reconciliation_identity_or_baseline_changed');
+  const sequence = ['backup_request','backup_create_ack','backup_available','statement_request','statement_ack','statement_request','statement_diagnostics','terminal'];
+  P.need(digest(journal.map(r => r.event)) === digest(sequence), 'rds_schema_reconciliation_prefix_changed');
+  const [first, ack, second, diagnostics] = journal.slice(3, 7);
+  P.need([first,ack,second,diagnostics].every(r => r.migration === GBP.migration && r.kind === 'ddl')
+    && first.sqlSha256 === GBP.statements[0] && ack.sqlSha256 === GBP.statements[0] && ack.warnings === 0
+    && second.sqlSha256 === GBP.statements[1] && diagnostics.sqlSha256 === GBP.statements[1]
+    && journal.at(-1).accepted === false && journal.at(-1).writesDispatched === 2,
+  'rds_schema_reconciliation_prefix_changed');
+  const expectedDiagnostics = [{ level: 'Warning', code: 1287, messageSha256: GBP.diagnosticMessageSha256 }];
+  P.need(diagnostics.warningReadFailed === false && diagnostics.warningStatus === 1
+    && diagnostics.policy === 'mysql-8.4.11-tinyint1-display-width/1'
+    && digest(diagnostics.diagnostics) === digest(expectedDiagnostics), 'rds_schema_reconciliation_original_diagnostics_changed');
+  const added = await gbpDefinition(source, plan), expected = structuredClone(plan.before);
+  P.need(expected.defaults.DEFAULT_CHARACTER_SET_NAME === 'utf8mb4' && expected.defaults.DEFAULT_COLLATION_NAME === 'utf8mb4_0900_ai_ci'
+    && expected.tables.some(r => r.TABLE_NAME === GBP.table) && !expected.columns.some(r => r.TABLE_NAME === GBP.table
+      && added.some(a => a.COLUMN_NAME === r.COLUMN_NAME)), 'rds_schema_reconciliation_metadata_drift');
+  const offset = expected.columns.findLastIndex(r => r.TABLE_NAME === GBP.table) + 1;
+  expected.columns.splice(offset, 0, ...added);
+  P.need(digest(expected) === digest(observed), 'rds_schema_reconciliation_metadata_drift');
+  return { migration: GBP.migration, table: GBP.table, statements: GBP.statements.map(sqlSha256 => ({ sqlSha256 })),
+    definitionDigest: digest(added), originalBeforeDigest: plan.beforeDigest, observedDigest: digest(observed),
+    originalWarning: 'retained_by_original_operator_hashed_diagnostics',
+    originalDiagnostics: { journalIndex: 6, journalRowDigest: digest(diagnostics), warningReadFailed: false, warningStatus: 1,
+      diagnostics: expectedDiagnostics, policy: diagnostics.policy },
+    continuationWarningPolicy: { name: 'mysql-8.4.11-gbp-request-char-binary/1', sqlSha256: GBP.requestCreateSha256,
+      warningCount: 7, code: 1287, messageSha256: GBP.diagnosticMessageSha256 } };
+}
 const supported = plan => plan.toApply?.[0] === DELEGATED.migration ? DELEGATED : SUPPORTED;
 const canonicalType = value => String(value).toLowerCase().replace(/\binteger\b/g, 'int').replace(/\b(int|bigint)\(\d+\)/g, '$1').replace(/,\s*/g, ',');
 async function definition(source, plan) {
@@ -73,6 +169,7 @@ async function definition(source, plan) {
   return { table, columns, indexes, foreignKeys };
 }
 async function validate({ source, originalPlan, observed, identity, result, journal }) {
+  if (isGbp(originalPlan)) return validateGbp({ source, originalPlan, observed, identity, result, journal });
   const selected = supported(originalPlan), delegated = selected === DELEGATED;
   P.need(result.status === 'rds_schema_failed_preserve_partial' && result.reason === 'rds_schema_statement_warnings_require_reconciliation'
     && result.writesDispatched === 1 && result.automaticReplayAllowed === false && result.closure?.physicalCloseObserved === true
@@ -116,4 +213,4 @@ async function validate({ source, originalPlan, observed, identity, result, jour
     originalWarning: delegated ? 'retained_by_original_operator_hashed_diagnostics' : 'not_retained_by_original_operator_unknown',
     ...(delegated ? { originalDiagnostics } : {}) };
 }
-module.exports = { SUPPORTED, DELEGATED, definition, validate };
+module.exports = { SUPPORTED, DELEGATED, GBP, GBP_OPERATOR_UPGRADE, isGbp, assertOriginalRequirements, gbpDefinition, definition, validate };

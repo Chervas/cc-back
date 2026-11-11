@@ -132,9 +132,12 @@ function migrationInterface({ admin, aws, journal, migrationName, continuation, 
         P.need(!poisoned, 'rds_schema_prior_statement_failed');
         const isDdl = kind === 'ddl' || kind === 'enum_extension';
         if (continuation?.pending) {
-          P.need(isDdl && migrationName === continuation.proof.migration && P.sha(sql) === continuation.proof.sqlSha256,
+          const prefix = continuation.proof.statements || [{ sqlSha256: continuation.proof.sqlSha256 }];
+          const index = continuation.cursor || 0;
+          P.need(isDdl && migrationName === continuation.proof.migration && P.sha(sql) === prefix[index]?.sqlSha256,
             'rds_schema_reconciliation_prefix_changed');
-          continuation.pending = false;
+          continuation.cursor = index + 1;
+          continuation.pending = continuation.cursor < prefix.length;
           journal({ event: 'statement_reconciled', migration: migrationName, kind: 'ddl', sqlSha256: P.sha(sql),
             originalResultRef: continuation.resultRef, proof: continuation.proof });
           return { result: { affectedRows: 0, warningStatus: 0 }, fields: undefined };
@@ -159,19 +162,20 @@ function migrationInterface({ admin, aws, journal, migrationName, continuation, 
             if (error) { reject(Error('rds_schema_statement_outcome_requires_reconciliation')); return; }
             originals.query.call(raw, { sql: 'SHOW WARNINGS', timeout: 5000 }, async (warningError, warnings) => {
               const warningCount = Number(result?.warningStatus || 0);
+              const warningPolicy = W.policyFor({ sql, migrationName, continuationProof: continuation?.proof });
               if (warningError || !Array.isArray(warnings) || warnings.length || warningCount !== 0) {
                 try { journal({ event: 'statement_diagnostics', migration: migrationName, sqlSha256: P.sha(sql), kind: isDdl ? 'ddl' : 'metadata',
                   warningReadFailed: !!warningError || !Array.isArray(warnings), warningStatus: warningCount,
-                  diagnostics: W.diagnostics(warnings), policy: W.NAME }); }
+                  diagnostics: W.diagnostics(warnings), policy: warningPolicy }); }
                 catch (caught) { reject(caught); return; }
               }
-              if (warningError || !W.accepted({ sql, kind, engineVersion: admin.identity?.engineVersion, rows: warnings, warningStatus: warningCount })) {
+              if (warningError || !W.accepted({ sql, kind, engineVersion: admin.identity?.engineVersion, rows: warnings, warningStatus: warningCount, migrationName, continuationProof: continuation?.proof })) {
                 reject(Error('rds_schema_statement_warnings_require_reconciliation')); return;
               }
               try {
                 if (target) E.validate(target, await metadata(), false);
                 if (isDdl) journal({ event: 'statement_ack', migration: migrationName, sqlSha256: P.sha(sql), kind: 'ddl', warnings: warnings.length,
-                  ...(warnings.length ? { warningPolicy: W.NAME } : {}) });
+                  ...(warnings.length ? { warningPolicy } : {}) });
               } catch (caught) { reject(caught); return; }
               resolve({ result, fields });
             });
@@ -215,7 +219,7 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
   async function continuationState({ source, info, store, runDirectory, before, identity }) {
     const pending = store.pending(runDirectory), original = pending.plan.value;
     const selected = original.selected.map(row => row.name), moduleFiles = P.migrationFiles(source, selected);
-    P.assertRequirements(original, info, selected);
+    R.assertOriginalRequirements(original, info, selected, pending.plan.reference.sha256);
     P.need(info.contractDigest === original.contractDigest && digest(moduleFiles) === digest(original.moduleFiles)
       && original.selected.every(row => !row.alreadyApplied && info.migrations[row.name] === row.sha256)
       && digest(original.toApply) === digest(selected), 'rds_schema_reconciliation_source_changed');
@@ -260,7 +264,7 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
       return { status: 'rds_schema_continuation_plan_ready', planRef, sourceRevision: info.revision,
         originalSourceRevision: plan.continuation.priorSourceRevision, continuation: plan.continuation, selected: plan.selected,
         toApply: plan.toApply, statementPolicy: plan.policy, closure, mutations: false,
-        instruction: 'Review this exact continuation plan SHA. The original warning is unknown; one CREATE is reconciled from exact metadata, never replayed or acknowledged retroactively.' };
+        instruction: 'Review this exact continuation plan SHA. Only the proven original statement prefix is reconciled from exact metadata, never replayed or acknowledged retroactively. Original diagnostics remain immutable.' };
     },
     async apply({ source, planFile, approvePlan }) {
       P.need(operatorUid() === 0, 'rds_schema_root_required');
@@ -335,7 +339,7 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         result = { status: 'rds_schema_applied_and_verified', sourceRevision: info.revision, planRef, completed,
           effectiveContractDigest: plan.effectiveContractDigest, effectiveContractScope: plan.effectiveContractScope, operatorFiles: plan.operatorFiles,
           afterDigest: digest(after), after, compatibility, identity: admin.identity, backup,
-          ...(continuation ? { continuation: plan.continuation, reconciledStatements: 1 } : {}),
+          ...(continuation ? { continuation: plan.continuation, reconciledStatements: resumed.cursor || 1 } : {}),
           releaseGate: { revision: info.revision, requiredMigrations: completed, stagingPromotion: 'fast-forward-only',
             applicationCrudPreflightStillRequired: true, preflightArgs: completed.flatMap(name => ['--require-migration', name]),
             gitOrServicesChangedByTool: false } };
