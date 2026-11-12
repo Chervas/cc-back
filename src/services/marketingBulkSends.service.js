@@ -7473,6 +7473,19 @@ function resolveVariableValue(variableName, item, list, clinic) {
     referencia_visita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última atención'),
     referencia_cita: custom.referencia_visita || (custom.fecha_cita || custom.fecha ? `el pasado ${custom.fecha_cita || custom.fecha}` : 'en tu última atención'),
   };
+  if (isReviewRequestList(list)) {
+    const criteria = asPlainObject(list?.criteria);
+    // These are campaign choices, not patient attributes. A frozen audience
+    // must not override a later explicit choice of clinic name or review team.
+    if (['clinica', 'nombre_clinica', 'nombreclinica', 'nombre_clinica_visible'].includes(key)
+      && normalizeText(criteria.review_display_clinic_name || criteria.reviewDisplayClinicName || '')) {
+      return displayClinicName;
+    }
+    if (['firma_resenas', 'nombre_remitente_resenas', 'remitente_resena', 'review_sender_name'].includes(key)
+      && normalizeText(criteria.review_sender_name || criteria.reviewSenderName || criteria.firma_resenas || '')) {
+      return reviewSenderName;
+    }
+  }
   if (CAMPAIGN_SENDER_VARIABLE_KEYS.has(key)) {
     return campaignSenderName;
   }

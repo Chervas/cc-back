@@ -77,9 +77,10 @@ function fixture({ finalNames = ['nombre_paciente', 'fecha_ultima_cita_asistida'
     isReviewTemplateUsage: value => value === 'solicitud_resena',
     isReviewRequestList: value => value.criteria.template_usage === 'solicitud_resena',
     careSnapshots: snapshots, resolveLastAttendedAppointmentDate: dates.resolveLastAttendedAppointmentDate,
-    formatReviewDate: dates.formatMarketingDate, CAMPAIGN_SENDER_VARIABLE_KEYS: new Set(),
-    resolveReviewDisplayClinicName: () => 'Clínica ficticia', resolveReviewSenderName: () => 'Equipo ficticio',
-    resolveCampaignSenderName: () => 'Equipo ficticio',
+    formatReviewDate: dates.formatMarketingDate, CAMPAIGN_SENDER_VARIABLE_KEYS: new Set(['usuario_nombre', 'nombre_remitente', 'sender_name']),
+    resolveReviewDisplayClinicName: (value, clinic) => value.criteria.review_display_clinic_name || value.criteria.reviewDisplayClinicName || clinic?.nombre || 'Clínica ficticia',
+    resolveReviewSenderName: value => value.criteria.review_sender_name || value.criteria.reviewSenderName || value.criteria.firma_resenas || '',
+    resolveCampaignSenderName: value => value.criteria.sender_name || 'Equipo ficticio',
     resolvePatientFirstNameForTemplate: item => item.name.split(' ')[0],
     buildWhatsappTemplateVariableContract: value => value.variables,
     MarketingPatientList: { findByPk: async () => list }, MarketingPatientListItem: itemModel,
@@ -132,6 +133,10 @@ function fixture({ finalNames = ['nombre_paciente', 'fecha_ultima_cita_asistida'
     item_id: 11, template_usage: 'solicitud_resena', whatsapp_template_id: 6071, to: '34900000099', ...body,
   });
   f.before = () => JSON.stringify([...f.sourceRows.values()].map(value => value.row));
+  f.normalParams = id => context.buildTemplateParams({ template: actual,
+    item: f.sourceRows.get(id).model.get(), list, clinic: { nombre: 'Clínica ficticia' } });
+  f.normalPreview = id => context.renderTemplatePreview({ template: actual,
+    item: f.sourceRows.get(id).model.get(), list, clinic: { nombre: 'Clínica ficticia' } });
   return f;
 }
 function isolated(f, sourceId) {
@@ -223,4 +228,86 @@ test('explicit email tests keep their separate transport without creating a What
   const f = fixture(), response = await f.run({ channel: 'email', item_id: undefined });
   assert.equal(response.email, true); assert.equal(f.emailCalls.length, 1);
   assert.equal(f.samples.length + f.sends.length + f.messages.length, 0);
+});
+
+const clinicAliases = ['clinica', 'nombre_clinica', 'nombreclinica', 'nombre_clinica_visible'];
+const reviewSenderAliases = ['firma_resenas', 'nombre_remitente_resenas', 'remitente_resena', 'review_sender_name'];
+function staleContext(f) {
+  const fields = f.sourceRows.get(11).row.custom_fields;
+  for (const key of clinicAliases) fields[key] = 'Clínica ficticia anterior larga';
+  for (const key of reviewSenderAliases) fields[key] = 'Firma ficticia anterior';
+}
+test('complete selected test uses the edited clinic/team context instead of frozen recipient values', async () => {
+  const f = fixture({ finalNames: ['nombre_paciente', 'firma_resenas', 'nombre_clinica', 'fecha_ultima_cita_asistida'] });
+  staleContext(f); const before = f.before();
+  await f.run({ review_display_clinic_name: 'Clínica corta', review_sender_name: 'Firma actual' });
+  assert.deepEqual(f.sends[0].templateParams, ['Ana', 'Firma actual', 'Clínica corta', '10/09/2026']);
+  assert.equal(f.messages[0].content, 'Ana | Firma actual | Clínica corta | 10/09/2026');
+  assert.equal(f.samples[0].custom_fields.nombre_clinica, 'Clínica corta');
+  assert.equal(f.samples[0].custom_fields.firma_resenas, 'Firma actual');
+  isolated(f, 11); assert.equal(f.before(), before);
+});
+test('ordinary recipient params and preview honor all clinic and review-team aliases without mutating the audience', async () => {
+  const f = fixture({ finalNames: [...clinicAliases, ...reviewSenderAliases, 'nombre_paciente', 'fecha_ultima_cita_asistida'] });
+  staleContext(f); f.list.criteria.review_display_clinic_name = 'Clínica corta'; f.list.criteria.review_sender_name = 'Firma actual';
+  const before = f.before();
+  const expected = [...clinicAliases.map(() => 'Clínica corta'), ...reviewSenderAliases.map(() => 'Firma actual'), 'Ana', '10/09/2026'];
+  assert.deepEqual(Array.from(await f.normalParams(11)), expected);
+  assert.equal(await f.normalPreview(11), expected.join(' | ')); assert.equal(f.before(), before);
+  assert.equal(f.samples.length + f.sends.length + f.messages.length, 0);
+});
+test('editing clinic/team context changes the render fingerprint but leaves the prior sent test unchanged', async () => {
+  const f = fixture({ finalNames: ['nombre_paciente', 'firma_resenas', 'nombre_clinica', 'fecha_ultima_cita_asistida'] });
+  staleContext(f); const before = f.before();
+  await f.run({ review_display_clinic_name: 'Clínica primera', review_sender_name: 'Primera firma' });
+  const previous = JSON.stringify({ sample: f.samples[0], message: f.messages[0] });
+  await f.run({ review_display_clinic_name: 'Clínica segunda', review_sender_name: 'Segunda firma' });
+  assert.deepEqual(f.sends[1].templateParams, ['Ana', 'Segunda firma', 'Clínica segunda', '10/09/2026']);
+  assert.notEqual(f.samples[0].custom_fields.review_test_render_fingerprint, f.samples[1].custom_fields.review_test_render_fingerprint);
+  assert.equal(JSON.stringify({ sample: f.samples[0], message: f.messages[0] }), previous); assert.equal(f.before(), before);
+});
+test('camel-case explicit context is honored and blank review choices retain existing recipient fallback', async () => {
+  const f = fixture({ finalNames: [...clinicAliases, ...reviewSenderAliases] }); staleContext(f);
+  delete f.list.criteria.review_sender_name;
+  Object.assign(f.list.criteria, { reviewDisplayClinicName: 'Clínica camel', reviewSenderName: 'Firma camel' });
+  assert.deepEqual(Array.from(await f.normalParams(11)), [...clinicAliases.map(() => 'Clínica camel'), ...reviewSenderAliases.map(() => 'Firma camel')]);
+  f.list.criteria.reviewDisplayClinicName = ''; f.list.criteria.reviewSenderName = '';
+  assert.deepEqual(Array.from(await f.normalParams(11)), [...clinicAliases.map(() => 'Clínica ficticia anterior larga'), ...reviewSenderAliases.map(() => 'Firma ficticia anterior')]);
+});
+test('non-review custom fields and generic campaign sender aliases preserve their prior contracts', async () => {
+  const genericAliases = ['usuario_nombre', 'nombre_remitente', 'sender_name'];
+  const f = fixture({ finalNames: [...clinicAliases, ...reviewSenderAliases, ...genericAliases] }); staleContext(f);
+  Object.assign(f.list.criteria, { template_usage: 'promocion', review_display_clinic_name: 'Review no aplicable',
+    review_sender_name: 'Review no aplicable', sender_name: 'Remitente general actual' });
+  for (const key of genericAliases) f.sourceRows.get(11).row.custom_fields[key] = 'Remitente general antiguo';
+  const before = f.before();
+  assert.deepEqual(Array.from(await f.normalParams(11)), [...clinicAliases.map(() => 'Clínica ficticia anterior larga'),
+    ...reviewSenderAliases.map(() => 'Firma ficticia anterior'), ...genericAliases.map(() => 'Remitente general actual')]);
+  assert.equal(f.before(), before);
+});
+test('context changes fill variables without rewriting approved literal clinic wording', async () => {
+  const f = fixture({ finalNames: ['nombre_clinica'] }); staleContext(f);
+  f.list.criteria.review_display_clinic_name = 'Clínica corta';
+  f.finalTemplate.components[0].text = 'Texto aprobado: Clínica literal fija. Variable: {{1}}';
+  const before = JSON.stringify(f.finalTemplate);
+  assert.equal(await f.normalPreview(11), 'Texto aprobado: Clínica literal fija. Variable: Clínica corta');
+  assert.equal(JSON.stringify(f.finalTemplate), before);
+});
+test('the real 6071 position contract renders clinic at 2 and review signature at 3 consistently', async () => {
+  const f = fixture({ finalNames: ['nombre_paciente', 'nombre_clinica', 'firma_resenas', 'fecha_ultima_cita_asistida'] });
+  f.finalTemplate.id = 6071;
+  f.finalTemplate.components[0].text = '¡Hola {{1}}! Soy {{3}} de {{2}}. Tu visita fue el {{4}}.';
+  staleContext(f); const sourceBefore = f.before(), templateBefore = JSON.stringify(f.finalTemplate);
+  await f.run({ review_display_clinic_name: 'Clínica previa', review_sender_name: 'Firma previa' });
+  const previousTest = JSON.stringify({ sample: f.samples[0], message: f.messages[0] });
+  await f.run({ review_display_clinic_name: 'Clínica corta', review_sender_name: 'Firma actual' });
+  assert.deepEqual(f.sends[1].templateParams, ['Ana', 'Clínica corta', 'Firma actual', '10/09/2026']);
+  assert.equal(f.sends[1].templateParams[1], 'Clínica corta');
+  assert.equal(f.sends[1].templateParams[2], 'Firma actual');
+  assert.equal(f.messages[1].content, '¡Hola Ana! Soy Firma actual de Clínica corta. Tu visita fue el 10/09/2026.');
+  assert.equal(f.samples[1].custom_fields.nombre_clinica, 'Clínica corta');
+  assert.equal(f.samples[1].custom_fields.firma_resenas, 'Firma actual');
+  assert.notEqual(f.samples[0].custom_fields.review_test_render_fingerprint, f.samples[1].custom_fields.review_test_render_fingerprint);
+  assert.equal(JSON.stringify({ sample: f.samples[0], message: f.messages[0] }), previousTest);
+  assert.equal(f.before(), sourceBefore); assert.equal(JSON.stringify(f.finalTemplate), templateBefore);
 });
