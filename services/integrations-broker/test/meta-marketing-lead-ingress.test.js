@@ -31,6 +31,19 @@ test('dedicated signed principal can verify challenge and persist HMAC IDs witho
   const events=r.current.store.db.prepare('SELECT event FROM audit_outbox').all().map(row=>JSON.parse(row.event));
   for(const operation of L.RECEPTION_OPERATIONS)assert(events.some(e=>e.actorId===r.id&&e.connectionRef===r.f.binding.connectionRef&&e.operation===operation&&e.result==='success'));
 });
+test('an expired reader token does not discard a valid signed receipt, while reader and explicit withdrawal stay closed',async t=>{
+  const r=await ingressFixture(t);r.f.state.clock+=3601000;
+  const before=r.state.calls.length;
+  const accepted=(await r.send(L.OPERATIONS.receiptAccept,acceptPayload())).data;
+  assert.equal(accepted.persisted,true);assert.equal(accepted.receipts.length,1);
+  assert.equal(r.state.calls.length,before,'HMAC admission must not probe Graph');
+  await assert.rejects(r.execute('receiptRead',{adAccountAssetRef:ACCOUNT,receiptRef:accepted.receipts[0].receiptRef}),{code:'credential_revoked'});
+  await assert.rejects(r.send(L.OPERATIONS.receiptAccept,{...acceptPayload(),signature:'sha256='+'0'.repeat(64)}),{code:'invalid_signature'});
+  r.current.store.db.prepare('INSERT INTO asset_revocations VALUES (?,?,?,?,?)').run('clinic:71',r.f.binding.connectionRef,ACCOUNT,randomUUID(),r.f.now());
+  await assert.rejects(r.send(L.OPERATIONS.receiptAccept,acceptPayload()),{code:'asset_revoked'});
+  assert.equal(r.current.store.db.prepare('SELECT COUNT(*) n FROM meta_marketing_lead_receipts').get().n,1);
+  assert.equal(r.state.calls.length,before);
+});
 test('dedicated ingress cannot read Ads/metadata/contacts, enable pages, authorize/enroll or use controls',async t=>{
   const r=await ingressFixture(t),scope={assetRef:'meta-enroll:group:9'},uuid=randomUUID(),digest='0'.repeat(64),state=randomBytes(32).toString('base64url');
   const commands=[
@@ -66,6 +79,19 @@ test('an unenrolled or closed Lead cohort does not create ingress authority',asy
   await assert.rejects(r.send(L.OPERATIONS.receiptAccept,acceptPayload()),{code:'scope_denied'});assert.equal(r.f.state.awsCalls.length,before);
   const active=await ingressFixture(t);active.current.store.db.prepare("UPDATE meta_marketing_enrollments SET state='prepared' WHERE id=?").run(active.enrollmentId);const calls=active.f.state.awsCalls.length;
   await assert.rejects(active.send(L.OPERATIONS.receiptAccept,acceptPayload()),{code:'scope_denied'});assert.equal(active.f.state.awsCalls.length,calls);
+});
+test('historical recovery requires its separate exact BS opt-in and can never be used by the HMAC ingress identity',async t=>{
+  const r=await ingressFixture(t),op=L.OPERATIONS.recoveryList,payload={adAccountAssetRef:ACCOUNT,formId:'702',startDate:'2026-11-08',endDate:'2026-11-12',cursor:null};
+  const calls=r.state.calls.length,aws=r.f.state.awsCalls.length;
+  await assert.rejects(r.execute('recoveryList',payload),{code:'scope_denied'});
+  await assert.rejects(r.send(op,payload),{code:'scope_denied'});
+  assert.equal(r.state.calls.length,calls);assert.equal(r.f.state.awsCalls.length,aws);
+  const config=require('../src/meta-marketing-lead-recovery-config');
+  assert.equal(config.config({enabled:true,cohort:config.COHORT,scopeKeys:['group:29']}).scopeKeys[0],'group:29');
+  for(const patch of [{scopeKeys:['group:9']},{scopeKeys:['group:29','group:28']},{scopeKeys:['clinic:66']},{enabled:false},{cohort:'other'},{unsafe:true}])
+    assert.throws(()=>config.config({enabled:true,cohort:config.COHORT,scopeKeys:['group:29'],...patch}),{code:'invalid_request'});
+  const runtimeConfig={...r.f.config,leadAds:structuredClone(r.config),leadRecovery:{enabled:true,cohort:config.COHORT,scopeKeys:['group:29']}};
+  assert.throws(()=>runtime.validateConfig(runtimeConfig),{code:'invalid_request'},'BS cannot be enabled against an unrelated group connection');
 });
 test('actual TLS runtime accepts the optional ingress identity while keeping contact reads inaccessible',async t=>{
   const r=await ingressFixture(t),f=r.f,fs=require('node:fs'),path=require('node:path'),net=require('node:net'),{execFileSync}=require('node:child_process');

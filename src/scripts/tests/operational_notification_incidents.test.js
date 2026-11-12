@@ -28,14 +28,14 @@ function fixture() {
   } };
   const Incident = { findByPk: async key => row(key), findAll: async ({ where }) => [...rows.keys()].map(row)
     .filter(value => value.namespace === where.namespace && value.state === where.state) };
-  const create = namespace => createIncidentNotifier({ sequelize, Incident, namespace,
+  const create = (namespace, options = {}) => createIncidentNotifier({ sequelize, Incident, namespace,
     now: () => time, channels: () => enabled, queue: async request => {
       assert(request.transaction); assert.equal(request.force,true);
       const created = Object.entries(request.channelsOverride).filter(([,value])=>value).map(([channel])=>({channel}));
       deliveries.push(...created.map(value=>({ ...value, metadata: request.metadata, payload: request.payload })));
       if (fail) throw Error('synthetic_outbox_failure');
       return { created, skipped: [] };
-    } });
+    }, ...options });
   return { create, rows, deliveries, advance: ms => { time += ms; }, fail: value => { fail=value; }, channels: value => { enabled=value; } };
 }
 test('identities are per clinic, account, event and runtime, never patient content', () => {
@@ -86,4 +86,27 @@ test('migration can resume after a partial application and never destroys histor
     describeTable:async()=>columns,addColumn:async(_,name)=>{columns[name]={};changes++;}};
   await migration.up(qi);assert.equal(changes,4);await migration.up(qi);assert.equal(changes,4);
   await assert.rejects(migration.down(),/Preserve/);
+});
+
+
+test('explicit isolation keeps other scopes observable after an observation rolls back', async () => {
+  const f=fixture(), errors=[];
+  const n=f.create('staging',{onIncidentError:({phase})=>errors.push(phase),beforeObserve:async({alert})=>{
+    if(alert.metadata.incident_scope==='clinic:72')throw Error('FICTITIOUS_SCOPE_UNAVAILABLE');
+  }});
+  const result=await n.sync([alert('clinic:72'),alert('clinic:66')]);
+  assert.deepEqual(errors,['observe']);assert.equal(result.length,1);assert.equal(f.rows.size,1);
+  assert.equal(f.deliveries.length,2);assert.equal([...f.rows.values()][0].scope_key,'clinic:66');
+  await f.create('staging').sync([alert('clinic:72'),alert('clinic:66')]);assert.equal(f.deliveries.length,4);
+});
+
+test('explicit isolation cannot close a failed scope and does not suppress independent recovery', async () => {
+  const f=fixture();await f.create('staging').sync([alert('clinic:72'),alert('clinic:66')]);
+  const errors=[],n=f.create('staging',{onIncidentError:({phase})=>errors.push(phase)});
+  await n.sync([],{resolution:async original=>{
+    if(original.metadata.incident_scope==='clinic:72')throw Error('FICTITIOUS_RECOVERY_UNAVAILABLE');
+    return{severity:'info',title:'Recuperado',detail:'Comprobado',action:'Sin mensajes.'};
+  }});
+  assert.deepEqual(errors,['resolve']);assert.equal([...f.rows.values()].find(r=>r.scope_key==='clinic:72').state,'open');
+  assert.equal([...f.rows.values()].find(r=>r.scope_key==='clinic:66').state,'closed');
 });

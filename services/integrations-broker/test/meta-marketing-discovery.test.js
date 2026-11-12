@@ -1,8 +1,36 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),{fixture,TOKEN,APP}=require('./meta-marketing-oauth-fixture.cjs');
 const C=require('../src/meta-marketing-oauth-contract'),D=require('../src/meta-marketing-discovery-contract');
+const BUSINESS=require('../src/meta-marketing-business-contract');
 const discover=(f,flow,patch={},control=false)=>f.execute(D.OPERATION,{flowId:flow.flowId,scopeDigest:flow.payload.scopeDigest,...patch},{},control);
 async function ready(t){const f=fixture(t,{discovery:true}),flow=await f.begin();await f.finish(flow);return {f,flow};}
+test('fresh USER and SYSTEM_USER results cap each lifetime without widening stored authority or modifying its metadata',()=>{
+ const now=Date.UTC(2030,0,1),HOUR=3600000;
+ const base={provider:C.PROVIDER,connectionRef:'qa:future-bound',secretArn:'qa-token',clientSecretArn:'qa-app',expiresAt:now+10*HOUR,
+  metaMarketingOAuth:{appId:'101',redirectUri:'https://example.invalid/oauth/meta/marketing/callback',appVersionId:'a'.repeat(32),slotVersionId:'s'.repeat(32),scopeKey:'group:9',clinicIds:[71,72],scopes:['ads_read','public_profile']}};
+ for(const business of [false,true]){
+  const config={enabled:true,cohort:BUSINESS.COHORT,configId:'777',graphVersion:'v27.0',providerBusinessId:'901',scopeKeys:['group:9']};
+  const binding=business?BUSINESS.derive(base,config):base,scopes=business?[...BUSINESS.SCOPES]:[...base.metaMarketingOAuth.scopes];
+  const stored={appId:'101',subjectId:'201',tokenType:business?'SYSTEM_USER':'USER',scopes,expiresAt:now+HOUR,dataAccessExpiresAt:now+2*HOUR,granularScopes:[],
+    ...(business?{clientBusinessId:'701',configId:'777',graphVersion:'v27.0'}:{})};
+  const raw=(expiresAt,dataAccessExpiresAt)=>({data:{app_id:'101',user_id:'201',type:stored.tokenType,is_valid:true,scopes,
+    expires_at:expiresAt===null?0:expiresAt/1000,data_access_expires_at:dataAccessExpiresAt===null?0:dataAccessExpiresAt/1000}});
+  for(const [observedToken,observedData,expectedToken,expectedData]of [
+    [now+HOUR/2,now+HOUR,now+HOUR/2,now+HOUR],
+    [now+3*HOUR,now+4*HOUR,now+HOUR,now+2*HOUR],
+    [business?now+3*HOUR:null,null,now+HOUR,now+2*HOUR]]){
+    const before=JSON.stringify(stored),result=D.fresh(raw(observedToken,observedData),binding,stored,now);
+    assert.equal(result.expiresAt,expectedToken);assert.equal(result.dataAccessExpiresAt,expectedData);assert.equal(JSON.stringify(stored),before);
+  }
+  const rawValid=raw(now+HOUR,now+2*HOUR);
+  assert.throws(()=>D.fresh(rawValid,binding,{...stored,expiresAt:now-1000},now),{code:'credential_revoked'});
+  assert.throws(()=>D.fresh(raw(now-1000,now+2*HOUR),binding,stored,now),{code:'credential_revoked'});
+  for(const mutate of [v=>v.data.is_valid=false,v=>v.data.app_id='999',v=>v.data.user_id='999',v=>v.data.type=business?'USER':'SYSTEM_USER',
+    v=>v.data.scopes=v.data.scopes.filter(scope=>scope!=='ads_read'),v=>v.data.granular_scopes=[{scope:'ads_read',target_ids:['999']} ]]){
+    const changed=structuredClone(rawValid);mutate(changed);assert.throws(()=>D.fresh(changed,binding,stored,now));
+  }
+ }
+});
 test('new candidate inventory returns only authorized typed metadata, pins, expiry and separate audit; no token or activation',async t=>{
   const {f,flow}=await ready(t),a=f.state.awsCalls.length,h=f.state.httpCalls.length,puts=f.state.puts;
   const result=await discover(f,flow);assert.equal(result.data.flowId,flow.flowId);assert.equal(result.data.accessBlocked,true);

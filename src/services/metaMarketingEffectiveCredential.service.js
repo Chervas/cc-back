@@ -47,14 +47,15 @@ function createEffectiveCredentials({models,now=()=>new Date()}){
         ||JSON.stringify(receipt.effectiveCredential.metadata)!==JSON.stringify(split(checked)))fail();
       value={epoch:Number(pointer.epoch),versionId:checked.versionId,digest:checked.digest,metadata:split(checked),candidate:checked,lastError:pointer.last_error};
     }
-    if(business&&models.MetaMarketingCredentialMaintenance){
+    if(models.MetaMarketingCredentialMaintenance){
       const observed=plain(await models.MetaMarketingCredentialMaintenance.findOne({...options(transaction),where:{enrollment_id:enrollment.enrollment_id,expected_epoch:value.epoch,expected_version_id:value.versionId},order:[['requested_at','DESC']]}));
       if(observed?.health_metadata){
         let evidence;try{evidence=JSON.parse(observed.health_metadata);}catch{fail();}
         if(evidence.enrollmentId!==enrollment.enrollment_id||evidence.epoch!==value.epoch||evidence.versionId!==value.versionId||evidence.digest!==value.digest||!Number.isSafeInteger(evidence.verifiedAt))fail();
-        if(evidence.healthy===true&&evidence.reason===null){
-          for(const key of ['expiresAt','dataAccessExpiresAt'])if(evidence[key]!==null){if(!Number.isSafeInteger(evidence[key])||evidence[key]<=0)fail();value.metadata[key]=value.metadata[key]===null?evidence[key]:Math.min(value.metadata[key],evidence[key]);}
-        }
+        if(typeof evidence.healthy!=='boolean'||(evidence.healthy?evidence.reason!==null:!['credential_revoked','permissions_lost','credential_expired'].includes(evidence.reason)))fail();
+        // Every confirmed observation keeps its conservative deadline, including
+        // a denial. A later health check cannot reopen an older finite bound.
+        for(const key of ['expiresAt','dataAccessExpiresAt'])if(evidence[key]!==null){if(!Number.isSafeInteger(evidence[key])||evidence[key]<=0)fail();value.metadata[key]=value.metadata[key]===null?evidence[key]:Math.min(value.metadata[key],evidence[key]);}
       }
     }
     const expiresAt=expiry(value.metadata),expired=expiresAt!==null&&expiresAt<=+now();
@@ -76,9 +77,19 @@ function createEffectiveCredentials({models,now=()=>new Date()}){
       lastError:value.lastError,healthKind:value.healthKind,observedAt:new Date(value.observedAt).toISOString(),currentMetadata:{expiresAt:value.metadata.expiresAt,
         dataAccessExpiresAt:value.metadata.dataAccessExpiresAt,health:value.healthKind,lastError:value.lastError,observedAt:new Date(value.observedAt).toISOString()}};
   }
-  async function recordFailure({enrollmentId,epoch,versionId},error){
+  async function updatePointer({enrollmentId,epoch,versionId,digest},patch,transaction){
+    const [changed]=await models.MetaMarketingEffectiveCredential.update(patch,{where:{enrollment_id:enrollmentId,epoch,version_id:versionId,candidate_digest:digest},transaction,logging:false});
+    if(changed===1)return true;if(changed!==0)return false;
+    // MySQL may report zero changed rows for an idempotent repeated timestamp.
+    // Recheck the complete current pin and patch under this same row lock; zero
+    // is never treated as success merely because an UPDATE was attempted.
+    const after=plain(await models.MetaMarketingEffectiveCredential.findByPk(enrollmentId,options(transaction)));
+    return !!after&&after.enrollment_id===enrollmentId&&Number(after.epoch)===epoch&&after.version_id===versionId&&after.candidate_digest===digest
+      &&Object.entries(patch).every(([key,value])=>value instanceof Date?after[key]!==null&&+new Date(after[key])===+value:after[key]===value);
+  }
+  async function recordFailure({enrollmentId,epoch,versionId},error,{transaction:providedTransaction}={}){
     const code=error?.code;if(!PERMANENT.has(code)&&!TEMPORARY.has(code)||!models.MetaMarketingEffectiveCredential)return false;
-    return models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},async transaction=>{
+    const work=async transaction=>{
       const enrollment=plain(await models.MetaMarketingEnrollmentRequest.findByPk(enrollmentId,options(transaction)));
       if(!enrollment||enrollment.state!=='active')return false;
       const flow=await models.MetaMarketingOAuthRequest.findByPk(enrollment.flow_id,options(transaction)),value=await resolve(enrollment,flow,transaction,{allowExpired:true});
@@ -87,24 +98,26 @@ function createEffectiveCredentials({models,now=()=>new Date()}){
       // A transient outage cannot erase a confirmed permanent permission failure.
       if(pointer&&PERMANENT.has(pointer.last_error)&&TEMPORARY.has(code))return false;
       const patch={last_error:code,last_error_at:now(),unknown_since:TEMPORARY.has(code)?pointer?.unknown_since??now():null};
-      if(pointer)await models.MetaMarketingEffectiveCredential.update(patch,{where:{enrollment_id:enrollmentId,epoch,version_id:versionId},transaction,logging:false});
+      if(pointer){if(!await updatePointer({enrollmentId,epoch,versionId,digest:value.digest},patch,transaction))return false;}
       else await models.MetaMarketingEffectiveCredential.create({enrollment_id:enrollmentId,renewal_id:null,epoch:0,version_id:value.versionId,
         candidate_digest:value.digest,candidate_metadata:JSON.stringify(value.candidate),owner_receipt_digest:null,activated_at:enrollment.activated_at,last_healthy_at:enrollment.activated_at,...patch},{transaction,logging:false});
       return true;
-    });
+    };
+    return providedTransaction?work(providedTransaction):models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},work);
   }
-  async function recordHealthy({enrollmentId,epoch,versionId},observation){
+  async function recordHealthy({enrollmentId,epoch,versionId},observation,{transaction:providedTransaction}={}){
     if(!Number.isSafeInteger(observation?.verifiedAt)||Math.abs(observation.verifiedAt-+now())>60000)return false;
-    return models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},async transaction=>{
+    const work=async transaction=>{
       const enrollment=plain(await models.MetaMarketingEnrollmentRequest.findByPk(enrollmentId,options(transaction)));if(enrollment?.state!=='active')return false;
       const flow=await models.MetaMarketingOAuthRequest.findByPk(enrollment.flow_id,options(transaction)),value=await resolve(enrollment,flow,transaction,{allowExpired:true});
       if(value.epoch!==epoch||value.versionId!==versionId||value.digest!==observation.digest)return false;
       const pointer=plain(await models.MetaMarketingEffectiveCredential.findByPk(enrollmentId,options(transaction)));
       if(pointer?.last_error_at&&+pointer.last_error_at>observation.verifiedAt)return false;
       const patch={last_error:null,last_error_at:null,unknown_since:null,last_healthy_at:new Date(observation.verifiedAt)};
-      if(pointer)await models.MetaMarketingEffectiveCredential.update(patch,{where:{enrollment_id:enrollmentId,epoch,version_id:versionId},transaction,logging:false});
+      if(pointer){if(!await updatePointer({enrollmentId,epoch,versionId,digest:value.digest},patch,transaction))return false;}
       else await models.MetaMarketingEffectiveCredential.create({enrollment_id:enrollmentId,renewal_id:null,epoch:0,version_id:value.versionId,candidate_digest:value.digest,candidate_metadata:JSON.stringify(value.candidate),owner_receipt_digest:null,activated_at:enrollment.activated_at,...patch},{transaction,logging:false});return true;
-    });
+    };
+    return providedTransaction?work(providedTransaction):models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},work);
   }
   return {resolve,getCredentialStatus,recordFailure,recordHealthy};
 }

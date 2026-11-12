@@ -248,11 +248,13 @@ function contactFields(lead) {
     email: validEmail, telefono: validPhone, email_hash: hash(validEmail), phone_hash: hash(validPhone) };
 }
 
-async function persistMetaLead({ models, event, retrieved, now = new Date(), publishCreated = require('./leadCreatedRealtime.service').publishLeadCreated }) {
+async function persistMetaLead({ models, event, retrieved, now = new Date(), recoveryProof = null, publishCreated = require('./leadCreatedRealtime.service').publishLeadCreated }) {
   const contact = contactFields(retrieved.lead);
   const result = await models.sequelize.transaction(async transaction => {
     const clinic = await resolveMetaLeadClinic({ models, event, ...retrieved, transaction });
     if (Number(clinic.id_clinica) !== Number(retrieved.clinic.id_clinica)) fail('meta_lead_clinic_scope_mismatch');
+    const historicalRecovery = recoveryProof === null ? null
+      : require('../lib/metaLeadHistoricalRecovery').forPersistence(recoveryProof, event, Number(clinic.id_clinica), retrieved.lead.created_time);
     const existing = await models.LeadIntake.findOne({ where: { external_source: 'meta_leadgen', external_id: event.lead_id },
       transaction, lock: transaction.LOCK.UPDATE });
     if (existing) {
@@ -272,13 +274,14 @@ async function persistMetaLead({ models, event, retrieved, now = new Date(), pub
       clinic_match_source: identity ? 'meta_campaign_assignment' : 'meta_page_id',
       clinic_match_value: identity ? `${identity.account_id}:${identity.campaign_id}` : event.page_id,
       status_lead: 'nuevo', ...contact,
+      ...(historicalRecovery ? { created_at: new Date(historicalRecovery.provider_created_at) } : {}),
     }, { transaction });
     // The audit is mandatory and commits with the lead. No custom form answers are copied into reporting metadata.
     await models.LeadAttributionAudit.create({ lead_intake_id: lead.id,
       raw_payload: { provider: 'meta_leadgen', lead_id: event.lead_id, form_id: event.form_id,
         provider_created_at: retrieved.lead.created_time || null },
       attribution_steps: { meta_page_id: event.page_id, meta_native_received_at: now.toISOString(),
-        advertising_identity: identity },
+        advertising_identity: identity, ...(historicalRecovery ? { meta_historical_recovery: historicalRecovery } : {}) },
     }, { transaction });
     if (retrieved.responseVersion === 2) await require('./metaLeadFormResponse.service').storeMetaLeadFormResponse({
       models, event, lead, clinic, formResponse: retrieved.formResponse,
@@ -307,6 +310,12 @@ async function runMetaLeadReceptionJob(payload, job = null, overrides = {}) {
       eventAt: result.lead.created_at || result.lead.createdAt || new Date() });
     return { status: 'completed', lead_id: result.lead.id, duplicate: result.duplicate };
   } catch (error) {
+    // Scope preparation checks persisted credential health before any Graph I/O.
+    // Keep signed receipts pending until renewed access is confirmed; polling
+    // local metadata must not exhaust the provider-work retry budget.
+    if (['meta_credential_renewal_required', 'credential_revoked'].includes(error.code)) {
+      return require('../lib/metaLeadBrokerCooldown').createCredentialRenewalWait(JOB_TYPE, Date.now(), error.code);
+    }
     const waiting = require('./metaMarketingLeadReader.service').cooldownWait(error, JOB_TYPE);
     if (waiting) return waiting;
     const code = error.code?.startsWith('meta_lead_') ? error.code : 'meta_lead_reception_failed';

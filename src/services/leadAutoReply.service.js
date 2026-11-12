@@ -498,6 +498,9 @@ async function enqueueForLead({
   const clinicId = toIntOrNull(lead?.clinica_id);
   const normalizedKind = cleanString(eventKind);
   if (!clinicId || !SOURCE_VALUES.has(normalizedKind)) return { skipped: true, reason: 'invalid_event_scope' };
+  if (await require('../lib/metaLeadHistoricalRecovery').suppressesAutomaticReply(db, lead)) {
+    return { skipped: true, reason: 'meta_historical_recovery' };
+  }
   const flow = await findLatestClinicFlow(clinicId, { activeOnly: true });
   if (!flow) return { skipped: true, reason: 'no_active_flow' };
   const config = normalizeConfig(flow.trigger_config || {});
@@ -587,7 +590,7 @@ async function listPendingLeadIds(clinicId, config, { sources = config?.sources 
       },
       attributes: [
         'id', 'clinica_id', 'grupo_clinica_id', 'source', 'telefono', 'call_initiated',
-        'created_at',
+        'created_at', 'external_source', 'external_id',
       ],
       order: [['id', 'ASC']],
       limit: 100,
@@ -597,6 +600,7 @@ async function listPendingLeadIds(clinicId, config, { sources = config?.sources 
     for (const lead of rows) {
       cursor = Math.max(cursor, Number(lead.id) || cursor);
       if (!cleanString(lead.telefono)) continue;
+      if (await require('../lib/metaLeadHistoricalRecovery').suppressesAutomaticReply(db, lead)) continue;
       const eventKind = resolveLeadEventKind(lead);
       if (!enabledSources.has(eventKind)) continue;
       const contactState = await evaluatePendingLeadContact({

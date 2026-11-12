@@ -26,12 +26,17 @@ function validateConfig(config) {
   if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetEnrollment')) { fields.push('assetEnrollment'); if(typeof config.assetEnrollment!=='boolean'||config.assetEnrollment&&!config.assetDiscovery)fail('invalid_request'); }
   if (config && Object.hasOwn(config,'credentialRenewal')) {fields.push('credentialRenewal');if(typeof config.credentialRenewal!=='boolean'||config.credentialRenewal&&config.assetEnrollment!==true)fail('invalid_request');}
+  if(config&&Object.hasOwn(config,'userCredentialHealth')){fields.push('userCredentialHealth');const v=config.userCredentialHealth;
+    if(!C.exact(v,'scopeKeys')||!Array.isArray(v.scopeKeys)||!v.scopeKeys.length||v.scopeKeys.length>64||new Set(v.scopeKeys).size!==v.scopeKeys.length
+      ||v.scopeKeys.some(key=>typeof key!=='string'||!/^(clinic|group):[1-9][0-9]{0,9}$/.test(key))||config.credentialRenewal!==true||config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if(config&&Object.hasOwn(config,'businessLogin')){fields.push('businessLogin');B.config(config.businessLogin);if(config.credentialRenewal!==true||config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if(config&&Object.hasOwn(config,'agencySystemUser')){fields.push('agencySystemUser');AG.config(config.agencySystemUser);if(config.credentialRenewal!==true||config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if(config&&Object.hasOwn(config,'businessCredentialHistory')){fields.push('businessCredentialHistory');if(!Array.isArray(config.businessCredentialHistory)||!config.businessCredentialHistory.length||config.credentialRenewal!==true||config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if(businessConfigs(config||{}).length)I.config(businessRegistry(config));
   if (config && Object.hasOwn(config,'adsRead')) {fields.push('adsRead');A.config(config.adsRead);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if (config && Object.hasOwn(config,'leadAds')) {fields.push('leadAds');L.config(config.leadAds);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
+  if(config&&Object.hasOwn(config,'leadRecovery')){fields.push('leadRecovery');require('./meta-marketing-lead-recovery-config').config(config.leadRecovery);
+    if(config.assetEnrollment!==true||!config.leadAds||config.standby===true)fail('invalid_request');}
   if(config&&Object.hasOwn(config,'enrolledAssetAccess')){fields.push('enrolledAssetAccess');X.config(config.enrolledAssetAccess);if(config.assetEnrollment!==true||config.assetDiscovery!==true||!config.adsRead||!config.leadAds||config.standby===true)fail('invalid_request');}
   if (config?.tlsRenewal) { fields.push('tlsRenewal');tlsReload.validateSettings(config.tlsRenewal); }
   if (!config || Object.keys(config).sort().join(',')!==fields.sort().join(',') || config.enabled!==true || config.cohort!==C.COHORT
@@ -54,6 +59,10 @@ function validateConfig(config) {
   const keys=policy.principals.map(p=>createPublicKey(p.publicKey).export({type:'spki',format:'der'}).toString('base64'));
   if (new Set(keys).size!==keys.length) fail('invalid_request');
   const slots=new Set(),apps=new Set(),scopes=new Set();
+  for(const scopeKey of config.leadRecovery?.scopeKeys||[]){
+    const matches=policy.connections.filter(binding=>C.bindingFor(binding).scopeKey===scopeKey);
+    if(matches.length!==1||!L.REQUIRED_SCOPES.every(scope=>C.bindingFor(matches[0]).scopes.includes(scope)))fail('invalid_request');
+  }
   for (const binding of policy.connections) {
     if (Object.keys(binding).sort().join(',')!=='clientSecretArn,connectionRef,expiresAt,initialState,metaMarketingOAuth,provider,secretArn') fail('invalid_request');
     const b=C.bindingFor(binding);
@@ -65,11 +74,12 @@ function validateConfig(config) {
     const grants=policy.grants.filter(g=>g.connectionRef===binding.connectionRef);
     if (grants.length!==2) fail('invalid_request');
     for (const principal of [gateway,control]) {
-      const grant=grants.find(g=>g.principalId===principal),operations=principal===gateway?[...Object.values(C.OPERATIONS),...(config.assetDiscovery?[D.OPERATION]:[]),...(config.assetEnrollment?Object.values(E.OPERATIONS):[]),...(config.credentialRenewal?Object.values(R.OPERATIONS):[]),...(businessScope(config,b.scopeKey)?Object.values(B.OPERATIONS):[])]:[C.OPERATIONS.status,C.OPERATIONS.abort,...(config.assetEnrollment?[E.OPERATIONS.status,E.OPERATIONS.revoke]:[]),...(config.credentialRenewal?[R.OPERATIONS.status,R.OPERATIONS.abort]:[]),...(businessScope(config,b.scopeKey)?[B.OPERATIONS.status,B.OPERATIONS.abort,B.OPERATIONS.drain,...Object.values(T.OPERATIONS)]:[])];
+      const grant=grants.find(g=>g.principalId===principal),operations=principal===gateway?[...Object.values(C.OPERATIONS),...(config.assetDiscovery?[D.OPERATION]:[]),...(config.assetEnrollment?Object.values(E.OPERATIONS):[]),...(config.credentialRenewal?Object.values(R.OPERATIONS):[]),...(businessScope(config,b.scopeKey)?Object.values(B.OPERATIONS):[])]:[C.OPERATIONS.status,C.OPERATIONS.abort,...(config.assetEnrollment?[E.OPERATIONS.status,E.OPERATIONS.revoke]:[]),...(config.credentialRenewal?[R.OPERATIONS.status,R.OPERATIONS.abort]:[]),...(businessScope(config,b.scopeKey)?[B.OPERATIONS.status,B.OPERATIONS.abort,B.OPERATIONS.drain,...Object.values(T.OPERATIONS)]:config.userCredentialHealth?.scopeKeys.includes(b.scopeKey)?[T.OPERATIONS.health]:[])];
       if (!grant || grant.tenantRef!=='clinic:'+b.clinicIds[0] || grant.assetRef!=='meta-enroll:'+b.scopeKey
         || JSON.stringify([...grant.operations].sort())!==JSON.stringify(operations.sort())) fail('invalid_request');
     }
   }
+  for(const scope of config.userCredentialHealth?.scopeKeys||[])if(policy.connections.filter(binding=>C.bindingFor(binding).scopeKey===scope).length!==1)fail('invalid_request');
   for(const scope of config.enrolledAssetAccess?.scopeKeys||[]){
     const bindings=policy.connections.filter(binding=>C.bindingFor(binding).scopeKey===scope);
     if(bindings.length!==1||businessScope(config,scope))fail('invalid_request');
@@ -115,11 +125,12 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
       if(config.leadAds)leadsHttp=require('./meta-marketing-leads-http').createMetaMarketingLeadsHttp({pacer,cursor,now:adsNow,...(leadsRequest?{request:leadsRequest}:{})});
     }
     const credentialEpochs=config.credentialRenewal?createMetaMarketingCredentialEpochs({store}):null;
-    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessRegistry(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{}),...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{})});
+    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessRegistry(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{}),...(config.leadRecovery?{leadRecovery:config.leadRecovery}:{}),...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{})});
     if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment});
-    if(businessConfigs(config).length){const businessHttp=require('./meta-marketing-business-issuer-http').createIssuerHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
-      business=require('./meta-marketing-business').createMetaMarketingBusiness({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,config:businessRegistry(config)});
-      maintenance=require('./meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({store,epochs:credentialEpochs,enrollment,secrets,http,businessHttp,environment:config.environment,config:businessRegistry(config)});}
+    if(businessConfigs(config).length||config.userCredentialHealth){const businessHttp=businessConfigs(config).length?require('./meta-marketing-business-issuer-http').createIssuerHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})}):null;
+      if(businessConfigs(config).length)business=require('./meta-marketing-business').createMetaMarketingBusiness({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,config:businessRegistry(config)});
+      const userHealthHttp=require('./meta-marketing-user-health-http').createUserHealthHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
+      maintenance=require('./meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({store,epochs:credentialEpochs,enrollment,secrets,http,businessHttp,userHealthHttp,environment:config.environment,...(businessConfigs(config).length?{config:businessRegistry(config)}:{})});}
     if(businessConfigs(config).length)store.setConnectionAuthorityResolver(ref=>enrollment.connectionAuthority(ref,config.policy));
     const broker=new Broker({store,policy:config.policy,secrets,policyResolver:enrollment,...(config.leadAds?{transportProfile:'meta-marketing'}:{}),operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations,...renewal?.operations,...business?.operations,...maintenance?.operations}});
     const controlKeys=new Set(config.policy.principals.filter(p=>p.id.startsWith('control:')).map(p=>p.keyId));

@@ -121,6 +121,26 @@ test('a credential epoch change during an active read is a temporary version con
   assert.equal((await r.read()).data.id, 'act_301');
 });
 
+test('signed lead receipt admission survives a concurrent effective-token renewal without changing receipt identity', async t => {
+  const r=await ready(t,{leads:true}),next=await staged(r),L=require('../src/meta-marketing-leads-contract');
+  const {generateKeyPairSync}=require('node:crypto'),{signRequest}=require('../src/auth'),{Broker}=require('../src/broker');
+  const keys=generateKeyPairSync('ed25519'),id=L.ingressPrincipal('staging');
+  r.f.policy.principals.push({id,keyId:id,enabled:true,maxPerMinute:20,publicKey:keys.publicKey.export({type:'spki',format:'pem'})});
+  const broker=new Broker({store:r.f.current.store,policy:r.f.policy,secrets:r.f.secrets,policyResolver:r.f.current.enrollment,
+    operations:r.f.current.enrollment.operations,transportProfile:'meta-marketing',now:r.f.now});
+  const raw=Buffer.from(JSON.stringify({object:'page',entry:[{id:'401',changes:[{field:'leadgen',value:{leadgen_id:'701',form_id:'702',ad_id:'603'}}]}]}));
+  const payload={adAccountAssetRef:'meta-ad_account:301',rawBase64:raw.toString('base64'),
+    signature:'sha256='+require('node:crypto').createHmac('sha256',APP).update(raw).digest('hex')};
+  const send=()=>{const command=r.f.command(L.OPERATIONS.receiptAccept,payload,{assetRef:'meta-facebook_page:401'}),signed=signRequest(command,{keyId:id,privateKey:keys.privateKey,audience:r.f.policy.audience,now:r.f.now()});return broker.execute(signed.raw,signed.headers);};
+  let switched=false;
+  r.f.state.afterAws=async(command,result)=>{if(!switched&&command.constructor.name==='GetSecretValueCommand'&&command.input.SecretId===r.f.binding.clientSecretArn){switched=true;await next.activate(next.candidate);}return result;};
+  const accepted=(await send()).data;r.f.state.afterAws=null;
+  assert.equal(switched,true);assert.equal((await next.status()).data.effectiveCredential.epoch,1);
+  const duplicate=(await send()).data;
+  assert.equal(duplicate.receipts[0].receiptRef,accepted.receipts[0].receiptRef);
+  assert.equal(r.f.current.store.db.prepare('SELECT COUNT(*) n FROM meta_marketing_lead_receipts').get().n,1);
+});
+
 test('renewal uses actual Meta expiry, permits an expired token to be replaced, and never extends expiry by a universal age', async t => {
   const r = await ready(t); r.f.state.clock += 3601000;
   await assert.rejects(r.read(), { code: 'credential_revoked' });

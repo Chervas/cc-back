@@ -1528,6 +1528,7 @@ async function runActiveChecks({ force = false } = {}) {
       namespace: jobRequestsService.getCurrentRuntimeNamespace() });
     credentialAlertCount = checked.alerts;
     queued.push(...checked.queued);
+    if (checked.incomplete) console.warn('[meta-credential-notifications] Connection checks incomplete: ' + checked.failed);
   } catch {
     // A failed observation neither invents permission loss nor closes an old
     // incident. Other operational checks retain their normal behavior.

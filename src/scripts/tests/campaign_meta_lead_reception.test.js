@@ -162,6 +162,34 @@ test('missing email and phone is pending instead of an empty successful lead', a
   assert.equal((await runMetaLeadReceptionJob(jobPayload, null, h)).error_message, 'meta_lead_contact_unavailable');
   assert.equal(h.state.leads.length, 0);
 });
+
+test('a renewal-required local credential parks the signed receipt without Graph, writes or notification, then resumes', async () => {
+  const h = harness(), original = h.reader.preparePair;
+  h.reader.preparePair = async () => { throw Object.assign(Error('meta_credential_renewal_required'), { code: 'meta_credential_renewal_required' }); };
+  const before = Date.now(), waiting = await runMetaLeadReceptionJob(jobPayload, null, h);
+  assert.equal(waiting.status, 'waiting'); assert.equal(waiting.reason, 'meta_credential_renewal_required');
+  assert.equal(waiting.error.code, 'meta_credential_renewal_required');
+  assert(+waiting.nextAllowedAt >= before + 15 * 60000);
+  assert.equal(h.state.graph.length, 0); assert.equal(h.state.leads.length, 0); assert.equal(h.state.notifications.length, 0);
+  h.reader.preparePair = original;
+  const resumed = await runMetaLeadReceptionJob(jobPayload, null, h);
+  assert.equal(resumed.status, 'completed'); assert.equal(h.state.leads.length, 1);
+});
+
+test('explicit asset withdrawal remains terminal and never becomes an authorization wait', async () => {
+  const h = harness(); h.reader.preparePair = async () => { throw Object.assign(Error('asset_revoked'), { code: 'asset_revoked' }); };
+  const result = await runMetaLeadReceptionJob(jobPayload, null, h);
+  assert.equal(result.status, 'failed'); assert.equal(result.retryable, false);
+  assert.equal(h.state.graph.length, 0); assert.equal(h.state.leads.length, 0); assert.equal(h.state.notifications.length, 0);
+});
+
+test('a confirmed provider credential rejection preserves its exact code and waits instead of discarding the receipt', async () => {
+  const h = harness();h.reader.read = async () => { throw Object.assign(Error('credential_revoked'), { code: 'credential_revoked' }); };
+  const result = await runMetaLeadReceptionJob(jobPayload, null, h);
+  assert.equal(result.status, 'waiting');assert.equal(result.reason, 'meta_credential_renewal_required');
+  assert.equal(result.credentialError, 'credential_revoked');assert.equal(result.error.code, 'credential_revoked');
+  assert.equal(h.state.leads.length, 0);assert.equal(h.state.notifications.length, 0);
+});
 test('lead and verified minimal attribution commit together, without custom health answers', async () => {
   const h = harness(); h.state.providerLead.field_data.push({ name: 'diagnosis', values: ['never copy'] });
   const result = await runMetaLeadReceptionJob(jobPayload, null, h);
@@ -170,6 +198,32 @@ test('lead and verified minimal attribution commit together, without custom heal
   assert.deepEqual(h.state.audits[0].attribution_steps.advertising_identity, { version: 1, verified_by: 'meta_graph',
     provider: 'meta_ads', clinic_id: 5, ...identity, page_id: '200', form_id: '300' });
   assert.ok(!JSON.stringify(h.state.audits).includes('never copy')); assert.equal(h.state.notifications.length, 1);
+});
+
+test('historical recovery suppression commits with a new native lead and never overwrites an already existing attribution', async () => {
+  const h = harness(), recovery = require('../../lib/metaLeadHistoricalRecovery');
+  const retrieved = await retrieveMetaLead({ models: h.models, event, reader: h.reader, receiptRef, pageAssetId: 10, accountAssetId: 11 });
+  const recoveryProof = recovery.issue({ actorId: 99, clinicId: 5, event, source: 'accepted_receipt', providerCreatedAt: retrieved.lead.created_time });
+  await persistMetaLead({ models: h.models, event, retrieved, recoveryProof });
+  assert.equal(h.state.leads.length, 1); assert.equal(h.state.audits.length, 1);
+  assert.equal(h.state.audits[0].attribution_steps.meta_historical_recovery.automatic_messages, 'suppressed');
+  assert.equal(h.state.leads[0].created_at.toISOString(), '2026-09-10T10:00:00.000Z');
+  assert.equal(Object.hasOwn(h.state.leads[0], 'updated_at'), false);
+  const original = JSON.stringify(h.state.audits);
+  assert.equal((await persistMetaLead({ models: h.models, event, retrieved, recoveryProof })).duplicate, true);
+  assert.equal(JSON.stringify(h.state.audits), original); assert.equal(h.state.notifications.length, 0);
+  const ordinary = harness(), normal = await retrieveMetaLead({ models: ordinary.models, event, reader: ordinary.reader, receiptRef, pageAssetId: 10, accountAssetId: 11 });
+  await persistMetaLead({ models: ordinary.models, event, retrieved: normal });
+  const initial = JSON.stringify(ordinary.state.audits);
+  await persistMetaLead({ models: ordinary.models, event, retrieved: normal, recoveryProof });
+  assert.equal(JSON.stringify(ordinary.state.audits), initial);
+  assert.equal(ordinary.state.audits[0].attribution_steps.meta_historical_recovery, undefined);
+});
+
+test('a forged historical recovery marker cannot write a lead, attribution, form or change consent', async () => {
+  const h = harness(), retrieved = await retrieveMetaLead({ models: h.models, event, reader: h.reader, receiptRef, pageAssetId: 10, accountAssetId: 11 });
+  await assert.rejects(persistMetaLead({ models: h.models, event, retrieved, recoveryProof: { automatic_messages: 'suppressed' } }), /proof_invalid/);
+  assert.equal(h.state.leads.length, 0); assert.equal(h.state.audits.length, 0); assert.equal(h.state.forms.length, 0); assert.equal(h.state.notifications.length, 0);
 });
 test('audit failure rolls back the lead and never notifies', async () => {
   const h = harness({ auditError: true });

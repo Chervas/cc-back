@@ -71,6 +71,25 @@ test('response extras, unrequested form answers and forged recipient routes cann
     await assert.rejects(f.reader.read(pair, 'receiptRead', { receiptRef }), { code: 'broker_response_invalid' });
   }
 });
+test('recovery requires a current explicit clinic route before making an Owner RPC', async () => {
+  for (const family of ['recoveryList', 'recoveryRead']) {
+    const f = fixture(), pair = await f.reader.preparePair(10, 11);
+    const payload = family === 'recoveryList' ? { formId: '300', startDate: '2026-11-01', endDate: '2026-11-07', cursor: null } : { proof: 'P'.repeat(64) };
+    await assert.rejects(f.reader.read(pair, family, payload), { code: 'scope_denied' });
+    assert.equal(f.state.commands.length, 0);
+  }
+});
+test('recoveryRead validates its closed V2 projection against the paired page, account and current recipient', async () => {
+  for (const mutation of [null, data => { data.event.page_id = '201'; }, data => { data.recipientClinicId = 6; }, data => { data.identity.account_id = '501'; }]) {
+    const f = fixture(), proof = 'P'.repeat(64); f.state.route = 5;
+    f.state.data = { ...f.state.data, recipientClinicId: 5, form_response: { version: 2, formId: '300', name: 'QA Form', fields: [] },
+      recovery: { proofDigest: require('node:crypto').createHash('sha256').update(proof).digest('hex'), formId: '300', startDate: '2026-11-01', endDate: '2026-11-07' } };
+    if (mutation) mutation(f.state.data);
+    const pair = await f.reader.preparePair(10, 11);
+    if (mutation) await assert.rejects(f.reader.read(pair, 'recoveryRead', { proof }), { code: 'broker_response_invalid' });
+    else assert.deepEqual(await f.reader.read(pair, 'recoveryRead', { proof }), f.state.data);
+  }
+});
 test('revocation and route edits during provider I/O prevent returning contacts', async () => {
   for (const mutate of [state => { state.blocked = true; }, state => { state.routeVersion++; }]) {
     const f = fixture(), pair = await f.reader.preparePair(10, 11); f.state.onCommand = () => mutate(f.state);

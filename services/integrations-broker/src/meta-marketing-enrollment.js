@@ -4,9 +4,10 @@ const {BrokerError,fail}=require('./errors'),{eventFor}=require('./audit'),{cano
 const C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),M=require('./meta-marketing-contract'),E=require('./meta-marketing-enrollment-contract');
 const A=require('./meta-marketing-ads-contract'),X=require('./meta-marketing-enrolled-asset-access-contract');
 const L=require('./meta-marketing-leads-contract'),{timingSafeEqual}=require('node:crypto');
-function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,credentialEpochs,businessConfig,enrolledAssetAccess}){
+function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,leadRecovery,credentialEpochs,businessConfig,enrolledAssetAccess}){
   if(adsRead!==undefined){A.config(adsRead);if(typeof adsHttp?.read!=='function')fail('invalid_request');}
   if(leadAds!==undefined){L.config(leadAds);if(typeof leadsHttp?.read!=='function'||typeof secrets?.withLeadVerification!=='function')fail('invalid_request');}
+  if(leadRecovery!==undefined){require('./meta-marketing-lead-recovery-config').config(leadRecovery);if(!leadAds)fail('invalid_request');}
   if(enrolledAssetAccess!==undefined){X.config(enrolledAssetAccess);if(!adsRead||!leadAds)fail('invalid_request');}
   const leadReceipts=leadAds?require('./meta-marketing-leads-receipts').createMetaMarketingLeadReceipts({store,now}):null;
   const adsOperation=operation=>Object.values(A.OPERATIONS).includes(operation);
@@ -134,6 +135,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     if(!active.assets.some(a=>a.assetRef===page.assetRef&&a.kind==='facebook_page')||accounts.length!==1||accounts[0].assetRef!==account.assetRef)fail('scope_denied');
     return {pageAssetRef:page.assetRef,adAccountAssetRef:account.assetRef,recipientClinicId:null};
   }
+  const receiptIngress=(request,principal)=>Boolean(leadAds&&principal.id===L.ingressPrincipal(environment)&&L.RECEPTION_OPERATIONS.includes(request.operation));
   function assetOwner(request,principal,policy){
     const lookup=get('SELECT enrollment FROM meta_marketing_enrollment_assets WHERE asset=?',request.assetRef);
     if(!lookup)fail('scope_denied');const row=rowFor(lookup.enrollment),binding=grantBinding(row,source(policy,request.connectionRef));
@@ -143,20 +145,22 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     const asset=selected(row).find(a=>a.assetRef===request.assetRef);if(!asset)fail('scope_denied');
     const control=request.operation===M.REVOKE&&principal.id===roles.assetControl;
     if(!control){
-      const ingress=leadAds&&principal.id===L.ingressPrincipal(environment)&&L.RECEPTION_OPERATIONS.includes(request.operation);
+      const ingress=receiptIngress(request,principal);
       if(!ingress&&(principal.id!==roles.reader||![...M.OPERATIONS,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS)].includes(request.operation)))fail('scope_denied');
+      if([L.OPERATIONS.recoveryList,L.OPERATIONS.recoveryRead].includes(request.operation)
+        &&(!leadRecovery||principal.id!==roles.reader||!leadRecovery.scopeKeys.includes(b.scopeKey)))fail('scope_denied');
       // Metrics are a distinct, explicitly reviewed cohort. Merely adding an
       // operation to source or enrolling an account does not grant these reads.
       if(adsOperation(request.operation)){
         if(!adsRead||asset.kind!=='ad_account'||!b.scopes.includes('ads_read'))fail('scope_denied');
         if(!adsRead.assetRefs.includes(request.assetRef))enrolledAuthority(row,binding);
       }
-      enrollmentActive(row,binding,{requireActive:true});
+      enrollmentActive(row,binding,{requireActive:true,allowExpired:ingress});
       if(leadOperation(request.operation)){
         L.validate(request.operation,request.payload);
         if(!leadAds||asset.kind!=='facebook_page'||!L.REQUIRED_SCOPES.every(s=>b.scopes.includes(s)))fail('scope_denied');
         const account=selected(row).find(a=>a.assetRef===request.payload.adAccountAssetRef&&a.kind==='ad_account');
-        const pair=leadPair(row,binding,asset,account);if(pair.recipientClinicId!=null&&!b.clinicIds.includes(pair.recipientClinicId))fail('scope_denied');
+        const pair=leadPair(row,binding,asset,account,{allowExpired:ingress});if(pair.recipientClinicId!=null&&!b.clinicIds.includes(pair.recipientClinicId))fail('scope_denied');
         if(request.operation===L.OPERATIONS.receiptRead)readLeadReceipt(request.payload.receiptRef,row,binding,asset,account);
         return {row,binding,asset,account,control};
       }
@@ -182,7 +186,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     return {app:K.bindingFor(binding).appId,subject:JSON.parse(flowFor(row.flow).credential_metadata).subjectId,
       tenant:row.tenant,connection:row.connection,enrollment:row.id,generation:C.hash(JSON.stringify([row.selection_digest,asset.assetRef,account.assetRef,recipientClinicId])),page:asset.id,account:account.id,recipientClinicId};
   };
-  const leadContext=(row,binding,asset,account)=>leadContextForRecipient(row,binding,asset,account,leadPair(row,binding,asset,account).recipientClinicId??null);
+  const leadContext=(row,binding,asset,account,options)=>leadContextForRecipient(row,binding,asset,account,leadPair(row,binding,asset,account,options).recipientClinicId??null);
   function readLeadReceipt(ref,row,binding,page,account){
     const current=leadContext(row,binding,page,account);
     return require('./meta-marketing-lead-routing-receipt').readRoutedLeadReceipt({
@@ -242,7 +246,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       if(signal.aborted)fail('provider_timeout');authorityNow();
       const current=store.connection(binding.connectionRef,now());if(revision!==undefined&&current.revision!==revision)fail('connection_blocked');revision=current.revision;
       if(isRead){
-        const v=assetOwner(request,principal,policy);row=v.row;const active=enrollmentActive(row,binding,{requireActive:true});task.assets=active.assets;
+        const v=assetOwner(request,principal,policy);row=v.row;const active=enrollmentActive(row,binding,{requireActive:true,allowExpired:receiptIngress(request,principal)});task.assets=active.assets;
         // HMAC acceptance/challenge do not borrow a user credential. Their
         // stable grant/receipt generation survives a concurrent token renewal.
         if(credentialEpochs&&![L.OPERATIONS.receiptAccept,L.OPERATIONS.challenge].includes(request.operation)){
@@ -276,7 +280,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       if(leadOperation(request.operation)&&[L.OPERATIONS.receiptAccept,L.OPERATIONS.challenge].includes(request.operation)){
         if(request.operation===L.OPERATIONS.receiptAccept){
           const raw=Buffer.from(request.payload.rawBase64,'base64');try{data=await secrets.withApplication(binding,appSecret=>{context=check();return leadReceipts.accept({raw,signature:request.payload.signature,appSecret,
-            context:leadContext(row,binding,context.asset,context.account),authorize:check,allowNew:()=>!barrier(row),settledDuplicate});},signal);}finally{raw.fill(0);}
+            context:leadContext(row,binding,context.asset,context.account,{allowExpired:receiptIngress(request,principal)}),authorize:check,allowNew:()=>!barrier(row),settledDuplicate});},signal);}finally{raw.fill(0);}
         }else data=await secrets.withLeadVerification(binding,leadAds.verifyTokenRef,verifyToken=>{
           check();const supplied=Buffer.from(request.payload.token);try{if(supplied.length!==verifyToken.length||!timingSafeEqual(supplied,verifyToken))fail('invalid_signature');return {challenge:request.payload.challenge};}finally{supplied.fill(0);}
         },signal);
@@ -286,7 +290,12 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
           context=check();if(JSON.stringify(borrowed.metadata)!==context.flow.credential_metadata)fail('secret_unavailable');
           if(isRead){
             if(leadOperation(request.operation))return leadsHttp.read({binding,...borrowed,asset:context.asset,account:context.account,operation:request.operation,payload:request.payload,signal,authorize:check,
-              context:{principalId:principal.id,tenantRef:request.tenantRef,policyVersion:policy.version},...(request.operation===L.OPERATIONS.receiptRead?(()=>{const r=readLeadReceipt(request.payload.receiptRef,row,binding,context.asset,context.account);return {receipt:r.event,recipientClinicId:r.recipientClinicId};})():{})});
+              context:{principalId:principal.id,tenantRef:request.tenantRef,policyVersion:policy.version,
+                credentialEpoch:context.credential?.epoch??0,credentialVersionId:context.credential?.versionId??context.flow.id,
+                credentialDigest:context.credential?.digest??context.flow.secret_digest},
+              ...(request.operation===L.OPERATIONS.receiptRead?(()=>{const r=readLeadReceipt(request.payload.receiptRef,row,binding,context.asset,context.account);return {receipt:r.event,recipientClinicId:r.recipientClinicId};})():{}),
+              ...([L.OPERATIONS.recoveryList,L.OPERATIONS.recoveryRead].includes(request.operation)
+                ? {recipientClinicId:leadPair(row,binding,context.asset,context.account).recipientClinicId??null}:{} )});
             if(adsOperation(request.operation))return adsHttp.read({binding,...borrowed,asset:context.asset,operation:request.operation,payload:request.payload,signal,authorize:check,
               context:{principalId:principal.id,tenantRef:request.tenantRef,policyVersion:policy.version}});
             return http.readCandidate({binding,...borrowed,asset:context.asset,operation:request.operation,signal,authorize:check});

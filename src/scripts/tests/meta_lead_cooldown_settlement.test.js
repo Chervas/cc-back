@@ -6,7 +6,7 @@ process.env.RUNTIME_ROLE = 'api';
 const db = require('../../../models');
 const requests = require('../../services/jobRequests.service');
 const scheduler = require('../../services/jobScheduler.service');
-const { createBrokerCooldownWait } = require('../../lib/metaLeadBrokerCooldown');
+const { createBrokerCooldownWait, createCredentialRenewalWait, CREDENTIAL_WAIT_MS } = require('../../lib/metaLeadBrokerCooldown');
 const clone = value => JSON.parse(JSON.stringify(value));
 test('broker WAIT preserves retry budget in the claim CAS and keeps claim attempts monotonic', async () => {
   const original = { update: db.JobRequest.update, findByPk: db.JobRequest.findByPk };
@@ -54,5 +54,26 @@ test('serialized or forged WAIT cannot increase a job budget; recovery keeps the
     assert(recovery.metaLeadCooldownProof);
     assert.throws(() => scheduler._buildSettlementRecovery({ ...job, max_attempts: 1000000 }, execution, new Date(now)), /invalid/);
     assert.throws(() => scheduler._buildSettlementRecovery(job, { ...execution, nextRunAt: new Date(now - 1) }, new Date(now)), /invalid/);
+  } finally { requests.markWaiting = original; }
+});
+
+test('local authorization WAIT preserves provider attempts with a private claim-bound proof, including settlement recovery', async () => {
+  const now = Date.now(), job = { id: 101, type: 'campaign_meta_lead_receive', status: 'running', attempts: 8, max_attempts: 8 };
+  const wait = createCredentialRenewalWait(job.type, now);
+  assert.equal(+wait.nextAllowedAt, now + CREDENTIAL_WAIT_MS);
+  const execution = { status: 'waiting', nextRunAt: wait.nextAllowedAt, error: wait.error, result: wait };
+  const original = requests.markWaiting, captured = [];
+  requests.markWaiting = async (_id, value) => captured.push(value);
+  try {
+    await scheduler._settleJobResult(job, execution, { now: new Date(now) });
+    assert(captured[0].metaLeadCooldownProof); assert.equal(captured[0].errorMessage, 'meta_credential_renewal_required');
+    const budget = require('../../lib/metaLeadBrokerCooldown').inspectRetryBudgetProof(captured[0].metaLeadCooldownProof, 101, 8, wait.nextAllowedAt, now);
+    assert.equal(budget.maxAttempts, 8); assert.equal(budget.type, job.type);
+    const recovery = scheduler._buildSettlementRecovery(job, execution, new Date(now));
+    assert(recovery.metaLeadCooldownProof); assert.equal(recovery.errorMessage, 'meta_credential_renewal_required');
+    await scheduler._settleJobResult(job, { ...execution, result: clone(wait) }, { now: new Date(now) });
+    assert.equal(captured[1].metaLeadCooldownProof, undefined);
+    assert.throws(() => require('../../lib/metaLeadBrokerCooldown').inspectRetryBudgetProof(captured[0].metaLeadCooldownProof, 101, 9, wait.nextAllowedAt, now));
+    assert.throws(() => createCredentialRenewalWait('campaign_meta_page_reception', now));
   } finally { requests.markWaiting = original; }
 });

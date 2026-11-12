@@ -15,8 +15,11 @@ function fresh(raw,binding,stored,now){
   const v=K.inspected(raw,binding,now,stored);
   if(['appId','subjectId','tokenType','scopes','granularScopes'].some(k=>JSON.stringify(v[k])!==JSON.stringify(stored[k])))fail('oauth_identity_mismatch');
   if([stored.expiresAt,stored.dataAccessExpiresAt].some(x=>x!==null&&x<=now))fail('credential_revoked');
-  if(['expiresAt','dataAccessExpiresAt'].some(k=>v[k]!==null&&(stored[k]===null||v[k]<stored[k])))fail('credential_revoked');
-  return v;
+  // The same still-valid credential may report a shorter lifetime. The current
+  // read remains bounded by BOTH observations; neither a longer future result
+  // nor a null result widens the stored lifetime. Custody/epochs are untouched.
+  const bound=key=>{const values=[stored[key],v[key]].filter(value=>value!==null);return values.length?Math.min(...values):null;};
+  return {...v,expiresAt:bound('expiresAt'),dataAccessExpiresAt:bound('dataAccessExpiresAt')};
 }
 function project(raw,kind,parentPageId=null){
   const id=kind==='ad_account'?raw?.account_id:raw?.id;

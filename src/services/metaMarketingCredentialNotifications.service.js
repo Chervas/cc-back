@@ -48,17 +48,29 @@ function createCredentialNotifications({ models, queue, channels, namespace, now
     const enrollments = await models.MetaMarketingEnrollmentRequest.findAll({ attributes: ['enrollment_id'],
       where: { state: 'active' }, order: [['enrollment_id', 'ASC']], limit: 101, raw: true, logging: false });
     if (!Array.isArray(enrollments) || enrollments.length > 100) fail('meta_credential_notification_limit');
-    const statuses = new Map();
+    const statuses = new Map(), failedEnrollments = new Set(), alerts = [];
+    let failed = 0;
     for (const row of enrollments) {
-      const prepared = await order.prepareEnrollment(row.enrollment_id);
-      if (!prepared) continue;
-      const value = await models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, transaction => current(row.enrollment_id, transaction, prepared));
-      if (value) statuses.set(value.value.enrollmentId, { ...value, prepared });
+      try {
+        const prepared = await order.prepareEnrollment(row.enrollment_id);
+        if (!prepared) continue;
+        const value = await models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, transaction => current(row.enrollment_id, transaction, prepared));
+        if (value) {
+          const observations = policy.alertsFromStatus(value.value, now(), value.maintenance);
+          statuses.set(value.value.enrollmentId, { ...value, prepared });
+          alerts.push(...observations);
+        }
+      } catch {
+        // An unavailable or invalid scope is unknown, never evidence that its
+        // prior incident recovered. Other connections retain their own checks.
+        failedEnrollments.add(row.enrollment_id);
+        failed++;
+      }
     }
-    const alerts = [...statuses.values()].flatMap(({ value, maintenance }) => policy.alertsFromStatus(value, now(), maintenance));
     const handovers = new Map();
     const notifier = createIncidentNotifier({ sequelize: models.sequelize, Incident: models.SystemNotificationIncident,
       namespace, now, managedEvents: policy.MANAGED, once: true,
+      onIncidentError: () => { failed++; },
       // Successful maintenance is audited by the maintenance owner. Close the
       // durable incident without an additional success email or panel notice.
       channels: alert => alert.payload.severity === 'info' ? [] : channels(alert).filter(channel => ['panel', 'email'].includes(channel)),
@@ -87,7 +99,9 @@ function createCredentialNotifications({ models, queue, channels, namespace, now
       },
     });
     const queued = await notifier.sync(alerts, { resolution: async original => {
-      const current = statuses.get(original.metadata?.credential?.enrollmentId);
+      const id = original.metadata?.credential?.enrollmentId;
+      if (failedEnrollments.has(id)) return null;
+      const current = statuses.get(id);
       if (current) return policy.resolution(original, current.value, now(), current.maintenance);
       const identity = original.metadata?.credential;
       if (!identity) return null;
@@ -100,7 +114,7 @@ function createCredentialNotifications({ models, queue, channels, namespace, now
       if (recovered) handovers.set(original.metadata.incident_scope, { value, prepared });
       return recovered;
     } });
-    return { status: 'completed', alerts: alerts.length, checked: statuses.size, queued };
+    return { status: 'completed', alerts: alerts.length, checked: statuses.size, failed, incomplete: failed > 0, queued };
   }
   return { run };
 }

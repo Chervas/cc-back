@@ -25,7 +25,7 @@ function notificationDecision(previous, observation, phase, now, { criticalMinut
 // State and notification jobs commit together. A restart or concurrent sweep
 // cannot turn an unchanged incident into a new hourly email.
 function createIncidentNotifier({ sequelize, Incident, queue, channels, namespace, now = () => Date.now(), reminderMinutes,
-  managedEvents = MANAGED, once = false, beforeObserve }) {
+  managedEvents = MANAGED, once = false, beforeObserve, onIncidentError }) {
   async function observe(alert, closing = false, expectedObservedAt = null) {
     const key = identity(alert, namespace, managedEvents);
     // Acquire the unique incident row without overwriting an existing clock.
@@ -90,22 +90,39 @@ function createIncidentNotifier({ sequelize, Incident, queue, channels, namespac
   async function sync(alerts, { resolution } = {}) {
     const result = [];
     const seen = new Set();
+    // Isolation is explicit per consumer. WhatsApp keeps the fail-fast default.
+    // A failed observation is still seen, so it cannot be mistaken for recovery.
+    async function isolate(work, phase) {
+      try { return await work(); }
+      catch (error) {
+        if (typeof onIncidentError !== 'function') throw error;
+        await onIncidentError({ phase, error });
+        return null;
+      }
+    }
     for (const alert of alerts.filter(alert => managedEvents.has(alert.eventKey))) {
-      seen.add(identity(alert, namespace, managedEvents)); result.push(await observe(alert));
+      const observed = await isolate(async () => {
+        seen.add(identity(alert, namespace, managedEvents));
+        return observe(alert);
+      }, 'observe');
+      if (observed) result.push(observed);
     }
     if (!resolution) return result;
     const open = await Incident.findAll({ where: { namespace, state: 'open' } });
     for (const row of open) {
       if (seen.has(row.incident_key)) continue;
-      const original = json(row.snapshot);
-      // Different opt-in consumers share this table, never each other's
-      // recovery policy. Existing WhatsApp defaults remain unchanged.
-      if (!managedEvents.has(original.eventKey)) continue;
-      const recovered = await resolution(original);
-      if (!recovered) continue;
-      result.push(await observe({ ...original, payload: recovered,
-        metadata: { ...original.metadata, incident_impact: ['recovered'], operational_summary: recovered.detail } },
-      true, millis(row.observed_at)));
+      const recovered = await isolate(async () => {
+        const original = json(row.snapshot);
+        // Different opt-in consumers share this table, never each other's
+        // recovery policy. Existing WhatsApp defaults remain unchanged.
+        if (!managedEvents.has(original.eventKey)) return null;
+        const payload = await resolution(original);
+        if (!payload) return null;
+        return observe({ ...original, payload,
+          metadata: { ...original.metadata, incident_impact: ['recovered'], operational_summary: payload.detail } },
+        true, millis(row.observed_at));
+      }, 'resolve');
+      if (recovered) result.push(recovered);
     }
     return result;
   }

@@ -106,13 +106,13 @@ test('concurrent sweeps and restarts dedupe each version/kind without daily remi
  assert(f.deliveries.every(d=>['panel','email'].includes(d.channel)));
 });
 test('outbox failure or effective credential changing at enqueue rolls back instead of notifying an old version',async()=>{
- const f=fixture();f.state.fail=true;await assert.rejects(f.create().run(),/FICTITIOUS_OUTBOX_FAILURE/);assert.equal(f.rows.size,0);assert.equal(f.deliveries.length,0);
+ const f=fixture();f.state.fail=true;assert.equal((await f.create().run()).incomplete,true);assert.equal(f.rows.size,0);assert.equal(f.deliveries.length,0);
  f.state.fail=false;await f.create().run();assert.equal(f.deliveries.length,2);
  const changed=fixture();changed.state.onRead=n=>{if(n===2)changed.state.value=status({epoch:1,versionId:next});};
- await assert.rejects(changed.create().run(),/current_changed/);assert.equal(changed.rows.size,0);assert.equal(changed.deliveries.length,0);
+ assert.equal((await changed.create().run()).incomplete,true);assert.equal(changed.rows.size,0);assert.equal(changed.deliveries.length,0);
 });
 test('failed/temporary observations never resolve; confirmed renewal closes onlyMeta with no success outbox',async()=>{
- const f=fixture();await f.create().run();f.state.error='FICTITIOUS_TIMEOUT';await assert.rejects(f.create().run());assert.equal([...f.rows.values()][0].state,'open');
+ const f=fixture();await f.create().run();f.state.error='FICTITIOUS_TIMEOUT';assert.equal((await f.create().run()).incomplete,true);assert.equal([...f.rows.values()][0].state,'open');
  f.state.error=null;f.state.value=status({epoch:1,versionId:next,health:'temporary',lastError:'rate_limited'});await f.create().run();assert.equal(f.deliveries.length,2);
  f.state.value=status({epoch:1,versionId:next});await f.create().run();await f.create().run();assert.equal(f.deliveries.length,2);assert.equal([...f.rows.values()][0].state,'closed');
 });
@@ -125,7 +125,7 @@ test('fresh healthy supervision resolves unknown on the same version without ema
  const changed=fixture(status({health:'temporary',lastError:'provider_timeout'}));changed.state.maintenance=maintenance(changed.state.value,{unknownSince:at-P.UNKNOWN_MARGIN,lastHealthyAt:null});await changed.create().run();
  changed.advance(1000);changed.state.value=status();changed.state.maintenance=maintenance(changed.state.value,{lastHealthyAt:at+1000});
  const prior=changed.state.reads;changed.state.onRead=n=>{if(n===prior+2)changed.state.value=status({health:'temporary',lastError:'provider_timeout'});};
- await assert.rejects(changed.create().run(),/current_changed/);assert.equal([...changed.rows.values()][0].state,'open');assert.equal(changed.deliveries.length,2);
+ assert.equal((await changed.create().run()).incomplete,true);assert.equal([...changed.rows.values()][0].state,'open');assert.equal(changed.deliveries.length,2);
 });
 test('a verified USER→Business handover closes an old enrollment incident audit-only, never by matching the scope alone',async()=>{
  const f=fixture(status({days:1,tokenType:'USER'}));await f.create().run();const original=[...f.rows.values()][0].snapshot,old=original.metadata.credential;
@@ -143,7 +143,7 @@ test('a changed handover lineage/epoch/identity is rejected before incident clos
   const copy=structuredClone(result);mutate(copy);assert.throws(()=>P.handoverResolution(original,copy,at+1000),/metadata_invalid/);
  }
  f.advance(1000);f.state.value=value;f.state.maintenance=result.maintenanceStatus;f.state.enumerated=[{enrollment_id:next}];f.state.superseded=[id];f.state.handoverResult=result;
- f.state.onHandoverRead=n=>{if(n===2)f.state.handoverResult.proof.chainDigest='d'.repeat(64);};await assert.rejects(f.create().run(),/current_changed/);
+ f.state.onHandoverRead=n=>{if(n===2)f.state.handoverResult.proof.chainDigest='d'.repeat(64);};assert.equal((await f.create().run()).incomplete,true);
  assert.equal([...f.rows.values()][0].state,'open');assert.equal(f.deliveries.length,2);
 });
 test('the defaultWhatsApp recovery resolver cannot close aMeta incident',async()=>{

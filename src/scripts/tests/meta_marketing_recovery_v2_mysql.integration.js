@@ -171,6 +171,9 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   assert.equal(await models.MetaMarketingRecovery.count({where:{canonical_connection_id:null,state:'active'}}),2);assert.equal(await baseline(),untouched);
   report.checks.push('BS bound before claim expiry completes reservation/activation after deadline; original MFA and candidate expiry remain enforced; freshAd303 plus exact2Pages have no credentials; ScopeDigest/snapshots/TTL and Arriaga/WA unchanged');
   const renewalProbe=await require('./fixtures/meta_credential_renewal_mysql.fixture')({models,sql,actors,flows,now,advance:value=>{clock+=value;},report,baseline,untouched,sessions});
+  if(process.env.META_MARKETING_USER_HEALTH_SQL_TEST==='1'){
+    await require('./fixtures/meta_user_credential_health_mysql.fixture')({models,sql,now,advance:value=>{clock+=value;},report,baseline,untouched,renewalProbe});return;
+  }
   if(process.env.META_BUSINESS_CONTINUITY_TEST==='1'){
     await require('./fixtures/meta_business_continuity_mysql.fixture')({models,sql,now,advance:value=>{clock+=value;},report,baseline,untouched});return;
   }

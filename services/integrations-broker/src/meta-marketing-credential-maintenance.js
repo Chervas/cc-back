@@ -2,8 +2,8 @@
 const {fail}=require('./errors'),{eventFor}=require('./audit'),{canonical}=require('./canonical');
 const C=require('./meta-marketing-oauth-contract'),B=require('./meta-marketing-business-issuer'),K=require('./meta-marketing-credential-shape');
 const T=require('./meta-marketing-credential-maintenance-contract'),E=require('./meta-marketing-enrollment-contract'),D=require('./meta-marketing-discovery-contract'),R=require('./meta-marketing-credential-renewal-contract');
-function createMetaMarketingCredentialMaintenance({store,epochs,enrollment,secrets,http,businessHttp,environment,config,now=Date.now}){
- B.config(config);const roles=E.roles(environment),running=new Map();let closed=false;
+function createMetaMarketingCredentialMaintenance({store,epochs,enrollment,secrets,http,businessHttp,userHealthHttp,environment,config,now=Date.now}){
+ if(config)B.config(config);const roles=E.roles(environment),running=new Map();let closed=false;
  store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_credential_maintenance(
   id TEXT PRIMARY KEY,enrollment TEXT NOT NULL,principal TEXT NOT NULL,tenant TEXT NOT NULL,connection TEXT NOT NULL,scope TEXT NOT NULL,
   expected_epoch INTEGER NOT NULL,expected_version TEXT NOT NULL,expected_digest TEXT NOT NULL,grant_digest TEXT NOT NULL,asset_digest TEXT NOT NULL,
@@ -26,19 +26,21 @@ function createMetaMarketingCredentialMaintenance({store,epochs,enrollment,secre
   const authPin=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey])),basePin=C.fingerprint(base),controller=new AbortController(),signal=controller.signal,timer=setTimeout(()=>controller.abort(),25000);timer.unref?.();
   function check(){if(closed||signal.aborted)fail('provider_timeout');const key=policy.principals.find(v=>v.id===principal.id),live=policy.connections.find(v=>v.connectionRef===base.connectionRef);
    if(!key?.enabled||C.hash(JSON.stringify([key.id,key.keyId,key.publicKey]))!==authPin||C.fingerprint(live)!==basePin)fail('scope_denied');require('./auth').authorize(key,request,policy);store.connection(base.connectionRef,now());store.assertAssetActive(request);
-   const v=enrollment.renewalAuthority(p.enrollmentId,base);if(!K.business(v.binding))fail('operation_denied');epochs.expected(v.credential,p);return v;
+   const v=enrollment.renewalAuthority(p.enrollmentId,base);if(!K.business(v.binding)&&v.credential.metadata.tokenType!=='USER')fail('operation_denied');epochs.expected(v.credential,p);return v;
   }
   function auditHealth(result,reason){if(store.backlog().pending>=policy.maxBacklog)fail('audit_unavailable');store.appendAudit(eventFor(request,principal,policy,'integration.completed',result,reason,now()));}
-  function result(v,metadata,reason=null){check();auditHealth(reason?'denied':'success',reason?'meta_credential_maintenance_health_denied':'meta_credential_maintenance_health_verified');return {requestId:request.requestId,data:{enrollmentId:v.row.id,epoch:v.credential.epoch,versionId:v.credential.versionId,digest:v.credential.digest,verifiedAt:now(),expiresAt:metadata.expiresAt,dataAccessExpiresAt:metadata.dataAccessExpiresAt,healthy:reason===null,reason},replayed:false};}
+  function result(v,metadata,reason=null){check();auditHealth(reason?'denied':'success',reason?'meta_credential_maintenance_health_denied':'meta_credential_maintenance_health_verified');const bound=key=>{const values=[v.credential.metadata[key],metadata[key]].filter(value=>value!==null);return values.length?Math.min(...values):null;};return {requestId:request.requestId,data:{enrollmentId:v.row.id,epoch:v.credential.epoch,versionId:v.credential.versionId,digest:v.credential.digest,verifiedAt:now(),expiresAt:bound('expiresAt'),dataAccessExpiresAt:bound('dataAccessExpiresAt'),healthy:reason===null,reason},replayed:false};}
   try{const v=check();if(store.backlog().pending+2>policy.maxBacklog)fail('audit_unavailable');store.appendAudit(eventFor(request,principal,policy,'integration.requested','accepted','meta_credential_maintenance_requested',now()));return await secrets.withCandidate(v.binding,v.credential.flow,v.credential.digest,async borrowed=>{
-   let inspected;try{inspected=await businessHttp.inspect({binding:v.binding,token:borrowed.token,appSecret:borrowed.appSecret,signal,authorize:check});}
+   const inspector=K.business(v.binding)?businessHttp:userHealthHttp;if(typeof inspector?.inspect!=='function')fail('operation_denied');
+   let inspected;try{inspected=await inspector.inspect({binding:v.binding,token:borrowed.token,appSecret:borrowed.appSecret,signal,authorize:check});}
    catch(error){if(error.code==='credential_revoked')return result(v,v.credential.metadata,'credential_revoked');if(['debug_required_scope_missing','business_management_denied'].includes(error.credentialValidationReason))return result(v,v.credential.metadata,'permissions_lost');throw error;}
-   if(B.identityKeys(v.credential.metadata).some(k=>inspected[k]!==v.credential.metadata[k]))fail('oauth_identity_mismatch');
+   if((K.business(v.binding)?B.identityKeys(v.credential.metadata):['appId','subjectId','tokenType']).some(k=>inspected[k]!==v.credential.metadata[k]))fail('oauth_identity_mismatch');
+   if(['expiresAt','dataAccessExpiresAt'].some(key=>[v.credential.metadata[key],inspected[key]].some(value=>value!==null&&value<=now())))return result(v,inspected,'credential_expired');
    try{enrollment.assertRenewalCredential(p.enrollmentId,v.binding,inspected);}catch(error){check();if(error.code==='scope_denied')return result(v,inspected,'permissions_lost');throw error;}
    if(require('./meta-marketing-agency-contract').isBinding(v.binding)){if(typeof businessHttp.verifyPages!=='function')fail('operation_denied');try{await businessHttp.verifyPages({binding:v.binding,...borrowed,metadata:inspected,assets:v.assets,signal,authorize:check});}catch(error){if(error.credentialValidationReason==='page_lead_access_denied')return result(v,inspected,'permissions_lost');throw error;}}
    let inventory;try{inventory=await http.discover({binding:v.binding,...borrowed,metadata:inspected,signal,authorize:check});}catch(error){if(error.code==='credential_revoked')fail('provider_failed');throw error;}
    D.checkAssets(inventory,inspected);if(v.assets.some(a=>!inventory.some(d=>JSON.stringify(E.identity(d))===JSON.stringify(E.identity(a)))))return result(v,inspected,'permissions_lost');
-   const after=await businessHttp.inspect({binding:v.binding,token:borrowed.token,appSecret:borrowed.appSecret,signal,authorize:check});
+   const after=await inspector.inspect({binding:v.binding,token:borrowed.token,appSecret:borrowed.appSecret,signal,authorize:check});
    if(JSON.stringify(after)!==JSON.stringify(inspected))fail('secret_version_changed');return result(v,after);
   },signal,{retentionStage:v.credential.retentionStage});}catch(error){try{auditHealth('unknown','meta_credential_maintenance_health_unavailable');}catch{}throw require('./meta-marketing-graph-pacing').safeError(error,'internal_error');}finally{clearTimeout(timer);}
  }
@@ -107,7 +109,7 @@ function createMetaMarketingCredentialMaintenance({store,epochs,enrollment,secre
   }
   try{
    if(name==='rotate'&&!row){
-    if(!B.selected(base,config).enabled)fail('operation_denied');const v=enrollment.renewalAuthority(p.enrollmentId,base);if(!K.business(v.binding))fail('operation_denied');epochs.expected(v.credential,p);
+    if(!config||!B.selected(base,config).enabled)fail('operation_denied');const v=enrollment.renewalAuthority(p.enrollmentId,base);if(!K.business(v.binding))fail('operation_denied');epochs.expected(v.credential,p);
     const commandDigest=C.hash(canonical({operation:request.operation,tenantRef:request.tenantRef,connectionRef:request.connectionRef,assetRef:request.assetRef,payload:p}));
     store.transaction(()=>{
      if(get(id)||epochs.flowFor(id)||store.db.prepare("SELECT 1 FROM meta_marketing_credential_maintenance WHERE enrollment=? AND state IN ('processing','not_applied','staged','interrupted')").get(v.row.id))fail('oauth_flow_busy');

@@ -76,7 +76,7 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
  assert(rendered.html.includes('action=renew_meta'));assert(rendered.text.includes(policy.actionUrl(scope)));assert.equal(providerCalls,0);
  report.checks.push('Actual dispatch persists one scoped platform notice and the normal encrypted ops.system_alert EmailMessage plus email_send outbox job; repeat dispatch deduplicates and no email/Meta/WhatsApp send handler runs');
  clock+=3*policy.DAY;failQueue=true;
- await assert.rejects(create().run(),/FICTITIOUS_JOB_OUTBOX_FAILURE/);
+ const incomplete=await create().run();assert.equal(incomplete.incomplete,true);assert.equal(incomplete.failed,1);
  assert.equal(await models.SystemNotificationIncident.count(),1);assert.equal(await models.SystemNotificationDelivery.count(),2);assert.equal(await models.JobRequest.count(),3);
  failQueue=false;await create().run();assert.equal(await models.SystemNotificationIncident.count(),2);assert.equal(await models.SystemNotificationDelivery.count(),4);
  report.checks.push('Failed native job enqueue rolls back a newly expired incident, deliveries and jobs atomically; an explicit later sweep retries without consuming dedupe state');

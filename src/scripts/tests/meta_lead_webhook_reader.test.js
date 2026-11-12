@@ -138,7 +138,8 @@ test('forWebhookModels builds Scope with receiver gate, never the API broker glo
   const filename = require.resolve('../../services/metaMarketingLeadWebhookReader.service');
   const loaded = { exports: {} };
   const ownRequire = name => name === './metaMarketingBrokerScope.service'
-    ? { createMetaMarketingBrokerScope: value => { options = value; return f.scope; }, createMetaMarketingScopeRepository: () => ({ fixture: true }) }
+    ? { createMetaMarketingBrokerScope: value => { options = value; return f.scope; }, createMetaMarketingLeadIngressScopeRepository: () => ({ fixture: true }),
+      createMetaMarketingScopeRepository: () => assert.fail('Public ingress must not require a usable reader credential') }
     : require(require.resolve(name, { paths: [path.dirname(filename)] }));
   vm.runInThisContext(ModuleWrapper(fs.readFileSync(filename, 'utf8')), { filename })(loaded.exports, ownRequire, loaded, filename, path.dirname(filename));
   const service = loaded.exports.forWebhookModels({ CampaignWorkspaceSetting: { findOne: async () => null } }, { env: f.env });

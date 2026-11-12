@@ -95,6 +95,8 @@ function createMetaMarketingLeadReader({ scope, client, transactionStates = asyn
       // Callers may not supply authority, even when it happens to match.
       if (Object.hasOwn(payload, 'adAccountAssetRef')) fail('invalid_request');
       L.validate(operation, full);
+      if (['recoveryList', 'recoveryRead'].includes(family)
+        && (!Number.isSafeInteger(before.route.recipientClinicId) || !before.page.clinicIds.includes(before.route.recipientClinicId))) fail('scope_denied');
       if (now() >= deadline) fail('broker_timeout');
       const response = await client.execute({ requestId, operation, connectionRef: before.page.connectionRef,
         assetRef: before.page.assetRef, tenantRef: before.page.tenantRef, payload: full }, { timeoutMs: deadline - now() });
@@ -107,7 +109,7 @@ function createMetaMarketingLeadReader({ scope, client, transactionStates = asyn
         || family === 'receiptAccept' && response.data.receipts.some(receipt => receipt.event.page_id !== before.page.id)) fail('broker_response_invalid');
       if (['pageStatus', 'pageEnable'].includes(family) && response.data.subscription.revision
         !== L.subscription(before.page.appId, before.page.id, before.account.id, response.data.subscription.fields)) fail('broker_response_invalid');
-      if (family === 'receiptRead') {
+      if (family === 'receiptRead' || family === 'recoveryRead') {
         if (response.data.event.page_id !== before.page.id || response.data.identity
           && response.data.identity.account_id !== before.account.id
           || response.data.recipientClinicId !== before.route.recipientClinicId) fail('broker_response_invalid');

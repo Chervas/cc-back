@@ -4,7 +4,7 @@ const C=require('./metaMarketingBusiness.contract'),M=require('../../services/in
 const plain=row=>row?.get?row.get({plain:true}):row;
 const DAY=86400000,START=14*DAY,SAFETY=3*DAY,HEALTH_INTERVAL=21600000,BACKOFF=[3600000,7200000,14400000,28800000,DAY];
 const TERMINAL=['succeeded','failed','human_required'];
-function createMaintenance({models,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_BUSINESS_MAINTENANCE_ENABLED==='true',audit:providedAudit}={}){
+function createMaintenance({models,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_BUSINESS_MAINTENANCE_ENABLED==='true',audit:providedAudit,userHealthScopeKeys=()=>require('../lib/metaMarketingUserHealth').scopeKeys()}={}){
   const T=models.MetaMarketingCredentialMaintenance,P=models.MetaMarketingEffectiveCredential,R=models.MetaMarketingEnrollmentRequest;
   const credentials=C.F.createEffectiveCredentials({models,now}),bindings=require('./metaMarketingEnrollmentBinding.service').createBindings({models,now});
   const tx=work=>models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},work),opts=transaction=>({raw:true,logging:false,...(transaction?{transaction,lock:transaction.LOCK.UPDATE}:{})});
@@ -16,11 +16,13 @@ function createMaintenance({models,client,now=()=>new Date(),enabled=()=>process
   }
   async function context(enrollment,transaction){
     const business=await require('./metaMarketingBusinessSource.service').createSource({models,now}).forEnrollment(enrollment,transaction);
-    if(!business)return null;const value=await credentials.resolve(enrollment,business.flow,transaction,{allowExpired:true});return {business,value};
+    if(!business&&!userHealthScopeKeys().includes(enrollment.scope_key))return null;
+    const flow=business?.flow||await models.MetaMarketingOAuthRequest.findByPk(enrollment.flow_id,opts(transaction));
+    if(!flow)return null;const value=await credentials.resolve(enrollment,flow,transaction,{allowExpired:true});return {business,value};
   }
   async function getMaintenanceStatus(enrollmentInput,{transaction}={}){
     const enrollment=plain(enrollmentInput),health=await credentials.getCredentialStatus(enrollment,{transaction});
-    const business=health.tokenType==='SYSTEM_USER',row=business&&T?plain(await T.findOne({...opts(transaction),where:{enrollment_id:enrollment.enrollment_id,expected_epoch:health.epoch,expected_version_id:health.versionId},order:[['requested_at','DESC'],['maintenance_id','DESC']]})):null;
+    const business=health.tokenType==='SYSTEM_USER',row=T?plain(await T.findOne({...opts(transaction),where:{enrollment_id:enrollment.enrollment_id,expected_epoch:health.epoch,expected_version_id:health.versionId},order:[['requested_at','DESC'],['maintenance_id','DESC']]})):null;
     const humanReason=health.healthKind==='permission_lost'?'permissions_lost':health.expired?'credential_expired':row?.state==='human_required'?'authorization_required':row?.state==='failed'?'automatic_renewal_failed':null;
     const unknown=health.unknownSince??(row?.unknown_since?+new Date(row.unknown_since):row?.health_next_at&&+new Date(row.health_next_at)<=+now()?+new Date(row.health_next_at):null);
     return {enrollmentId:enrollment.enrollment_id,epoch:health.epoch,versionId:health.versionId,mechanism:business?(health.issuerKind===C.A.ISSUER?'agency_system_user':'business_api'):'user_legacy',automaticSupported:business,
@@ -30,10 +32,19 @@ function createMaintenance({models,client,now=()=>new Date(),enabled=()=>process
   async function schedule(enrollmentInput,{transaction}={}){
     const enrollment=plain(enrollmentInput);if(!T||enrollment.state!=='active')return null;
     const source=await context(enrollment,transaction);if(!source)return null;const {value}=source;
+    const healthOnly=!source.business&&value.metadata.tokenType==='USER';
+    if(healthOnly&&!userHealthScopeKeys().includes(enrollment.scope_key))return null;
+    if(!source.business&&!healthOnly)return null;
     const existing=plain(await T.findOne({...opts(transaction),where:{enrollment_id:enrollment.enrollment_id,expected_epoch:value.epoch,expected_version_id:value.versionId},order:[['requested_at','DESC']]}));if(existing)return existing;
-    const date=now(),id=randomUUID(),row={maintenance_id:id,enrollment_id:enrollment.enrollment_id,pending_enrollment_id:enrollment.enrollment_id,rotate_request_id:randomUUID(),expected_epoch:value.epoch,expected_version_id:value.versionId,expected_candidate_digest:value.digest,
-      state:'scheduled',requested_at:date,updated_at:date,next_attempt_at:new Date(Math.max(+date,C.F.expiry(value.metadata)-START)),window_started_at:date,last_attempt_at:null,last_healthy_at:value.lastHealthyAt?new Date(value.lastHealthyAt):null,unknown_since:null,completed_at:null,lease_token:null,lease_until:null,rotate_sent_at:null,last_error:null,attempts:0,candidate_metadata:null,owner_receipt:null,
-      health_metadata:null,last_health_at:null,health_next_at:new Date(+date+HEALTH_INTERVAL),last_health_error:null};
+    const prior=plain(await T.findOne({...opts(transaction),where:{pending_enrollment_id:enrollment.enrollment_id}}));
+    if(prior){
+      if(Number(prior.expected_epoch)===value.epoch&&prior.expected_version_id===value.versionId)C.fail('meta_business_version_changed',409);
+      const retired=await update(prior,{state:'failed',last_error:'meta_business_version_changed',completed_at:now(),lease_token:null,lease_until:null},transaction);
+      await record(retired,enrollment,'meta_maintenance_rejected',transaction);
+    }
+    const date=now(),nextHealth=new Date(Math.max(+date,+new Date(value.lastHealthyAt||date)+HEALTH_INTERVAL)),id=randomUUID(),row={maintenance_id:id,enrollment_id:enrollment.enrollment_id,pending_enrollment_id:enrollment.enrollment_id,rotate_request_id:randomUUID(),expected_epoch:value.epoch,expected_version_id:value.versionId,expected_candidate_digest:value.digest,
+      state:'scheduled',requested_at:date,updated_at:date,next_attempt_at:healthOnly?nextHealth:new Date(Math.max(+date,C.F.expiry(value.metadata)-START)),window_started_at:date,last_attempt_at:null,last_healthy_at:value.lastHealthyAt?new Date(value.lastHealthyAt):null,unknown_since:null,completed_at:null,lease_token:null,lease_until:null,rotate_sent_at:null,last_error:null,attempts:0,candidate_metadata:null,owner_receipt:null,
+      health_metadata:null,last_health_at:null,health_next_at:healthOnly?nextHealth:new Date(+date+HEALTH_INTERVAL),last_health_error:null};
     await T.create(row,{transaction,logging:false});return row;
   }
   async function requestTx(id,work){
@@ -82,7 +93,7 @@ function createMaintenance({models,client,now=()=>new Date(),enabled=()=>process
       if(enrollment.state!=='active'){await update(row,{state:'failed',last_error:'meta_business_scope_changed',completed_at:now(),lease_token:null,lease_until:null},transaction);return null;}
       const pending=models.MetaMarketingBusinessHandover?await models.MetaMarketingBusinessHandover.findOne({...opts(transaction),where:{old_enrollment_id:enrollment.enrollment_id,pending_scope_key:enrollment.scope_key}}):null;
       if(pending){await update(row,{next_attempt_at:new Date(+now()+300000),lease_token:null,lease_until:null},transaction);return null;}
-      await bindings.committed(enrollment.enrollment_id,transaction,{allowExpiredCredential:true});const source=await context(enrollment,transaction);if(!source)C.fail();
+      await bindings.committed(enrollment.enrollment_id,transaction,{allowExpiredCredential:true});const source=await context(enrollment,transaction);if(!source?.business)C.fail('operation_denied',403);
       if(source.value.epoch!==Number(row.expected_epoch)||source.value.versionId!==row.expected_version_id||source.value.digest!==row.expected_candidate_digest){await update(row,{state:'failed',last_error:'meta_business_version_changed',completed_at:now(),lease_token:null,lease_until:null},transaction);return null;}
       if(!row.rotate_sent_at&&C.F.expiry(source.value.metadata)-START>+now()){await update(row,{next_attempt_at:new Date(C.F.expiry(source.value.metadata)-START),lease_token:null,lease_until:null},transaction);return null;}
       return {row,enrollment,source};});if(!captured)return;
@@ -106,31 +117,48 @@ function createMaintenance({models,client,now=()=>new Date(),enabled=()=>process
       const response=await client.execute({requestId,operation:M.OPERATIONS.health,tenantRef:'clinic:'+C.clinics(enrollment.clinic_ids)[0],connectionRef:enrollment.connection_ref,assetRef:'meta-enroll:'+enrollment.scope_key,payload},{timeoutMs:30000}),v=response?.data;
       if(!C.exact(response,'requestId,data,replayed')||response.requestId!==requestId||response.replayed!==false||!C.exact(v,'enrollmentId,epoch,versionId,digest,verifiedAt,expiresAt,dataAccessExpiresAt,healthy,reason')
         ||v.enrollmentId!==enrollment.enrollment_id||v.epoch!==source.value.epoch||v.versionId!==source.value.versionId||v.digest!==source.value.digest||!Number.isSafeInteger(v.verifiedAt)||Math.abs(v.verifiedAt-+now())>60000
-        ||typeof v.healthy!=='boolean'||(v.healthy?v.reason!==null:!['credential_revoked','permissions_lost'].includes(v.reason))||![v.expiresAt,v.dataAccessExpiresAt].every(value=>value===null||Number.isSafeInteger(value)&&value>0))C.fail('broker_response_invalid');
+        ||typeof v.healthy!=='boolean'||(v.healthy?v.reason!==null:!['credential_revoked','permissions_lost','credential_expired'].includes(v.reason))||![v.expiresAt,v.dataAccessExpiresAt].every(value=>value===null||Number.isSafeInteger(value)&&value>0))C.fail('broker_response_invalid');
+      const observedExpiry=[v.expiresAt,v.dataAccessExpiresAt].filter(value=>value!==null);
+      if(v.healthy&&observedExpiry.some(value=>value<=v.verifiedAt)||v.reason==='credential_expired'&&!observedExpiry.some(value=>value<=v.verifiedAt))C.fail('broker_response_invalid');
       const pin={enrollmentId:enrollment.enrollment_id,epoch:v.epoch,versionId:v.versionId};
-      if(v.healthy)await credentials.recordHealthy(pin,v);else await credentials.recordFailure(pin,{code:v.reason});
-      await requestTx(id,async(value,transaction)=>{if(TERMINAL.includes(value.row.state)||value.enrollment.state!=='active')return;const fresh=await context(value.enrollment,transaction);
-        if(fresh.value.epoch!==v.epoch||fresh.value.versionId!==v.versionId||fresh.value.digest!==v.digest)return;
-        await update(value.row,{health_metadata:JSON.stringify(v),last_health_at:new Date(v.verifiedAt),last_healthy_at:v.healthy?new Date(v.verifiedAt):value.row.last_healthy_at,health_next_at:new Date(v.verifiedAt+HEALTH_INTERVAL),last_health_error:v.reason,unknown_since:null,
-          ...(!v.healthy?{state:'human_required',last_error:'authorization_required',completed_at:now(),lease_token:null,lease_until:null}:{})},transaction);
-      });return v.healthy;
+      const applied=await requestTx(id,async(value,transaction)=>{if(TERMINAL.includes(value.row.state)||value.enrollment.state!=='active')return false;const fresh=await context(value.enrollment,transaction);
+        if(fresh.value.epoch!==v.epoch||fresh.value.versionId!==v.versionId||fresh.value.digest!==v.digest)return false;
+        const proof=require('../lib/metaMarketingUserHealth').boundedObservation(v,fresh.value.metadata);
+        const changed=proof.healthy?await credentials.recordHealthy(pin,proof,{transaction}):await credentials.recordFailure(pin,{code:proof.reason==='credential_expired'?'credential_revoked':proof.reason},{transaction});
+        if(!changed)return false;
+        const healthOnly=!fresh.business&&fresh.value.metadata.tokenType==='USER',nextHealth=new Date(v.verifiedAt+HEALTH_INTERVAL);
+        let prior;try{prior=value.row.health_metadata?JSON.parse(value.row.health_metadata).previousFailure:null;}catch{C.fail('broker_response_invalid');}
+        if(prior&&(!C.F.PERMANENT.has(prior.code)||typeof prior.observedAt!=='string'||!Number.isFinite(Date.parse(prior.observedAt))))C.fail('broker_response_invalid');
+        const previousFailure=prior||(C.F.PERMANENT.has(fresh.value.lastError)?{code:fresh.value.lastError,observedAt:new Date(fresh.value.observedAt).toISOString()}:null);
+        await update(value.row,{health_metadata:JSON.stringify({...proof,previousFailure}),last_health_at:new Date(v.verifiedAt),last_attempt_at:now(),last_healthy_at:proof.healthy?new Date(v.verifiedAt):value.row.last_healthy_at,health_next_at:nextHealth,last_health_error:proof.reason,unknown_since:null,
+          ...(healthOnly?{next_attempt_at:nextHealth,lease_token:null,lease_until:null}:{}),
+          ...(!proof.healthy?{state:'human_required',last_error:'authorization_required',completed_at:now(),lease_token:null,lease_until:null}:{})},transaction);
+        return proof.healthy;
+      });return applied;
     }catch(error){const retryAfter=Number.isSafeInteger(error.retryAfterMs)&&error.retryAfterMs>=0?Math.min(error.retryAfterMs,DAY):0;
-      await requestTx(id,async(value,transaction)=>{if(!TERMINAL.includes(value.row.state))await update(value.row,{last_health_at:now(),last_health_error:C.safe(error),unknown_since:value.row.unknown_since||value.row.health_next_at||now(),health_next_at:new Date(+now()+Math.max(1800000,retryAfter)),lease_token:null,lease_until:null},transaction);});return false;}
+      await requestTx(id,async(value,transaction)=>{if(!TERMINAL.includes(value.row.state)){
+        const fresh=await context(value.enrollment,transaction),nextHealth=new Date(+now()+Math.max(1800000,retryAfter));
+        await update(value.row,{last_health_at:now(),last_health_error:C.safe(error),unknown_since:value.row.unknown_since||value.row.health_next_at||now(),health_next_at:nextHealth,
+          ...(!fresh?.business?{next_attempt_at:nextHealth}:{}),lease_token:null,lease_until:null},transaction);
+      }});return false;}
   }
   let running=false;
   async function run(){if(!enabled()||!T||running)return {status:'completed',skipped:true};running=true;let processed=0,failed=0;
     try{
       const enrollments=await R.findAll({where:{state:'active'},attributes:['enrollment_id'],order:[['enrollment_id','ASC']],limit:100,raw:true,logging:false});
-      for(const value of enrollments)await tx(async transaction=>{const enrollment=plain(await R.findByPk(value.enrollment_id,opts(transaction)));if(enrollment?.state==='active')await schedule(enrollment,{transaction});});
+      for(const value of enrollments)try{await tx(async transaction=>{const enrollment=plain(await R.findByPk(value.enrollment_id,opts(transaction)));if(enrollment?.state==='active')await schedule(enrollment,{transaction});});}catch{failed++;}
       const deadline=+now()+30000;
       // Discover IDs without locking T. Every mutation then acquires the
       // enrollment lock before its maintenance row, including lease claims.
       const due=await T.findAll({where:{state:{[Op.in]:['scheduled','running','retry_wait']},[Op.or]:[{next_attempt_at:{[Op.lte]:now()}},{health_next_at:{[Op.lte]:now()}}]},order:[['next_attempt_at','ASC']],limit:50,attributes:['maintenance_id'],raw:true,logging:false});
       for(const candidate of due){if(processed+failed>=10||+now()>=deadline)break;
         const row=await requestTx(candidate.maintenance_id,async(value,transaction)=>{if(TERMINAL.includes(value.row.state)||value.row.lease_until&&+value.row.lease_until>+now()||+value.row.next_attempt_at>+now()&&(!value.row.health_next_at||+value.row.health_next_at>+now()))return null;
-          return update(value.row,{lease_token:randomUUID(),lease_until:new Date(+now()+120000)},transaction);});if(!row)continue;
+          const source=await context(value.enrollment,transaction);if(!source)return null;
+          const healthOnly=!source.business&&source.value.metadata.tokenType==='USER';if(healthOnly&&!userHealthScopeKeys().includes(value.enrollment.scope_key))return null;
+          return {...await update(value.row,{lease_token:randomUUID(),lease_until:new Date(+now()+120000)},transaction),healthOnly};});if(!row)continue;
         try{
           if(row.health_next_at&&+row.health_next_at<=+now()&&!await checkHealth(row.maintenance_id)){failed++;continue;}
+          if(row.healthOnly){processed++;continue;}
           if(+row.next_attempt_at<=+now())await reconcile(row.maintenance_id);
           else await requestTx(row.maintenance_id,async(value,transaction)=>{if(!TERMINAL.includes(value.row.state))await update(value.row,{lease_token:null,lease_until:null},transaction);});
           processed++;
