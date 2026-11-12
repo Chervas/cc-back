@@ -19,6 +19,7 @@ function customSubmissionName(input) {
     display: String(input.displayName || '').trim(), body: String(input.bodyText || '').trim(),
     category: input.category || 'UTILITY', language: input.language || 'es',
     variables: input.variables || [], header: input.headerImageUrl || null,
+    ...(input.buttons !== undefined ? { buttons: require('./whatsapp-template-buttons').normalizeQuickReplyButtons(input.buttons) } : {}),
     usage: input.templateUsage || null,
     replacement: (input.replacementTemplateIds || [input.replaceTemplateId || null]).slice().sort(),
     targets: [...new Set(input.targetWabaIds || [input.wabaId])].map(String).sort(),
@@ -27,6 +28,7 @@ function customSubmissionName(input) {
 }
 
 async function runCustomSubmission(input, { acquire, find, create, reconcile, enqueue }) {
+  if (input.buttons !== undefined) input = { ...input, buttons: require('./whatsapp-template-buttons').normalizeQuickReplyButtons(input.buttons) };
   const name = input.technicalName || customSubmissionName(input);
   const lease = await acquire(input.wabaId);
   if (!lease.acquired) throw Object.assign(Error('template_submission_in_progress'), {

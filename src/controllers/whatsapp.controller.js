@@ -2015,6 +2015,7 @@ exports.createCustomTemplate = async (req, res) => {
           category: req.body?.category || (req.body?.template_commercial ? 'MARKETING' : 'UTILITY'),
           language: req.body?.language || 'es',
           variables: req.body?.variables || [],
+          buttons: req.body?.buttons,
           templateUsage: templateUsage || null,
           replaceTemplateId: replacements.get(String(asset.wabaId)) || null,
           createdByUserId: userId,

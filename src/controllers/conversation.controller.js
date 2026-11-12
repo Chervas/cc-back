@@ -1513,7 +1513,7 @@ exports.listConversations = async (req, res) => {
       offset,
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
-        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'call_initiated', 'call_outcome_appointment_id'] },
+        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'created_at', 'call_initiated', 'call_outcome_appointment_id'] },
         {
           model: Message,
           as: 'messages',
@@ -1645,7 +1645,7 @@ exports.getMessages = async (req, res) => {
     let conversation = await Conversation.findByPk(conversationId, {
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
-        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'call_initiated', 'call_outcome_appointment_id'] },
+        { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'created_at', 'call_initiated', 'call_outcome_appointment_id'] },
       ],
     });
     if (!conversation) {
@@ -1665,7 +1665,7 @@ exports.getMessages = async (req, res) => {
         conversation = await Conversation.findByPk(canonical.id, {
           include: [
             { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
-            { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'call_initiated', 'call_outcome_appointment_id'] },
+            { model: LeadIntake, as: 'lead', attributes: ['id', 'nombre', 'telefono', 'email', 'status_lead', 'created_at', 'call_initiated', 'call_outcome_appointment_id'] },
           ],
         });
       }

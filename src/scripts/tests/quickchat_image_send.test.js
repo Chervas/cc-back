@@ -9,7 +9,7 @@ function fixture({access=true,open=true,existing=null,unknown=false}={}){
   const transaction={LOCK:{UPDATE:'UPDATE'},commit:async()=>{calls.commit++;transaction.finished='commit';},rollback:async()=>{calls.rollback++;transaction.finished='rollback';}};
   const metadata=[];
   const context={exports:{},console,Buffer,Op:{and:Symbol('and')},
-    require:name=>{if(name==='../lib/quickchat-image')return image;if(name==='../services/temporaryPatientDirection.service')return{observeConversation:async()=>{}};throw Error('Forbidden module '+name);},
+    require:name=>{if(name==='../lib/quickchat-image')return image;if(name==='../lib/whatsapp-contact-identity')return require('../../lib/whatsapp-contact-identity');if(name==='../services/temporaryPatientDirection.service')return{observeConversation:async()=>{}};throw Error('Forbidden module '+name);},
     db:{sequelize:{transaction:async()=>transaction,where:()=>({}),json:()=>({})}},
     Conversation:{findByPk:async()=>conversation}, Message:{findOne:async()=>existing,create:async values=>{calls.rows.push(structuredClone(values));return{...values,id:77,save:async()=>{}};}},
     getUserClinics:async()=>({clinicIds:[123]}),ensureAccess:()=>access,ensureQuickChatConversationReadAccess:async()=>{},sendQuickChatCategoryForbidden:()=>{},
@@ -48,7 +48,7 @@ test('reading a sent photo streams the broker receipt without calling legacy med
     STREAMABLE_MEDIA_KINDS:new Set(['image']),INLINE_MEDIA_KINDS:new Set(['image']),
     normalizeMediaMimeType:v=>v,getDefaultMimeTypeForKind:()=> 'image/png',extensionForMediaMimeType:()=> 'png',
     whatsappService:{getClinicConfig:()=>{throw Error('Legacy token forbidden');}},
-    require:name=>{if(name==='../lib/quickchat-image')return image;if(name==='../lib/whatsappAuthorizedBrokerClient')return{configuration:()=>({}),media:async id=>{assert.equal(id,77);reads++;return{buffer:bytes,contentType:'image/png'};}};throw Error('Forbidden module '+name);},
+    require:name=>{if(name==='../lib/quickchat-image')return image;if(name==='../lib/whatsapp-contact-identity')return require('../../lib/whatsapp-contact-identity');if(name==='../lib/whatsappAuthorizedBrokerClient')return{configuration:()=>({}),media:async id=>{assert.equal(id,77);reads++;return{buffer:bytes,contentType:'image/png'};}};throw Error('Forbidden module '+name);},
   };
   const source=fs.readFileSync(require.resolve('../../controllers/conversation.controller'),'utf8');
   vm.runInNewContext(source.slice(source.indexOf('exports.streamMessageMedia ='),source.indexOf('exports.getConversationByPatient =')),context);

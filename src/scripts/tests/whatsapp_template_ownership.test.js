@@ -730,7 +730,8 @@ test('una plantilla anterior aprobada sigue enviable en su scope sin adjudicar a
   }
 });
 
-test('el listado etiqueta una histórica como Anterior, enviable y de solo lectura', async () => {
+test('el listado etiqueta una histórica como Anterior, enviable y de solo lectura', async (t) => {
+  t.mock.method(whatsappService, 'resolvePhoneAssetByClinic', async () => null);
   const originals = {
     membershipFindAll: db.UsuarioClinica.findAll,
     clinicFindOne: db.Clinica.findOne,
@@ -798,7 +799,8 @@ test('el listado etiqueta una histórica como Anterior, enviable y de solo lectu
   }
 });
 
-test('el contexto QuickChat excluye plantillas reservadas al flujo de resenas', async () => {
+test('el contexto QuickChat excluye plantillas reservadas al flujo de resenas', async (t) => {
+  t.mock.method(whatsappService, 'resolvePhoneAssetByClinic', async () => null);
   const originals = {
     membershipFindAll: db.UsuarioClinica.findAll,
     clinicFindOne: db.Clinica.findOne,
@@ -940,6 +942,7 @@ test('el envío directo no permite una plantilla personal de otro autor', async 
 });
 
 test('QuickChat solo resuelve plantillas APPROVED al enviar fuera de ventana', async (t) => {
+  t.mock.method(require('../../services/whatsapp.service'), 'assertRecipientCanReceive', async () => {});
   t.mock.method(require('../../services/patientDirection.service'),'resolveOutboundPolicy',async()=>({mode:'clinic_default',clinicConfig:await require('../../services/whatsapp.service').getClinicConfig(19),assignment:null,requiresTakeConfirmation:false}));
   const conversationController = require('../../controllers/conversation.controller');
   const whatsappService = require('../../services/whatsapp.service');
@@ -1022,6 +1025,7 @@ test('QuickChat solo resuelve plantillas APPROVED al enviar fuera de ventana', a
 });
 
 test('QuickChat bloquea una plantilla que requiere iniciar el flujo de resenas', async (t) => {
+  t.mock.method(require('../../services/whatsapp.service'), 'assertRecipientCanReceive', async () => {});
   t.mock.method(require('../../services/patientDirection.service'),'resolveOutboundPolicy',async()=>({mode:'clinic_default',clinicConfig:await require('../../services/whatsapp.service').getClinicConfig(19),assignment:null,requiresTakeConfirmation:false}));
   const conversationController = require('../../controllers/conversation.controller');
   const whatsappService = require('../../services/whatsapp.service');

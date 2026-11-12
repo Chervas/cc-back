@@ -73,4 +73,12 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await lists[0].reload();assert.equal(lists[0].template_snapshot.id,first.row.id);
   assert.equal((await replacement.row.reload()).superseded_by_template_id,newest.row.id);
   report.checks.push('A delayed replacement job for a now-retired version cannot regress editable snapshots or overwrite its newer successor');
+  const withButtons = await service.createCustomTemplateForClinic({...base, displayName:'TESTONLY replies', buttons:[{type:'QUICK_REPLY',text:'Sí'},{type:'QUICK_REPLY',text:'No'}]});
+  assert.deepEqual(withButtons.row.components.find(c=>c.type==='BUTTONS').buttons.map(b=>b.text),['Sí','No']);
+  const previousCalls = calls;
+  assert.equal((await service.createCustomTemplateForClinic({...base, displayName:'TESTONLY replies', buttons:[{type:'QUICK_REPLY',text:'Sí'},{type:'QUICK_REPLY',text:'No'}]})).row.id,withButtons.row.id);
+  assert.equal(calls,previousCalls);
+  const retained = await service.createCustomTemplateForClinic({...base,displayName:'TESTONLY replies edited',replaceTemplateId:withButtons.row.id});
+  assert.deepEqual(retained.row.components.find(c=>c.type==='BUTTONS').buttons.map(b=>b.text),['Sí','No']);
+  report.checks.push('Quick replies persist through the actual service and retry without duplicate provider creation; legacy body-only replacement preserves buttons');
 }).catch(error=>{console.error(error);process.exitCode=1;});
