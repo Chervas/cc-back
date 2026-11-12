@@ -68,7 +68,8 @@ function fixture() {
     '../lib/role-helpers': require('../../lib/role-helpers'),
     './publicMediaPersonalization.service': { normalizeHexColor: value => value || null },
   });
-  f.service = service;
+  f.service = { ...service, sendTest: (targetScope, id, body = {}, options) =>
+    service.sendTest(targetScope, id, { item_id: 12345, ...body }, options) };
   f.find = (id, options, targetScope = scope) => service.__testing.findApprovedReviewWhatsappTemplate(targetScope, id, options);
   return f;
 }
@@ -180,7 +181,8 @@ for (const operation of ['prepareCampaign', 'sendTest']) {
       error => error === reachedAudience);
     assert.deepEqual(f.lookups, [6055]);
     assert.deepEqual(f.resolutions, [{ id: 6055, clinicId: 1 }]);
-    if (operation === 'sendTest') assert.equal(f.list.criteria.review_team_photo_url, null, 'own list records the requested clear');
+    if (operation === 'sendTest') assert.equal(f.list.criteria.review_team_photo_url, photo,
+      'the selected template honors the clear, but saved criteria wait for a valid recipient');
   });
 
   test(`${operation} rejects an image template when its photo is explicitly removed`, async () => {

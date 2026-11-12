@@ -7500,49 +7500,76 @@ function getClinicIdForList(list, fallbackScope = {}) {
   return Number.isInteger(fromScope) && fromScope > 0 ? fromScope : null;
 }
 
-async function getOrCreateReviewTestSampleItem(list, clinicId, listCriteria = {}) {
+async function getOrCreateReviewTestSampleItem(list, clinicId, listCriteria = {}, {
+  sourceItem = null, template = null, clinic = null, explicitDummy = false, allowReviewCare = false,
+} = {}) {
   if (!list?.id || !MarketingPatientListItem) return null;
   const safeClinicId = Number(clinicId || 0) || null;
-  const existing = await MarketingPatientListItem.findOne({
-    where: { list_id: list.id, clinica_id: safeClinicId, status: 'test_sample' },
-    order: [['id', 'ASC']],
-  });
-  if (existing) {
-    return existing;
+  const source = sourceItem?.get ? sourceItem.get({ plain: true }) : sourceItem;
+  if (!source && !explicitDummy || source && (explicitDummy || Number(source.list_id) !== Number(list.id)
+    || Number(source.clinica_id) !== safeClinicId || source.status === 'test_sample' || !normalizeText(source.name)
+    || !Number.isSafeInteger(Number(source.paciente_id)) || Number(source.paciente_id) <= 0)) {
+    throw Object.assign(new Error('Selecciona un paciente válido de esta lista o la muestra de ejemplo.'), {
+      code: 'review_test_source_invalid', status: 400,
+    });
   }
-
+  // This projection follows the current clinical guard. A test row has another
+  // identity: materialize permitted values, never copy its clinical snapshot.
+  const publicItem = source ? serializeItem(source, { allowReviewCare }) : null;
+  const careDate = source ? resolveLastAttendedAppointmentDate(source) : formatReviewDate(new Date());
+  if (source && !careDate) {
+    throw Object.assign(new Error('El paciente seleccionado necesita una fecha real de atención para esta prueba.'), {
+      code: 'review_test_source_date_required', status: 409,
+    });
+  }
+  const resolved = source ? Object.fromEntries(getTemplateVariableContract(template)
+    .filter(variable => variable.name !== careSnapshots.KEY)
+    .map(variable => [variable.name, resolveVariableValue(variable.name, source, list, clinic)])) : {};
   const displayClinicName = normalizeText(listCriteria.review_display_clinic_name || listCriteria.reviewDisplayClinicName || '')
     || 'tu clínica';
   const senderName = normalizeReviewSenderName(
     listCriteria.review_sender_name || listCriteria.reviewSenderName || ''
   );
+  const fields = source ? { ...publicItem.custom_fields, ...resolved,
+    fecha_ultima_cita_asistida: careDate, fecha_ultima_atencion_realizada: careDate,
+  } : {
+    nombre: 'Paciente de ejemplo', nombre_paciente: 'Paciente de ejemplo', nombre_completo: 'Paciente de ejemplo',
+    clinica: displayClinicName, nombre_clinica: displayClinicName, firma_resenas: senderName,
+    tratamiento: 'Tratamiento de ejemplo', fecha: new Date().toISOString().slice(0, 10),
+    fecha_ultima_cita_asistida: careDate,
+  };
+  delete fields[careSnapshots.KEY];
+  // A retained parsing warning cannot mask the date just resolved through the
+  // authorized snapshot; the source record itself remains untouched.
+  if (source && careDate) delete fields.import_care_date;
+  const renderFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+    listId: Number(list.id), clinicId: safeClinicId, sourceItemId: source ? Number(source.id) : null,
+    mode: source ? 'selected_recipient' : 'explicit_example', name: source ? publicItem.name : 'Paciente de ejemplo',
+    treatment: publicItem?.treatment || null, fields,
+    template: { id: template?.id || null, name: template?.name || null, language: template?.language || 'es' },
+    context: listCriteria,
+  })).digest('hex');
+  // Every attempt owns an isolated row. Reusing a prior sample could change the
+  // patient/date associated with an already sent test or its subsequent reply.
   return MarketingPatientListItem.create({
     list_id: list.id,
     paciente_id: null,
     clinica_id: safeClinicId,
-    name: 'Paciente de ejemplo',
+    name: source ? publicItem.name : 'Paciente de ejemplo',
     phone: null,
     email: null,
-    treatment: 'Tratamiento de ejemplo',
-    last_visit_at: new Date(),
-    appointment_at: null,
-    treatment_completed: true,
+    treatment: source ? publicItem.treatment : 'Tratamiento de ejemplo',
+    last_visit_at: source ? publicItem.last_visit_at : new Date(),
+    appointment_at: source ? publicItem.appointment_at : null,
+    treatment_completed: source ? publicItem.treatment_completed : true,
     status: 'test_sample',
     selected: false,
     reason: 'Contacto sintético para prueba interna; nunca entra en la cola real.',
     exclusion_reason: null,
-    custom_fields: {
-      nombre: 'Paciente de ejemplo',
-      nombre_paciente: 'Paciente de ejemplo',
-      nombre_completo: 'Paciente de ejemplo',
-      clinica: displayClinicName,
-      nombre_clinica: displayClinicName,
-      firma_resenas: senderName,
-      tratamiento: 'Tratamiento de ejemplo',
-      fecha: new Date().toISOString().slice(0, 10),
-      fecha_ultima_cita_asistida: formatReviewDate(new Date()),
-      test_sample: true,
-    },
+    custom_fields: { ...fields, test_sample: true,
+      review_test_source_item_id: source ? Number(source.id) : null,
+      review_test_render_fingerprint: renderFingerprint,
+      review_test_data_mode: source ? 'selected_recipient' : 'explicit_example' },
     missing_variables: [],
     dispatch_status: 'test_only',
     notes: 'Contacto sintético generado para enviar una prueba al teléfono del usuario.',
@@ -8727,14 +8754,31 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
   // Build context in memory until the selected copy, its approval and media
   // have passed validation. A rejected test must not alter the saved campaign.
   const protectedCareTest = Number(list.criteria?.review_care_version) === 1;
-  if (!protectedCareTest && JSON.stringify(listCriteria) !== storedCriteria) {
+  const reviewTest = isReviewTemplateUsage(templateUsage);
+  const explicitDummy = reviewTest && body.test_sample === true;
+  const hasItemId = body.item_id !== undefined && body.item_id !== null && String(body.item_id).trim() !== '';
+  if (reviewTest && (explicitDummy && hasItemId || !explicitDummy
+    && (!hasItemId || !/^[1-9]\d*$/.test(String(body.item_id)) || !Number.isSafeInteger(Number(body.item_id))))) {
+    throw Object.assign(new Error('Selecciona el paciente de la prueba o solicita expresamente la muestra de ejemplo.'), {
+      code: 'review_test_source_required', status: 400,
+    });
+  }
+  if (!protectedCareTest && !reviewTest && JSON.stringify(listCriteria) !== storedCriteria) {
     await list.update({ criteria: listCriteria });
   }
-  let item = body.item_id
+  let item = explicitDummy ? null : body.item_id
     ? await MarketingPatientListItem.findOne({ where: { id: body.item_id, list_id: list.id } })
     : await MarketingPatientListItem.findOne({ where: { list_id: list.id, status: 'ready' }, order: [['id', 'ASC']] });
+  const selectedSource = item?.get ? item.get({ plain: true }) : item;
+  if (reviewTest && !explicitDummy && (!selectedSource || selectedSource.status === 'test_sample'
+    || Number(selectedSource.list_id) !== Number(list.id)
+    || !Number.isSafeInteger(Number(selectedSource.paciente_id)) || Number(selectedSource.paciente_id) <= 0)) {
+    throw Object.assign(new Error('El paciente seleccionado ya no está disponible en esta lista. Vuelve a comprobarlo.'), {
+      code: 'review_test_source_invalid', status: 400,
+    });
+  }
   await guardReviewCare(scope, list, item ? [item] : [], { checkHold: true });
-  if (protectedCareTest && JSON.stringify(listCriteria) !== storedCriteria) {
+  if (protectedCareTest && !reviewTest && JSON.stringify(listCriteria) !== storedCriteria) {
     await list.update({ criteria: listCriteria });
   }
   const targetPhone = whatsappService.normalizePhoneNumber(body.to || body.phone || '');
@@ -8759,16 +8803,15 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
       throw Object.assign(new Error('review_communication_scope_unverified'), { code: 'review_communication_scope_unverified', retryable: false, status: 403 });
     }
   }
-  if (isReviewTemplateUsage(templateUsage)) {
-    item = await getOrCreateReviewTestSampleItem(list, clinicId, listCriteria);
+  if (reviewTest && JSON.stringify(listCriteria) !== storedCriteria) {
+    await list.update({ criteria: listCriteria });
   }
-  if (!item) {
+  const clinic = await loadClinicForTemplateVariables(clinicId);
+  if (!item && !explicitDummy) {
     const err = new Error('La campaña no tiene contactos listos para generar variables de prueba.');
     err.status = 400;
     throw err;
   }
-  const plainItem = item.get({ plain: true });
-  const clinic = await loadClinicForTemplateVariables(clinicId);
   const clinicConfig = await resolveWhatsappClinicConfigForList(list, clinicId, body);
   if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
     const err = new Error(clinicConfig?.routingUnavailable === true
@@ -8791,6 +8834,13 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
     err.status = 409;
     throw err;
   }
+  if (reviewTest) await guardReviewCare(scope, list, item ? [item] : [], { checkHold: true });
+  if (isReviewTemplateUsage(templateUsage)) {
+    item = await getOrCreateReviewTestSampleItem(list, clinicId, listCriteria, {
+      sourceItem: item, template, clinic, explicitDummy, allowReviewCare: !!scope.reviewCareAuthority,
+    });
+  }
+  const plainItem = item.get({ plain: true });
   const missingVariables = buildMissingVariablesSummary({ template, items: [plainItem], list, clinic });
   if (missingVariables.length) {
     const err = new Error(formatMissingVariablesMessage(missingVariables));
@@ -8861,6 +8911,10 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
       sender_origin_id: clinicConfig.originId || null,
       whatsapp_channel_role: resolveWhatsappChannelRole(clinicConfig),
       payment_recovery_probe: paymentRecoveryProbe,
+      ...(reviewTest ? {
+        review_test_source_item_id: plainItem.custom_fields?.review_test_source_item_id ?? null,
+        review_test_render_fingerprint: plainItem.custom_fields?.review_test_render_fingerprint || null,
+      } : {}),
     },
     sent_at: null,
   });

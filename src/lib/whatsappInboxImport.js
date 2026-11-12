@@ -242,9 +242,18 @@ async function importLease(connection, lease, scope, now = Date.now(), { validat
         const recipient=contactRows.length===1?Identity.phone(contactRows[0].contact_id):null;
         if(recipient && (!s.identity.phone || s.identity.phone===recipient)) {
           // Exact provider-message ownership proves this alias; a nickname does not.
-          const businessId=await Identity.businessForScope(query,scope);
-          await Identity.bind(query,{clinicId:scope.clinicId,businessId,type:'bsuid',value:s.identity.bsuid,conversationId:old.conversation_id,wabaId:scope.wabaId,phoneId:scope.phoneId});
-          await Identity.bind(query,{clinicId:scope.clinicId,businessId,type:'phone',value:recipient,conversationId:old.conversation_id,wabaId:scope.wabaId,phoneId:scope.phoneId});
+          let businessId;
+          try { businessId=await Identity.businessForScope(query,scope); }
+          catch(error) {
+            // The existing exact clinic + WAMID owns this factual status.
+            // An unavailable business scope only prevents learning a new
+            // scoped alias; it must not withhold delivery/read confirmation.
+            if(error.message!=='whatsapp_identity_scope_required')throw error;
+          }
+          if(businessId) {
+            await Identity.bind(query,{clinicId:scope.clinicId,businessId,type:'bsuid',value:s.identity.bsuid,conversationId:old.conversation_id,wabaId:scope.wabaId,phoneId:scope.phoneId});
+            await Identity.bind(query,{clinicId:scope.clinicId,businessId,type:'phone',value:recipient,conversationId:old.conversation_id,wabaId:scope.wabaId,phoneId:scope.phoneId});
+          }
         }
       }
       const projected=projectProviderStatus(old,s,{recoverFailed:true});

@@ -216,7 +216,7 @@ test('the ordinary campaign test endpoint cannot replay a diagnostic attempt',as
   const guard=source.slice(source.indexOf('function ensureDispatchableCampaignRecord('),source.indexOf('\nfunction computeCounters'));
   const command=source.slice(source.indexOf('async function sendTest('),source.indexOf('\nasync function getEmailTestStatus'));
   const context={MarketingPatientList:{findByPk:async()=>({source:'whatsapp_payment_recovery_test',criteria:{whatsapp_payment_recovery_test:true}})},
-    ensureScopeAccess:()=>{},normalizeMassSendRecordKind:()=> 'campaign'};
+    ensureScopeAccess:()=>{},guardReviewCare:async()=>{},normalizeMassSendRecordKind:()=> 'campaign'};
   vm.createContext(context);vm.runInContext(guard+'\n'+command,context);
   await assert.rejects(context.sendTest({},1,{payment_recovery_probe:true}),{code:'payment_test_not_dispatchable'});
 });
