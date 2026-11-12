@@ -61,7 +61,7 @@ function createAppointmentRemindersReadService({ db, canAccess, now=()=>new Date
     const tables=await db.sequelize.query("SELECT TABLE_NAME name FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('AppointmentVisitCommunications','AppointmentVisits')",{type:QueryTypes.SELECT,logging:false});
     const native=tables.length===2;
     const runtime=runtimePolicy || (()=>{const r=require('./jobRequests.service');return {namespaces:[r.getCurrentRuntimeNamespace(),...r.getRuntimeNamespaceAliases()],claimUnscoped:r.shouldClaimUnscopedJobs()};})();
-    const replacements={clinic_id:clinicId,now:now(),native_enabled:nativeEnabled()?1:0,claim_unscoped:runtime.claimUnscoped?1:0,runtime_namespaces:runtime.namespaces.length?runtime.namespaces:['__no_runtime__']};
+    const replacements={clinic_id:clinicId,actor_id:actorId,now:now(),native_enabled:nativeEnabled()?1:0,claim_unscoped:runtime.claimUnscoped?1:0,runtime_namespaces:runtime.namespaces.length?runtime.namespaces:['__no_runtime__']};
     const where=[];
     if (filter.status==='pending') {where.push('status IN (:statuses)');replacements.statuses=PENDING;}
     else if (filter.status!=='all') {where.push('status = :status');replacements.status=filter.status;}
@@ -100,7 +100,7 @@ function createAppointmentRemindersReadService({ db, canAccess, now=()=>new Date
       return {id:row.id,source_kind:row.source_kind,clinic_id:clinicId,patient_id:Number(row.patient_id),patient_public_id:row.patient_public_id||null,
         patient_name:row.patient_name,appointment_id:Number(row.appointment_id),appointment_title:row.appointment_title||'Cita',appointment_start:iso(row.appointment_start),appointment_status:row.appointment_status,
         scheduled_at:iso(row.scheduled_at),created_at:iso(row.created_at),stage:['day_before','same_day','week_before'].includes(row.stage)?row.stage:null,
-        channel:row.message_id?'whatsapp':null,status:row.status,sent_at:iso(row.sent_at),template_name:row.template_name||null,template_version:number(row.template_version),
+        channel:row.message_id?'whatsapp':null,status:row.status,sent_at:iso(row.sent_at),template_name:templateInScope?row.template_name||null:null,template_version:templateInScope?number(row.template_version):null,
         source:{job_id:number(row.job_id),communication_id:row.communication_id||null,execution_id:number(row.execution_id),message_id:number(row.message_id),conversation_id:canChat?number(row.conversation_id):null},
         delivery:{message_status:row.message_status||null,job_status:row.job_status||null,execution_status:row.execution_status||null,communication_status:row.communication_status||null},
         reason_code:row.status==='skipped'&&SKIPS[row.skip_reason]?row.skip_reason:reason?.[0]||null,

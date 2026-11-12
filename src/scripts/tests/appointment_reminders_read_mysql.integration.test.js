@@ -81,4 +81,12 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
     runtimePolicy:{namespaces:['test'],claimUnscoped:false},canAccess:async()=>++aclCalls<=3});
   await assert.rejects(revocationReader.list({actorId:7,clinicId:1}),{code:'access_policy_forbidden'});
   report.checks.push('permission revocation during the read is rechecked before any rows or count are returned');
+  await db.FlowExecutionV2.create({...execution(50,'completed',window+':foreign-template'),template_version_id:2});
+  await db.AppointmentVisitCommunication.create(intent('foreign-template-intent','pending',{template_version_id:2,window_starts_at:'2030-01-20T09:00:00Z'}));
+  result=await list({status:'all'});
+  for(const id of ['execution:50','visit:foreign-template-intent']) {
+    const row=result.items.find(x=>x.id===id);assert(row);assert.equal(row.template_name,null);assert.equal(row.template_version,null);assert.equal(row.links.automation,null);
+  }
+  assert.equal((await list({q:'Regla ajena',status:'all'})).total,0);
+  report.checks.push('a corrupt foreign template binding exposes neither its label/version/link nor a search-count oracle');
 }).catch(error=>{console.error(error.stack||error.message);process.exitCode=1;});

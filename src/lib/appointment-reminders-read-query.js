@@ -5,13 +5,16 @@
 const J = (alias, path) => `JSON_UNQUOTE(JSON_EXTRACT(${alias},'${path}'))`;
 const windowOf = alias => `CASE WHEN LOCATE(':schedule:',${alias}.idempotency_key)>0 THEN SUBSTRING(${alias}.idempotency_key,LOCATE(':schedule:',${alias}.idempotency_key)+1) END`;
 const parseInstant = sql => `STR_TO_DATE(REPLACE(REPLACE(${sql},'T',' '),'Z',''),'%Y-%m-%d %H:%i:%s.%f')`;
+const templateScope = alias => `(${alias}.clinic_id=:clinic_id OR ${alias}.group_id IN (SELECT grupoClinicaId FROM Clinicas WHERE id_clinica=:clinic_id)
+  OR ${alias}.is_system=1 OR (${alias}.clinic_id IS NULL AND ${alias}.group_id IS NULL AND ${alias}.created_by=:actor_id))`;
 
 function buildProjection({ native = false } = {}) {
   const nativeCte = native ? `
     SELECT n.id,n.owner_appointment_id appointment_id,n.patient_id,n.purpose,n.status,n.template_version_id,
       n.execution_id,n.message_id,n.window_starts_at scheduled_at,n.created_at,n.cancellation_reason,
       v.communication_revision current_revision,n.communication_revision,
-      t.template_key,t.name template_name,t.version template_version,t.public_id template_public_id,
+      t.template_key,CASE WHEN ${templateScope('t')} THEN t.name END template_name,
+      CASE WHEN ${templateScope('t')} THEN t.version END template_version,t.public_id template_public_id,
       t.clinic_id template_clinic_id,t.group_id template_group_id,t.is_system template_is_system,t.created_by template_created_by
     FROM AppointmentVisitCommunications n
     JOIN scoped_appointments a ON a.id_cita=n.owner_appointment_id AND a.paciente_id=n.patient_id
@@ -33,7 +36,8 @@ function buildProjection({ native = false } = {}) {
   executions AS (
     SELECT e.id,e.trigger_entity_id appointment_id,e.status,e.wait_until,e.created_at,e.template_version_id,
       ${windowOf('e')} window_identifier,${J('e.context','$.trigger.schedule_moment')} stage,
-      t.template_key,t.name template_name,t.version template_version,t.public_id template_public_id,
+      t.template_key,CASE WHEN ${templateScope('t')} THEN t.name END template_name,
+      CASE WHEN ${templateScope('t')} THEN t.version END template_version,t.public_id template_public_id,
       t.clinic_id template_clinic_id,t.group_id template_group_id,t.is_system template_is_system,t.created_by template_created_by
     FROM FlowExecutionsV2 e JOIN scoped_appointments a ON a.id_cita=e.trigger_entity_id
     JOIN AutomationFlowTemplatesV2 t ON t.id=e.template_version_id
@@ -54,7 +58,7 @@ function buildProjection({ native = false } = {}) {
   templates_ranked AS (
     SELECT t.*,ROW_NUMBER() OVER(PARTITION BY t.template_key ORDER BY (t.is_active=1 AND t.published_at IS NOT NULL) DESC,t.version DESC,t.id DESC) ranking
     FROM AutomationFlowTemplatesV2 t JOIN Clinicas c ON c.id_clinica=:clinic_id
-    WHERE t.clinic_id=:clinic_id OR t.group_id=c.grupoClinicaId OR t.is_system=1
+    WHERE ${templateScope('t')}
   ), valid_messages AS (
     SELECT DISTINCT m.id,m.status,m.sent_at,m.createdAt,m.conversation_id,
       CAST(${J('m.metadata','$.execution_id')} AS UNSIGNED) execution_id,c.patient_id,
