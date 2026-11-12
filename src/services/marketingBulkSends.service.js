@@ -3331,9 +3331,11 @@ function parseReviewCandidateDate(value) {
 }
 
 function getReviewCandidateSortTimestamp(item) {
+  if (careSnapshots.hasCareSnapshot(item)) {
+    return Date.parse(`${careSnapshots.validateCareSnapshot(item).date}T00:00:00.000Z`);
+  }
   const custom = asPlainObject(item?.custom_fields);
   const candidates = [
-    careSnapshots.hasCareSnapshot(item) ? resolveLastAttendedAppointmentDate(item) : null,
     item?.last_visit_at,
     item?.appointment_at,
     custom.fecha_fin_tratamiento,

@@ -64,7 +64,7 @@ function validateCareSnapshot(item, list = null) {
 // the reserved namespace; no clinical archive text is copied into Marketing.
 function careDateForTemplate(item, list = null) {
   const snapshot = validateCareSnapshot(item, list);
-  return snapshot ? parseImportedCareDate(snapshot.date).formatted : '';
+  return snapshot ? `${snapshot.date.slice(8, 10)}/${snapshot.date.slice(5, 7)}/${snapshot.date.slice(0, 4)}` : '';
 }
 module.exports = { KEY, stripCareSnapshot, snapshotOf, hasCareSnapshot, sealCareSnapshot,
   bindCareSnapshot, validateCareSnapshot, careDateForTemplate };
