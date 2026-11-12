@@ -71,6 +71,20 @@ test('generic serialization and cloning omit the protected snapshot while an aut
   assert.equal(service.cloneRecipientItemForCampaign(row, ['whatsapp']).custom_fields.review_care_v1, undefined);
 });
 
+test('newly bound recipient previews validate the list before the SQL roundtrip without exposing care evidence', () => {
+  const service = load({}, { '../lib/review-sender-policy': require('../../lib/review-sender-policy') }).__testing;
+  const item = { paciente_id: 31, clinica_id: 56, custom_fields: { nombre: 'Ficticio' }, status: 'ready' };
+  item.custom_fields.review_care_v1 = snapshots.sealCareSnapshot({ item, actorId: 9, care: {
+    patientId: 31, clinicId: 56, latestCare: { date: '2026-09-10', kind: 'performed_service_import', provenance: [] } } });
+  const preview = { ...snapshots.bindCareSnapshot(item, 98), id: 1 };
+  const serialized = service.serializeItem(preview, { allowReviewCare: true });
+  assert.equal(serialized.custom_fields.fecha_ultima_cita_asistida, '10/09/2026');
+  assert.equal(serialized.custom_fields.review_care_v1, undefined);
+  assert.equal(service.resolveVariableValue('fecha_ultima_cita_asistida', preview, { id: 98 }, {}), '10/09/2026');
+  assert.throws(() => service.serializeItem({ ...preview, list_id: 99 }, { allowReviewCare: true }),
+    { code: 'review_care_snapshot_invalid', status: 409 });
+});
+
 test('manual group audiences keep each patient-clinic pair separate for fields and appointments', async () => {
   const db = {
     sequelize: { query: async sql => sql.includes('FROM Pacientes p') ? [56, 57].map(clinicId => ({ id_paciente: 41,

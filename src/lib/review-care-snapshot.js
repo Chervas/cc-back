@@ -42,7 +42,10 @@ function bindCareSnapshot(item, listId) {
   }
   const { digest: _digest, ...value } = snapshot;
   const next = { ...value, listId: Number(listId) };
-  return { ...item, custom_fields: { ...stripCareSnapshot(item.custom_fields), [KEY]: { ...next, digest: digestOf(next) } } };
+  // The in-memory recipient must carry the same list identity as the sealed
+  // evidence, including previews produced before bulkCreate returns SQL rows.
+  return { ...item, list_id: Number(listId),
+    custom_fields: { ...stripCareSnapshot(item.custom_fields), [KEY]: { ...next, digest: digestOf(next) } } };
 }
 function validateCareSnapshot(item, list = null) {
   const plain = item?.get ? item.get({ plain: true }) : item;

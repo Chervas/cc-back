@@ -15,6 +15,12 @@ test('a minimal snapshot is bound to list, patient, clinic and authority', () =>
   assert.equal(snapshots.validateCareSnapshot(row, { id: 98 }).importedMessagesHold, true);
   assert.deepEqual(snapshots.stripCareSnapshot(row.custom_fields), { nombre: 'Ficticio' });
 });
+test('binding a new recipient keeps its in-memory list identity usable before the SQL roundtrip', () => {
+  const row = fixture();
+  assert.equal(row.list_id, 98);
+  assert.equal(snapshots.validateCareSnapshot(row).listId, 98);
+  assert.equal(snapshots.careDateForTemplate(row), '10/09/2026');
+});
 test('changing a date, patient, clinic or list invalidates the snapshot', () => {
   const row = fixture();
   for (const change of [{ paciente_id: 32 }, { clinica_id: 57 }, { list_id: 99 },
@@ -58,6 +64,17 @@ test('binding cannot heal a tampered unbound snapshot or transplant a bound snap
   assert.throws(() => snapshots.bindCareSnapshot(bound, 99), { status: 409 });
   assert.equal(snapshots.snapshotOf(bound).listId, 98);
   assert.equal(snapshots.snapshotOf(snapshots.bindCareSnapshot(bound, 98)).digest, snapshots.snapshotOf(bound).digest);
+});
+
+test('binding cannot attach fresh unbound evidence to a persisted recipient or move it to another list', () => {
+  const source = { ...item, list_id: 98, custom_fields: { ...item.custom_fields,
+    [snapshots.KEY]: snapshots.sealCareSnapshot({ care: { patientId: 31, clinicId: 56,
+      latestCare: { date: '2026-09-10', kind: 'performed_service_import' } }, item, actorId: 9 }) } };
+  assert.equal(snapshots.snapshotOf(source).listId, null);
+  for (const target of [98, 990]) {
+    assert.throws(() => snapshots.bindCareSnapshot(source, target),
+      { code: 'review_care_snapshot_invalid', status: 409 });
+  }
 });
 
 test('an explicit list object cannot hide a different persisted item list_id', () => {

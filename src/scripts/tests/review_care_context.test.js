@@ -92,6 +92,37 @@ test('factory and legacy enrichment perform no I/O or source projection without 
   assert.deepEqual(state.calls, []);
 });
 
+test('refreshing an existing list recipient preserves its list binding for preview and test guards', async () => {
+  const { state, service, scope } = fixture();
+  state.facts.set('11:1', fact(11, 1, '2026-10-04'));
+  const [output] = await service.enrich([sealed()], scope);
+  assert.equal(output.list_id, 98);
+  assert.equal(snapshots.validateCareSnapshot(output).listId, 98);
+  assert.equal(snapshots.careDateForTemplate(output), '04/10/2026');
+  await service.guard({ list: list(), items: [output], scope, checkHold: true });
+  for (const change of [{ paciente_id: 12 }, { clinica_id: 70 }, { list_id: 99 }]) {
+    assert.throws(() => snapshots.validateCareSnapshot({ ...output, ...change }),
+      { code: 'review_care_snapshot_invalid', status: 409 });
+  }
+});
+
+test('a source refresh cannot heal missing or foreign list binding on an existing recipient', async () => {
+  const { state, service, scope } = fixture();
+  state.facts.set('11:1', fact(11, 1, '2026-10-04'));
+  const source = sealed();
+  for (const snapshotListId of [null, 990]) {
+    const item = structuredClone(source), snapshot = snapshots.snapshotOf(item);
+    const { digest: _digest, ...value } = snapshot;
+    value.listId = snapshotListId;
+    // An internally well-formed digest does not establish this item's list.
+    item.custom_fields[snapshots.KEY] = snapshots.sealCareSnapshot({ item,
+      listId: snapshotListId, actorId: value.actorId,
+      care: fact(11, 1, value.date), capturedAt: value.capturedAt });
+    await assert.rejects(service.enrich([item], scope),
+      { code: 'review_care_snapshot_invalid', status: 409 });
+  }
+});
+
 test('enrichment keeps a distinct latest source for the same patient in each site and minimal provenance', async () => {
   const { state, service, scope } = fixture();
   state.facts.set('11:1', fact(11, 1, '2026-09-10'));

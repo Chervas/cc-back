@@ -69,7 +69,8 @@ function createReviewCareContext({ db, access, createReader = createPatientLastC
         latest = { date: oldDate.date, kind: 'declared_care_date', precision: 'day', provenance: [] };
       }
       const snapshot = latest ? snapshots.sealCareSnapshot({ care: { ...detail, latestCare: latest,
-        importedMessagesHold: held.has(detail.patientId) }, item, actorId: authority.actorId }) : null;
+        importedMessagesHold: held.has(detail.patientId) }, item, listId: item.list_id ?? null,
+        actorId: authority.actorId }) : null;
       return { ...item,
         custom_fields: { ...snapshots.stripCareSnapshot(item.custom_fields), ...(snapshot ? { [snapshots.KEY]: snapshot } : {}) },
         ...(!String(item.status || '').startsWith('excluded') && held.has(detail.patientId) ? { status: 'excluded_import_hold', selected: false,
