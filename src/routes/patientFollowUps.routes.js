@@ -8,6 +8,7 @@ router.use(authMiddleware);
 router.get('/', controller.list);
 router.post('/', controller.create);
 router.get('/recipient-options', controller.recipientOptions);
+router.get('/appointment-reminders', require('../controllers/appointmentRemindersRead.controller').list);
 router.get('/from-appointment/:appointmentId', controller.getForSourceAppointment);
 router.get('/from-episode/:episodeId', controller.getForSourceEpisode);
 router.get('/:id/appointment-candidates', controller.appointmentCandidates);
