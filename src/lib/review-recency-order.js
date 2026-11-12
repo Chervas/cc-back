@@ -14,7 +14,8 @@ function reviewRecencySql() {
       WHEN ${raw} REGEXP '^[0-9]{1,2}-[0-9]{1,2}-[0-9]{4}' THEN
         COALESCE(STR_TO_DATE(${raw},'%d-%m-%Y %H:%i:%s'),STR_TO_DATE(${raw},'%d-%m-%Y')) END`;
   });
-  return `COALESCE(last_visit_at,appointment_at,${dates.join(',')})`;
+  const protectedDate = "CASE WHEN JSON_EXTRACT(custom_fields,'$.review_care_v1.version')=1 THEN STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(custom_fields,'$.review_care_v1.date')),'%Y-%m-%d') END";
+  return `COALESCE(${protectedDate},last_visit_at,appointment_at,${dates.join(',')})`;
 }
 
 module.exports = { reviewRecencySql, CUSTOM_DATE_KEYS };

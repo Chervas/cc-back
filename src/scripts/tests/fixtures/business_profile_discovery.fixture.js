@@ -4,6 +4,8 @@ const root = path.resolve(__dirname, '../../..');
 // Pure policy helpers are executed as production code; transports and models
 // still require explicit injection and retain the closed dependency fallback.
 const pureDependencies = {
+  '../lib/marketing-import-care-date': require('../../../lib/marketing-import-care-date'),
+  '../lib/review-care-snapshot': require('../../../lib/review-care-snapshot'),
   '../lib/delegatedOperationPolicy': require('../../../lib/delegatedOperationPolicy'),
   '../lib/lead-patient-context': require('../../../lib/lead-patient-context'),
 };

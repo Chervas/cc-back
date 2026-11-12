@@ -4,6 +4,15 @@ const { resolveClinicScope } = require('../lib/clinicScope');
 const marketingBulkSendsService = require('../services/marketingBulkSends.service');
 const { hasMarketingClinicScopeAccess } = require('../lib/marketingScopeAccess');
 
+function withReviewCareAuthority(req, scope) {
+  // This authority is internal, never accepted from query/body or serialized.
+  if (!req.headers?.authorization) return scope;
+  const authority = require('../services/reviewCareAccess.service').current().httpAuthority(req);
+  return { ...scope, reviewCareAuthority: Object.freeze({ ...authority,
+    auditRead: input => require('../services/reviewCareAudit.service').current().run({ req, ...input }),
+  }) };
+}
+
 async function requireReviewHistoryAccess(req, scope) {
   if (!await hasMarketingClinicScopeAccess({ userId: req.userData?.userId, clinicIds: scope.clinicIds, access: 'read' })) {
     throw Object.assign(new Error('No tienes acceso a las reseñas de estas clínicas'), { status: 403 });
@@ -27,7 +36,7 @@ async function resolveScope(req, { allowAll = false } = {}) {
     err.status = 400;
     throw err;
   }
-  return scope;
+  return withReviewCareAuthority(req, scope);
 }
 
 async function resolveReviewRequestSummaryScope(req, { allowAll = false } = {}) {
@@ -47,7 +56,7 @@ async function resolveReviewRequestSummaryScope(req, { allowAll = false } = {}) 
     err.status = 400;
     throw err;
   }
-  return scope;
+  return withReviewCareAuthority(req, scope);
 }
 
 async function resolveScopeFromRequest(req, { allowAll = false } = {}) {
@@ -71,7 +80,7 @@ async function resolveScopeFromRequest(req, { allowAll = false } = {}) {
     err.status = 400;
     throw err;
   }
-  return scope;
+  return withReviewCareAuthority(req, scope);
 }
 
 function sendError(res, error, fallbackMessage) {

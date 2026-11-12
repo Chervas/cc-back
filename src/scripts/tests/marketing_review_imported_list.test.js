@@ -1,15 +1,25 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-
-const db = require('../../../models');
-const service = require('../../services/marketingBulkSends.service');
-const controller = require('../../controllers/marketingBulkSends.controller');
+require('./fixtures/security_offline_runtime.cjs');
+const { loadDiscoverySource } = require('./fixtures/business_profile_discovery.fixture');
+const db = { Sequelize: require('sequelize'), sequelize: { close: async () => {} } };
+const service = loadDiscoverySource('services/marketingBulkSends.service.js', {
+  crypto: require('node:crypto'), sequelize: require('sequelize'), '../../models': db,
+  '../lib/phone': { normalizePhoneDigits: value => String(value || '').replace(/\D/g, '') },
+  '../lib/marketing-template-variables': require('../../lib/marketing-template-variables'),
+});
+const controller = loadDiscoverySource('controllers/marketingBulkSends.controller.js', {
+  '../lib/clinicScope': { resolveClinicScope: async () => ({ clinicIds: [66], isValid: true, scope: 'clinic' }) },
+  '../lib/marketingScopeAccess': { hasMarketingClinicScopeAccess: async () => true },
+  '../services/marketingBulkSends.service': service,
+});
 
 function responseRecorder() {
   return {
     statusCode: 200,
     payload: null,
+    set() { return this; },
     status(code) {
       this.statusCode = code;
       return this;

@@ -1,4 +1,5 @@
 'use strict';
+require('./fixtures/security_offline_runtime.cjs');
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
@@ -65,11 +66,12 @@ test('la plantilla de reseñas utility conserva las cuatro variables semánticas
 
 test('un importado sin fecha usa la última cita completada del paciente dentro del scope', async (t) => {
   t.mock.method(db.CitaPaciente, 'findAll', async () => [
-    { paciente_id: 41, ultima_cita_asistida: '2026-09-07T10:00:00.000Z' },
+    { paciente_id: 41, clinica_id: 56, ultima_cita_asistida: '2026-09-07T10:00:00.000Z' },
   ]);
   const [item] = await bulkSends.__testing.attachLatestAttendedAppointmentDate([
     {
       paciente_id: 41,
+      clinica_id: 56,
       appointment_at: '2026-10-01T09:00:00.000Z',
       custom_fields: {},
     },
@@ -83,11 +85,12 @@ test('un importado sin fecha usa la última cita completada del paciente dentro 
 
 test('recupera la cita completada antes de aplicar la exclusión por fecha', async (t) => {
   t.mock.method(db.CitaPaciente, 'findAll', async () => [
-    { paciente_id: 41, ultima_cita_asistida: '2026-09-07T10:00:00.000Z' },
+    { paciente_id: 41, clinica_id: 56, ultima_cita_asistida: '2026-09-07T10:00:00.000Z' },
   ]);
   const [item] = await bulkSends.__testing.prepareReviewItemsForExclusions([
     {
       paciente_id: 41,
+      clinica_id: 56,
       status: 'ready',
       selected: true,
       phone: '+34617560236',

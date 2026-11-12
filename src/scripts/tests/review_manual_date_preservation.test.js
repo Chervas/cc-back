@@ -36,7 +36,7 @@ function fixture({ fields = [], appointments = [] } = {}) {
       assert.deepEqual(Array.from(where.estado[sequelize.Op.in]), ['ha_acudido', 'en_atencion', 'completada']);
       return appointments.filter(row => row.clinica_id === 56 && row.paciente_id === 41
         && ['ha_acudido', 'en_atencion', 'completada'].includes(row.estado))
-        .map(row => ({ paciente_id: row.paciente_id, ultima_cita_asistida: row.inicio }));
+        .map(row => ({ paciente_id: row.paciente_id, clinica_id: row.clinica_id, ultima_cita_asistida: row.inicio }));
     } },
   };
   const service = loadDiscoverySource('services/marketingBulkSends.service.js', {

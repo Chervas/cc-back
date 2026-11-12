@@ -1,4 +1,5 @@
 'use strict';
+const { snapshotOf, careDateForTemplate } = require('./review-care-snapshot');
 
 const LAST_ATTENDED_DATE_KEYS = Object.freeze([
   'fecha_ultima_cita_asistida',
@@ -77,9 +78,14 @@ function formatMarketingDate(value) {
 }
 
 function resolveLastAttendedAppointmentDate(item = {}) {
+  // Compatibility name for approved templates; the evidence type is retained.
+  if (snapshotOf(item)) return careDateForTemplate(item);
   const custom = item?.custom_fields && typeof item.custom_fields === 'object'
     ? item.custom_fields
     : {};
+  // New imports have a server-validated meaning/format. A raw legacy-looking
+  // custom column must not turn a missing, invalid or future value into care.
+  if (custom.import_care_date?.version === 1 && custom.import_care_date.status !== 'valid') return '';
   const candidates = [
     ...LAST_ATTENDED_DATE_KEYS.map((key) => custom[key]),
     item.last_visit_at,

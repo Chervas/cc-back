@@ -16,6 +16,8 @@ const {
   formatMarketingDate,
   resolveLastAttendedAppointmentDate,
 } = require('../lib/marketing-template-variables');
+const { CARE_DATE_IMPORT_ALIASES, inferCareDateColumn, readImportedCareDate } = require('../lib/marketing-import-care-date');
+const careSnapshots = require('../lib/review-care-snapshot');
 const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
 const { usesExplicitDispatchWindow } = require('../lib/marketing-dispatch-window');
 const { normalizeReviewSenderName, requireReviewSenderName } = require('../lib/review-sender-policy');
@@ -107,6 +109,12 @@ const WHATSAPP_SESSION_WINDOW_MS = 23 * 60 * 60 * 1000 + 50 * 60 * 1000;
 const REVIEW_REMINDER_DELAY_MS = 24 * 60 * 60 * 1000;
 const REVIEW_NO_RESPONSE_DELAY_MS = 24 * 60 * 60 * 1000;
 const testSendCooldowns = new Map();
+
+async function guardReviewCare(scope, list, items = [], options = {}) {
+  if (Number(list?.criteria?.review_care_version) === 1 || items.some(careSnapshots.hasCareSnapshot)) {
+    return require('./reviewCareContext.service').current().guard({ list, items, scope, ...options });
+  }
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1568,6 +1576,12 @@ async function applyMarketingOptOutExclusions(itemPayloads, scope, transaction =
 
 async function revalidateDispatchExclusions(list, items, scope, transaction = null) {
   if (!Array.isArray(items) || !items.length) return [];
+  const careProtected = Number(list?.criteria?.review_care_version) === 1 || items.some(careSnapshots.hasCareSnapshot);
+  let careHeld = new Set();
+  if (careProtected) {
+    await guardReviewCare(scope, list, items, { background: true });
+    careHeld = await require('./reviewCareContext.service').current().heldPatientIds(items.map(item => Number(item.paciente_id)));
+  }
   const optOutSets = await marketingOptOutService.getActiveOptOutSetsForScope(scope, transaction);
   const patientIds = items.map((item) => Number(item.paciente_id || 0)).filter((id) => Number.isInteger(id) && id > 0);
   const rejectedContactRows = patientIds.length && PacienteConsentimiento
@@ -1596,12 +1610,13 @@ async function revalidateDispatchExclusions(list, items, scope, transaction = nu
       optOutSets,
     });
     const noContact = item.paciente_id && rejectedContactPatientIds.has(Number(item.paciente_id));
-    if (!hasMarketingOptOut && !noContact) continue;
+    const importHeld = careHeld.has(Number(item.paciente_id));
+    if (!hasMarketingOptOut && !noContact && !importHeld) continue;
     await item.update({
-      status: 'excluded_opt_out',
-      exclusion_reason: hasMarketingOptOut ? 'opt_out' : 'no_contactar',
+      status: importHeld ? 'excluded_import_hold' : 'excluded_opt_out',
+      exclusion_reason: importHeld ? 'importacion_comunicaciones_retenidas' : (hasMarketingOptOut ? 'opt_out' : 'no_contactar'),
       selected: false,
-      reason: hasMarketingOptOut
+      reason: importHeld ? 'Comunicaciones retenidas en la importación.' : hasMarketingOptOut
         ? 'Baja comercial solicitada antes del envío'
         : 'Paciente con comunicaciones rechazadas antes del envío',
       dispatch_status: null,
@@ -1615,7 +1630,7 @@ async function revalidateDispatchExclusions(list, items, scope, transaction = nu
       event_type: 'mass_campaign_contact_excluded_before_send',
       channel: 'whatsapp',
       payload: {
-        reason: hasMarketingOptOut ? 'opt_out' : 'no_contactar',
+        reason: importHeld ? 'importacion_comunicaciones_retenidas' : (hasMarketingOptOut ? 'opt_out' : 'no_contactar'),
       },
       occurred_at: new Date(),
     }, { transaction });
@@ -1634,6 +1649,7 @@ const IMPORT_ALIASES = {
   phone: ['telefono', 'teléfono', 'movil', 'móvil', 'telefono_movil', 'phone', 'mobile', 'whatsapp'],
   email: ['email', 'correo', 'correo_electronico', 'mail'],
   clinic: ['clinica', 'clínica', 'sede', 'centro', 'clinic', 'location'],
+  last_visit_at: CARE_DATE_IMPORT_ALIASES,
 };
 
 function findHeader(headers, aliases) {
@@ -1649,7 +1665,8 @@ function inferColumnMapping(rows, explicit = {}) {
   const headers = Array.from(new Set(rows.flatMap((row) => Object.keys(row || {})).map(normalizeText).filter(Boolean)));
   const mapping = {};
   for (const [field, aliases] of Object.entries(IMPORT_ALIASES)) {
-    mapping[field] = explicit[field] || findHeader(headers, aliases) || null;
+    mapping[field] = field === 'last_visit_at' ? inferCareDateColumn(headers, explicit)
+      : (explicit[field] || findHeader(headers, aliases) || null);
   }
   return mapping;
 }
@@ -1687,7 +1704,7 @@ function buildCustomFields(row, mapping, customFieldsSchema = []) {
     const custom = {};
     for (const field of explicit) {
       const value = normalizeText(row?.[field.source_column]);
-      if (value) custom[field.key] = value;
+      if (value && field.key !== careSnapshots.KEY) custom[field.key] = value;
     }
     return custom;
   }
@@ -1698,7 +1715,7 @@ function buildCustomFields(row, mapping, customFieldsSchema = []) {
     if (mappedHeaders.has(header)) continue;
     const key = normalizeKey(header);
     const cleanValue = normalizeText(value);
-    if (!key || !cleanValue || STANDARD_FIELDS.has(key)) continue;
+    if (!key || key === careSnapshots.KEY || !cleanValue || STANDARD_FIELDS.has(key)) continue;
     custom[key] = cleanValue;
   }
   return custom;
@@ -1718,6 +1735,7 @@ function buildCustomFieldSchema(rows, mapping, explicitSchema = []) {
         label: key.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' '),
         type: /^-?\d+([.,]\d+)?$/.test(String(value)) ? 'number' : 'text',
         source: 'import',
+        source_column: Object.keys(row || {}).find(header => normalizeKey(header) === key) || key,
       });
     }
   }
@@ -1742,7 +1760,7 @@ function buildPatientVariableFields(patient, patientCustomFields = []) {
     const key = normalizeKey(customField.field_key);
     const value = normalizeText(customField.value);
     if (!key || !value) continue;
-    fields[key] = value;
+    if (key !== careSnapshots.KEY) fields[key] = value;
   }
 
   return fields;
@@ -1976,7 +1994,7 @@ function cloneRecipientItemForCampaign(item, channels) {
     reason: plain.reason || null,
     exclusion_reason: plain.exclusion_reason || null,
     selected: plain.status === 'ready',
-    custom_fields: plain.custom_fields || {},
+    custom_fields: careSnapshots.stripCareSnapshot(plain.custom_fields),
     missing_variables: [],
     notes: plain.notes || null,
   };
@@ -2095,6 +2113,7 @@ function buildItemsFromRows(rows, body, channels) {
     const email = readImportValue(row, columnMapping, 'email') || null;
     const importedClinic = readImportValue(row, columnMapping, 'clinic') || null;
     const customFields = buildCustomFields(row, columnMapping, customFieldsSchema);
+    const importedCare = readImportedCareDate(row, columnMapping, body);
     const missing = missingRequiredFields({ channels, name: nameInfo.name, phoneDigits, email });
     const dedupeKey = buildItemDedupeKeyForChannels({ channels, name: nameInfo.name, phoneDigits, email });
     let status = missing.length ? 'excluded_missing_required' : 'ready';
@@ -2115,7 +2134,7 @@ function buildItemsFromRows(rows, body, channels) {
       email,
       treatment: null,
       treatment_id: null,
-      last_visit_at: null,
+      last_visit_at: importedCare.status === 'valid' ? new Date(`${importedCare.date}T00:00:00.000Z`) : null,
       status,
       reason,
       exclusion_reason: exclusionReason,
@@ -2126,6 +2145,13 @@ function buildItemsFromRows(rows, body, channels) {
         apellidos: nameInfo.lastName,
         nombre_completo: nameInfo.fullName,
         ...customFields,
+        import_care_date: {
+          version: 1, status: importedCare.status,
+          column: columnMapping.last_visit_at || null,
+          raw: columnMapping.last_visit_at ? normalizeText(row[columnMapping.last_visit_at]).slice(0, 200) : null,
+          format: body.import_date_format || 'dmy', excel_date_system: body.import_excel_date_system || '1900',
+        },
+        ...(importedCare.status === 'valid' ? { fecha_ultima_cita_asistida: importedCare.formatted } : {}),
         ...(importedClinic ? { clinica_importada: importedClinic, sede_importada: importedClinic } : {}),
         fecha_importacion: importMetadata.importedAtDate,
         fecha_importacion_texto: importMetadata.importedAtLabel,
@@ -2409,7 +2435,7 @@ async function assertReviewRequestCommunicationAllowed({ list, item = null, conv
   forceReview = false, templateName = null, channel = null, deliveryClinicId = null } = {}) {
   const eligibility = require('../lib/whatsappAppointmentEligibility');
   const storedList = list?.id ? await MarketingPatientList.findByPk(list.id, {
-    attributes: ['id', 'criteria', 'scope_type', 'clinica_id', 'clinic_ids', 'grupo_clinica_id'],
+    attributes: ['id', 'criteria', 'scope_type', 'clinica_id', 'clinic_ids', 'grupo_clinica_id', 'created_by'],
   }) : null;
   const review = forceReview || isReviewRequestList(storedList) || isReviewRequestList(list)
     || eligibility.nonOperationalClinicCommunication({ templateName }) === true;
@@ -2420,12 +2446,13 @@ async function assertReviewRequestCommunicationAllowed({ list, item = null, conv
   }); };
   if (!storedList) deniedScope();
   const bound = item?.id ? await MarketingPatientListItem.findOne({
-    where: { id: item.id, list_id: storedList.id }, attributes: ['id', 'list_id', 'clinica_id'],
+    where: { id: item.id, list_id: storedList.id }, attributes: ['id', 'list_id', 'clinica_id', 'paciente_id', 'custom_fields'],
   }) : null;
   if (item?.id && !bound) deniedScope();
   const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
   const listIds = [...new Set([storedList.clinica_id, ...(Array.isArray(storedList.clinic_ids) ? storedList.clinic_ids : [])]
     .map(positive).filter(Boolean))];
+  await guardReviewCare({ clinicIds: listIds }, storedList, bound ? [bound] : [], { background: true, checkHold: true });
   const multi = ['group', 'multi'].includes(String(storedList.scope_type || '').toLowerCase()) || listIds.length > 1;
   const clinicId = positive(bound?.clinica_id) || (!multi && listIds.length === 1 ? listIds[0] : null);
   const assertClinic = id => eligibility.assertClinicNonOperationalAllowed(id, {
@@ -3306,6 +3333,7 @@ function parseReviewCandidateDate(value) {
 function getReviewCandidateSortTimestamp(item) {
   const custom = asPlainObject(item?.custom_fields);
   const candidates = [
+    careSnapshots.hasCareSnapshot(item) ? resolveLastAttendedAppointmentDate(item) : null,
     item?.last_visit_at,
     item?.appointment_at,
     custom.fecha_fin_tratamiento,
@@ -3471,7 +3499,7 @@ function getReviewRuleExclusionReason(item, rules = {}) {
   ) {
     return 'Sin tratamiento asociado';
   }
-  if (rules.no_visit_date && !item?.last_visit_at && !item?.appointment_at && !resolveLastAttendedAppointmentDate(item)) {
+  if (rules.no_visit_date && !resolveLastAttendedAppointmentDate(item)) {
     return 'Sin fecha de atención';
   }
   return null;
@@ -3640,20 +3668,21 @@ async function attachLatestAttendedAppointmentDate(items = [], scope = {}) {
     },
     attributes: [
       'paciente_id',
+      'clinica_id',
       [Sequelize.fn('MAX', Sequelize.col('inicio')), 'ultima_cita_asistida'],
     ],
-    group: ['paciente_id'],
+    group: ['paciente_id', 'clinica_id'],
     raw: true,
   });
   const latestByPatient = new Map();
   for (const row of rows) {
-    const patientId = Number(row.paciente_id || 0);
-    if (patientId) latestByPatient.set(patientId, row.ultima_cita_asistida);
+    const patientId = Number(row.paciente_id || 0), clinicId = Number(row.clinica_id || 0);
+    if (patientId && clinicId) latestByPatient.set(`${patientId}:${clinicId}`, row.ultima_cita_asistida);
   }
 
   return (items || []).map((item) => {
     if (resolveLastAttendedAppointmentDate(item)) return item;
-    const appointmentAt = latestByPatient.get(Number(item?.paciente_id || 0));
+    const appointmentAt = latestByPatient.get(`${Number(item?.paciente_id || 0)}:${Number(item?.clinica_id || 0)}`);
     const formatted = formatReviewDate(appointmentAt);
     if (!formatted) return item;
     return {
@@ -3670,7 +3699,9 @@ async function attachLatestAttendedAppointmentDate(items = [], scope = {}) {
 
 async function prepareReviewItemsForExclusions(items = [], scope = {}, body = {}) {
   const datedItems = await attachLatestAttendedAppointmentDate(items, scope);
-  return applyReviewRequestExclusions(datedItems, body);
+  const enriched = scope.reviewCareAuthority
+    ? await require('./reviewCareContext.service').current().enrich(datedItems, scope) : datedItems;
+  return applyReviewRequestExclusions(enriched, body);
 }
 
 function isReviewImportedListEligible(list) {
@@ -3752,6 +3783,10 @@ async function buildItemsForReviewRequest(scope, body = {}) {
 
   if (body.review_appointment_id || body.appointment_id || body.cita_id) {
     const candidate = await buildReviewRequestCandidateForAppointment(scope, body);
+    if (scope.reviewCareAuthority && candidate.item) {
+      return (await prepareReviewItemsForExclusions([candidate.item], scope, body))
+        .filter(item => !String(item.status || '').startsWith('excluded'));
+    }
     return candidate.item
       ? applyReviewRequestExclusions([candidate.item], body).filter((item) => !String(item.status || '').startsWith('excluded'))
       : [];
@@ -3809,15 +3844,15 @@ async function buildItemsForReviewRequest(scope, body = {}) {
           paciente_id: { [Op.in]: patientIds },
           clinica_id: { [Op.in]: clinicIds },
         },
-        attributes: ['paciente_id', 'field_key', 'value'],
+        attributes: ['paciente_id', 'clinica_id', 'field_key', 'value'],
         raw: true,
       })
       : [];
     const customByPatient = new Map();
     for (const row of customRows) {
-      const id = Number(row.paciente_id);
-      if (!customByPatient.has(id)) customByPatient.set(id, []);
-      customByPatient.get(id).push(row);
+      const key = `${Number(row.paciente_id)}:${Number(row.clinica_id)}`;
+      if (!customByPatient.has(key)) customByPatient.set(key, []);
+      customByPatient.get(key).push(row);
     }
     const latestAppointmentRows = CitaPaciente && patientIds.length
       ? await db.sequelize.query(
@@ -3851,13 +3886,15 @@ async function buildItemsForReviewRequest(scope, body = {}) {
       : [];
     const latestAppointmentByPatient = new Map();
     for (const row of latestAppointmentRows) {
-      const patientId = Number(row.paciente_id);
-      if (!patientId || latestAppointmentByPatient.has(patientId)) continue;
-      latestAppointmentByPatient.set(patientId, row);
+      const patientId = Number(row.paciente_id), clinicId = Number(row.clinica_id);
+      const key = `${patientId}:${clinicId}`;
+      if (!patientId || !clinicId || latestAppointmentByPatient.has(key)) continue;
+      latestAppointmentByPatient.set(key, row);
     }
 
     const items = patients.map((patient) => {
-      const latestAppointment = latestAppointmentByPatient.get(Number(patient.id_paciente));
+      const patientClinicKey = `${Number(patient.id_paciente)}:${Number(patient.review_clinica_id || patient.clinica_id)}`;
+      const latestAppointment = latestAppointmentByPatient.get(patientClinicKey);
       const item = mapReviewPatientItem({
         patient,
         appointment: latestAppointment
@@ -3879,7 +3916,7 @@ async function buildItemsForReviewRequest(scope, body = {}) {
           },
         source,
       });
-      const patientFields = buildPatientVariableFields(patient, customByPatient.get(Number(patient.id_paciente)) || []);
+      const patientFields = buildPatientVariableFields(patient, customByPatient.get(patientClinicKey) || []);
       const storedAttendedDate = formatMarketingDate(patientFields.fecha_ultima_cita_asistida);
       const generatedAttendedDate = normalizeText(item.custom_fields?.fecha_ultima_cita_asistida);
       return {
@@ -3947,7 +3984,8 @@ async function buildItemsForReviewRequest(scope, body = {}) {
 
   const items = applyReviewRequestExclusions(excludePreviouslyRequestedReviews(Array.from(selected.values()), history), body);
   return sortReviewRequestItemsByRecentCare(
-    await attachLatestAttendedAppointmentDate(items, scope)
+    scope.reviewCareAuthority ? await prepareReviewItemsForExclusions(items, scope, body)
+      : await attachLatestAttendedAppointmentDate(items, scope)
   );
 }
 
@@ -5278,12 +5316,17 @@ async function getReviewRequestSummary(scope, options = {}) {
     : serializedAutomationTemplate?.is_active === true;
   const googleRatingSummary = buildGoogleRatingSummary(googleRatingRow || {});
 
+  if (!overviewOnly && effectiveScope.reviewCareAuthority) {
+    await guardReviewCare(effectiveScope, { criteria: { review_care_version: 1 } }, candidates);
+  }
+
   return {
     success: true,
     summary: {
       audience_evaluated: !overviewOnly,
       possible_patients: overviewOnly ? null : summaryCandidates.length,
-      candidates_preview: candidatePool.slice(0, previewLimit).map(serializeItem),
+      candidates_preview: candidatePool.slice(0, previewLimit).map(item => serializeItem(item, { allowReviewCare: !!effectiveScope.reviewCareAuthority })),
+      care_dates_available: candidates.filter(item => !!resolveLastAttendedAppointmentDate(item)).length,
       candidates_preview_total: candidatePool.length,
       candidates_preview_limit: previewLimit,
       review_send_order: 'recent_care_desc',
@@ -6352,8 +6395,10 @@ async function runReviewNoResponseJob(payload = {}) {
   return { status: 'completed', result: { closed: true, list_id: listId, item_id: itemId } };
 }
 
-function serializeItem(item) {
+function serializeItem(item, { allowReviewCare = false } = {}) {
   const plain = item?.get ? item.get({ plain: true }) : item;
+  const fields = careSnapshots.stripCareSnapshot(plain.custom_fields);
+  const careDate = allowReviewCare && careSnapshots.hasCareSnapshot(plain) ? careSnapshots.careDateForTemplate(plain) : '';
   return {
     id: plain.id,
     patient_id: plain.paciente_id,
@@ -6370,7 +6415,7 @@ function serializeItem(item) {
     reason: plain.reason,
     exclusion_reason: plain.exclusion_reason,
     selected: plain.selected,
-    custom_fields: plain.custom_fields || {},
+    custom_fields: { ...fields, ...(careDate ? { fecha_ultima_cita_asistida: careDate, fecha_ultima_atencion_realizada: careDate } : {}) },
     missing_variables: plain.missing_variables || [],
     dispatch_status: plain.dispatch_status || null,
     channel_status: plain.channel_status || {},
@@ -6395,7 +6440,7 @@ function getBlockedGates(gates) {
   return REQUIRED_SEND_GATES.filter((key) => gates?.[key] !== true);
 }
 
-function serializeCampaign(list, { itemsPreview = [] } = {}) {
+function serializeCampaign(list, { itemsPreview = [], allowReviewCare = false } = {}) {
   const plain = list?.get ? list.get({ plain: true }) : list;
   return {
     id: plain.id,
@@ -6426,7 +6471,7 @@ function serializeCampaign(list, { itemsPreview = [] } = {}) {
     last_sent_at: plain.last_sent_at,
     created_at: plain.created_at,
     updated_at: plain.updated_at,
-    items_preview: itemsPreview.map(serializeItem),
+    items_preview: itemsPreview.map(item => serializeItem(item, { allowReviewCare })),
   };
 }
 
@@ -6488,6 +6533,8 @@ async function listCampaigns(scope, options = {}) {
     order: [['updated_at', 'DESC']],
     limit: 100,
   });
+  const protectedList = lists.find(list => Number(list.criteria?.review_care_version) === 1);
+  if (protectedList) await guardReviewCare(scope, protectedList);
   const ids = lists.map((list) => list.id);
   const [uniqueContactsRow] = ids.length
     ? await db.sequelize.query(
@@ -6616,6 +6663,9 @@ async function createCampaign(scope, body = {}, userId = null) {
       importSummary = buildImportSummary(itemPayloads, importMetadata);
     }
 
+    if (isReviewRequest && source !== 'existing_patients_condition' && effectiveScope.reviewCareAuthority) {
+      itemPayloads = await prepareReviewItemsForExclusions(itemPayloads, effectiveScope, body);
+    }
     itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, effectiveScope, transaction);
     if (isReviewRequest && effectiveScope?.scope === 'group') {
       const clinicStatuses = await buildReviewClinicStatuses(effectiveScope, {
@@ -6648,6 +6698,8 @@ async function createCampaign(scope, body = {}, userId = null) {
           : 'Lista externa importada para campaña puntual.'),
       exclusion_summary: counters.excluded ? `${counters.excluded} contactos no tienen los campos necesarios o están duplicados.` : 'Sin exclusiones detectadas.',
       criteria: {
+        review_care_version: isReviewRequest && !!effectiveScope.reviewCareAuthority ? 1 : null,
+        review_care_actor_id: isReviewRequest && !!effectiveScope.reviewCareAuthority ? userId : null,
         record_kind: recordKind,
         source_list_id: sourceListId,
         campaign_name: campaignName,
@@ -6690,6 +6742,8 @@ async function createCampaign(scope, body = {}, userId = null) {
         review_automation_enabled: false,
         import_file_name: body.import_file_name || null,
         column_mapping: columnMapping,
+        import_date_format: body.import_date_format || sourceCriteria.import_date_format || 'dmy',
+        import_excel_date_system: body.import_excel_date_system || sourceCriteria.import_excel_date_system || '1900',
         name_format: normalizeNameFormat(body.name_format || body.nameFormat || (source === 'imported_file' ? 'auto' : null)),
         import_history: importSummary ? [importSummary] : (Array.isArray(sourceCriteria.import_history) ? sourceCriteria.import_history : []),
         segments: Array.isArray(sourceCriteria.segments) ? sourceCriteria.segments : [],
@@ -6721,6 +6775,7 @@ async function createCampaign(scope, body = {}, userId = null) {
     }, { transaction });
 
     if (itemPayloads.length) {
+      itemPayloads = itemPayloads.map(item => careSnapshots.bindCareSnapshot(item, list.id));
       await MarketingPatientListItem.bulkCreate(itemPayloads.map((item) => ({ ...item, list_id: list.id })), { transaction });
     }
 
@@ -6758,10 +6813,11 @@ async function createCampaign(scope, body = {}, userId = null) {
           .map(serializeImportResultItem),
       }
       : null;
+    await guardReviewCare(effectiveScope, created, preview);
     return {
       success: true,
-      campaign: serializeCampaign(created, { itemsPreview: preview }),
-      list: serializeCampaign(created, { itemsPreview: preview }),
+      campaign: serializeCampaign(created, { itemsPreview: preview, allowReviewCare: !!effectiveScope.reviewCareAuthority }),
+      list: serializeCampaign(created, { itemsPreview: preview, allowReviewCare: !!effectiveScope.reviewCareAuthority }),
       import_result: responseImportSummary,
     };
   });
@@ -6770,6 +6826,7 @@ async function createCampaign(scope, body = {}, userId = null) {
 async function getCampaign(scope, campaignId) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  await guardReviewCare(scope, list);
   await reconcileListMessageState(list, scope);
   const reloaded = await MarketingPatientList.findByPk(list.id);
   await hydrateListTemplateSnapshots(reloaded);
@@ -6778,12 +6835,15 @@ async function getCampaign(scope, campaignId) {
     order: [['id', 'ASC']],
     limit: 1000,
   });
+  if (Number(list.criteria?.review_care_version) === 1 || items.some(careSnapshots.hasCareSnapshot)) {
+    await require('./reviewCareContext.service').current().guard({ list, items, scope });
+  }
   const report = await buildListReport(list.id);
   return {
     success: true,
-    campaign: serializeCampaign(reloaded, { itemsPreview: items.slice(0, 5) }),
-    list: serializeCampaign(reloaded, { itemsPreview: items.slice(0, 5) }),
-    items: items.map(serializeItem),
+    campaign: serializeCampaign(reloaded, { itemsPreview: items.slice(0, 5), allowReviewCare: !!scope.reviewCareAuthority }),
+    list: serializeCampaign(reloaded, { itemsPreview: items.slice(0, 5), allowReviewCare: !!scope.reviewCareAuthority }),
+    items: items.map(item => serializeItem(item, { allowReviewCare: !!scope.reviewCareAuthority })),
     report,
   };
 }
@@ -6997,6 +7057,7 @@ async function applyActiveSegmentSelection(list, items = [], activeSegmentId = n
 async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  await guardReviewCare(scope, list);
   if (String(list.status || '') === 'archived') {
     const err = new Error('No se puede editar una lista archivada');
     err.status = 409;
@@ -7132,6 +7193,10 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
       const importResult = buildItemsFromRows(appendRows, importBody, effectiveChannels);
       let itemPayloads = importResult.items;
       itemPayloads = await attachExistingPatientContext(itemPayloads, scope, transaction);
+      if (Number(list.criteria?.review_care_version) === 1) {
+        itemPayloads = await prepareReviewItemsForExclusions(itemPayloads, scope, importBody);
+        itemPayloads = itemPayloads.map(item => careSnapshots.bindCareSnapshot(item, list.id));
+      }
       itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
 
       const existingRows = await MarketingPatientListItem.findAll({
@@ -7177,6 +7242,8 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
 
       if (readyItemPayloads.length) {
         nextCriteria.column_mapping = importResult.columnMapping;
+        nextCriteria.import_date_format = importBody.import_date_format || 'dmy';
+        nextCriteria.import_excel_date_system = importBody.import_excel_date_system || '1900';
         nextCriteria.name_format = importResult.nameFormat;
         updatePayload.custom_fields_schema = mergeCustomFieldSchemas(list.custom_fields_schema || [], importResult.customFieldsSchema || []);
         updatePayload.condition_summary = 'Lista externa importada para campaña puntual, con contactos añadidos posteriormente.';
@@ -7215,10 +7282,11 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
     order: [['id', 'ASC']],
     limit: 5,
   });
+  await guardReviewCare(scope, list, items);
   return {
     success: true,
-    campaign: serializeCampaign(reloaded, { itemsPreview: items }),
-    list: serializeCampaign(reloaded, { itemsPreview: items }),
+    campaign: serializeCampaign(reloaded, { itemsPreview: items, allowReviewCare: !!scope.reviewCareAuthority }),
+    list: serializeCampaign(reloaded, { itemsPreview: items, allowReviewCare: !!scope.reviewCareAuthority }),
     import_result: appendImportSummary,
   };
 }
@@ -8137,6 +8205,7 @@ async function renderTemplatePreview({ template, item, list, clinic }) {
 async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  await guardReviewCare(scope, list);
   ensureDispatchableCampaignRecord(list);
   const dispatchContext = normalizeDispatchContext(body.dispatch_context || body.dispatch_mode);
   const isWelcomeDispatch = dispatchContext === 'welcome' || body.welcome === true;
@@ -8260,6 +8329,14 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     ? !!template && String(template.status || '').toUpperCase() === 'APPROVED'
     : true;
   let items = await MarketingPatientListItem.findAll({ where: { list_id: list.id } });
+  await guardReviewCare(scope, list, items);
+  if (Number(list.criteria?.review_care_version) === 1 || items.some(careSnapshots.hasCareSnapshot)) {
+    const held = await require('./reviewCareContext.service').current().heldPatientIds(items.map(item => Number(item.paciente_id)));
+    for (const item of items) if (held.has(Number(item.paciente_id)) && String(item.status) === 'ready') {
+      await item.update({ status: 'excluded_import_hold', selected: false, exclusion_reason: 'importacion_comunicaciones_retenidas',
+        reason: 'Comunicaciones retenidas en la importación.', dispatch_status: null });
+    }
+  }
   await revalidateItemsForChannels(items, channels);
   items = await MarketingPatientListItem.findAll({ where: { list_id: list.id } });
   const listCounters = computeCounters(items.map((item) => (item?.get ? item.get({ plain: true }) : item)));
@@ -8295,6 +8372,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   }
   const nextCriteriaBase = annotateSegmentCounts({
     ...(list.criteria || {}),
+    ...(Number(list.criteria?.review_care_version) === 1 ? { review_care_actor_id: userId } : {}),
     active_segment_id: activeSegmentId,
   }, selectedItems);
   const clinicId = senderClinicId;
@@ -8484,9 +8562,10 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
 
   const reloaded = await MarketingPatientList.findByPk(list.id);
   const accountQuality = await getWhatsappAccountQualityForList(reloaded, scope);
+  await guardReviewCare(scope, reloaded, items);
   return {
     success: true,
-    campaign: serializeCampaign(reloaded, { itemsPreview: items.slice(0, 5) }),
+    campaign: serializeCampaign(reloaded, { itemsPreview: items.slice(0, 5), allowReviewCare: !!scope.reviewCareAuthority }),
     dispatch_blocked: getBlockedGates(nextGates).length > 0,
     blocked_gates: getBlockedGates(nextGates),
     dispatch: getDispatchProgress(reloaded, counters, accountQuality),
@@ -8501,6 +8580,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
 async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTest = false } = {}) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  await guardReviewCare(scope, list);
   ensureDispatchableCampaignRecord(list, { allowPaymentTest: allowDiagnosticPaymentTest === true });
   if (list.criteria?.whatsapp_payment_recovery_test === true) {
     const criteria = list.criteria;
@@ -8644,12 +8724,17 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
   }
   // Build context in memory until the selected copy, its approval and media
   // have passed validation. A rejected test must not alter the saved campaign.
-  if (JSON.stringify(listCriteria) !== storedCriteria) {
+  const protectedCareTest = Number(list.criteria?.review_care_version) === 1;
+  if (!protectedCareTest && JSON.stringify(listCriteria) !== storedCriteria) {
     await list.update({ criteria: listCriteria });
   }
   let item = body.item_id
     ? await MarketingPatientListItem.findOne({ where: { id: body.item_id, list_id: list.id } })
     : await MarketingPatientListItem.findOne({ where: { list_id: list.id, status: 'ready' }, order: [['id', 'ASC']] });
+  await guardReviewCare(scope, list, item ? [item] : [], { checkHold: true });
+  if (protectedCareTest && JSON.stringify(listCriteria) !== storedCriteria) {
+    await list.update({ criteria: listCriteria });
+  }
   const targetPhone = whatsappService.normalizePhoneNumber(body.to || body.phone || '');
   if (!targetPhone) {
     const err = new Error('Número de prueba no válido.');
@@ -8949,6 +9034,7 @@ async function getEmailTestStatus(scope, campaignId, messagePublicId) {
 async function listRecipients(scope, campaignId, query = {}) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  await guardReviewCare(scope, list);
   await reconcileListMessageState(list, scope);
   const reloaded = await MarketingPatientList.findByPk(list.id);
   const page = Math.max(1, Number.parseInt(query.page || '1', 10) || 1);
@@ -8975,7 +9061,7 @@ async function listRecipients(scope, campaignId, query = {}) {
       { name: { [Op.like]: `%${search}%` } },
       { phone: { [Op.like]: `%${search}%` } },
       { email: { [Op.like]: `%${search}%` } },
-      Sequelize.where(Sequelize.cast(Sequelize.col('custom_fields'), 'CHAR'), { [Op.like]: `%${search}%` }),
+      Sequelize.where(Sequelize.cast(Sequelize.fn('JSON_REMOVE', Sequelize.col('custom_fields'), '$.review_care_v1'), 'CHAR'), { [Op.like]: `%${search}%` }),
     ];
   }
 
@@ -8985,6 +9071,7 @@ async function listRecipients(scope, campaignId, query = {}) {
     limit: pageSize,
     offset,
   });
+  await guardReviewCare(scope, list, rows);
   const counters = reloaded?.counters || await refreshListCounters(list.id);
   const report = await buildListReport(list.id);
   const clickCountsByItem = new Map((report?.item_clicks || []).map((row) => [Number(row.item_id), Number(row.clicks || 0)]));
@@ -8994,7 +9081,7 @@ async function listRecipients(scope, campaignId, query = {}) {
     page_size: pageSize,
     total: count,
     items: rows.map((row) => ({
-      ...serializeItem(row),
+      ...serializeItem(row, { allowReviewCare: !!scope.reviewCareAuthority }),
       link_clicks: clickCountsByItem.get(Number(row.id)) || 0,
     })),
     summary: counters,
@@ -9016,6 +9103,11 @@ async function updateRecipient(scope, campaignId, itemId, body = {}, userId = nu
     const err = new Error('Contacto de la lista no encontrado');
     err.status = 404;
     throw err;
+  }
+
+  await guardReviewCare(scope, list, [item], { checkHold: true });
+  if (Number(list.criteria?.review_care_version) === 1 && !careSnapshots.hasCareSnapshot(item)) {
+    throw Object.assign(new Error('Comprueba la atención realizada de este paciente antes de habilitarlo.'), { status: 409 });
   }
 
   const action = normalizeKey(body.action || 'restore');
@@ -9072,12 +9164,13 @@ async function updateRecipient(scope, campaignId, itemId, body = {}, userId = nu
 
   const reloaded = await MarketingPatientList.findByPk(list.id);
   const updated = await MarketingPatientListItem.findByPk(item.id);
+  await guardReviewCare(scope, reloaded, [updated], { checkHold: true });
   return {
     success: true,
     action: 'restored',
-    item: serializeItem(updated),
-    campaign: serializeCampaign(reloaded, { itemsPreview: [updated] }),
-    list: serializeCampaign(reloaded, { itemsPreview: [updated] }),
+    item: serializeItem(updated, { allowReviewCare: !!scope.reviewCareAuthority }),
+    campaign: serializeCampaign(reloaded, { itemsPreview: [updated], allowReviewCare: !!scope.reviewCareAuthority }),
+    list: serializeCampaign(reloaded, { itemsPreview: [updated], allowReviewCare: !!scope.reviewCareAuthority }),
   };
 }
 
@@ -9280,6 +9373,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const userId = getActorUserId(actor);
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  await guardReviewCare(scope, list, [], { background: !scope.reviewCareAuthority });
   ensureDispatchableCampaignRecord(list);
   const rawDispatchOverride = body.dispatch_config || body.dispatchConfig || null;
   const requestedContext = normalizeDispatchContext(
@@ -9613,6 +9707,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   const userId = getActorUserId(actor);
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
+  await guardReviewCare(scope, list, [], { background: !scope.reviewCareAuthority });
   ensureDispatchableCampaignRecord(list);
   const channels = Array.isArray(list.criteria?.channels)
     ? list.criteria.channels
@@ -11264,6 +11359,8 @@ module.exports = {
   removeCampaign,
   reconcileDispatchJobState,
   __testing: {
+    buildItemsFromRows,
+    serializeItem,
     isReviewImportedListEligible,
     buildReviewItemsFromImportedList,
     isReviewRequestList,

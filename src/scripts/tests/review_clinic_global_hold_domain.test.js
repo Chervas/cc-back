@@ -32,6 +32,8 @@ function harness() {
         if (name === '../../models') return db;
         if (name === 'crypto' || name === 'sequelize') return require(name);
         if (name === '../lib/whatsappAppointmentEligibility') return eligibility;
+        if (name === '../lib/review-care-snapshot') return require('../../lib/review-care-snapshot');
+        if (name === '../lib/marketing-import-care-date') return require('../../lib/marketing-import-care-date');
         if (name === '../lib/bs-privacy-commercial-preferences') return { assertCommercialAllowed: async () => true };
         if (name === './marketingBulkSends.service') return bulk;
         if (name === './marketingEmailDispatch.service') return email || serviceStub;

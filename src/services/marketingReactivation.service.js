@@ -5,6 +5,8 @@ const crypto = require('crypto');
 const db = require('../../models');
 const { normalizePhoneDigits } = require('../lib/phone');
 const { formatMarketingDate } = require('../lib/marketing-template-variables');
+const { CARE_DATE_IMPORT_ALIASES, inferCareDateColumn, readImportedCareDate } = require('../lib/marketing-import-care-date');
+const { KEY: REVIEW_CARE_KEY, stripCareSnapshot } = require('../lib/review-care-snapshot');
 const marketingOptOutService = require('./marketingOptOut.service');
 
 const {
@@ -538,7 +540,9 @@ function listInScope(list, scope) {
 }
 
 function ensureScopeAccess(list, scope) {
-  if (!list || !listInScope(list, scope)) {
+  if (!list || !listInScope(list, scope)
+    || (list.objective_id && list.objective_id !== 'reactivate_patients')
+    || Number(list.criteria?.review_care_version) === 1) {
     const err = new Error('Lista de reactivación no encontrada en el scope actual');
     err.status = 404;
     throw err;
@@ -914,26 +918,7 @@ const IMPORT_ALIASES = {
   phone_landline: ['telefono_fijo', 'teléfono_fijo', 'telefono_secundario', 'teléfono_secundario', 'fijo', 'phone_landline', 'landline', 'fixed_phone', 'telefono_casa'],
   email: ['email', 'correo', 'correo_electronico', 'mail'],
   treatment: ['tratamiento', 'descripcion_tratamiento', 'descripción_tratamiento', 'nombre_tratamiento', 'tratamiento_realizado', 'treatment', 'servicio', 'procedimiento'],
-  last_visit_at: [
-    'fecha_ultima_cita_asistida',
-    'ultima_cita_asistida',
-    'last_attended_appointment_date',
-    'last_attended_visit_date',
-    'fecha_fin_realizacion',
-    'fecha_fin_realización',
-    'fecha_fin_tratamiento',
-    'fecha_inicio_tratamiento',
-    'fecha_tratamiento',
-    'fecha_de_tratamiento',
-    'fecha_realizacion',
-    'fecha_realizacion_tratamiento',
-    'fecha_ultima_cita',
-    'ultima_cita',
-    'última_cita',
-    'fecha_ultimo_tratamiento',
-    'last_visit',
-    'last_visit_at',
-  ],
+  last_visit_at: CARE_DATE_IMPORT_ALIASES,
   clinic: ['clinica', 'clínica', 'sede', 'centro', 'ubicacion_de_la_clinica', 'ubicación_de_la_clínica', 'ubicacion_clinica', 'ubicación_clínica', 'ubicacion', 'ubicación', 'clinic', 'location'],
 };
 
@@ -952,7 +937,8 @@ function inferColumnMapping(rows, explicit = {}) {
   ));
   const mapping = {};
   for (const [field, aliases] of Object.entries(IMPORT_ALIASES)) {
-    mapping[field] = explicit[field] || findImportHeader(headers, aliases) || null;
+    mapping[field] = field === 'last_visit_at' ? inferCareDateColumn(headers, explicit)
+      : (explicit[field] || findImportHeader(headers, aliases) || null);
   }
   return mapping;
 }
@@ -1111,7 +1097,7 @@ function buildCustomFields(row, mapping, customFieldsSchema = []) {
     const custom = {};
     for (const field of explicitFields) {
       const cleanValue = normalizeText(row?.[field.source_column]);
-      if (!cleanValue) continue;
+      if (!cleanValue || field.key === REVIEW_CARE_KEY) continue;
       custom[field.key] = cleanValue;
     }
     return custom;
@@ -1123,7 +1109,7 @@ function buildCustomFields(row, mapping, customFieldsSchema = []) {
     if (STANDARD_IMPORT_FIELDS.has(normalizeKey(key))) continue;
     const cleanKey = normalizeKey(key);
     const cleanValue = normalizeText(value);
-    if (!cleanKey || !cleanValue) continue;
+    if (!cleanKey || cleanKey === REVIEW_CARE_KEY || !cleanValue) continue;
     custom[cleanKey] = cleanValue;
   }
   return custom;
@@ -1657,7 +1643,8 @@ async function buildImportedItemPayloads(scope, body, transaction) {
     const email = readImportValue(row, columnMapping, 'email') || null;
     const importedClinic = readImportValue(row, columnMapping, 'clinic') || null;
     const importedClinicId = resolveImportedClinicId(importedClinic, clinicLookup);
-    const lastVisit = parseImportDate(readImportValue(row, columnMapping, 'last_visit_at'));
+    const importedCare = readImportedCareDate(row, columnMapping, body);
+    const lastVisit = importedCare.status === 'valid' ? new Date(`${importedCare.date}T00:00:00.000Z`) : null;
     const customFields = buildCustomFields(row, columnMapping, customFieldsSchema);
     let patient = phoneDigits ? patientByPhone.get(phoneDigits) : null;
     const hadExistingPatient = !!patient;
@@ -1804,6 +1791,12 @@ async function buildImportedItemPayloads(scope, body, transaction) {
       selected,
       custom_fields: {
         ...customFields,
+        import_care_date: {
+          version: 1, status: importedCare.status,
+          column: columnMapping.last_visit_at || null,
+          raw: columnMapping.last_visit_at ? normalizeText(row[columnMapping.last_visit_at]).slice(0, 200) : null,
+          format: body.import_date_format || 'dmy', excel_date_system: body.import_excel_date_system || '1900',
+        },
         ...(lastVisit ? { fecha_ultima_cita_asistida: formatMarketingDate(lastVisit) } : {}),
         import_patient_status: patientImportStatus,
       },
@@ -2194,7 +2187,7 @@ function serializeItem(item) {
     reason: plain.reason,
     exclusion_reason: plain.exclusion_reason,
     selected: plain.selected,
-    custom_fields: plain.custom_fields || {},
+    custom_fields: stripCareSnapshot(plain.custom_fields),
     missing_variables: plain.missing_variables || [],
     appointment_at: plain.appointment_at,
     treatment_completed: !!plain.treatment_completed,
@@ -2372,6 +2365,8 @@ async function createList(scope, body = {}, userId = null) {
         import_file_name: body.import_file_name || null,
         import_patient_summary: importResult?.patientSummary || null,
         column_mapping: importResult?.columnMapping || body.column_mapping || null,
+        import_date_format: body.import_date_format || 'dmy',
+        import_excel_date_system: body.import_excel_date_system || '1900',
         name_format: source === 'import' ? normalizeNameFormat(body.name_format || body.nameFormat || 'auto') : null,
         treatment_mappings: body.treatment_mappings || body.treatment_mapping || null,
         create_historical_appointments: source === 'import'
