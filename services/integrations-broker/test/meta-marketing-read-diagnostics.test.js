@@ -187,7 +187,7 @@ test('Ads path variants are closed diagnostics and never allow aliases, other ve
  assert.equal(c.error.code,'provider_failed');assert.equal(e.pagination.pathMismatch,false);assert.equal(e.pagination.fragmentRejected,true);assert.equal(e.paginationPathVariant,'exact');
 });
 test('Ads path shape qualifies public versions, account equality and fixed edges without exposing path values',async()=>{
- const cases=[['/v25.0/act_301/ads',{version:'v25.0',versionRelation:'other',account:'same_act',edge:'ads',edgeMatches:true,trailingSlash:false,canonicalPattern:true}],
+ const cases=[['/v26.0/act_301/ads',{version:'v26.0',versionRelation:'other',account:'same_act',edge:'ads',edgeMatches:true,trailingSlash:false,canonicalPattern:true}],
   ['/v24.0/301/ads',{version:'v24.0',versionRelation:'current',account:'same_numeric',edge:'ads',edgeMatches:true,canonicalPattern:true}],
   ['/v24.0/act_302/ads',{account:'other_numeric',edge:'ads',edgeMatches:true,canonicalPattern:true}],
   ['/act_301/ads/',{version:null,versionRelation:'versionless',account:'same_act',edge:'ads',edgeMatches:true,trailingSlash:true,canonicalPattern:true}],
@@ -204,6 +204,27 @@ test('Ads path shape qualifies public versions, account equality and fixed edges
   const shape=JSON.stringify(e.paginationPathShape);
   assert(!c.lines[0].includes(pathname));assert(!shape.includes('301'));assert(!shape.includes('302'));assert(!c.lines[0].includes('QA_AFTER'));
   assert.equal(f.calls.filter(v=>v.path.endsWith('/ads')).length,1);
+ }
+});
+test('the observed v25 paging alias cannot change account, edge, authority, encoding or any cursor validation',async()=>{
+ const next=()=>({data:[row('ads')],paging:{cursors:{after:'QA_AFTER'},next:'https://graph.facebook.com/v25.0/act_301/ads?after=QA_AFTER'}});
+ const cases=[['pathMismatch',v=>v.paging.next=v.paging.next.replace('/v25.0/','/v26.0/')],
+  ['pathMismatch',v=>v.paging.next=v.paging.next.replace('act_301','act_302')],['pathMismatch',v=>v.paging.next=v.paging.next.replace('act_301','301')],
+  ['pathMismatch',v=>v.paging.next=v.paging.next.replace('/ads?','/campaigns?')],['pathMismatch',v=>v.paging.next=v.paging.next.replace('/ads?','/ads/?')],
+  ['pathMismatch',v=>v.paging.next=v.paging.next.replace('act_301','%61ct_301')],['pathMismatch',v=>v.paging.next=v.paging.next.replace('/act_301/','//act_301/')],
+  ['hostRejected',v=>v.paging.next=v.paging.next.replace('graph.facebook.com','foreign.example.invalid')],
+  ['protocolRejected',v=>v.paging.next=v.paging.next.replace('https:','http:')],
+  ['authorityRejected',v=>v.paging.next=v.paging.next.replace('graph.facebook.com','user:private@graph.facebook.com')],
+  ['fragmentRejected',v=>v.paging.next+='#private'],['cursorMissing',v=>delete v.paging.cursors.after],
+  ['cursorMalformed',v=>v.paging.cursors.after='bad cursor'],['cursorUrlMismatch',v=>v.paging.cursors.after='OTHER_AFTER'],
+  ['emptyPage',v=>v.data=[]],['credentialReflection',v=>{v.paging.cursors.after=TOKEN;v.paging.next=v.paging.next.replace('QA_AFTER',TOKEN);}]];
+ for(const [flag,change]of cases){const raw=next();change(raw);const f=fixture({family:'ads',alter:k=>k==='ads_data'?{raw}:null}),c=await capture(f.run),e=closed(c);
+  assert.equal(c.error.code,'provider_failed');assert.equal(e.phase,'pagination');assert.equal(e.pagination[flag],true);
+  assert.equal(f.calls.filter(v=>v.path.endsWith('/ads')).length,1);assert(!c.lines[0].includes('QA_AFTER'));assert(!c.lines[0].includes('foreign.example.invalid'));
+ }
+ for(const [flag,state]of [['cursorRepeated',{after:'QA_AFTER',pages:1,startDate:null,endDate:null}],['pageLimitReached',{after:'EARLIER_AFTER',pages:1999,startDate:null,endDate:null}]] ){
+  const f=fixture({family:'ads',cursorState:state,alter:k=>k==='ads_data'?{raw:next()}:null}),c=await capture(f.run),e=closed(c);
+  assert.equal(c.error.code,'provider_failed');assert.equal(e.pagination[flag],true);
  }
 });
 test('diagnostic pagination and credential context reject unsafe values rather than copying provider data',async()=>{

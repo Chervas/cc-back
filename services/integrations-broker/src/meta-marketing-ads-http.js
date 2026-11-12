@@ -78,9 +78,14 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
           account:accountPart===`act_${asset.id}`?'same_act':accountPart===asset.id?'same_numeric':!accountPart?'missing':/^(?:act_)?[1-9][0-9]{0,29}$/.test(accountPart)?'other_numeric':'other',
           edge:['ads','adsets','campaigns','insights'].includes(edgePart)?edgePart:null,edgeMatches:edgePart===edge,
           canonicalPattern:/^\/(?:v[0-9]{1,3}\.[0-9]{1,2}\/)?(?:act_)?[1-9][0-9]{0,29}\/(?:ads|adsets|campaigns|insights)\/?$/.test(next.pathname)});
+        // Meta's observed v24 request response supplies a canonical v25 paging
+        // path. Admit only that exact version pair and the same account/edge.
+        // Next is never fetched: requests keep their fixed path and only the
+        // validated cursor is sealed for the next typed read.
+        const observedVersionAlias=graphVersion==='v24.0'&&next.pathname===`/v25.0/act_${asset.id}/${edge}`;
         const cursorAfter=raw.paging?.cursors?.after;
         const pagination={urlInvalid:false,protocolRejected:next.protocol!=='https:',hostRejected:next.hostname!=='graph.facebook.com',
-          authorityRejected:Boolean(next.port||next.username||next.password),fragmentRejected:Boolean(next.hash),pathMismatch:next.pathname!==path,
+          authorityRejected:Boolean(next.port||next.username||next.password),fragmentRejected:Boolean(next.hash),pathMismatch:next.pathname!==path&&!observedVersionAlias,
           cursorMissing:typeof cursorAfter!=='string',cursorMalformed:typeof cursorAfter==='string'&&!/^[\x21-\x7e]{1,1024}$/.test(cursorAfter),
           cursorUrlMismatch:next.searchParams.get('after')!==cursorAfter,cursorRepeated:cursorAfter===after,emptyPage:!results.length,pageLimitReached:pages>=1999,
           credentialReflection:typeof cursorAfter==='string'&&(cursorAfter.includes(ownToken.toString('utf8'))||cursorAfter.includes(ownApp.toString('ascii')))};

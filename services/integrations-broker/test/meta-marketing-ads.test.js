@@ -75,6 +75,19 @@ test('opaque cursors bind account, operation, dates and TTL; never return a prov
   await assert.rejects(r.execute('insights',{...payload('insights'),pageToken:first.nextPageToken},{assetRef:'meta-ad_account:999'}),{code:'scope_denied'});
   r.f.state.clock+=600001;await assert.rejects(r.execute('insights',{...payload('insights'),pageToken:first.nextPageToken}),{code:'invalid_request'});assert.equal(r.state.calls.length,before);
 });
+test('the observed v24 to v25 paging alias uses only an opaque cursor and keeps the fixed request account, edge and fields',async t=>{
+ for(const family of Object.keys(A.OPERATIONS)){
+  const r=await ready(t);r.state.raw=url=>({data:[row(family,url.searchParams.has('after')?'608':'607')],
+   ...(url.searchParams.has('after')?{}:{paging:{cursors:{after:'FICTITIOUS_UPGRADE_AFTER'},
+    next:`https://graph.facebook.com/v25.0/act_301/${['actions','insights'].includes(family)?'insights':family}?after=FICTITIOUS_UPGRADE_AFTER&access_token=${TOKEN}&fields=untrusted`}})});
+  const first=(await r.execute(family)).data;assert(first.nextPageToken);assert(!JSON.stringify(first).includes('FICTITIOUS_UPGRADE_AFTER'));assert(!JSON.stringify(first).includes(TOKEN));
+  const second=(await r.execute(family,{...payload(family),pageToken:first.nextPageToken})).data;assert.equal(second.nextPageToken,null);assert.equal(second.results.length,1);
+  const dataCalls=r.state.calls.filter(v=>!v.path.endsWith('/debug_token'));
+  assert.equal(dataCalls.length,2);
+  for(const call of dataCalls){assert.equal(call.path,`/v24.0/act_301/${['actions','insights'].includes(family)?'insights':family}`);assert.equal(call.query.fields,A.FIELDS[family]);assert.equal(call.query.limit,'50');}
+  assert.equal(dataCalls[1].query.after,'FICTITIOUS_UPGRADE_AFTER');assert(!Object.hasOwn(dataCalls[1].query,'access_token'));
+ }
+});
 test('revocation during Graph I/O aborts disclosure and excludes subsequent reads without another provider call',async t=>{
   const r=await ready(t);let revoked=false;r.state.before=async()=>{if(revoked)return;revoked=true;await r.f.execute(M.REVOKE,{}, {assetRef:REF},'assetControl',r.current);};
   await assert.rejects(r.execute('campaigns'),{code:'provider_timeout'});const before=r.state.calls.length;await assert.rejects(r.execute('campaigns'),{code:'asset_revoked'});assert.equal(r.state.calls.length,before);
