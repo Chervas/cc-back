@@ -253,7 +253,7 @@ async function persistMetaLead({ models, event, retrieved, now = new Date(), rec
   const result = await models.sequelize.transaction(async transaction => {
     const clinic = await resolveMetaLeadClinic({ models, event, ...retrieved, transaction });
     if (Number(clinic.id_clinica) !== Number(retrieved.clinic.id_clinica)) fail('meta_lead_clinic_scope_mismatch');
-    const historicalRecovery = recoveryProof === null ? null
+    let historicalRecovery = recoveryProof === null ? null
       : require('../lib/metaLeadHistoricalRecovery').forPersistence(recoveryProof, event, Number(clinic.id_clinica), retrieved.lead.created_time);
     const existing = await models.LeadIntake.findOne({ where: { external_source: 'meta_leadgen', external_id: event.lead_id },
       transaction, lock: transaction.LOCK.UPDATE });
@@ -264,6 +264,11 @@ async function persistMetaLead({ models, event, retrieved, now = new Date(), rec
         providerCreatedAt: retrieved.lead.created_time, transaction,
       });
       return { lead: existing, duplicate: true };
+    }
+    if (historicalRecovery === null) {
+      const recovery = require('../lib/metaLeadHistoricalRecovery');
+      const late = await recovery.forLateProviderReceipt({ event, clinic, retrieved, transaction, recoveredAt: now });
+      if (late) historicalRecovery = recovery.forPersistence(late, event, Number(clinic.id_clinica), retrieved.lead.created_time);
     }
     const identity = retrieved.identity && { version: 1, verified_by: 'meta_graph', provider: 'meta_ads',
       clinic_id: Number(clinic.id_clinica), ...retrieved.identity, page_id: event.page_id, form_id: event.form_id };
@@ -319,7 +324,7 @@ async function runMetaLeadReceptionJob(payload, job = null, overrides = {}) {
     const waiting = require('./metaMarketingLeadReader.service').cooldownWait(error, JOB_TYPE);
     if (waiting) return waiting;
     const code = error.code?.startsWith('meta_lead_') ? error.code : 'meta_lead_reception_failed';
-    return { status: 'failed', retryable: !['meta_lead_receipt_review_required', 'meta_lead_form_conflict',
+    return { status: 'failed', retryable: !['meta_lead_receipt_review_required', 'meta_lead_recovery_proof_invalid', 'meta_lead_recovery_cutoff_invalid', 'meta_lead_form_conflict',
       'meta_lead_form_identity_mismatch', 'meta_lead_form_response_invalid'].includes(error.code)
       && !['scope_denied', 'asset_revoked', 'credential_revoked', 'operation_denied', 'meta_leads_disabled'].includes(error.code), error_message: code };
   }

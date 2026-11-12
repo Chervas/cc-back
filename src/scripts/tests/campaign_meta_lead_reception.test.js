@@ -311,3 +311,58 @@ test('organic shared Page requires the independently reviewed Page route and nev
   h.state.recipientClinicId = null;
   assert.equal((await runMetaLeadReceptionJob(payload, null, h)).error_message, 'meta_lead_clinic_assignment_required');
 });
+
+function lateReceiptHarness() {
+  const h=harness(),pageId='100586185397014',nativeEvent={...event,page_id:pageId};
+  Object.assign(h.state.page,{metaAssetId:pageId,metaConnectionId:172,grupoClinicaId:29});
+  Object.assign(h.state.account,{metaConnectionId:172,grupoClinicaId:29});
+  h.state.connection.id=172;h.state.clinics=[{id_clinica:66,grupoClinicaId:29,estado_clinica:1}];
+  h.state.decisions=[{status:'active',clinica_id:66}];h.state.assignments=[{scopeKey:'group:29',metaConnectionId:172}];
+  h.state.eventOverride=nativeEvent;h.state.recipientClinicId=66;
+  h.reader.assertPair=async()=>({page:{mappingId:10,id:pageId,connectionId:172,scopeKey:'group:29',clinicIds:[66,72]},
+    account:{mappingId:11,id:'500',connectionId:172,scopeKey:'group:29'},route:{recipientClinicId:66}});
+  h.models.LeadAttributionAudit.findAll=async({where})=>h.state.audits.filter(row=>row.lead_intake_id===where.lead_intake_id);
+  const guardedNotify=async input=>{if(!await require('../../lib/metaLeadHistoricalRecovery').suppressesAutomaticReply(h.models,input.lead))h.state.notifications.push(input);};
+  return {...h,nativeEvent,payload:{...jobPayload,...nativeEvent},guardedNotify};
+}
+async function withCutoff(work) {
+  const key='META_MARKETING_LEAD_RECOVERY_CUTOFF_POLICY',before=process.env[key];
+  process.env[key]=JSON.stringify({version:1,scopeKey:'group:29',connectionId:172,before:new Date(Date.now()-60000).toISOString(),
+    pages:[{pageId:'100586185397014',clinicId:66},{pageId:'162719417401326',clinicId:72}]});
+  try{return await work();}finally{if(before===undefined)delete process.env[key];else process.env[key]=before;}
+}
+test('a late native job that wins before historical CLI commits one system-suppressed lead and cannot trigger an auto-reply',async()=>withCutoff(async()=>{
+  const h=lateReceiptHarness(),R=require('../../lib/metaLeadHistoricalRecovery');
+  const first=await runMetaLeadReceptionJob(h.payload,null,{...h,notify:h.guardedNotify});
+  assert.equal(first.status,'completed');assert.equal(h.state.leads.length,1);assert.equal(h.state.notifications.length,0);
+  const marker=h.state.audits[0].attribution_steps.meta_historical_recovery;
+  assert.equal(marker.source,'late_provider_receipt');assert.equal(marker.actor_kind,'system');assert.equal(marker.actor_user_id,null);
+  const history=JSON.stringify(h.state.audits),retrieved=await retrieveMetaLead({models:h.models,event:h.nativeEvent,reader:h.reader,receiptRef,pageAssetId:10,accountAssetId:11});
+  const proof=R.issue({actorId:99,clinicId:66,event:h.nativeEvent,source:'accepted_receipt',providerCreatedAt:retrieved.lead.created_time});
+  assert.equal((await persistMetaLead({models:h.models,event:h.nativeEvent,retrieved,recoveryProof:proof})).duplicate,true);
+  assert.equal(JSON.stringify(h.state.audits),history);assert.equal(h.state.leads.length,1);assert.equal(h.state.notifications.length,0);
+}));
+test('a late webhook after historical CLI reuses the original lead and cannot enqueue an auto-reply',async()=>withCutoff(async()=>{
+  const h=lateReceiptHarness(),R=require('../../lib/metaLeadHistoricalRecovery');
+  const retrieved=await retrieveMetaLead({models:h.models,event:h.nativeEvent,reader:h.reader,receiptRef,pageAssetId:10,accountAssetId:11});
+  const proof=R.issue({actorId:99,clinicId:66,event:h.nativeEvent,source:'accepted_receipt',providerCreatedAt:retrieved.lead.created_time});
+  await persistMetaLead({models:h.models,event:h.nativeEvent,retrieved,recoveryProof:proof});const original=JSON.stringify(h.state.audits);
+  const later=await runMetaLeadReceptionJob(h.payload,null,{...h,notify:h.guardedNotify});
+  assert.equal(later.status,'completed');assert.equal(later.duplicate,true);assert.equal(h.state.leads.length,1);
+  assert.equal(JSON.stringify(h.state.audits),original);assert.equal(h.state.notifications.length,0);
+}));
+test('fresh leads keep normal auto-replies, invalid future dates cannot INSERT, and existing ordinary history is not marked retroactively',async()=>withCutoff(async()=>{
+  const fresh=lateReceiptHarness();fresh.state.providerLead.created_time=new Date(Date.now()-1000).toISOString();
+  assert.equal((await runMetaLeadReceptionJob(fresh.payload,null,{...fresh,notify:fresh.guardedNotify})).status,'completed');
+  assert.equal(fresh.state.audits[0].attribution_steps.meta_historical_recovery,undefined);assert.equal(fresh.state.notifications.length,1);
+  const future=lateReceiptHarness();future.state.providerLead.created_time=new Date(Date.now()+3600000).toISOString();
+  const rejected=await runMetaLeadReceptionJob(future.payload,null,{...future,notify:future.guardedNotify});
+  assert.equal(rejected.status,'failed');assert.equal(rejected.retryable,false);assert.equal(future.state.leads.length,0);assert.equal(future.state.notifications.length,0);
+  const key='META_MARKETING_LEAD_RECOVERY_CUTOFF_POLICY',policy=process.env[key],old=lateReceiptHarness();delete process.env[key];
+  const retrieved=await retrieveMetaLead({models:old.models,event:old.nativeEvent,reader:old.reader,receiptRef,pageAssetId:10,accountAssetId:11});
+  await persistMetaLead({models:old.models,event:old.nativeEvent,retrieved});process.env[key]='MALFORMED_POLICY';
+  const history=JSON.stringify(old.state.audits);
+  assert.equal((await persistMetaLead({models:old.models,event:old.nativeEvent,retrieved})).duplicate,true);
+  assert.equal(JSON.stringify(old.state.audits),history);assert.equal(old.state.audits[0].attribution_steps.meta_historical_recovery,undefined);
+  process.env[key]=policy;
+}));
