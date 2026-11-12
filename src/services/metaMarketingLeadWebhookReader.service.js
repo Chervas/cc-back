@@ -7,7 +7,7 @@ const L = require('../../services/integrations-broker/src/meta-marketing-leads-c
 const { isGatewayRuntime, resolveEnqueueRuntimeNamespace } = require('../lib/gatewayJobOwnership');
 const { createConfiguredMetaMarketingClient } = require('./metaMarketingBrokerReader.service');
 const { createMetaMarketingLeadReader } = require('./metaMarketingLeadReader.service');
-const { createMetaMarketingBrokerScope, createMetaMarketingScopeRepository } = require('./metaMarketingBrokerScope.service');
+const { createMetaMarketingBrokerScope, createMetaMarketingLeadIngressScopeRepository } = require('./metaMarketingBrokerScope.service');
 const fail = code => { throw Object.assign(Error(code), { code }); };
 const positive = value => typeof value === 'string' && /^[1-9][0-9]{0,9}$/.test(value)
   && Number(value) <= 2147483647;
@@ -110,7 +110,7 @@ function forWebhookModels(models, { env = process.env } = {}) {
   if (!instances.has(models)) instances.set(models, new WeakMap());
   const byEnvironment = instances.get(models);
   if (!byEnvironment.has(env)) {
-    const scope = createMetaMarketingBrokerScope({ ...createMetaMarketingScopeRepository(() => models),
+    const scope = createMetaMarketingBrokerScope({ ...createMetaMarketingLeadIngressScopeRepository(() => models),
       enabled: () => {
         if (env.META_MARKETING_LEADGEN_RECEIVER_ENABLED !== 'true') return false;
         receiverConfiguration(env); return true;

@@ -36,7 +36,7 @@ function mapping(value) {
     clinicId:value.clinicaId === null ? null : Number(value.clinicaId), groupId:value.grupoClinicaId === null ? null : Number(value.grupoClinicaId), active:[true,1].includes(value.isActive) };
 }
 function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocations, loadMappings, loadClinics, loadShared, loadPrimaryGroups, inspectEnrollment,
-  loadGrants, loadConnection, blocked, enabled = () => process.env.META_MARKETING_BROKER_ENABLED === 'true' }) {
+  loadGrants, loadConnection, blocked, inspectInTransaction, enabled = () => process.env.META_MARKETING_BROKER_ENABLED === 'true' }) {
   const contexts = new WeakMap();
   async function inspect(mappingId, expected) {
     if (!enabled()) fail('broker_cohort_disabled');
@@ -139,18 +139,37 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
   return { describe:context => { // Metadata from preparation, never a replacement for assertContext.
       const captured=contexts.get(context);if(!captured)fail();return structuredClone(captured);
     }, prepare:guard(async mappingId => { const captured=await inspect(mappingId); const context=Object.freeze({}); contexts.set(context,captured);return context; }),
-    assertContext:guard(async context => { const captured=contexts.get(context);if(!captured)fail();return structuredClone(await inspect(captured.mappingId,captured)); }) };
+    assertContext:guard(async (context, options) => {
+      if(options!==undefined&&(!options||Object.getPrototypeOf(options)!==Object.prototype||Object.keys(options).join(',')!=='transaction'||!options.transaction))fail();
+      const transaction=options?.transaction;
+      const captured=contexts.get(context);if(!captured)fail();
+      if(transaction!==undefined){
+        if(!transaction?.LOCK?.UPDATE||transaction.finished||typeof inspectInTransaction!=='function')fail();
+        const current=await inspectInTransaction(structuredClone(captured),transaction);
+        if(digest(current)!==digest(captured))fail('meta_broker_scope_changed');
+        return structuredClone(current);
+      }
+      return structuredClone(await inspect(captured.mappingId,captured));
+    }) };
 }
-function createMetaMarketingScopeRepository(getModels, { transaction = null } = {}) {
+function createMetaMarketingScopeRepository(getModels, options = {}) {
+  return createScopeRepository(getModels,options,false);
+}
+function createMetaMarketingLeadIngressScopeRepository(getModels, options = {}) {
+  return createScopeRepository(getModels,options,true);
+}
+function createScopeRepository(getModels, { transaction = null } = {}, leadIngress) {
   if (transaction && (!transaction.LOCK?.UPDATE || transaction.finished)) fail();
   const options = { raw:true,logging:false,limit:1001,
     ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {}) };
   const mappingOptions = { ...options, attributes:[...MAPPING_FIELDS,[literal('(pageAccessToken IS NULL AND waAccessToken IS NULL AND additionalData IS NULL)'),'credentials_absent']] };
+  const inspectEnrollment=(id,tx)=>{
+    const bindings=require('./metaMarketingEnrollmentBinding.service').createBindings({models:getModels()});
+    return leadIngress?bindings.committedForLeadIngress(id,tx):bindings.committed(id,tx);
+  };
   return {
-    inspectEnrollment:id=>transaction
-      ? require('./metaMarketingEnrollmentBinding.service').createBindings({models:getModels()}).committed(id,transaction)
-      : getModels().sequelize.transaction({isolationLevel:'REPEATABLE READ'},transaction=>
-        require('./metaMarketingEnrollmentBinding.service').createBindings({models:getModels()}).committed(id,transaction)),
+    inspectEnrollment:id=>transaction?inspectEnrollment(id,transaction)
+      : getModels().sequelize.transaction({isolationLevel:'REPEATABLE READ'},tx=>inspectEnrollment(id,tx)),
     loadMapping:id => getModels().ClinicMetaAsset.findByPk(id,mappingOptions),
     loadRevocations:assetRef => getModels().MetaMarketingBrokerRevocation.findAll({ ...options,attributes:['tuple_hash'],where:{asset_ref:assetRef} }),
     loadBindings:(assetRef,mappingId) => getModels().MetaMarketingBrokerBinding.findAll({ ...options,attributes:BINDING_FIELDS,
@@ -185,4 +204,4 @@ function createMetaMarketingScopeRepository(getModels, { transaction = null } = 
     blocked:scope => require('./metaScopeBlock.service').blocked(scope,{models:getModels(),purpose:'meta',...(transaction?{transaction}:{})}),
   };
 }
-module.exports={createMetaMarketingBrokerScope,createMetaMarketingScopeRepository,BINDING_FIELDS,MAPPING_FIELDS,binding,mapping,asset,positive,reference};
+module.exports={createMetaMarketingBrokerScope,createMetaMarketingScopeRepository,createMetaMarketingLeadIngressScopeRepository,BINDING_FIELDS,MAPPING_FIELDS,binding,mapping,asset,positive,reference};

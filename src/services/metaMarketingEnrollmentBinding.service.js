@@ -126,6 +126,13 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
       credential:{epoch:effective.epoch,versionId:effective.versionId,expiresAt:effective.metadata.expiresAt,dataAccessExpiresAt:effective.metadata.dataAccessExpiresAt},
       digest:C.hash(JSON.stringify(pieces))};
   }
+  async function committedForLeadIngress(id,transaction){
+    // A signed receipt contains provider IDs only and borrows no user token.
+    // Reuse every structural/revocation check, but not reader-token health.
+    // Do not let a concurrent token replacement invalidate the stable grant.
+    const value=await committed(id,transaction,{allowExpiredCredential:true});
+    return {...value,credential:null};
+  }
   async function activate(value,remote,transaction){
     const expected=C.request(plain(value)),o=opts(transaction),stored=await R.findByPk(expected.enrollment_id,o);
     if(!stored)fail();const row=C.request(stored);
@@ -196,6 +203,6 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
     if(proof)await recovery.activate({flow,enrollment:current},transaction);
     await committed(row.enrollment_id,transaction);await record(current,'meta_enrollment_activated',transaction);return current;
   }
-  return {activate,committed,record,scopeOf};
+  return {activate,committed,committedForLeadIngress,record,scopeOf};
 }
 module.exports={createBindings,scopeOf};
