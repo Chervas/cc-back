@@ -66,12 +66,32 @@ function normalizeValues(payload, { creating = false, imported = false } = {}) {
     throw domainError(400, 'follow_up_invalid_input', 'El seguimiento no es válido.');
   }
   const values = {};
+  // An additive deployment must not activate years of imported/legacy work.
+  // Native creation and an explicit save of the new notice controls opt in.
+  if(creating) values.notice_enabled=!imported;
+  else if(['reminder_advance_days','recipient_mode','recipient_role_ids'].some(key=>Object.hasOwn(payload,key))) values.notice_enabled=true;
   if (creating || Object.hasOwn(payload, 'operational_reason')) {
     values.operational_reason = boundedText(payload.operational_reason, 'Motivo', 500, true);
   }
   if (Object.hasOwn(payload, 'clinical_notes')) values.clinical_notes = boundedText(payload.clinical_notes, 'Notas clínicas', 10000);
   for (const key of ['clinical_target_date', 'contact_due_date']) {
     if (creating || Object.hasOwn(payload, key)) values[key] = dateOnly(payload[key], key);
+  }
+  if (Object.hasOwn(payload, 'reminder_advance_days')) {
+    const advance = payload.reminder_advance_days;
+    if (advance !== null && ![1, 7, 15, 30].includes(advance)) throw domainError(400, 'follow_up_invalid_advance', 'La antelación debe ser 1, 7, 15 o 30 días.');
+    values.reminder_advance_days = advance;
+    if (advance !== null && payload.clinical_target_date) values.contact_due_date = addDays(dateOnly(payload.clinical_target_date, 'clinical_target_date'), -advance);
+  }
+  if (creating || Object.hasOwn(payload, 'recipient_mode')) {
+    values.recipient_mode = payload.recipient_mode || 'creator';
+    if (!['creator','roles','team'].includes(values.recipient_mode)) throw domainError(400, 'follow_up_invalid_recipients', 'Elige creador, roles o equipo.');
+  }
+  if (Object.hasOwn(payload, 'recipient_role_ids') || values.recipient_mode === 'roles') {
+    const ids = payload.recipient_role_ids;
+    if (!Array.isArray(ids) || ids.length > 8 || ids.some(id => !Number.isInteger(id) || id < 1 || id > 8)) throw domainError(400, 'follow_up_invalid_recipients', 'Los roles destinatarios no son válidos.');
+    values.recipient_role_ids = [...new Set(ids)].sort((a,b)=>a-b);
+    if (values.recipient_mode === 'roles' && !values.recipient_role_ids.length) throw domainError(400, 'follow_up_invalid_recipients', 'Selecciona al menos un rol.');
   }
   for (const key of ['treatment_id', 'linked_appointment_id']) {
     if (Object.hasOwn(payload, key)) values[key] = payload[key] == null ? null : positiveInteger(payload[key], key);
@@ -80,7 +100,7 @@ function normalizeValues(payload, { creating = false, imported = false } = {}) {
     values.status = payload.status ?? 'pending';
     if (!STATUSES.includes(values.status)) throw domainError(400, 'follow_up_invalid_status', 'Estado de seguimiento no válido.');
   }
-  if (creating && !imported && values.clinical_target_date && !Object.hasOwn(payload, 'contact_due_date')) {
+  if (creating && !imported && values.clinical_target_date && !Object.hasOwn(payload, 'contact_due_date') && !Object.hasOwn(payload, 'reminder_advance_days')) {
     values.contact_due_date = previousMonth(values.clinical_target_date);
   }
   return values;

@@ -445,6 +445,8 @@ async function handleCriticalTick() {
 
 async function handleStandardTick() {
   if (IS_GATEWAY_RUNTIME) return 0;
+  try { await require('./patientFollowUpNotices.service').current().tick(); }
+  catch(error) { console.warn('[follow-up notices] tick deferred',error.code||error.name); }
   if (process.env.PATIENT_MOBILE_VERIFICATION_ENABLED === 'true') await require('./patientMobileVerificationLifecycle.service').tick();
   if (externalDispatcher) {
     return externalDispatcher('standard');

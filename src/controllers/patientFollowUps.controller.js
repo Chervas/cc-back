@@ -19,6 +19,8 @@ function createPatientFollowUpsController({ followUps = service, canAccess = can
   }
 
   return {
+    recipientOptions: asyncHandler(async(req,res)=>{const ctx=await context(req);res.set('Cache-Control','no-store');res.json(await followUps.recipientOptions(ctx));}),
+    noticeAction: asyncHandler(async(req,res)=>{const ctx=await context(req);res.set('Cache-Control','no-store');res.json(await followUps.noticeAction({...ctx,id:req.params.id,payload:req.body}));}),
     list: asyncHandler(async (req, res) => {
       const ctx = await context(req);
       res.set('Cache-Control', 'no-store');

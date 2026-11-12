@@ -43,7 +43,18 @@ function packetFor(event, payload) {
     if (event === 'flow_execution:log') body.log = { ...project(payload.log, 'id node_id node_type status started_at finished_at'), error_message: null, audit_snapshot: null };
   }
   if (family === 'notification') {
+    if(event==='notification:updated' && payload.data?.accessRevoked===true){
+      return {event,body:{id:String(resourceId),read:true,title:'',description:'',data:{accessRevoked:true}},resource:{type:resourceType,id:String(resourceId)}};
+    }
     body.data = project(payload.data, 'quickChatConversationId quickChatMessageId appointmentId leadId');
+    const clinicalReminder=body.event==='clinical.follow_up_due' && payload.data?.kind==='patient_follow_up_reminder'
+      && typeof payload.data.follow_up_id==='string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(payload.data.follow_up_id)
+      && positive(payload.data.clinic_id) && Number(payload.data.clinic_id)===Number(body.clinicaId) && positive(payload.data.patient_id);
+    if(clinicalReminder){
+      body.data={kind:'patient_follow_up_reminder',follow_up_id:payload.data.follow_up_id,clinic_id:Number(body.clinicaId),patient_id:Number(payload.data.patient_id),
+        displayMode:'persistent_alert',requiresAcknowledgement:true,reminder_active:payload.data.reminder_active===true,contentFormat:'text'};
+      body.link=`/recordatorios?clinica_id=${body.data.clinic_id}&reminder=${body.data.follow_up_id}`;body.useRouter=true;
+    }
     const mobileReview = ['automation.persistent_alert', 'automation.system_notification'].includes(body.event)
       && payload.data?.trigger_type === 'patient.mobile_verification_requested'
       && positive(payload.data?.request_event_id) && positive(payload.data?.patientId) && positive(body.clinicaId);
@@ -82,7 +93,7 @@ function packetFor(event, payload) {
         requiresAcknowledgement: payload.data.requiresAcknowledgement === true, resolved: payload.data.resolved === true,
       };
       body.link = `/pacientes/detalle/${body.data.patientId}/datos-personales?clinic_id=${body.data.clinicId}`;
-    } else {
+    } else if(!clinicalReminder) {
       // Navigation must remain local; arbitrary URLs can carry credentials or exfiltrate user context.
       body.link = typeof body.link === 'string' && /^\/(?!\/)[a-zA-Z0-9/_-]*$/.test(body.link) ? body.link : null;
     }

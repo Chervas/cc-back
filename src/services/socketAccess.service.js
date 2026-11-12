@@ -64,11 +64,29 @@ function createPolicy({ models, canAccess, isAdmin }) {
       if (!row) return null;
       features = ['appointments.view', 'patients.sensitive.view', 'leads.sensitive.view']; location = await scopeFor(row.clinica_id);
     } else if (type === 'notification') {
-      row = await db().Notification.findByPk(id, { attributes: ['id', 'userId', 'clinicaId', 'data'], raw: true });
+      row = await db().Notification.findByPk(id, { attributes: ['id', 'userId', 'clinicaId', 'data','isRead','title','message','icon','level','category','event','createdAt'], raw: true });
       if (!row) return null;
+      if(packet.body?.data?.accessRevoked===true){
+        if(packet.event!=='notification:updated' || row.data?.kind!=='patient_follow_up_reminder')return null;
+        packet.body={id:String(id),read:true,title:'',description:'',data:{accessRevoked:true}};
+        return {scope:{type:'platform',id:null},clinicIds:[],features:[],ownerId:Number(row.userId)};
+      }
       features = ['patients.sensitive.view', 'leads.sensitive.view'];
       location = row.clinicaId ? await scopeFor(row.clinicaId) : { scope: { type: 'platform', id: null }, clinicIds: [] };
-      if (row.data?.quickChatConversationId) {
+      if(row.data?.kind==='patient_follow_up_reminder'){
+        const noticeAccess=require('./patientFollowUpNotices.service').createPatientFollowUpNoticeService({db:db(),canAccess});
+        const data=packet.body?.data;
+        if(data?.kind!=='patient_follow_up_reminder'||data.follow_up_id!==row.data.follow_up_id||Number(data.patient_id)!==Number(row.data.patient_id)||Number(data.clinic_id)!==Number(row.clinicaId))return null;
+        if(!await noticeAccess.canReadNotification(row,Number(row.userId))){
+          packet.body={id:String(id),read:true,title:'',description:'',data:{accessRevoked:true}};
+          return {scope:{type:'platform',id:null},clinicIds:[],features:[],ownerId:Number(row.userId)};
+        }
+        // A queued producer may predate a snooze/disable/booking transaction.
+        // Reproject the latest database state so an old packet cannot resurrect it.
+        const authoritative=require('../lib/socket-payload').packetFor(packet.event,require('../lib/notification-dto').mapNotificationToDto(row));
+        if(!authoritative)return null;packet.body=authoritative.body;
+        features=['appointments.view','patients.view','patients.sensitive.view'];
+      } else if (row.data?.quickChatConversationId) {
         if (!positive(row.data.quickChatConversationId)) return null;
         const related = await resolve({ resource: { type: 'conversation', id: String(row.data.quickChatConversationId) } });
         if (!related || row.clinicaId && !related.clinicIds.includes(Number(row.clinicaId))) return null;

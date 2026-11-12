@@ -6,6 +6,7 @@ const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '1,44')
   .filter((id) => Number.isInteger(id));
 
 const NOTIFICATION_CATEGORIES = [
+  { id: 'clinical', label: 'Recordatorios clínicos', icon: 'heroicons_outline:calendar-days' },
   {
     id: 'ads',
     label: 'Campañas publicitarias',
@@ -39,6 +40,7 @@ const NOTIFICATION_CATEGORIES = [
 ];
 
 const NOTIFICATION_EVENTS = [
+  { event: 'clinical.follow_up_due', category: 'clinical', label: 'Próxima cita pendiente de organizar', level: 'info' },
   { event: 'infrastructure.rds_event', category: 'system', label: 'AWS RDS: evento operativo significativo', level: 'info' },
   { event: 'infrastructure.rds_alarm', category: 'system', label: 'AWS RDS: alarma de infraestructura', level: 'warning' },
   { event: 'infrastructure.rds_recovered', category: 'system', label: 'AWS RDS: condición recuperada', level: 'info' },

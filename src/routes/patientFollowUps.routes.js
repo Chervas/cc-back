@@ -7,11 +7,13 @@ const controller = require('../controllers/patientFollowUps.controller');
 router.use(authMiddleware);
 router.get('/', controller.list);
 router.post('/', controller.create);
+router.get('/recipient-options', controller.recipientOptions);
 router.get('/from-appointment/:appointmentId', controller.getForSourceAppointment);
 router.get('/from-episode/:episodeId', controller.getForSourceEpisode);
 router.get('/:id/appointment-candidates', controller.appointmentCandidates);
 router.get('/:id', controller.get);
 router.patch('/:id', controller.update);
+router.post('/:id/notice', controller.noticeAction);
 // No DELETE: closing/cancelling retains clinical provenance and revisions.
 router.use((error, req, res, next) => {
   if (['ER_NO_SUCH_TABLE', '42P01'].includes(error.original?.code || error.parent?.code)) {

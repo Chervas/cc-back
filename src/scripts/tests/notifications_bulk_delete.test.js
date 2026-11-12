@@ -32,7 +32,7 @@ async function run() {
     await controller.removeAll({ userData: { userId: 321 } }, response);
     assert.equal(response.statusCode, 200);
     assert.deepEqual(response.payload, { deleted: 7 });
-    assert.deepEqual(destroyWhere, { userId: 321 });
+    assert.equal(destroyWhere.userId, 321, 'bulk deletion must remain restricted to the authenticated user');
   } finally {
     db.Notification.destroy = originalDestroy;
     await db.sequelize.close();
