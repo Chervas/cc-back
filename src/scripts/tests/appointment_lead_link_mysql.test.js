@@ -11,6 +11,7 @@ test('appointment/lead linkage uses isolated SQL, including rollback and simulta
     models.Sequelize = Sequelize;
     models.LeadIntake = sql.define('LeadIntake', { id: { type: DataTypes.INTEGER, primaryKey: true },
       clinica_id: DataTypes.INTEGER, telefono: DataTypes.STRING, status_lead: DataTypes.STRING,
+      motivo_descarte: DataTypes.STRING,
       archived_at: DataTypes.DATE, call_initiated: DataTypes.BOOLEAN, call_outcome: DataTypes.STRING,
       call_outcome_at: DataTypes.DATE, call_outcome_notes: DataTypes.STRING, call_outcome_appointment_id: DataTypes.INTEGER,
       historial_contactos: DataTypes.JSON, num_contactos: DataTypes.INTEGER, ultimo_contacto: DataTypes.DATE,
@@ -48,19 +49,77 @@ test('appointment/lead linkage uses isolated SQL, including rollback and simulta
       await reset(); await lead({ id: 2, clinica_id: 4 }); await lead({ id: 3, telefono: '+1612345678' });
       assert.equal(await find(), null); await lead(); assert.equal((await find()).id, 1);
     });
-    await t.test('explicit links preserve attended and terminal states; genuine pending calls still resolve', async () => {
+    await t.test('passive links preserve terminal states and explicit bookings preserve attended/converted; pending calls resolve', async () => {
       for (const status of ['acudio_cita', 'convertido', 'descartado']) {
         await reset(); const linked = await lead({ status_lead: status });
         await sql.transaction(async transaction => {
           const appointment = await models.CitaPaciente.create({ clinica_id: 3, paciente_id: 9,
             lead_intake_id: 1, estado: 'pendiente' }, { transaction });
-          await recordCreatedAppointmentLead({ models, lead: linked, appointment, transaction });
+          await recordCreatedAppointmentLead({ models, lead: linked, appointment, transaction,
+            explicitLeadIntakeId: status === 'descartado' ? null : linked.id });
         });
         assert.equal((await models.LeadIntake.findByPk(1)).status_lead, status);
       }
       await reset(); await lead({ call_initiated: true }); await create(await find());
       const after = await models.LeadIntake.findByPk(1);
       assert.equal(after.status_lead, 'citado'); assert.equal(after.call_outcome, 'citado');
+    });
+    const bookExplicitly = (linked, extra = {}) => createAppointmentWithPatientLanguage({ sequelize: sql,
+      AppointmentModel: models.CitaPaciente, patient: { id_paciente: 9 }, appointmentValues: {
+        clinica_id: 3, paciente_id: 9, lead_intake_id: linked.id, estado: extra.estado || 'pendiente',
+      }, afterPersist: async (appointment, transaction) => {
+        await recordCreatedAppointmentLead({ models, lead: linked, appointment, transaction,
+          explicitLeadIntakeId: linked.id, actorId: 7 });
+        await extra.afterPersist?.(appointment, transaction);
+      } });
+    await t.test('booking a discarded lead explicitly restores citado and audits the decision without erasing its discard history', async () => {
+      await reset(); const linked = await lead({ status_lead: 'descartado', motivo_descarte: 'otro: FICTITIOUS',
+        call_outcome: 'informacion', num_contactos: 2, historial_contactos: [{ motivo: 'FICTITIOUS' }] });
+      const appointment = await bookExplicitly(linked);
+      const after = await models.LeadIntake.findByPk(1);
+      assert.equal(after.status_lead, 'citado');
+      assert.equal(after.call_outcome_appointment_id, appointment.id_cita);
+      assert.equal(after.motivo_descarte, 'otro: FICTITIOUS');
+      assert.equal(after.call_outcome, 'informacion');
+      assert.equal(after.num_contactos, 2); assert.deepEqual(after.historial_contactos, [{ motivo: 'FICTITIOUS' }]);
+      const audits = await models.LeadAttributionAudit.findAll(); assert.equal(audits.length, 1);
+      assert.deepEqual(audits[0].attribution_steps, { action: 'discarded_lead_scheduled', userId: 7,
+        clinic_id: 3, previous_status: 'descartado', next_status: 'citado' });
+      assert.deepEqual(audits[0].raw_payload, { appointment_id: appointment.id_cita });
+    });
+    await t.test('a downstream failure rolls back the explicit reopening, its audit and the new appointment', async () => {
+      await reset(); const linked = await lead({ status_lead: 'descartado', motivo_descarte: 'otro: FICTITIOUS' });
+      await assert.rejects(bookExplicitly(linked, { afterPersist() { throw Error('FICTITIOUS_BOOKING_FAILURE'); } }), /FICTITIOUS/);
+      assert.equal(await models.CitaPaciente.count(), 0); assert.equal(await models.LeadAttributionAudit.count(), 0);
+      const after = await models.LeadIntake.findByPk(1);
+      assert.equal(after.status_lead, 'descartado'); assert.equal(after.call_outcome_appointment_id, null);
+      assert.equal(after.motivo_descarte, 'otro: FICTITIOUS');
+    });
+    await t.test('an explicit inactive appointment cannot reopen a discarded lead', async () => {
+      await reset(); const linked = await lead({ status_lead: 'descartado' });
+      await bookExplicitly(linked, { estado: 'cancelada' });
+      assert.equal((await models.LeadIntake.findByPk(1)).status_lead, 'descartado');
+      assert.equal(await models.LeadAttributionAudit.count(), 0);
+    });
+    await t.test('a reopening without its audit is rolled back instead of losing traceability', async () => {
+      await reset(); const linked = await lead({ status_lead: 'descartado' });
+      const original = models.LeadAttributionAudit.create;
+      models.LeadAttributionAudit.create = async () => { throw Error('FICTITIOUS_AUDIT_FAILURE'); };
+      try { await assert.rejects(bookExplicitly(linked), /FICTITIOUS_AUDIT_FAILURE/); }
+      finally { models.LeadAttributionAudit.create = original; }
+      assert.equal((await models.LeadIntake.findByPk(1)).status_lead, 'descartado');
+      assert.equal(await models.CitaPaciente.count(), 0);
+    });
+    await t.test('a mismatched explicit lead cannot authorize reopening or commit a booking', async () => {
+      await reset(); const linked = await lead({ status_lead: 'descartado' });
+      await assert.rejects(sql.transaction(async transaction => {
+        const appointment = await models.CitaPaciente.create({ clinica_id: 3, paciente_id: 9,
+          lead_intake_id: 1, estado: 'pendiente' }, { transaction });
+        await recordCreatedAppointmentLead({ models, lead: linked, appointment, transaction,
+          explicitLeadIntakeId: 2, actorId: 7 });
+      }), { code: 'appointment_lead_link_changed' });
+      assert.equal((await models.LeadIntake.findByPk(1)).status_lead, 'descartado');
+      assert.equal(await models.CitaPaciente.count(), 0); assert.equal(await models.LeadAttributionAudit.count(), 0);
     });
     await t.test('two eligible leads require an explicit choice, even when one has a pending call', async () => {
       await reset(); await lead(); await lead({ id: 2, telefono: '+34612345678', call_initiated: true });

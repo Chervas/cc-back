@@ -39,7 +39,7 @@ async function findUniqueAppointmentLead({ models, clinicId, phone, patientId = 
 // Called inside the appointment transaction, before any automation can observe
 // the new booking. A concurrent manual contact uses the same lead row lock.
 async function recordCreatedAppointmentLead({ models, lead, appointment, transaction,
-  autoLinkPhone = null, actorId = null }) {
+  autoLinkPhone = null, explicitLeadIntakeId = null, actorId = null }) {
   if (!lead) return null;
   if (!transaction) throw Error('appointment_lead_transaction_required');
   const fresh = await models.LeadIntake.findByPk(lead.id, { transaction, lock: transaction.LOCK.UPDATE });
@@ -52,14 +52,29 @@ async function recordCreatedAppointmentLead({ models, lead, appointment, transac
       patientId: appointment.paciente_id, phone: autoLinkPhone, transaction });
     if (!candidate || positive(candidate.id) !== positive(fresh.id)) conflict();
   }
+  if (explicitLeadIntakeId !== null && positive(explicitLeadIntakeId) !== positive(fresh.id)) conflict();
+  // Only the explicitly selected lead may leave descartado on a real booking.
+  // Phone matching and later appointment synchronizations cannot reopen it.
+  const previousStatus = String(fresh.status_lead || '').trim().toLowerCase();
+  const reopensDiscarded = previousStatus === 'descartado' && autoLinkPhone === null
+    && positive(explicitLeadIntakeId) === positive(fresh.id);
   if (ACTIVE_APPOINTMENTS.has(String(appointment.estado || '').toLowerCase())
-    && !['convertido', 'descartado', 'acudio_cita'].includes(String(fresh.status_lead || '').toLowerCase())) {
+    && (reopensDiscarded || !['convertido', 'descartado', 'acudio_cita'].includes(previousStatus))) {
     await fresh.update({ status_lead: 'citado', call_outcome_appointment_id: appointment.id_cita,
       ...(fresh.call_initiated && !fresh.call_outcome ? {
         call_outcome: 'citado', call_outcome_at: new Date(),
         call_outcome_notes: fresh.call_outcome_notes || 'Lead vinculado al crear una cita con el mismo teléfono.',
       } : {}),
     }, { transaction });
+    if (reopensDiscarded) {
+      // Keep motivo_descarte and contact history as historical evidence. The
+      // status, appointment and audit must all roll back if booking fails.
+      await models.LeadAttributionAudit.create({ lead_intake_id: fresh.id,
+        raw_payload: { appointment_id: appointment.id_cita },
+        attribution_steps: { action: 'discarded_lead_scheduled', userId: positive(actorId),
+          clinic_id: positive(appointment.clinica_id), previous_status: previousStatus, next_status: 'citado' },
+      }, { transaction });
+    }
   }
   if (autoLinkPhone !== null && models.LeadAttributionAudit) {
     await models.LeadAttributionAudit.create({ lead_intake_id: fresh.id,

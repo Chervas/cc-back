@@ -2229,6 +2229,7 @@ exports.createCita = asyncHandler(async (req, res) => {
                 }
                 lead = await recordCreatedAppointmentLead({ models: db, lead, appointment, transaction,
                     autoLinkPhone: !explicitLeadIntakeId && lead ? autoLinkPhone : null,
+                    explicitLeadIntakeId,
                     actorId: req.userData?.userId,
                 });
                 await enqueueCreatedAppointmentCrmSignals({ lead, appointment, transaction });
