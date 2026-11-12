@@ -92,12 +92,16 @@ function fixture({ finalNames = ['nombre_paciente', 'fecha_ultima_cita_asistida'
     templateHasImageHeader: () => false, publicMediaPersonalizationService: { normalizeHexColor: () => null },
     findApprovedReviewWhatsappTemplate: async () => requested, resolveWhatsappTemplate: async () => requested,
     loadClinicForTemplateVariables: async () => ({ nombre: 'Clínica ficticia' }),
-    resolveWhatsappClinicConfigForList: async () => ({ wabaId: 'FICTITIOUS', phoneNumberId: 'FICTITIOUS' }),
+    resolveWhatsappClinicConfigForList: async () => ({ originId: 411, wabaId: 'FICTITIOUS', phoneNumberId: 'FICTITIOUS' }),
     isWhatsappRoutingConfigAvailable: () => true,
     resolveWhatsappTemplateForClinic: async () => { if (f.beforeFinalTemplate) await f.beforeFinalTemplate(); return actual; },
-    whatsappAccountHealthService: { assertCanSend: async () => {} },
+    whatsappAccountHealthService: { assertCanSend: async input => f.healthGuard?.(input) },
     whatsappService: { normalizePhoneNumber: value => String(value || '').replace(/\D/g, ''),
-      sendMessage: async value => { f.sends.push(structuredClone(value)); return { messages: [{ id: 'FICTITIOUS_WAMID' }] }; } },
+      sendMessage: async value => {
+        if (f.healthGuard) await f.healthGuard({ clinicConfig: value.clinicConfig, source: value.healthContext.source,
+          messageId: value.healthContext.messageId, allowPaymentRecoveryProbe: value.healthContext.allowPaymentRecoveryProbe });
+        f.sends.push(structuredClone(value)); return { messages: [{ id: 'FICTITIOUS_WAMID' }] };
+      } },
     getListLinkTrackingConfig: () => ({ enabled: false }),
     extractBodyText: components => components.find(c => c.type === 'BODY')?.text || '',
     buildTemplateComponentsForSend: async ({ params }) => [{ type: 'body', parameters: params.map(text => ({ type: 'text', text })) }],
@@ -106,15 +110,18 @@ function fixture({ finalNames = ['nombre_paciente', 'fecha_ultima_cita_asistida'
       f.conversations.push(structuredClone(value)); return { id: 500, clinic_id: value.clinicId, update: async () => {} };
     },
     Message: { create: async value => {
-      const row = structuredClone({ id: 2000 + f.messages.length, ...value }); f.messages.push(row);
+      const row = structuredClone({ id: 2000 + f.messages.length, createdAt: new Date(), ...value }); f.messages.push(row);
       return { ...row, update: async patch => { Object.assign(row, structuredClone(patch)); } };
     } },
     emitQuickChatMessageCreated: () => {}, emitQuickChatMessageUpdated: () => {},
     resolveWhatsappChannelRole: () => 'primary', OBJECTIVE_ID: 'mass_sends',
     whatsappDeliveryGovernanceService: { recordImmediateSendResponse: async () => ({ status: 'accepted', held: false, providerMessageId: 'FICTITIOUS_WAMID' }) },
+    whatsappConnectionStatusService: { markDisconnectedAfterProviderError: async () => {} },
+    whatsappPaymentStatusService: { markMissingPaymentFromProviderError: async () => {} },
     marketingEmailDispatchService: { sendTest: async (...args) => { f.emailCalls.push(args); return { email: true }; } },
     require: name => {
       if (name === '../lib/whatsappAppointmentEligibility') return require('../../lib/whatsappAppointmentEligibility');
+      if (name === '../lib/whatsapp-dispatch-wait') return require('../../lib/whatsapp-dispatch-wait');
       throw Error('UNEXPECTED_DEPENDENCY_' + name);
     },
   };
@@ -133,6 +140,7 @@ function fixture({ finalNames = ['nombre_paciente', 'fecha_ultima_cita_asistida'
     item_id: 11, template_usage: 'solicitud_resena', whatsapp_template_id: 6071, to: '34900000099', ...body,
   });
   f.before = () => JSON.stringify([...f.sourceRows.values()].map(value => value.row));
+  f.requestedTemplate = requested;
   f.normalParams = id => context.buildTemplateParams({ template: actual,
     item: f.sourceRows.get(id).model.get(), list, clinic: { nombre: 'Clínica ficticia' } });
   f.normalPreview = id => context.renderTemplatePreview({ template: actual,
@@ -310,4 +318,72 @@ test('the real 6071 position contract renders clinic at 2 and review signature a
   assert.notEqual(f.samples[0].custom_fields.review_test_render_fingerprint, f.samples[1].custom_fields.review_test_render_fingerprint);
   assert.equal(JSON.stringify({ sample: f.samples[0], message: f.messages[0] }), previousTest);
   assert.equal(f.before(), sourceBefore); assert.equal(JSON.stringify(f.finalTemplate), templateBefore);
+});
+
+function paymentGuard(f, { blocked = false, cooldown = true } = {}) {
+  const healthSource = fs.readFileSync(path.resolve(__dirname, '../../services/whatsappAccountHealth.service.js'), 'utf8');
+  const now = new Date(), state = { claims: 0, saves: 0, events: 0, blockedSends: 0 };
+  const asset = { id: 411, assetType: 'whatsapp_phone_number', isActive: true,
+    whatsappAuthorizationId: '11111111-1111-4111-8111-111111111111', additionalData: { payment: {
+      ...(cooldown ? { last_probe_at: new Date(+now - 60000).toISOString() } : {}),
+      ...(blocked ? { status: 'missing_payment_method', last_error_code: 131042,
+        last_detected_at: new Date(+now - 3600000).toISOString() } : {}),
+    } }, changed() {}, async save() { state.saves++; } };
+  const health = { state: blocked ? 'blocked' : 'healthy', can_send: !blocked, is_stale: false,
+    reason_code: blocked ? 'meta_error_131042_payment_missing' : 'provider_connected', provider_status: 'CONNECTED' };
+  const context = { Date, paymentProbe: require('../../lib/whatsapp-payment-recovery-probe'),
+    clean: value => String(value || '').trim(), safeObject: value => value || {},
+    findAssetForConfig: async () => asset, summarizeAssetHealth: () => health,
+    isBlockingState: require('../../lib/whatsapp-account-health').isBlockingState,
+    db: { sequelize: { transaction: async work => { state.claims++; return work({ LOCK: { UPDATE: 'UPDATE' } }); } } },
+    ClinicMetaAsset: { findByPk: async () => asset }, Message: { findByPk: async id => f.messages.find(row => row.id === id) },
+    createEvent: async () => { state.events++; }, healthEventDetails: value => value,
+    recordBlockedSend: async () => { state.blockedSends++; },
+  };
+  vm.createContext(context);
+  for (const [name, next] of [['paymentRecoveryProbeEligibility', 'async function claimPaymentRecoveryProbe'],
+    ['claimPaymentRecoveryProbe', 'function sha256'], ['blockedError', 'async function recordBlockedSend'],
+    ['assertCanSend', 'async function recordProviderFailure']]) {
+    const at = healthSource.indexOf(`function ${name}(`), end = healthSource.indexOf('\n' + next, at);
+    vm.runInContext(healthSource.slice(healthSource.lastIndexOf('\n', at) + 1, end), context);
+  }
+  f.healthGuard = input => context.assertCanSend(input);
+  return { state, asset, health };
+}
+test('ordinary healthy Review ignores an old probe flag and its existing payment cooldown', async () => {
+  for (const bodyLabel of ['solicitud_resena', 'promocion']) {
+    const f = fixture(), guard = paymentGuard(f), before = JSON.stringify(guard.asset.additionalData);
+    const result = await f.run({ payment_recovery_probe: true, template_usage: bodyLabel });
+    assert.equal(result.success, true); assert.equal(f.sends.length, 1);
+    assert.equal(f.messages[0].metadata.payment_recovery_probe, false);
+    assert.equal(f.sends[0].healthContext.allowPaymentRecoveryProbe, false);
+    assert.equal(f.sends[0].healthContext.source, 'marketing_bulk_sends');
+    assert.equal(guard.state.claims + guard.state.saves + guard.state.events, 0);
+    assert.equal(JSON.stringify(guard.asset.additionalData), before);
+  }
+});
+test('an actually payment-blocked Review remains blocked and cannot claim a recovery probe', async () => {
+  const f = fixture(), guard = paymentGuard(f, { blocked: true });
+  const before = JSON.stringify(guard.asset.additionalData);
+  await assert.rejects(f.run({ payment_recovery_probe: true }), { code: 'WHATSAPP_SENDER_HEALTH_BLOCKED' });
+  assert.equal(f.sends.length + f.messages.length + f.samples.length, 0);
+  assert.equal(guard.state.claims + guard.state.saves + guard.state.events, 0);
+  assert.equal(JSON.stringify(guard.asset.additionalData), before);
+});
+test('non-Review recovery retains the current cooldown and the legitimate eligible recovery claim', async () => {
+  for (const cooldown of [true, false]) {
+    const f = fixture(); f.list.criteria.template_usage = 'promocion';
+    f.requestedTemplate.name = f.finalTemplate.name = 'fictitious_campaign_contact';
+    const guard = paymentGuard(f, { blocked: true, cooldown });
+    if (cooldown) {
+      await assert.rejects(f.run({ template_usage: 'promocion', payment_recovery_probe: true }),
+        error => error.code === 'WHATSAPP_SENDER_HEALTH_BLOCKED' && error.details.retry_after_seconds > 0);
+      assert.equal(f.sends.length + guard.state.saves + guard.state.events, 0);
+    } else {
+      assert.equal((await f.run({ template_usage: 'promocion', payment_recovery_probe: true })).success, true);
+      assert.equal(f.sends.length, 1); assert.equal(guard.state.saves, 1); assert.equal(guard.state.events, 1);
+      assert.equal(f.sends[0].healthContext.allowPaymentRecoveryProbe, true);
+    }
+    assert.equal(guard.state.claims, 1);
+  }
 });

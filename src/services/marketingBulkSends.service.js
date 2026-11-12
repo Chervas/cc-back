@@ -8834,7 +8834,7 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
     throw err;
   }
   clinicConfig.clinicId = clinicId;
-  const paymentRecoveryProbe = body.payment_recovery_probe === true;
+  const paymentRecoveryProbe = body.payment_recovery_probe === true && allowedReviewScope.review !== true;
   if (!paymentRecoveryProbe) {
     await whatsappAccountHealthService.assertCanSend({
       clinicConfig,
