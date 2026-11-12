@@ -70,6 +70,14 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
         // authorization decision: the original strict path check below remains.
         diagnostic.paginationPathVariant(next.pathname===path?'exact':next.pathname===`/${graphVersion}/${asset.id}/${edge}`?'numeric_account'
           :[`/act_${asset.id}/${edge}`,`/${asset.id}/${edge}`].includes(next.pathname)?'versionless_same_account':'other');
+        const pathParts=next.pathname.split('/').slice(1),version=/^v[0-9]{1,3}\.[0-9]{1,2}$/.test(pathParts[0])?pathParts[0]:null;
+        const accountPart=pathParts[version?1:0],edgePart=pathParts[version?2:1];
+        diagnostic.paginationPathShape({segmentCount:pathParts.filter(Boolean).length,emptySegments:pathParts.slice(0,next.pathname.endsWith('/')?-1:undefined).some(v=>v===''),
+          trailingSlash:next.pathname.endsWith('/'),percentEncoding:next.pathname.includes('%'),version,
+          versionRelation:version?(version===graphVersion?'current':'other'):/^(?:act_)?[1-9][0-9]{0,29}$/.test(pathParts[0])?'versionless':'invalid',
+          account:accountPart===`act_${asset.id}`?'same_act':accountPart===asset.id?'same_numeric':!accountPart?'missing':/^(?:act_)?[1-9][0-9]{0,29}$/.test(accountPart)?'other_numeric':'other',
+          edge:['ads','adsets','campaigns','insights'].includes(edgePart)?edgePart:null,edgeMatches:edgePart===edge,
+          canonicalPattern:/^\/(?:v[0-9]{1,3}\.[0-9]{1,2}\/)?(?:act_)?[1-9][0-9]{0,29}\/(?:ads|adsets|campaigns|insights)\/?$/.test(next.pathname)});
         const cursorAfter=raw.paging?.cursors?.after;
         const pagination={urlInvalid:false,protocolRejected:next.protocol!=='https:',hostRejected:next.hostname!=='graph.facebook.com',
           authorityRejected:Boolean(next.port||next.username||next.password),fragmentRejected:Boolean(next.hash),pathMismatch:next.pathname!==path,

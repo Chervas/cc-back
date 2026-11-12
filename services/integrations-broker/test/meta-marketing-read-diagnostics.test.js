@@ -50,7 +50,7 @@ async function capture(work,{throwObserver=false}={}){
  return{result,error,lines,events:lines.map(s=>JSON.parse(s))};
 }
 function closed(c){assert.equal(c.lines.length,1);assert(Buffer.byteLength(c.lines[0])<=2048);assert(!c.lines[0].includes(CANARY));assert(!c.lines[0].includes(TOKEN));assert(!c.lines[0].includes(APP));
- const e=c.events[0];assert.deepEqual(Object.keys(e).sort(),['assetRef','credentialContext','debugScopes','error','event','httpStatus','metaCode','metaSubcode','operation','pagination','paginationPathVariant','phase','shape','stage','version'].sort());assert.equal(e.event,R.EVENT);return e;}
+ const e=c.events[0];assert.deepEqual(Object.keys(e).sort(),['assetRef','credentialContext','debugScopes','error','event','httpStatus','metaCode','metaSubcode','operation','pagination','paginationPathVariant','paginationPathShape','phase','shape','stage','version'].sort());assert.equal(e.event,R.EVENT);return e;}
 test('five successful Ads reads retain exact results/calls/pacing and emit no event',async()=>{
  for(const family of Object.keys(A.OPERATIONS)){const f=fixture({family}),b=fixture({family,base:true}),c=await capture(f.run),original=await capture(b.run);assert.ifError(c.error);assert.equal(c.lines.length,0);assert.deepEqual(c.result,original.result);assert.deepEqual(f.calls,b.calls);assert.deepEqual([...f.state],[...b.state]);}
 });
@@ -186,9 +186,29 @@ test('Ads path variants are closed diagnostics and never allow aliases, other ve
  const f=fixture({family:'ads',alter:k=>k==='ads_data'?{raw:exact}:null}),c=await capture(f.run),e=closed(c);
  assert.equal(c.error.code,'provider_failed');assert.equal(e.pagination.pathMismatch,false);assert.equal(e.pagination.fragmentRejected,true);assert.equal(e.paginationPathVariant,'exact');
 });
+test('Ads path shape qualifies public versions, account equality and fixed edges without exposing path values',async()=>{
+ const cases=[['/v25.0/act_301/ads',{version:'v25.0',versionRelation:'other',account:'same_act',edge:'ads',edgeMatches:true,trailingSlash:false,canonicalPattern:true}],
+  ['/v24.0/301/ads',{version:'v24.0',versionRelation:'current',account:'same_numeric',edge:'ads',edgeMatches:true,canonicalPattern:true}],
+  ['/v24.0/act_302/ads',{account:'other_numeric',edge:'ads',edgeMatches:true,canonicalPattern:true}],
+  ['/act_301/ads/',{version:null,versionRelation:'versionless',account:'same_act',edge:'ads',edgeMatches:true,trailingSlash:true,canonicalPattern:true}],
+  ['/v24.0/act_301/ads/',{segmentCount:3,emptySegments:false,account:'same_act',trailingSlash:true,canonicalPattern:true}],
+  ['/v24.0//act_301/ads',{emptySegments:true,account:'missing',edge:null,edgeMatches:false,canonicalPattern:false}],
+  ['/v24.0/%61ct_301/ads',{percentEncoding:true,account:'other',edge:'ads',edgeMatches:true,canonicalPattern:false}],
+  ['/v24.0/act_301/campaigns',{account:'same_act',edge:'campaigns',edgeMatches:false,canonicalPattern:true}],
+  ['/v24.0/act_301/'+CANARY,{account:'same_act',edge:null,edgeMatches:false,canonicalPattern:false}]];
+ for(const [pathname,expected]of cases){
+  const raw={data:[row('ads')],paging:{cursors:{after:'QA_AFTER'},next:`https://graph.facebook.com${pathname}?after=QA_AFTER&access_token=${TOKEN}`}};
+  const f=fixture({family:'ads',alter:k=>k==='ads_data'?{raw}:null}),c=await capture(f.run),e=closed(c);
+  assert.equal(c.error.code,'provider_failed');assert.equal(e.pagination.pathMismatch,true);
+  for(const [key,value]of Object.entries(expected))assert.equal(e.paginationPathShape[key],value);
+  const shape=JSON.stringify(e.paginationPathShape);
+  assert(!c.lines[0].includes(pathname));assert(!shape.includes('301'));assert(!shape.includes('302'));assert(!c.lines[0].includes('QA_AFTER'));
+  assert.equal(f.calls.filter(v=>v.path.endsWith('/ads')).length,1);
+ }
+});
 test('diagnostic pagination and credential context reject unsafe values rather than copying provider data',async()=>{
- const c=await capture(async()=>{const d=R.create({operation:A.OPERATIONS.ads,assetRef:'meta-ad_account:301'});d.credential(CANARY);d.pagination({hostRejected:CANARY,provider:CANARY});d.paginationPathVariant(CANARY);d.fail({code:'provider_failed'});}),e=closed(c);
- assert.equal(e.credentialContext,null);assert.equal(e.pagination,null);assert.equal(e.paginationPathVariant,null);
+ const c=await capture(async()=>{const d=R.create({operation:A.OPERATIONS.ads,assetRef:'meta-ad_account:301'});d.credential(CANARY);d.pagination({hostRejected:CANARY,provider:CANARY});d.paginationPathVariant(CANARY);d.paginationPathShape({version:CANARY});d.fail({code:'provider_failed'});}),e=closed(c);
+ assert.equal(e.credentialContext,null);assert.equal(e.pagination,null);assert.equal(e.paginationPathVariant,null);assert.equal(e.paginationPathShape,null);
 });
 test('a real closed fd2 cannot emit an asynchronous stream error or replace the original failure',()=>{
  const code=`const fs=require('node:fs'),assert=require('node:assert/strict'),R=require(${JSON.stringify(require.resolve('../src/meta-marketing-read-diagnostics'))});fs.closeSync(2);const original=Object.assign(Error('FICTITIOUS_ORIGINAL'),{code:'provider_failed'});let preserved=false;try{throw original;}catch(error){R.create({operation:'meta.marketing.ads.insights.read.v1',assetRef:'meta-ad_account:301'}).fail(error);preserved=error===original&&error.code==='provider_failed';}process.stdout.write(JSON.stringify({preserved,completed:true})+'\\n');`;
