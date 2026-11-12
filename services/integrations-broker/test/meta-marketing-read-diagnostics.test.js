@@ -50,7 +50,7 @@ async function capture(work,{throwObserver=false}={}){
  return{result,error,lines,events:lines.map(s=>JSON.parse(s))};
 }
 function closed(c){assert.equal(c.lines.length,1);assert(Buffer.byteLength(c.lines[0])<=2048);assert(!c.lines[0].includes(CANARY));assert(!c.lines[0].includes(TOKEN));assert(!c.lines[0].includes(APP));
- const e=c.events[0];assert.deepEqual(Object.keys(e).sort(),['assetRef','credentialContext','debugScopes','error','event','httpStatus','metaCode','metaSubcode','operation','pagination','phase','shape','stage','version'].sort());assert.equal(e.event,R.EVENT);return e;}
+ const e=c.events[0];assert.deepEqual(Object.keys(e).sort(),['assetRef','credentialContext','debugScopes','error','event','httpStatus','metaCode','metaSubcode','operation','pagination','paginationPathVariant','phase','shape','stage','version'].sort());assert.equal(e.event,R.EVENT);return e;}
 test('five successful Ads reads retain exact results/calls/pacing and emit no event',async()=>{
  for(const family of Object.keys(A.OPERATIONS)){const f=fixture({family}),b=fixture({family,base:true}),c=await capture(f.run),original=await capture(b.run);assert.ifError(c.error);assert.equal(c.lines.length,0);assert.deepEqual(c.result,original.result);assert.deepEqual(f.calls,b.calls);assert.deepEqual([...f.state],[...b.state]);}
 });
@@ -172,9 +172,23 @@ test('Lead destinations retain the same strict pagination and safe failure flags
  const f=fixture({lead:true,family:'destinations',alter:k=>k==='ads_data'?{raw}:null}),c=await capture(f.run),e=closed(c);assert.equal(c.error.code,'provider_failed');assert.equal(e.phase,'pagination');assert.equal(e.pagination.hostRejected,true);assert.equal(e.credentialContext,'primary');
  assert(!f.calls.some(v=>v.path.includes('foreign')));assert(!c.lines[0].includes('QA_AFTER'));
 });
+test('Ads path variants are closed diagnostics and never allow aliases, other versions, accounts or edges',async()=>{
+ const cases=[['/v24.0/301/ads','numeric_account'],['/act_301/ads','versionless_same_account'],['/301/ads','versionless_same_account'],
+  ['/v23.0/301/ads','other'],['/v23.0/act_301/ads','other'],['/v24.0/302/ads','other'],['/v24.0/301/campaigns','other'],
+  ['/v24.0/act_301/ads/','other'],['/v24.0/301%2Fads','other']];
+ for(const [pathname,variant]of cases){
+  const raw={data:[row('ads')],paging:{cursors:{after:'QA_AFTER'},next:`https://graph.facebook.com${pathname}?after=QA_AFTER&access_token=${TOKEN}`}};
+  const f=fixture({family:'ads',alter:k=>k==='ads_data'?{raw}:null}),c=await capture(f.run),e=closed(c);
+  assert.equal(c.error.code,'provider_failed');assert.equal(e.phase,'pagination');assert.equal(e.pagination.pathMismatch,true);assert.equal(e.paginationPathVariant,variant);
+  assert.equal(f.calls.filter(v=>v.path.endsWith('/ads')).length,1);assert(!c.lines[0].includes('QA_AFTER'));assert(!c.lines[0].includes(pathname));
+ }
+ const exact={data:[row('ads')],paging:{cursors:{after:'QA_AFTER'},next:'https://graph.facebook.com/v24.0/act_301/ads?after=QA_AFTER#private'}};
+ const f=fixture({family:'ads',alter:k=>k==='ads_data'?{raw:exact}:null}),c=await capture(f.run),e=closed(c);
+ assert.equal(c.error.code,'provider_failed');assert.equal(e.pagination.pathMismatch,false);assert.equal(e.pagination.fragmentRejected,true);assert.equal(e.paginationPathVariant,'exact');
+});
 test('diagnostic pagination and credential context reject unsafe values rather than copying provider data',async()=>{
- const c=await capture(async()=>{const d=R.create({operation:A.OPERATIONS.ads,assetRef:'meta-ad_account:301'});d.credential(CANARY);d.pagination({hostRejected:CANARY,provider:CANARY});d.fail({code:'provider_failed'});}),e=closed(c);
- assert.equal(e.credentialContext,null);assert.equal(e.pagination,null);
+ const c=await capture(async()=>{const d=R.create({operation:A.OPERATIONS.ads,assetRef:'meta-ad_account:301'});d.credential(CANARY);d.pagination({hostRejected:CANARY,provider:CANARY});d.paginationPathVariant(CANARY);d.fail({code:'provider_failed'});}),e=closed(c);
+ assert.equal(e.credentialContext,null);assert.equal(e.pagination,null);assert.equal(e.paginationPathVariant,null);
 });
 test('a real closed fd2 cannot emit an asynchronous stream error or replace the original failure',()=>{
  const code=`const fs=require('node:fs'),assert=require('node:assert/strict'),R=require(${JSON.stringify(require.resolve('../src/meta-marketing-read-diagnostics'))});fs.closeSync(2);const original=Object.assign(Error('FICTITIOUS_ORIGINAL'),{code:'provider_failed'});let preserved=false;try{throw original;}catch(error){R.create({operation:'meta.marketing.ads.insights.read.v1',assetRef:'meta-ad_account:301'}).fail(error);preserved=error===original&&error.code==='provider_failed';}process.stdout.write(JSON.stringify({preserved,completed:true})+'\\n');`;

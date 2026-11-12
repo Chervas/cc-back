@@ -13,6 +13,7 @@ const ERRORS=new Set(['invalid_request','scope_denied','operation_denied','conne
  'oauth_credentials_incomplete','invalid_signature','audit_unavailable','internal_error','secret_unavailable']);
 const PAGINATION_FLAGS=Object.freeze(['urlInvalid','protocolRejected','hostRejected','authorityRejected','fragmentRejected','pathMismatch',
  'cursorMissing','cursorMalformed','cursorUrlMismatch','cursorRepeated','emptyPage','pageLimitReached','credentialReflection']);
+const PAGINATION_PATH_VARIANTS=new Set(['exact','numeric_account','versionless_same_account','other']);
 const id=v=>typeof v==='string'&&/^[1-9][0-9]{0,29}$/.test(v);
 const text=(v,max=256)=>typeof v==='string'&&v.length>0&&v.length<=max&&!/[\x00-\x1f\x7f]/.test(v);
 const date=v=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(v)&&Number.isFinite(Date.parse(v))&&new Date(v).toISOString().slice(0,10)===v;
@@ -48,18 +49,19 @@ function adsFields(name,row){
 function create({operation,assetRef}){
  const family=Object.keys(A.OPERATIONS).find(k=>A.OPERATIONS[k]===operation),lead=Object.values(L.OPERATIONS).includes(operation)&&!L.RECEPTION_OPERATIONS.includes(operation),page=operation===L.OPERATIONS.pageStatus;
  const enabled=Boolean((family&&/^meta-ad_account:[1-9][0-9]{0,29}$/.test(assetRef))||(lead&&/^meta-facebook_page:[1-9][0-9]{0,29}$/.test(assetRef)));
- let emitted=false,phase='unknown',stage='none',httpStatus=null,metaCode=null,metaSubcode=null,shape=null,debugScopes=null,credentialContext=null,pagination=null;
+ let emitted=false,phase='unknown',stage='none',httpStatus=null,metaCode=null,metaSubcode=null,shape=null,debugScopes=null,credentialContext=null,pagination=null,paginationPathVariant=null;
  const guarded=work=>{try{if(enabled)work();}catch{/* Observation must never replace the normal failure. */}};
  const bounded=v=>Number.isSafeInteger(v)&&v>=0&&v<=2147483647?v:null;
  return{
   phase:value=>guarded(()=>{phase=PHASES.has(value)?value:'unknown';stage='none';}),
   stage:value=>guarded(()=>{stage=STAGES.has(value)?value:'none';}),
-  begin:()=>guarded(()=>{stage='pacing';httpStatus=metaCode=metaSubcode=null;credentialContext=null;pagination=null;}),
+  begin:()=>guarded(()=>{stage='pacing';httpStatus=metaCode=metaSubcode=null;credentialContext=null;pagination=null;paginationPathVariant=null;}),
   status:value=>guarded(()=>{stage='headers';httpStatus=Number.isInteger(value)&&value>=100&&value<=599?value:null;}),
   meta:value=>guarded(()=>{metaCode=bounded(value?.code);metaSubcode=bounded(value?.error_subcode);}),
   credential:value=>guarded(()=>{credentialContext=['application','primary','page'].includes(value)?value:null;}),
   pagination:value=>guarded(()=>{pagination=value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every(key=>PAGINATION_FLAGS.includes(key)&&typeof value[key]==='boolean')
    ?Object.fromEntries(PAGINATION_FLAGS.map(key=>[key,value[key]===true])):null;}),
+  paginationPathVariant:value=>guarded(()=>{paginationPathVariant=PAGINATION_PATH_VARIANTS.has(value)?value:null;}),
   scopes:value=>guarded(()=>{debugScopes=null;if(Array.isArray(value)&&value.length<=64&&value.every(v=>typeof v==='string'&&/^[a-z][a-z0-9_]{0,127}$/.test(v)))debugScopes={hasAdsReadScope:value.includes('ads_read'),hasAdsManagementScope:value.includes('ads_management')};}),
   adsProjection:(name,raw,payload)=>guarded(()=>{
    if(!family||name!==family||!Array.isArray(raw?.data))return;
@@ -78,7 +80,7 @@ function create({operation,assetRef}){
   fail:error=>guarded(()=>{
    if(emitted)return;emitted=true;
    const value={event:EVENT,version:1,operation,assetRef,phase,stage,httpStatus,metaCode,metaSubcode,
-    error:ERRORS.has(error?.code)?error.code:'provider_failed',shape,debugScopes,credentialContext,pagination};
+    error:ERRORS.has(error?.code)?error.code:'provider_failed',shape,debugScopes,credentialContext,pagination,paginationPathVariant};
    // A synchronous fd2 write cannot schedule an unhandled stream error event.
    // One bounded write only; closed/full/partial sinks never trigger a retry.
    const line=JSON.stringify(value)+'\n';if(Buffer.byteLength(line)<=MAX_BYTES)fs.writeSync(2,line);

@@ -31,7 +31,8 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
     const check=()=>{if(signal.aborted||now()>=deadline)fail('provider_timeout');authorize();};
     const pacedRequest=(work)=>pacer.run(scope,{signal,deadline},async()=>{check();const result=await work();check();return result;});
     const transport=(settings,callback)=>request(settings,res=>{diagnostic.status(res.statusCode);const pct=usage(res.headers);observed=Math.max(observed,pct);pacer.observe(scope,pct);callback(res);});
-    const path=`/${metadata.graphVersion||M.GRAPH_VERSION}/act_${asset.id}/${['insights','actions'].includes(name)?'insights':name}`;
+    const graphVersion=metadata.graphVersion||M.GRAPH_VERSION,edge=['insights','actions'].includes(name)?'insights':name;
+    const path=`/${graphVersion}/act_${asset.id}/${edge}`;
     const fetchGraph=(targetPath,bearer)=>{diagnostic.begin();diagnostic.credential(bearer===appToken?'application':'primary');return pacedRequest(()=>new Promise((resolve,reject)=>{
         diagnostic.stage('request');
         let req,res,timer,settled=false,bytes=0;const chunks=[];
@@ -64,7 +65,11 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
       diagnostic.phase('data_http');const raw=await fetchGraph(path+'?'+query,ownToken);
       diagnostic.phase('data_projection');let results;try{results=A.projectPage(name,raw,payload);}catch(error){diagnostic.adsProjection(name,raw,payload);throw error;}let nextPageToken=null;
       diagnostic.phase('pagination');
-      if(raw.paging?.next){let next;try{next=new URL(raw.paging.next);}catch{diagnostic.pagination({urlInvalid:true});fail('provider_failed');}
+      if(raw.paging?.next){let next;try{next=new URL(raw.paging.next);}catch{diagnostic.pagination({urlInvalid:true});diagnostic.paginationPathVariant('other');fail('provider_failed');}
+        // Classify only exact, closed equivalents for diagnosis. This is not an
+        // authorization decision: the original strict path check below remains.
+        diagnostic.paginationPathVariant(next.pathname===path?'exact':next.pathname===`/${graphVersion}/${asset.id}/${edge}`?'numeric_account'
+          :[`/act_${asset.id}/${edge}`,`/${asset.id}/${edge}`].includes(next.pathname)?'versionless_same_account':'other');
         const cursorAfter=raw.paging?.cursors?.after;
         const pagination={urlInvalid:false,protocolRejected:next.protocol!=='https:',hostRejected:next.hostname!=='graph.facebook.com',
           authorityRejected:Boolean(next.port||next.username||next.password),fragmentRejected:Boolean(next.hash),pathMismatch:next.pathname!==path,
