@@ -1616,7 +1616,8 @@
         {"COLUMN_NAME": "expires_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "NO","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
         {"COLUMN_NAME": "claimed_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
         {"COLUMN_NAME": "cancelled_at","COLUMN_TYPE": "datetime(3)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": null,"COLLATION_NAME": null},
-        {"COLUMN_NAME": "channel_role","COLUMN_TYPE": "enum('primary','secondary')","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
+        {"COLUMN_NAME": "channel_role","COLUMN_TYPE": "enum('primary','secondary')","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"},
+        {"COLUMN_NAME": "onboarding_mode","COLUMN_TYPE": "enum('cloud_api','coexistence')","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "ascii","COLLATION_NAME": "ascii_bin"}
       ],
       "indexes": [
         {"name": "idx_whatsapp_authorization_user_active","columns": [{"INDEX_NAME": "idx_whatsapp_authorization_user_active","NON_UNIQUE": 1,"SEQ_IN_INDEX": 1,"COLUMN_NAME": "user_id","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_whatsapp_authorization_user_active","NON_UNIQUE": 1,"SEQ_IN_INDEX": 2,"COLUMN_NAME": "state","SUB_PART": null,"INDEX_TYPE": "BTREE"},{"INDEX_NAME": "idx_whatsapp_authorization_user_active","NON_UNIQUE": 1,"SEQ_IN_INDEX": 3,"COLUMN_NAME": "expires_at","SUB_PART": null,"INDEX_TYPE": "BTREE"}]},
@@ -6533,6 +6534,10 @@
     }
   },
   "migrations": [
+    {
+      "name": "20261113010000-add-whatsapp-onboarding-mode.js",
+      "sha256": "9b3400dee93cdabe12273a97594d8d944268b9b8d48c87ea1be5fcbf6a68e46f"
+    },
     {
       "name": "20261110210000-whatsapp-contact-identities.js",
       "sha256": "f44c4d2f72fd3426325b2b120d72ef436006741d05a1337b48811c0bb2925caa"

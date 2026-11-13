@@ -42,6 +42,16 @@ test('Authorization listing accepts scoped or all-view requests using only middl
  assert.equal((await f.request('authorizations',{scope:null},{origin:'https://foreign.invalid'})).status,403);
  assert.equal(f.state.generalParser,0);
 });
+test('Only begin accepts optional mode intent and preserves the middleware actor',async t=>{
+ const f=await fixture(t),requestId=randomUUID();
+ for(const mode of ['cloud_api','coexistence']){
+  const response=await f.request('begin',{requestId,scope:{type:'clinic',id:71},channelRole:'primary',mode});
+  assert.equal(response.status,200);assert.equal(f.state.calls.at(-1).input.mode,mode);
+  assert.equal(f.state.calls.at(-1).input.userId,501);assert.equal(f.state.calls.at(-1).input.sessionRef,f.sessionRef);
+ }
+ for(const operation of ['finish','status','cancel','authorizations','complete'])assert.equal((await f.request(operation,{requestId,mode:'coexistence'})).status,400);
+ assert.equal((await f.request('begin',{requestId,scope:{type:'clinic',id:71},mode:'coexistence',providerGrantPolicy:'meta-app-companion-v1'})).status,400);
+});
 test('Dedicated routes forward verified middleware identity and keep all bodies outside the general raw parser', async t => {
   const f = await fixture(t); const requestId = randomUUID();
   for (const [name, extra] of [['begin', { scope: { type: 'group', id: 9 } }], ['finish', { state: 's'.repeat(43), code: 'FICTITIOUS_CODE', wabaId: '301', phoneId: '401' }], ['status', {}], ['cancel', {}]]) {

@@ -59,6 +59,25 @@ function localAsset(overrides={}){
  for(const field of ['waAccessToken','pageAccessToken','additionalData','password_usuario'])Object.defineProperty(row,field,{get(){assert.fail('private field read: '+field);}});
  return row;
 }
+test('Listing carries the signed optional mode across reload without exposing policy or private state',async()=>{
+ for(const mode of ['cloud_api','coexistence']){
+  const f=fixture(),row=f.state.rows[0];row.onboarding_mode=mode;f.resign(row,undefined);
+  const before=structuredClone(f.state.rows),result=await f.call({type:'clinic',id:19});
+  assert.equal(result.incomplete,false);assert.equal(result.authorizations.length,1);
+  const dto=result.authorizations[0];assert.equal(dto.mode,mode);assert.equal(dto.connected,false);
+  assert.equal(f.state.brokerCalls[0].mode,mode);
+  assert(f.state.queries.find(q=>!q.group).attributes.includes('onboarding_mode'));
+  for(const key of ['onboarding_mode','context_digest','scopeDigest','providerGrantPolicy','candidate'])assert.equal(Object.hasOwn(dto,key),false);
+  assert.deepEqual(f.state.rows,before);
+ }
+ const legacy=fixture();assert.equal(Object.hasOwn((await legacy.call({type:'clinic',id:19})).authorizations[0],'mode'),false);
+});
+test('Mode changes during listing cannot reuse an earlier signed authorization receipt',async()=>{
+ const f=fixture(),row=f.state.rows[0];row.onboarding_mode='coexistence';f.resign(row,undefined);
+ f.state.afterBroker=()=>{row.onboarding_mode='cloud_api';};
+ assert.deepEqual(await f.call({type:'clinic',id:19}),{authorizations:[],incomplete:true});
+ assert.equal(f.state.brokerCalls.length,1);
+});
 test('Expired OAuth and another original user/session remain visible through current MFA and scope ACL',async()=>{
  const f=fixture(),before=JSON.stringify(f.state.rows),result=await f.call();
  assert.equal(result.authorizations.length,2);assert.equal(result.incomplete,false);

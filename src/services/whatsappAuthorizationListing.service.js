@@ -10,7 +10,7 @@ const { project, safe } = require('./whatsappOnboardingGateway.service');
 const phoneMetadata = require('./whatsappAuthorizationPhoneMetadata.service');
 const P = require('../../services/integrations-broker/src/whatsapp-provisioning-contract');
 const ATTRIBUTES = ['request_id','user_id','session_ref','session_expires_at','scope_type','scope_id','original_clinic_ids',
-  'scope_digest','state_hash','context_digest','state','created_at','expires_at','claimed_at','channel_role',
+  'scope_digest','state_hash','context_digest','state','created_at','expires_at','claimed_at','channel_role','onboarding_mode',
   'replacement_asset_id','replacement_authorization_id','replacement_phone_digest'];
 function input(value) {
   S.exact(value, ['scope','userId','sessionRef','sessionExpiresAt']);
@@ -137,6 +137,7 @@ function createService({ models, sessions, broker = configuredClient(), config =
           const local = {requestId:row.request_id,status:row.expires_at <= now() ? 'expired' : 'claimed',scope:selected.scope,
             clinicIds:[...row.original_clinic_ids],expiresAt:row.expires_at.toISOString(),scopeDigest:row.scope_digest,
             clinicSetDigest:S.digest(JSON.stringify(row.original_clinic_ids)),channelRole:S.channelRole(row.channel_role)};
+          if (S.onboardingMode(row.onboarding_mode) !== null) local.mode = row.onboarding_mode;
           await verifyActor(actor); const before = await snapshot(selected.scope,actor);
           if (before.digest !== selected.snap.digest || !unchanged()) { incomplete = true; continue; }
           // The read-only client has a 5s timeout. Reserve its entire budget so

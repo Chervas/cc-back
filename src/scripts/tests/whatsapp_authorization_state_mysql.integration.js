@@ -30,6 +30,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await roleMigration.up(qi, D); await roleMigration.down(qi, D); await roleMigration.up(qi, D);
   const replacementMigration = require('../../../migrations/20260929123000-bind-whatsapp-reconnection-target');
   await replacementMigration.up(qi, D); await replacementMigration.down(qi, D); await replacementMigration.up(qi, D);
+  const modeMigration = require('../../../migrations/20261113010000-add-whatsapp-onboarding-mode');
+  await modeMigration.up(qi, D); await modeMigration.down(qi, D); await modeMigration.up(qi, D);
   for (const [name, file] of [['PlatformAuditEvent', 'platformauditevent'], ['AuthSession', 'authsession'],
     ['MetaScopeBlock', 'metascopeblock'], ['WhatsappAuthorizationState', 'whatsappauthorizationstate']]) models[name] = require('../../../models/' + file)(sql, D);
   const R = models.WhatsappAuthorizationState; const A = models.PlatformAuditEvent;

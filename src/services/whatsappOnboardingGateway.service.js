@@ -37,6 +37,7 @@ function project(local, remote, state) {
     cancellationConfirmed: local.status === 'cancelled' && remote.status === 'aborted',
     selected: status === 'awaiting_activation' ? { wabaId: remote.candidate.wabaId, phoneId: remote.candidate.phoneId } : null,
     phoneState: status === 'awaiting_activation' ? remote.phoneState ?? null : null };
+  if (S.onboardingMode(local.mode) !== null) result.mode = local.mode;
   if (state && status === 'awaiting_authorization') result.authorization = { ...remote.authorization, state };
   return result;
 }

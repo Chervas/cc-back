@@ -18,11 +18,13 @@ function request(input, operation) {
   if (!['issue', 'claim', 'assertClaimActive', 'status', 'cancel'].includes(operation)) fail();
   const keys = ['requestId', 'userId', 'sessionRef', 'sessionExpiresAt'];
   if (operation === 'issue') keys.push('scope', ...(Object.hasOwn(input || {}, 'channelRole') ? ['channelRole'] : []),
+    ...(Object.hasOwn(input || {}, 'mode') ? ['mode'] : []),
     ...(Object.hasOwn(input || {}, 'replacementAssetId') ? ['replacementAssetId'] : []));
   if (operation === 'claim') keys.push('state', 'code');
   exact(input, keys); actor(input); if (!uuid(input.requestId)) fail();
   if (operation === 'issue') { exact(input.scope, ['type', 'id']); if (!['clinic', 'group'].includes(input.scope.type) || !id(input.scope.id)
     || Object.hasOwn(input, 'channelRole') && !['primary','secondary'].includes(input.channelRole)
+    || Object.hasOwn(input, 'mode') && !['cloud_api','coexistence'].includes(input.mode)
     || Object.hasOwn(input, 'replacementAssetId') && !id(input.replacementAssetId)) fail(); }
   if (operation === 'claim' && (!token(input.state) || !code(input.code))) fail();
   return structuredClone(input);
@@ -32,8 +34,14 @@ function channelRole(value) {
   if (!['primary','secondary'].includes(value)) fail('whatsapp_authorization_unavailable', 503);
   return value;
 }
+function onboardingMode(value) {
+  if (value === null || value === undefined) return null;
+  if (!['cloud_api','coexistence'].includes(value)) fail('whatsapp_authorization_unavailable', 503);
+  return value;
+}
 function contextDigest(row) {
   const role = channelRole(row.channel_role);
+  const mode = onboardingMode(row.onboarding_mode);
   const replacementAssetId = row.replacement_asset_id ?? null;
   const replacementAuthorizationId = row.replacement_authorization_id ?? null;
   const replacementPhoneDigest = row.replacement_phone_digest ?? null;
@@ -47,7 +55,10 @@ function contextDigest(row) {
     row.session_expires_at.toISOString(), row.scope_type, row.scope_id, row.original_clinic_ids,
     row.scope_digest, row.created_at.toISOString(), row.expires_at.toISOString()];
   // NULL belongs to already-issued v1 states; never rewrite their context/MAC.
-  if (replacementAssetId !== null) {
+  if (mode !== null) {
+    parts[0] = 'whatsapp-onboarding-v4';
+    parts.push(role, replacementAssetId, replacementAuthorizationId, replacementPhoneDigest, mode);
+  } else if (replacementAssetId !== null) {
     parts[0] = 'whatsapp-onboarding-v3'; parts.push(role, replacementAssetId, replacementAuthorizationId, replacementPhoneDigest);
   } else if (row.channel_role != null) { parts[0] = 'whatsapp-onboarding-v2'; parts.push(role); }
   return digest(JSON.stringify(parts));
@@ -73,4 +84,4 @@ function stateFor(key, row) {
 }
 function equalHash(a, b) { return typeof a === 'string' && typeof b === 'string' && /^[a-f0-9]{64}$/.test(a) && /^[a-f0-9]{64}$/.test(b)
   && timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex')); }
-module.exports = { id, uuid, token, code, digest, fail, exact, request, settings, stateFor, equalHash, channelRole, contextDigest };
+module.exports = { id, uuid, token, code, digest, fail, exact, request, settings, stateFor, equalHash, channelRole, onboardingMode, contextDigest };
