@@ -10,12 +10,13 @@ function fixture(extraRows = []) {
   const old = { id: 10, clinic_id: 72, channel: 'whatsapp', patient_id: 101, lead_id: null,
     contact_id: '34600000001', unread_count: 2, last_message_at: '2026-10-18T10:00:00Z' };
   const patient = { id_paciente: 101, clinica_id: 72, telefono_movil: '34600000002' };
-  const rows = [old, ...extraRows], creates = [], locks = [], appointments = [];
+  const rows = [old, ...extraRows], creates = [], locks = [], appointments = [], leads = [];
   const tx = { LOCK: { SHARE: 'SHARE', UPDATE: 'UPDATE' } };
   const db = { Sequelize: S, sequelize: { transaction: async work => work(tx) },
     Clinica: { findByPk: async (id, options) => { locks.push(['clinic', id, options.transaction]); return { id_clinica: id }; } },
     Paciente: { findByPk: async (id, options) => { locks.push(['patient', id, options.transaction]); return patient; } },
     PacienteClinica: { findOne: async () => null },
+    LeadIntake: { findByPk: async id => leads.find(x=>Number(x.id)===Number(id)) || null },
     CitaPaciente: { findOne: async ({ where }) => appointments.find(row =>
       Object.entries(where).every(([key, value]) => Number(row[key]) === Number(value))) || null },
     Conversation: {
@@ -40,7 +41,7 @@ function fixture(extraRows = []) {
   const lookup = (overrides = {}) => canonical.findCanonicalWhatsappConversation({ clinicId: 72,
     contactId: patient.telefono_movil, patientId: patient.id_paciente, requireExactContact: true,
     isolatePatientContact: true, ...overrides });
-  return { old, patient, rows, creates, locks, appointments, tx, lookup };
+  return { old, patient, rows, creates, locks, appointments, leads, tx, lookup };
 }
 
 test('verification creates an exact new-number chat without editing or merging the old chat', async () => {
@@ -102,6 +103,20 @@ test('a booking hint cannot authorize an unrelated patient, clinic, lead or dupl
   const f = fixture([row, { ...row, id: 21 }]);
   f.appointments.push({ id_cita: 501, clinica_id: 72, paciente_id: 101, lead_intake_id: 45 });
   await assert.rejects(f.lookup({ linkedAppointmentId: 501 }), error => error.code === 'whatsapp_contact_identity_conflict');
+});
+
+test('a booked patient keeps an older lead link when its exact clinic/phone identity is still proven', async () => {
+  const row={id:20,clinic_id:72,channel:'whatsapp',patient_id:101,lead_id:45,contact_id:'34600000002'};
+  const f=fixture([row]),before=structuredClone(f.rows);
+  f.appointments.push({id_cita:501,clinica_id:72,paciente_id:101,lead_intake_id:46});
+  f.leads.push({id:45,clinica_id:72,telefono:'+34 600 000 002'});
+  assert.equal((await f.lookup({linkedAppointmentId:501})).id,20);
+  assert.deepEqual(f.rows,before);assert.equal(f.creates.length,0);
+  await assert.rejects(f.lookup(),e=>e.code==='whatsapp_contact_identity_conflict');
+  for(const change of [{clinica_id:99},{telefono:'34600000003'}]){
+    Object.assign(f.leads[0],{clinica_id:72,telefono:'34600000002'},change);
+    await assert.rejects(f.lookup({linkedAppointmentId:501}),e=>e.code==='whatsapp_contact_identity_conflict');
+  }
 });
 
 test('locked patient mobile must still match the frozen destination before selecting or creating a chat', async () => {

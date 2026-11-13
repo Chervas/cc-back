@@ -18,13 +18,14 @@ test('new registration links only an unambiguous unowned chat before the real is
   db.Message=define('Message',{conversation_id:D.INTEGER,content:D.STRING},'Messages');
   db.CitaPaciente=define('CitaPaciente',{id_cita:{type:D.INTEGER,primaryKey:true,autoIncrement:true},
    clinica_id:D.INTEGER,paciente_id:D.INTEGER,lead_intake_id:D.INTEGER,estado:D.STRING},'CitasPacientes');
+  db.LeadIntake=define('LeadIntake',{id:{type:D.INTEGER,primaryKey:true},clinica_id:D.INTEGER,telefono:D.STRING},'LeadIntakes');
   db.PatientOperationalEvent=define('PatientOperationalEvent',{patient_id:D.INTEGER,event_type:D.STRING},'PatientOperationalEvents');
   await sql.sync();await db.Clinica.bulkCreate([{id_clinica:35},{id_clinica:72}]);
   const canonical=loadSource('../lib/canonical-conversation',{'../../models':db,'./phone':require('../../lib/phone'),
    '../services/whatsapp.service':{},'../services/temporaryPatientDirection.service':{observeConversation:async row=>row}},{});
   const lookup=overrides=>canonical.findCanonicalWhatsappConversation({clinicId:35,patientId:1,contactId:'+34600000001',
    requireExactContact:true,isolatePatientContact:true,createIfMissing:true,...overrides});
-  const reset=async()=>{for(const model of [db.CitaPaciente,db.Message,db.Conversation,db.PacienteClinica,db.PatientOperationalEvent,db.Paciente])await model.destroy({where:{}})};
+  const reset=async()=>{for(const model of [db.CitaPaciente,db.LeadIntake,db.Message,db.Conversation,db.PacienteClinica,db.PatientOperationalEvent,db.Paciente])await model.destroy({where:{}})};
   const patient=async(values={})=>db.Paciente.create({id_paciente:1,clinica_id:35,telefono_movil:'34600000001',...values});
   const chat=values=>db.Conversation.create({clinic_id:35,channel:'whatsapp',contact_id:'+34 600 000 001',patient_id:null,lead_id:null,
    unread_count:4,last_message_at:new Date('2026-01-01T12:00Z'),...values});
@@ -57,6 +58,63 @@ test('new registration links only an unambiguous unowned chat before the real is
    await db.CitaPaciente.update({lead_intake_id:21},{where:{id_cita:501}});
    await assert.rejects(lookup({linkedAppointmentId:501}),e=>e.code==='whatsapp_contact_identity_conflict');
    assert.equal(await db.Conversation.count(),1);
+  });
+  await t.test('booking binds its exact lead chat before the first sender can observe it',async()=>{
+   await reset();const p=await patient(),c=await chat({lead_id:20});
+   await db.LeadIntake.create({id:20,clinica_id:35,telefono:'600000001'});
+   const m=await db.Message.create({conversation_id:c.id,content:'Fictitious original lead message'});
+   const before=(await c.reload()).toJSON();let a;
+   await sql.transaction(async transaction=>{
+    a=await db.CitaPaciente.create({clinica_id:35,paciente_id:1,lead_intake_id:20,estado:'pendiente'},{transaction});
+    assert.equal(await link({db,patient:p,clinicId:35,transaction,appointment:a}),c.id);
+    assert.equal((await db.Conversation.findByPk(c.id,{transaction})).patient_id,1);
+   });
+   assert.equal((await lookup({linkedAppointmentId:a.id_cita})).id,c.id);
+   assert.deepEqual({...((await c.reload()).toJSON()),patient_id:null},before);
+   assert.equal((await m.reload()).content,'Fictitious original lead message');assert.equal(await db.Conversation.count(),1);
+  });
+  await t.test('booking rollback also undoes the lead-chat binding and leaves all previous messages intact',async()=>{
+   await reset();const p=await patient(),c=await chat({lead_id:20});
+   await db.LeadIntake.create({id:20,clinica_id:35,telefono:'34600000001'});
+   await assert.rejects(sql.transaction(async transaction=>{
+    const a=await db.CitaPaciente.create({clinica_id:35,paciente_id:1,lead_intake_id:20},{transaction});
+    assert.equal(await link({db,patient:p,clinicId:35,transaction,appointment:a}),c.id);
+    throw Error('FICTITIOUS_BOOKING_ROLLBACK');
+   }),/FICTITIOUS_BOOKING_ROLLBACK/);
+   assert.equal((await c.reload()).patient_id,null);assert.equal(await db.CitaPaciente.count(),0);
+  });
+  await t.test('booking cannot claim a foreign, duplicate or unrelated lead chat, or trust an unpersisted appointment',async()=>{
+   for(const kind of ['foreign_patient','foreign_clinic','foreign_phone','unrelated_lead','duplicate','unpersisted','other_booking']){
+    await reset();const p=await patient(),c=await chat({lead_id:20,...(kind==='foreign_patient'?{patient_id:99}:{})});
+    await db.LeadIntake.create({id:20,clinica_id:kind==='foreign_clinic'?72:35,telefono:kind==='foreign_phone'?'34600000002':'34600000001'});
+    if(kind==='duplicate')await chat({lead_id:20});
+    if(kind==='other_booking')await db.CitaPaciente.create({clinica_id:35,paciente_id:99,lead_intake_id:20});
+    const before=(await db.Conversation.findAll({raw:true}));
+    await sql.transaction(async transaction=>{
+     const a=kind==='unpersisted'?{id_cita:999999}:await db.CitaPaciente.create({clinica_id:35,paciente_id:1,lead_intake_id:kind==='unrelated_lead'?21:20},{transaction});
+     assert.equal(await link({db,patient:p,clinicId:35,transaction,appointment:a}),null,kind);
+    });
+    assert.deepEqual(await db.Conversation.findAll({raw:true}),before);assert.equal((await c.reload()).patient_id,kind==='foreign_patient'?99:null);
+   }
+  });
+  await t.test('an existing patient booking can bind a unique unowned local-format chat',async()=>{
+   await reset();const p=await patient(),c=await chat({contact_id:'600000001'});
+   await sql.transaction(async transaction=>{
+    const a=await db.CitaPaciente.create({clinica_id:35,paciente_id:1},{transaction});
+    assert.equal(await link({db,patient:p,clinicId:35,transaction,appointment:a}),c.id);
+   });
+   assert.equal((await lookup()).id,c.id);assert.equal(await db.Conversation.count(),1);
+  });
+  await t.test('a later appointment reuses the same owned phone without replacing its historical lead',async()=>{
+   await reset();await patient();const c=await chat({patient_id:1,lead_id:20});
+   await db.LeadIntake.create({id:20,clinica_id:35,telefono:'600000001'});
+   const a=await db.CitaPaciente.create({clinica_id:35,paciente_id:1,lead_intake_id:21});
+   const before=(await c.reload()).toJSON();
+   assert.equal((await lookup({linkedAppointmentId:a.id_cita})).id,c.id);
+   assert.deepEqual((await c.reload()).toJSON(),before);
+   await db.CitaPaciente.create({clinica_id:35,paciente_id:99,lead_intake_id:20});
+   await assert.rejects(lookup({linkedAppointmentId:a.id_cita}),e=>e.code==='whatsapp_contact_identity_conflict');
+   assert.deepEqual((await c.reload()).toJSON(),before);
   });
   for(const kind of ['foreign','lead','duplicate','shared_patient','other_clinic','foreign_suffix'])await t.test(kind+' cannot be silently attached',async()=>{
    await reset();const p=await patient(),c=await chat(kind==='foreign'?{patient_id:99}:kind==='lead'?{lead_id:20}:

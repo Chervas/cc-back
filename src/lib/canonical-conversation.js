@@ -332,22 +332,32 @@ async function findCanonicalWhatsappConversation({
   const exact = conversations.filter(c => normalizePhoneE164(c.contact_id) === requestedPhone);
   if (isolatePatientContact) {
     // A booked patient's chat can retain its original lead link. Ordinary
-    // appointment sends may reuse it only when that exact booking proves the
-    // same patient/clinic/lead relationship. Mobile verification stays strict.
+    // appointment sends may reuse it when that exact booking proves its owner.
+    // A later enquiry can have another lead ID; the historical lead must still
+    // prove this same complete phone/clinic, without another patient's booking.
+    // Mobile verification stays strict and no lead link is overwritten.
     let bookedLeadMatches = false;
     if (conversations.length === 1 && exact.length === 1 && exact[0].lead_id
       && Number(exact[0].patient_id) === Number(patientId)
       && Number.isSafeInteger(Number(linkedAppointmentId)) && Number(linkedAppointmentId) > 0) {
       const appointment = await db.CitaPaciente.findOne({ where: {
         id_cita: Number(linkedAppointmentId), clinica_id: normalizedClinicId,
-        paciente_id: Number(patientId), lead_intake_id: Number(exact[0].lead_id),
+        paciente_id: Number(patientId),
       }, attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id'],
       transaction, lock: transaction.LOCK.SHARE, raw: true });
       bookedLeadMatches = !!appointment
         && Number(appointment.id_cita) === Number(linkedAppointmentId)
         && Number(appointment.clinica_id) === normalizedClinicId
-        && Number(appointment.paciente_id) === Number(patientId)
-        && Number(appointment.lead_intake_id) === Number(exact[0].lead_id);
+        && Number(appointment.paciente_id) === Number(patientId);
+      if (bookedLeadMatches && Number(appointment.lead_intake_id) !== Number(exact[0].lead_id)) {
+        const lead = await db.LeadIntake.findByPk(exact[0].lead_id, {
+          attributes: ['id', 'clinica_id', 'telefono'], transaction, lock: transaction.LOCK.SHARE, raw: true });
+        const otherOwner = await db.CitaPaciente.findOne({ where: { clinica_id: normalizedClinicId,
+          lead_intake_id: Number(exact[0].lead_id), paciente_id: { [Op.ne]: Number(patientId) } },
+          attributes: ['id_cita'], transaction, lock: transaction.LOCK.SHARE, raw: true });
+        bookedLeadMatches = !!lead && Number(lead.clinica_id) === normalizedClinicId
+          && normalizePhoneE164(lead.telefono) === requestedPhone && !otherOwner;
+      }
     }
     if (conversations.length !== 1 || exact.length !== 1
       || Number(exact[0].patient_id) !== Number(patientId) || (exact[0].lead_id && !bookedLeadMatches)) {

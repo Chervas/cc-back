@@ -2160,7 +2160,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         }
 
         // Resolver/crear paciente
-        const { patient: paciente, created: patientCreated } = await findOrCreatePaciente({
+        const { patient: paciente } = await findOrCreatePaciente({
             clinica_id,
             nombre: datosPaciente.nombre,
             apellidos: datosPaciente.apellidos,
@@ -2221,8 +2221,8 @@ exports.createCita = asyncHandler(async (req, res) => {
             patient: paciente,
             requestedLanguage: datosPaciente.idioma_preferido,
             afterPersist: async (appointment, transaction) => {
-                if (patientCreated) await require('../services/newPatientWhatsappConversation.service').link({
-                    db, patient: paciente, clinicId: clinica_id, transaction,
+                await require('../services/newPatientWhatsappConversation.service').link({
+                    db, patient: paciente, clinicId: clinica_id, transaction, appointment,
                 });
                 if (!bookingEnabled || pastHistoryOnly) {
                     await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, appointment, transaction });
