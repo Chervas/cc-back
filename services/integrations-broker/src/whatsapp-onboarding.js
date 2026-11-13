@@ -100,6 +100,11 @@ function createWhatsappOnboarding({ store, policy, secrets, http, resolveBinding
   async function dispatch(request, principal, binding, name, signal, attempt) {
     const b = C.bindingFor(binding); const id = request.payload.flowId || request.requestId;
     if (name === 'begin') return store.transaction(() => {
+      // Provisioning can select a virgin slot's profile in another process
+      // after policy resolution. Serialize with that transaction and reject a
+      // stale binding before recording a flow or accepting its OAuth state.
+      const currentBinding = bindingForConnection(request.connectionRef);
+      if (!currentBinding || C.fingerprint(currentBinding) !== C.fingerprint(binding)) fail('idempotency_conflict');
       const old = get(id);
       if (old) {
         const row = checked(request, principal, binding); active(row, signal);

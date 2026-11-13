@@ -16,10 +16,40 @@ function createWhatsappProvisioning({ store, policy, settings, client, now = () 
   store.db.exec(`CREATE TABLE IF NOT EXISTS whatsapp_provisioned_slots (
     scope TEXT PRIMARY KEY, connection TEXT NOT NULL UNIQUE, clinic_ids TEXT NOT NULL,
     config_digest TEXT NOT NULL, version_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL UNIQUE,
-    arn TEXT, state TEXT NOT NULL CHECK(state IN ('preparing','ready')), created_at INTEGER NOT NULL);
+    arn TEXT, state TEXT NOT NULL CHECK(state IN ('preparing','ready')), created_at INTEGER NOT NULL,
+    provider_grant_policy TEXT CHECK(provider_grant_policy IS NULL OR provider_grant_policy IN ('strict-v1','meta-app-companion-v1')));
     CREATE TABLE IF NOT EXISTS whatsapp_preparation_requests (
     id TEXT PRIMARY KEY, digest TEXT NOT NULL, scope TEXT NOT NULL, created_at INTEGER NOT NULL, completed_at INTEGER);`);
+  // Additive only: historical NULL profiles keep their exact legacy binding.
+  store.transaction(() => {
+    if (!store.db.prepare("PRAGMA table_info(whatsapp_provisioned_slots)").all().some(column => column.name === 'provider_grant_policy')) {
+      store.db.exec("ALTER TABLE whatsapp_provisioned_slots ADD COLUMN provider_grant_policy TEXT CHECK(provider_grant_policy IS NULL OR provider_grant_policy IN ('strict-v1','meta-app-companion-v1'))");
+    }
+  });
   const rowFor = scope => store.db.prepare('SELECT * FROM whatsapp_provisioned_slots WHERE scope=?').get(scope);
+  const grantPolicy = binding => binding.customer.providerGrantPolicy || P.STRICT_GRANT_POLICY;
+  function policyForRow(row) {
+    if (row.provider_grant_policy != null) {
+      if (![P.STRICT_GRANT_POLICY,C.PROVIDER_GRANT_POLICY].includes(row.provider_grant_policy)) fail('scope_denied');
+      return row.provider_grant_policy;
+    }
+    return grantPolicy(P.publicBinding(template,row.scope,JSON.parse(row.clinic_ids)));
+  }
+  function hasRetainedAuthority(row, requestId) {
+    // An expired/interrupted attempt is not a virgin scope. Only a confirmed
+    // abort without any candidate evidence can precede a profile selection.
+    const asset = 'wa-enroll:' + row.scope;
+    if (store.db.prepare("SELECT 1 FROM whatsapp_onboarding_flows WHERE (connection=? OR asset=?) AND (state<>'aborted' OR secret_digest IS NOT NULL OR credential_metadata IS NOT NULL) LIMIT 1").get(row.connection,asset)) return true;
+    for (const table of ['whatsapp_onboarding_assets','whatsapp_onboarding_wabas']) {
+      if (store.db.prepare(`SELECT 1 FROM ${table} WHERE connection=? OR asset=? LIMIT 1`).get(row.connection,asset)) return true;
+    }
+    if (store.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='whatsapp_activations'").get()
+      && store.db.prepare("SELECT 1 FROM whatsapp_activations a LEFT JOIN whatsapp_onboarding_flows f ON f.id=a.flow_id WHERE f.connection=? OR f.asset=? OR json_extract(a.definition,'$.enrollmentBinding.connectionRef')=? OR json_extract(a.definition,'$.enrollmentBinding.whatsappOnboarding.scopeKey')=? LIMIT 1").get(row.connection,asset,row.connection,row.scope)) return true;
+    if (store.db.prepare('SELECT 1 FROM whatsapp_preparation_requests WHERE scope=? AND completed_at IS NULL AND id<>? LIMIT 1').get(row.scope,requestId)) return true;
+    // Old command journals do not retain their scope. Conservatively defer a
+    // profile change while any Owner command is in flight, without changing it.
+    return !!store.db.prepare("SELECT 1 FROM commands WHERE state='started' LIMIT 1").get();
+  }
   function checkBlocks(scope, clinicIds) {
     for (const key of new Set([scope, ...clinicIds.map(id => 'clinic:' + id)])) {
       if (store.db.prepare('SELECT 1 FROM whatsapp_onboarding_scope_blocks WHERE scope_key=?').get(key)) fail('asset_revoked');
@@ -99,11 +129,17 @@ function createWhatsappProvisioning({ store, policy, settings, client, now = () 
     if (request.connectionRef !== P.connectionRef(v.scopeKey) || request.assetRef !== 'wa-enroll:' + v.scopeKey
       || request.tenantRef !== 'clinic:' + v.clinicIds[0]
       || policy.connections.some(b => b.whatsappOnboarding.scopeKey === v.scopeKey || b.connectionRef === request.connectionRef)) fail('scope_denied');
+    const desired = grantPolicy(P.publicBinding(template,v.scopeKey,v.clinicIds,v.mode));
+    // A modern automatic coexistence admission must be ready to validate the
+    // mixed application grant. Refuse before creating even an empty slot when
+    // the server capability/legacy override is absent.
+    if (v.mode === 'coexistence' && desired !== C.PROVIDER_GRANT_POLICY) fail('invalid_request');
     // The request has passed principal, scope and template validation. Audit this
     // exact preparation grant; it is not an operational send authorization.
     const auditPolicy = { ...policy, grants: [{ principalId: principal.id, tenantRef: request.tenantRef,
       assetRef: request.assetRef, connectionRef: request.connectionRef, operations: [P.PREPARE] }] };
-    const digest = C.hash(canonical({ connectionRef: request.connectionRef, payload: v }));
+    const digest = C.hash(canonical({ connectionRef: request.connectionRef, payload: v,
+      ...(Object.hasOwn(v,'mode') ? { providerGrantPolicy: desired } : {}) }));
     const row = store.transaction(() => {
       checkBlocks(v.scopeKey,v.clinicIds);
       const prior = store.db.prepare('SELECT * FROM whatsapp_preparation_requests WHERE id=?').get(request.requestId);
@@ -113,9 +149,27 @@ function createWhatsappProvisioning({ store, policy, settings, client, now = () 
       if (store.backlog().pending + 2 > policy.maxBacklog) fail('audit_unavailable');
       if (!found) {
         if (store.db.prepare('SELECT count(*) AS n FROM whatsapp_provisioned_slots').get().n >= maxConnections) fail('rate_limited');
-        store.db.prepare("INSERT INTO whatsapp_provisioned_slots VALUES (?,?,?,?,?,?,NULL,'preparing',?)")
-          .run(v.scopeKey,request.connectionRef,JSON.stringify(v.clinicIds),configDigest,randomUUID(),P.PREFIX + v.scopeKey.replace(':','-') + '/candidate',now());
+        store.db.prepare("INSERT INTO whatsapp_provisioned_slots(scope,connection,clinic_ids,config_digest,version_id,name,arn,state,created_at,provider_grant_policy) VALUES (?,?,?,?,?,?,NULL,'preparing',?,?)")
+          .run(v.scopeKey,request.connectionRef,JSON.stringify(v.clinicIds),configDigest,randomUUID(),P.PREFIX + v.scopeKey.replace(':','-') + '/candidate',now(),
+            Object.hasOwn(v,'mode') ? desired : null);
         found = rowFor(v.scopeKey);
+      } else {
+        const effective = policyForRow(found);
+        if (effective !== desired) {
+          // Never downgrade or rewrite a previously selected profile. An old
+          // strict NULL slot may be upgraded only before it has authority.
+          if (found.provider_grant_policy != null || desired !== C.PROVIDER_GRANT_POLICY
+            || effective !== P.STRICT_GRANT_POLICY || hasRetainedAuthority(found,request.requestId)) fail('idempotency_conflict');
+          store.db.prepare('UPDATE whatsapp_provisioned_slots SET provider_grant_policy=? WHERE scope=? AND provider_grant_policy IS NULL')
+            .run(desired,found.scope);
+          found = rowFor(v.scopeKey);
+        } else if (found.provider_grant_policy == null && Object.hasOwn(v,'mode') && !hasRetainedAuthority(found,request.requestId)) {
+          // Pin an empty slot, but do not even rewrite NULL on historical
+          // authorities whose effective fingerprint is already compatible.
+          store.db.prepare('UPDATE whatsapp_provisioned_slots SET provider_grant_policy=? WHERE scope=? AND provider_grant_policy IS NULL')
+            .run(desired,found.scope);
+          found = rowFor(v.scopeKey);
+        }
       }
       if (!prior) {
         store.db.prepare('INSERT INTO whatsapp_preparation_requests VALUES (?,?,?,?,NULL)').run(request.requestId,digest,v.scopeKey,now());
@@ -131,7 +185,8 @@ function createWhatsappProvisioning({ store, policy, settings, client, now = () 
         checkBlocks(v.scopeKey,v.clinicIds);
         if (store.backlog().pending >= policy.maxBacklog) fail('audit_unavailable');
         const current = rowFor(v.scopeKey);
-        if (current.version_id !== row.version_id || current.config_digest !== configDigest || current.arn && current.arn !== arn) fail('idempotency_conflict');
+        if (current.version_id !== row.version_id || current.config_digest !== configDigest || current.arn && current.arn !== arn
+          || current.provider_grant_policy !== row.provider_grant_policy || policyForRow(current) !== desired) fail('idempotency_conflict');
         if (current.state !== 'ready') {
           store.db.prepare("UPDATE whatsapp_provisioned_slots SET arn=?,state='ready' WHERE scope=?").run(arn,v.scopeKey);
           store.seedConnection(row.connection,{state:'active',expiresAt:null});
@@ -142,7 +197,7 @@ function createWhatsappProvisioning({ store, policy, settings, client, now = () 
           store.db.prepare('UPDATE whatsapp_preparation_requests SET completed_at=? WHERE id=?').run(now(),request.requestId);
         }
         return { requestId: request.requestId, replayed: completed.completed_at !== null, data: {
-          status: 'prepared', connected: false, binding: P.publicBinding(template,v.scopeKey,v.clinicIds) } };
+          status: 'prepared', connected: false, binding: P.publicBinding(template,v.scopeKey,v.clinicIds,v.mode) } };
       });
     } catch (error) {
       if (error instanceof BrokerError) throw error;

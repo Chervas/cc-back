@@ -282,6 +282,62 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await assert.rejects(roleMigration.down(qi,D),/Preserve signed WhatsApp channel intents/);
   await assert.rejects(replacementMigration.down(qi,D),/Preserve signed WhatsApp reconnection targets/);
   report.checks.push('Additive nullable role migration preserves legacy v1 MAC; reconnection target is scope/role/phone bound, supports only verified legacy coexistence, survives restart and cannot be omitted or changed');
+  const [modeColumns] = await sql.query("SHOW COLUMNS FROM WhatsappAuthorizationStates LIKE 'onboarding_mode'");
+  assert.equal(modeColumns[0].Type, "enum('cloud_api','coexistence')");
+  assert.equal(modeColumns[0].Null, 'YES'); assert.equal(modeColumns[0].Default, null);
+  for (const requestId of [firstRole.requestId, secondRole.requestId, replacementFlow.requestId]) {
+    const previous = await R.findByPk(requestId, { raw: true });
+    assert.equal(previous.onboarding_mode, null);
+    const parts = ['whatsapp-onboarding-v1', previous.request_id, previous.user_id, previous.session_ref,
+      previous.session_expires_at.toISOString(), previous.scope_type, previous.scope_id, previous.original_clinic_ids,
+      previous.scope_digest, previous.created_at.toISOString(), previous.expires_at.toISOString()];
+    if (previous.replacement_asset_id != null) {
+      parts[0] = 'whatsapp-onboarding-v3'; parts.push(previous.channel_role || 'primary', previous.replacement_asset_id,
+        previous.replacement_authorization_id, previous.replacement_phone_digest);
+    } else if (previous.channel_role != null) { parts[0] = 'whatsapp-onboarding-v2'; parts.push(previous.channel_role); }
+    assert.equal(previous.context_digest, SC.digest(JSON.stringify(parts)));
+    assert.equal(previous.state_hash, SC.digest(SC.stateFor(Buffer.alloc(32, 7), previous)));
+  }
+  const nullBefore = await R.findByPk(firstRole.requestId, { raw: true });
+  await assert.rejects(service.issue({ ...roleWho, requestId: firstRole.requestId, scope,
+    channelRole: 'primary', mode: 'coexistence' }), codeIs('whatsapp_authorization_conflict'));
+  assert.deepEqual(await R.findByPk(firstRole.requestId, { raw: true }), nullBefore);
+  report.checks.push('Real nullable enum and up/down/up migration preserve literal NULL-mode v1/v2/v3 contexts and MACs; a legacy UUID cannot acquire a new mode');
+  for (const mode of ['cloud_api', 'coexistence']) {
+    const modeWho = await actor(), input = { ...modeWho, requestId: randomUUID(), scope, channelRole: 'primary', mode };
+    const issued = await service.issue(input), before = await R.findByPk(input.requestId, { raw: true });
+    assert.equal(issued.mode, mode); assert.equal(before.onboarding_mode, mode);
+    assert.equal((await make().issue(input)).state, issued.state);
+    assert.equal((await make().status(inputFor(modeWho, issued))).mode, mode);
+    const { mode: omitted, ...withoutMode } = input;
+    await assert.rejects(make().issue(withoutMode), codeIs('whatsapp_authorization_conflict'));
+    const otherMode = mode === 'cloud_api' ? 'coexistence' : 'cloud_api';
+    await assert.rejects(make().issue({ ...input, mode: otherMode }), codeIs('whatsapp_authorization_conflict'));
+    assert.deepEqual(await R.findByPk(input.requestId, { raw: true }), before);
+    await R.update({ onboarding_mode: otherMode }, { where: { request_id: input.requestId } });
+    await assert.rejects(make().status(inputFor(modeWho, issued)), codeIs('whatsapp_authorization_unavailable'));
+    await assert.rejects(claim(modeWho, issued, make()), codeIs('whatsapp_authorization_unavailable'));
+    assert.equal((await R.findByPk(input.requestId)).state, 'awaiting');
+    await R.update({ onboarding_mode: mode }, { where: { request_id: input.requestId } });
+    const winners = await Promise.allSettled([claim(modeWho, issued, make()), claim(modeWho, issued, make())]);
+    assert.equal(winners.filter(result => result.status === 'fulfilled' && result.value.mayExchange && result.value.mode === mode).length, 1);
+    assert.equal(winners.find(result => result.status === 'rejected').reason.code, 'whatsapp_authorization_consumed');
+    assert.equal((await make().resume(inputFor(modeWho, issued))).mode, mode);
+    assert.equal((await make().cancel(inputFor(modeWho, issued))).mode, mode);
+    const cancelled = await R.findByPk(input.requestId, { raw: true });
+    assert.equal(cancelled.onboarding_mode, mode); assert.equal(cancelled.context_digest, before.context_digest);
+    assert.equal(cancelled.state_hash, before.state_hash);
+  }
+  const modeRaceWho = await actor(), raceInput = { ...modeRaceWho, requestId: randomUUID(), scope, channelRole: 'primary' };
+  const modeRaces = await Promise.allSettled(['cloud_api', 'coexistence'].map(mode => make().issue({ ...raceInput, mode })));
+  assert.equal(modeRaces.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(modeRaces.find(result => result.status === 'rejected').reason.code, 'whatsapp_authorization_conflict');
+  const winner = modeRaces.find(result => result.status === 'fulfilled').value;
+  assert.equal((await R.findByPk(raceInput.requestId)).onboarding_mode, winner.mode);
+  assert.equal(await R.count({ where: { request_id: raceInput.requestId } }), 1);
+  await assert.rejects(modeMigration.down(qi, D), /Preserve signed WhatsApp onboarding modes/);
+  assert.equal((await qi.describeTable('WhatsappAuthorizationStates')).onboarding_mode.allowNull, true);
+  report.checks.push('Real MySQL persists both modes across reload, claim, resume and cancellation; replay omission/change and mode tampering fail closed; concurrent claims/issuance have one winner; non-NULL mode blocks destructive rollback');
   const rows = await A.findAll({ raw: true }); const bodies = rows.map(r => r.body).join('\n');
   assert(!bodies.includes(flow.state)); assert(!bodies.includes('FICTITIOUS_OAUTH_CODE')); assert(!bodies.includes('FICTITIOUS_JWT_KEY'));
   assert(rows.every(r => JSON.parse(r.body).version === 15));
