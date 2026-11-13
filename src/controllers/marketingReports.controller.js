@@ -2834,7 +2834,28 @@ async function aggregateWebPages(scope, range, seoPages = [], loadedLeads = null
   });
 }
 
-async function aggregateBusinessProfile(scope, range, marketingState = null) {
+async function reportBusinessHistory(scope,marketingState,userId){
+  if(!userId||scope.isAll)return null;
+  const ids=effectiveBusinessLocationIds(marketingState);if(!ids.length)return null;
+  const rows=await ClinicBusinessLocation.findAll({where:{id:{[Op.in]:ids},is_active:true},raw:true});
+  const projections=[],clinicIds=normalizedUniqueIntegers(scope.clinicIds||[]),candidates=new Map();
+  const clinicMappings=async clinicId=>effectiveBusinessLocationIds(await resolveReportMarketingState({scope:'clinic',clinicIds:[clinicId],isAll:false}));
+  for(const row of rows){
+    let clinicId=clinicIds.includes(Number(row.clinica_id))?Number(row.clinica_id):null;
+    if(clinicId==null)for(const candidate of clinicIds){
+      if(!candidates.has(candidate))candidates.set(candidate,await clinicMappings(candidate));
+      if(candidates.get(candidate).includes(Number(row.id))){clinicId=candidate;break;}
+    }
+    if(clinicId==null)throw Object.assign(Error('scope_denied'),{code:'scope_denied',status:403,httpStatus:403});
+    const projection=await require('../services/businessProfileHistoryScope.service').createHistoryProjection({models:require('../../models'),clinicId:Number(clinicId),userId:Number(userId),locations:[row],
+      resolveEffectiveMappingIds:()=>clinicMappings(clinicId)});
+    projections.push(projection);
+  }
+  if(!projections.some(p=>p.lineages.some(l=>l.generationId)))return null;
+  return {mappingIds:[...new Set(projections.flatMap(p=>p.mappingIds))],lineages:projections.flatMap(p=>p.lineages),fingerprint:projections.map(p=>p.fingerprint),assert:async()=>{for(const p of projections)await p.assert();}};
+}
+
+async function aggregateBusinessProfile(scope, range, marketingState = null,userId=null) {
   const empty = {
     metrics: {
       views: 0,
@@ -2854,6 +2875,8 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
   if (!ClinicBusinessLocation || !BusinessProfileDailyMetric || !BusinessProfileReview) return empty;
 
   const effectiveLocationIds = effectiveBusinessLocationIds(marketingState);
+  const history=await reportBusinessHistory(scope,marketingState,userId);
+  const readIds=history?.mappingIds||effectiveLocationIds;
   // A current association is a resource selection, not an ownership transfer
   // of the clinic's historical metrics. An authoritative empty inventory does
   // not fall back to observations from a retired Google location.
@@ -2873,11 +2896,12 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
       scope,
       'clinica_id',
       'business_location_id',
-      effectiveLocationIds
+      readIds
     ),
     ...buildDateOnlyWhere('date', range),
   };
-  const rows = await BusinessProfileDailyMetric.findAll({ where: metricWhere, raw: true });
+  const storedRows = await BusinessProfileDailyMetric.findAll({ where: metricWhere, raw: true });
+  const rows=require('../services/businessProfileHistoryScope.service').deduplicateMetrics(storedRows,history);
   const reportableMetricRows = collapseBusinessProfileMetricRows(rows);
   const rawMetricDates = new Set(rows.map((row) => String(row.date || '')).filter(Boolean));
   const reportableMetricDates = new Set(reportableMetricRows.map((row) => String(row.date || '')).filter(Boolean));
@@ -2893,7 +2917,7 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
     scope,
     'clinica_id',
     'business_location_id',
-    effectiveLocationIds
+    readIds
   ), google_missing_at: null };
   const [reviewTotals, newReviews] = await Promise.all([
     BusinessProfileReview.findOne({
@@ -2915,6 +2939,7 @@ async function aggregateBusinessProfile(scope, range, marketingState = null) {
   const totalReviews = toNumber(reviewTotals?.totalReviews);
   const averageRating = round(reviewTotals?.averageRating, 1);
   const unansweredReviews = toNumber(reviewTotals?.unansweredReviews);
+  await history?.assert();
 
   const metrics = {
     views: sumDefinition(BUSINESS_PROFILE_LOCAL_METRIC_DEFINITIONS.profile_views),
@@ -3918,7 +3943,7 @@ function buildRecommendations({
     .map(({ priority: _priority, ...recommendation }) => recommendation);
 }
 
-async function buildOverviewPayload({ scope, range, sourceChecks = [] }) {
+async function buildOverviewPayload({ scope, range, sourceChecks = [],userId=null }) {
   const marketingState = await resolveReportMarketingState(scope);
   const paidAttributionCoverage = await resolvePaidAttributionCoverage(scope);
   const paidCoverageSummary = buildPaidAttributionCoverageSummary(range, paidAttributionCoverage);
@@ -3965,7 +3990,7 @@ async function buildOverviewPayload({ scope, range, sourceChecks = [] }) {
     aggregateGa(scope, range, marketingState),
     aggregateSeo(scope, range, marketingState, sourceChecks),
     aggregateSocialOrganic(scope, range, marketingState),
-    aggregateBusinessProfile(scope, range, marketingState),
+    aggregateBusinessProfile(scope, range, marketingState,userId),
     webEventsService.getFirstPartySummary(scope, range),
   ]);
 
@@ -4164,7 +4189,7 @@ function forceRefreshRequested(req) {
   return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
 }
 
-async function prepareOverviewSnapshot({ scope, range, section = 'overview' }) {
+async function prepareOverviewSnapshot({ scope, range, section = 'overview',userId=null }) {
   const { prepareValidatedReportSnapshot } = require('../lib/validated-report-snapshot');
   const sourceMode = process.env.SC_ANALYTICS_READ_ENABLED === 'true';
   const assertSourceMode = () => {
@@ -4176,6 +4201,7 @@ async function prepareOverviewSnapshot({ scope, range, section = 'overview' }) {
     capture: async () => {
       assertSourceMode();
       const state = await resolveReportMarketingState(scope);
+      const history=await reportBusinessHistory(scope,state,userId);
       let revisions;
       if (sourceMode) {
         const siteUrls = await currentSearchConsoleSiteUrls(scope, state);
@@ -4189,13 +4215,13 @@ async function prepareOverviewSnapshot({ scope, range, section = 'overview' }) {
       return { scope: state?.scope || { clinicIds: scope.clinicIds, isAll: scope.isAll },
         ...(sourceMode ? { revisions } : { sourceMode: 'legacy' }),
         google: { accounts: effectiveGoogleAccounts(state), properties: effectiveGoogleProperties(state) },
-        meta: effectiveMetaAssets(state) };
+        meta: effectiveMetaAssets(state),...(history?{businessProfileHistory:history.fingerprint}:{}) };
     },
     buildIdentity: contextKey => buildOverviewCacheIdentity({ scope, range, section, contextKey }),
     cache: scope.isAll ? null : overviewCache,
     generate: async () => {
       const sourceChecks = [];
-      const payload = await buildOverviewPayload({ scope, range, sourceChecks });
+      const payload = await buildOverviewPayload({ scope, range, sourceChecks,userId });
       for (const validate of sourceChecks) await validate();
       return payload;
     },
@@ -4265,14 +4291,14 @@ exports.getOverview = async (req, res) => {
         },
         capture: async () => currentSearchConsoleSiteUrls(scope, await resolveReportMarketingState(scope)),
         generate: async () => {
-          const prepared = await prepareOverviewSnapshot({ scope, range });
+          const prepared = await prepareOverviewSnapshot({ scope, range,userId });
           snapshotIdentity = prepared.identity.cache_key;
           return prepared.read({ forceRefresh: forceRefreshRequested(req), staleWhileRefresh: true });
         },
       });
       return res.json(overviewNavigationResponse(req, response, scope.isAll ? null : snapshotIdentity));
     }
-    const prepared = await prepareOverviewSnapshot({ scope, range });
+    const prepared = await prepareOverviewSnapshot({ scope, range,userId });
     const response = await prepared.read({ forceRefresh: forceRefreshRequested(req), staleWhileRefresh: true });
     return res.json(response);
   } catch (error) {

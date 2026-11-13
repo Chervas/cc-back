@@ -85,25 +85,52 @@ function aggregateReport(rows, range, quality = {}) {
 }
 
 const reportCaches=new WeakMap();let reportGeneration=0;
+async function providerHistoryForReport(db,options){
+  if(!options.userId||!options.locationIds?.length)return null;
+  const {Op}=require('sequelize'),H=require('./businessProfileHistoryScope.service');
+  const rows=await db.ClinicBusinessLocation.findAll({where:{id:{[Op.in]:options.locationIds},is_active:true},raw:true});
+  const projections=[],clinicIds=[...new Set(options.clinicIds.map(Number))],candidates=new Map(),locationOwners={};
+  const clinicMappings=async clinicId=>{
+    if(typeof options.resolveEffectiveMappingIdsForClinic==='function')return options.resolveEffectiveMappingIdsForClinic(clinicId);
+    if(clinicIds.length===1&&typeof options.resolveEffectiveMappingIds==='function')return options.resolveEffectiveMappingIds();
+    throw Object.assign(Error('scope_denied'),{code:'scope_denied',status:403,httpStatus:403});
+  };
+  for(const row of rows){
+    let clinicId=clinicIds.includes(Number(row.clinica_id))?Number(row.clinica_id):null;
+    if(clinicId==null)for(const candidate of clinicIds){
+      if(!candidates.has(candidate))candidates.set(candidate,await clinicMappings(candidate));
+      if(candidates.get(candidate).includes(Number(row.id))){clinicId=candidate;break;}
+    }
+    if(clinicId==null)throw Object.assign(Error('scope_denied'),{code:'scope_denied',status:403,httpStatus:403});
+    const projection=await H.createHistoryProjection({models:db,clinicId:Number(clinicId),userId:Number(options.userId),locations:[row],resolveEffectiveMappingIds:()=>clinicMappings(clinicId)});
+    projections.push(projection);
+    const owners=(options.locationOwners?.[row.id]||[]).map(Number).filter(id=>clinicIds.includes(id));
+    for(const id of projection.mappingIds)locationOwners[id]=owners.length?owners:[clinicId];
+  }
+  if(!projections.some(p=>p.lineages.some(l=>l.generationId)))return null;
+  return {mappingIds:[...new Set(projections.flatMap(p=>p.mappingIds))],lineages:projections.flatMap(p=>p.lineages),locationOwners,fingerprint:projections.map(p=>p.fingerprint),assert:async()=>{for(const p of projections)await p.assert();}};
+}
 async function readReport(db,options={}) {
+  const providerHistory=await providerHistoryForReport(db,options);
   const identity=db.sequelize||db;
   let entry=reportCaches.get(identity);
   if(!entry){entry={generation:reportGeneration,cache:require('../lib/report-read-cache').createReportReadCache()};reportCaches.set(identity,entry);}
   if(entry.generation!==reportGeneration){entry.cache.clear();entry.generation=reportGeneration;}
   const range=reportRange(options.period||'30d',options.now||new Date());
-  const key=JSON.stringify([[...(options.clinicIds||[])].sort((a,b)=>a-b),[...(options.locationIds||[])].sort((a,b)=>a-b),Object.entries(options.clinicNames||{}).sort((a,b)=>Number(a[0])-Number(b[0])),Object.entries(options.locationOwners||{}).sort((a,b)=>Number(a[0])-Number(b[0])).map(([id,owners])=>[id,[...owners].map(Number).sort((a,b)=>a-b)]),range.from,range.to]);
-  const result=await entry.cache.read(key,()=>readUncachedReport(db,options));
+  const key=JSON.stringify([[...(options.clinicIds||[])].sort((a,b)=>a-b),[...(options.locationIds||[])].sort((a,b)=>a-b),Object.entries(options.clinicNames||{}).sort((a,b)=>Number(a[0])-Number(b[0])),Object.entries(options.locationOwners||{}).sort((a,b)=>Number(a[0])-Number(b[0])).map(([id,owners])=>[id,[...owners].map(Number).sort((a,b)=>a-b)]),range.from,range.to,...(providerHistory?[providerHistory.fingerprint]:[])]);
+  const result=await entry.cache.read(key,async()=>{const value=await readUncachedReport(db,{...options,providerHistory});await providerHistory?.assert();return value;});
+  await providerHistory?.assert();
   return {...result.value,generated_at:result.generated_at,aggregate_cache:{status:result.status}};
 }
 function invalidate(){reportGeneration++;}
 
-async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinicNames = {}, locationOwners = {}, period = '30d', now = new Date() } = {}) {
+async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinicNames = {}, locationOwners = {}, period = '30d', now = new Date(),providerHistory=null } = {}) {
   const range = reportRange(period, now);
   clinicIds = [...new Set(clinicIds.map(Number).filter(id => Number.isInteger(id) && id > 0))];
   locationIds = [...new Set(locationIds.map(Number).filter(id => Number.isInteger(id) && id > 0))];
   if (!clinicIds.length) return { ...aggregateReport([], range), score_trends: [] };
   const previous = previousReportRange(range);
-  const replacements = { clinicIds, locationIds, start: previous.start, split: range.start, end: range.end };
+  const replacements = { clinicIds, locationIds,providerLocationIds:providerHistory?.mappingIds||locationIds, start: previous.start, split: range.start, end: range.end };
   const options = { replacements, type: db.Sequelize.QueryTypes.SELECT };
   const testExclusion = `NOT EXISTS (SELECT 1 FROM MarketingPatientContactEvents t
     WHERE t.list_id=i.list_id AND t.item_id=i.id AND t.event_type IN ('mass_campaign_test_sent','mass_campaign_test_failed'))`;
@@ -156,9 +183,9 @@ async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinic
       FROM MarketingContactOptOuts WHERE clinica_id IN (:clinicIds) AND channel='whatsapp'
         AND opted_out_at>= :start AND opted_out_at< :end GROUP BY DATE_FORMAT(opted_out_at,'%Y-%m-%dT%H:00:00Z')`, options);
 
-  const locationScope = locationIds.length ? 'r.business_location_id IN (:locationIds)' : 'r.clinica_id IN (:clinicIds)';
+  const locationScope = locationIds.length ? 'r.business_location_id IN (:providerLocationIds)' : 'r.clinica_id IN (:clinicIds)';
   const matchScope = locationIds.length ? 'm.location_id IN (:locationIds)' : 'm.clinic_id IN (:clinicIds)';
-  const ownershipCases = Object.entries(locationOwners).filter(([id, owners]) => Number.isSafeInteger(Number(id)) && Number(id)>0)
+  const ownershipCases = Object.entries({...locationOwners,...(providerHistory?.locationOwners||{})}).filter(([id, owners]) => Number.isSafeInteger(Number(id)) && Number(id)>0)
     .map(([id, owners]) => `WHEN ${Number(id)} THEN ${owners.length === 1 && clinicIds.includes(Number(owners[0])) ? Number(owners[0]) : 0}`).join(' ');
   const ownerExpression = ownershipCases ? `CASE r.business_location_id ${ownershipCases} ELSE r.clinica_id END` : 'r.clinica_id';
   const inventoryCte = `WITH matches AS (
@@ -199,7 +226,7 @@ async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinic
   const qualityPromise = db.sequelize.query(`${inventoryCte} SELECT COALESCE(SUM(missing_at IS NOT NULL OR missing_without_date=1),0) missing_total,
     COALESCE(SUM(missing_without_date),0) missing_without_date,
     COALESCE(SUM(observation_date=1 AND published_at >= :split AND published_at < :end),0) reviews_with_observation_date FROM inventory`, options);
-  const scoreTrendsPromise = require('./reviewScoreTrend.service').readScoreTrends(db, { locationIds, range, previous });
+  const scoreTrendsPromise = require('./reviewScoreTrend.service').readScoreTrends(db, { locationIds, range, previous,historyProjection:providerHistory });
   const [requestRows,reviewRows,[quality],periodRows,scoreTrends]=await Promise.all([
     requestRowsPromise,reviewRowsPromise,qualityPromise,periodRowsPromise,scoreTrendsPromise]);
   const rows = [...requestRows, ...reviewRows, ...periodRows];

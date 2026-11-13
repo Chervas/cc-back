@@ -385,8 +385,14 @@ async function resolveEffectiveLocations(clinicIdRaw, dependencies = {}) {
   const locations = orderedAssets
     .map((asset) => byId.get(toInt(asset.mapping_id)))
     .filter(Boolean);
-  return { clinicId, inventory, locations, assets: orderedAssets, primaryLocationId, timeZone };
+  const history = dependencies.userId ? await require('./businessProfileHistoryScope.service').createHistoryProjection({models:dependencies.models||require('../../models'),clinicId,userId:Number(dependencies.userId),locations,
+    resolveEffectiveMappingIds:async()=>{const fresh=await inventoryResolver({clinicIdRaw:clinicId,groupIdRaw:null,assignmentScopeRaw:'clinic'});return (fresh?.google?.available_assets?.business_profile||[]).map(a=>Number(a.mapping_id));}}) : null;
+  return { clinicId, inventory, locations, assets: orderedAssets, primaryLocationId, timeZone, history };
 }
+
+const historyLocationIds = resolved => resolved.history?.mappingIds || resolved.locations.map(location=>Number(location.id));
+const historyMetrics = (rows,resolved) => require('./businessProfileHistoryScope.service').deduplicateMetrics(rows,resolved.history);
+const historyRead = fn => async(resolved,...args)=>{await resolved.history?.assert();const result=await fn(resolved,...args);await resolved.history?.assert();return result;};
 
 async function resolvePhotoMutationClinicIds(resolved, dependencies = {}) {
   const location = resolved?.locations?.[0] || null;
@@ -550,9 +556,9 @@ async function loadMetricRows(locationIds, range) {
 
 async function buildOverview(resolved, startDate, endDate) {
   const range = resolveDateRange(startDate, endDate, 90);
-  const locationIds = resolved.locations.map((location) => Number(location.id));
+  const locationIds = historyLocationIds(resolved);
   const [{ current: metrics, previous: prevMetrics }, reviewTotals, newReviews] = await Promise.all([
-    loadMetricRows(locationIds, range),
+    loadMetricRows(locationIds, range).then(rows=>({current:historyMetrics(rows.current,resolved),previous:historyMetrics(rows.previous,resolved)})),
     locationIds.length
       ? BusinessProfileReview.findOne({
         where: { business_location_id: { [Op.in]: locationIds }, google_missing_at: null },
@@ -611,7 +617,7 @@ async function buildOverview(resolved, startDate, endDate) {
 async function buildTimeseries(resolved, metric, startDate, endDate) {
   const range = resolveDateRange(startDate, endDate, 90);
   const definition = METRIC_DEFINITIONS[metric] || METRIC_DEFINITIONS.profile_views;
-  const locationIds = resolved.locations.map((location) => Number(location.id));
+  const locationIds = historyLocationIds(resolved);
   if (!locationIds.length) {
     return { success: true, metric, period: { start: range.start, end: range.end }, comparison: range.previous, current: [], previous: [] };
   }
@@ -638,8 +644,8 @@ async function buildTimeseries(resolved, metric, startDate, endDate) {
     metric,
     period: { start: range.start, end: range.end },
     comparison: range.previous,
-    current: metricValueByDate(currentRows, definition),
-    previous: metricValueByDate(previousRows, definition),
+    current: metricValueByDate(historyMetrics(currentRows,resolved), definition),
+    previous: metricValueByDate(historyMetrics(previousRows,resolved), definition),
   };
 }
 
@@ -649,7 +655,7 @@ async function buildSeasonality(resolved, monthsRaw = 18) {
   today.setHours(0, 0, 0, 0);
   const start = new Date(today.getFullYear(), today.getMonth() - (months - 1), 1);
   const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-  const locationIds = resolved.locations.map((location) => Number(location.id));
+  const locationIds = historyLocationIds(resolved);
   const rows = locationIds.length
     ? await BusinessProfileDailyMetric.findAll({
       where: {
@@ -665,7 +671,7 @@ async function buildSeasonality(resolved, monthsRaw = 18) {
     const month = cursor.toISOString().slice(0, 7);
     byMonth.set(month, { month, views: 0, calls: 0, directions: 0, websiteClicks: 0, totalActions: 0 });
   }
-  const collapsed = collapseMetricRows(rows);
+  const collapsed = collapseMetricRows(historyMetrics(rows,resolved));
   const rowsByMonth = new Map();
   for (const row of collapsed) {
     const month = String(row.date).slice(0, 7);
@@ -708,7 +714,7 @@ function clampPage(value, fallback, max) {
 }
 
 async function listReviews(resolved, query = {}) {
-  const locationIds = resolved.locations.map((location) => Number(location.id));
+  const locationIds = historyLocationIds(resolved);
   const limit = Math.max(1, clampPage(query.limit, 10, 50));
   const offset = clampPage(query.offset, 0, 100000);
   if (!locationIds.length) return { success: true, items: [], total: 0, limit, offset };
@@ -729,7 +735,13 @@ async function listReviews(resolved, query = {}) {
     }),
     BusinessProfileReview.count({ where }),
   ]);
-  return { success: true, items: rows, total, limit, offset };
+  const currentIds=new Set(resolved.locations.map(r=>Number(r.id)));
+  const items=rows.map(row=>{
+    if(currentIds.has(Number(row.business_location_id)))return row;
+    const {matched_paciente_id:_patient,matched_contact_event_id:_contact,match_confidence:_confidence,match_reason:_reason,matched_at:_matched,...publicReview}=row;
+    return {...publicReview,read_only:true};
+  });
+  return { success: true, items, total, limit, offset };
 }
 
 async function findReviewForMutation(resolved, reviewIdRaw, attributes) {
@@ -882,7 +894,7 @@ async function deleteReviewReply(resolved, reviewIdRaw, payload = {}, options = 
 }
 
 async function listPosts(resolved, query = {}) {
-  const locationIds = resolved.locations.map((location) => Number(location.id));
+  const locationIds = historyLocationIds(resolved);
   const limit = Math.max(1, clampPage(query.limit, 10, 50));
   const offset = clampPage(query.offset, 0, 100000);
   if (!locationIds.length) return { success: true, items: [], total: 0, limit, offset };
@@ -1871,19 +1883,19 @@ module.exports = {
   resolveEffectiveLocations,
   resolvePhotoMutationClinicIds,
   buildStatus,
-  buildOverview,
-  buildTimeseries,
-  buildSeasonality,
-  listReviews,
+  buildOverview:historyRead(buildOverview),
+  buildTimeseries:historyRead(buildTimeseries),
+  buildSeasonality:historyRead(buildSeasonality),
+  listReviews:historyRead(listReviews),
   resolveReviewMutationLocation: async (resolved, reviewId) => (await findReviewForMutation(resolved, reviewId)).location,
   resolveReviewDraftSource: (resolved, reviewId) => findReviewForMutation(resolved, reviewId,
     ['id', 'business_location_id', 'comment', 'star_rating', 'update_time', 'has_reply', 'reply_comment', 'google_missing_at']),
   updateReviewReply,
   deleteReviewReply,
-  listPosts,
+  listPosts:historyRead(listPosts),
   buildContent,
-  buildReviewInsights,
-  buildDashboard,
+  buildReviewInsights:historyRead(buildReviewInsights),
+  buildDashboard:historyRead(buildDashboard),
   updateSpecialHours,
   applyScheduledSpecialHoursPeriod,
   importRegularHoursToClinic,

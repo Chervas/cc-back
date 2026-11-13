@@ -8,6 +8,7 @@ const pureDependencies = {
   '../lib/review-care-snapshot': require('../../../lib/review-care-snapshot'),
   '../lib/delegatedOperationPolicy': require('../../../lib/delegatedOperationPolicy'),
   '../lib/lead-patient-context': require('../../../lib/lead-patient-context'),
+  '../services/businessProfileHistoryScope.service': require('../../../services/businessProfileHistoryScope.service'),
 };
 function loadDiscoverySource(relative, dependencies, { env = {}, logs = [] } = {}) {
   const filename = path.join(root, relative); const module = { exports: {} };

@@ -62,7 +62,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   table('ClinicBusinessLocation', 'ClinicBusinessLocations', { id: { type: D.INTEGER, primaryKey: true }, clinica_id: D.INTEGER,
     google_connection_id: D.INTEGER, location_id: D.STRING, broker_read_connection_ref: D.STRING, broker_read_asset_ref: D.STRING, is_active: D.BOOLEAN });
   table('BusinessProfileBrokerBinding', 'BusinessProfileBrokerBindings', { state: {type:D.STRING(16),allowNull:false,defaultValue:'active'}, external_location_id: { type: D.STRING, primaryKey: true },
-    clinica_id: D.INTEGER, google_connection_id: D.INTEGER, connection_ref: D.STRING, asset_ref: D.STRING });
+    clinica_id: D.INTEGER, google_connection_id: D.INTEGER, connection_ref: D.STRING, asset_ref: D.STRING,current_generation_id:{type:D.UUID,allowNull:true} });
   table('BusinessProfileBrokerRevocation', 'BusinessProfileBrokerRevocations', { external_location_id: { type: D.STRING, primaryKey: true } });
   for (const name of ['GoogleConnectionAssignment', 'ClinicBusinessLocation', 'BusinessProfileBrokerBinding', 'BusinessProfileBrokerRevocation']) await models[name].sync();
   await require('../../../migrations/20260913030000-add-search-console-broker-read-binding').up(qi, D);

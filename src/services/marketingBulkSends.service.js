@@ -4915,7 +4915,9 @@ async function getReviewActivityReport(scope, options = {}) {
   const effectiveScope = applyReviewClinicFilter(scope, options);
   const clinicIds = Array.isArray(effectiveScope?.clinicIds) ? effectiveScope.clinicIds.filter(Number.isInteger) : [];
   const ownership = await resolveReviewBusinessLocationIdsForClinics(clinicIds, { withOwners: true });
-  return require('./reviewActivityReport.service').readReport(db, { clinicIds, ...ownership, period: options.period });
+  return require('./reviewActivityReport.service').readReport(db, { clinicIds, ...ownership, period: options.period,userId:options.userId,
+    resolveEffectiveMappingIds:()=>resolveReviewBusinessLocationIdsForClinics(clinicIds),
+    resolveEffectiveMappingIdsForClinic:clinicId=>resolveReviewBusinessLocationIdsForClinics([clinicId]) });
 }
 
 async function getAttributedGoogleReviews(scope, options = {}) {

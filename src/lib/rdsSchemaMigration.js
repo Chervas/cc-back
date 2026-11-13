@@ -10,6 +10,7 @@ const T = require('./rdsSchemaMigrationTransport');
 const E = require('./mysqlEnumExtension');
 const W = require('./rdsSchemaWarningPolicy');
 const R = require('./rdsSchemaFirstCreateReconciliation');
+const G = require('./rdsSchemaGbpGenerationIndexReplacement');
 const STATE = '/var/lib/clinicaclick-rds-schema-release';
 const SAFE = /^rds_schema_[a-z_]+$/;
 const safeCode = error => SAFE.test(error?.message || '') ? error.message : 'rds_schema_operation_failed';
@@ -147,11 +148,11 @@ function migrationInterface({ admin, aws, journal, migrationName, continuation, 
       const sql = typeof options === 'string' ? options : options.sql;
       const emitter = new EventEmitter();
       let kind;
-      try { P.need(!closed && typeof callback === 'function', 'rds_schema_query_interface_required'); kind = P.statementKind(sql, values, admin.identity?.database || T.DATABASE); }
+      try { P.need(!closed && typeof callback === 'function', 'rds_schema_query_interface_required'); kind = G.accepts(sql,migrationName)&&(!values||!values.length) ? 'gbp_generation_index_replacement' : P.statementKind(sql, values, admin.identity?.database || T.DATABASE); }
       catch (error) { queueMicrotask(() => callback(error)); return emitter; }
       const task = tail.then(async () => {
         P.need(!poisoned, 'rds_schema_prior_statement_failed');
-        const isDdl = kind === 'ddl' || kind === 'enum_extension';
+        const isDdl = kind === 'ddl' || kind === 'enum_extension' || kind === 'gbp_generation_index_replacement';
         if (continuation?.pending) {
           const prefix = continuation.proof.statements || [{ sqlSha256: continuation.proof.sqlSha256 }];
           const index = continuation.cursor || 0;
@@ -164,6 +165,7 @@ function migrationInterface({ admin, aws, journal, migrationName, continuation, 
           return { result: { affectedRows: 0, warningStatus: 0 }, fields: undefined };
         }
         const target = kind === 'enum_extension' ? E.statement(sql) : null;
+        const generationMetadata=async()=>{const result={};for(const [name,text] of Object.entries(G.sql))result[name]=await new Promise((resolve,reject)=>originals.query.call(raw,{sql:text,timeout:30000},[],(error,rows)=>error?reject(Error('rds_schema_gbp_generation_index_guard')):resolve(rows)));return result;};
         const metadata = () => new Promise((resolve, reject) => {
           originals.query.call(raw, { sql: E.metadataSql, timeout: 30000 }, [target.table, target.name], (error, rows) => {
             if (error || !Array.isArray(rows) || rows.length !== 1) return reject(Error('rds_schema_enum_metadata_invalid'));
@@ -172,6 +174,7 @@ function migrationInterface({ admin, aws, journal, migrationName, continuation, 
         });
         aws.assertFresh((isDdl ? ddlTimeoutMs : 30000) + 30000);
         if (target) E.validate(await metadata(), target);
+        if(kind==='gbp_generation_index_replacement'){const state=await generationMetadata();G.validate(state);journal({event:'gbp_generation_index_before',migration:migrationName,metadata:state});}
         return new Promise((resolve, reject) => {
           try {
             if (isDdl) { beforeDispatch(); aws.assertFresh(ddlTimeoutMs + 30000); }
@@ -195,6 +198,7 @@ function migrationInterface({ admin, aws, journal, migrationName, continuation, 
               }
               try {
                 if (target) E.validate(target, await metadata(), false);
+                if(kind==='gbp_generation_index_replacement'){const state=await generationMetadata();G.validate(state,true);journal({event:'gbp_generation_index_after',migration:migrationName,metadata:state});}
                 if (isDdl) journal({ event: 'statement_ack', migration: migrationName, sqlSha256: P.sha(sql), kind: 'ddl', warnings: warnings.length,
                   ...(warnings.length ? { warningPolicy } : {}) });
               } catch (caught) { reject(caught); return; }

@@ -2627,6 +2627,9 @@ router.get('/google/local/mappings', async (req, res) => {
                 clinicName: clinic?.nombre_clinica || null,
                 clinicAvatar: clinic?.url_avatar || null,
                 locations: [{
+                    mappingId: selectedLocation.id,
+                    connectionId: selectedLocation.google_connection_id,
+                    ownerClinicId: selectedLocation.clinica_id,
                     locationId: selectedLocation.location_id,
                     locationName: selectedLocation.location_name,
                     storeCode: selectedLocation.store_code,
@@ -2670,6 +2673,9 @@ router.get('/google/local/mappings', async (req, res) => {
                 });
             }
             byClinic.get(clinicaId).locations.push({
+                mappingId: row.id,
+                connectionId: row.google_connection_id,
+                ownerClinicId: row.clinica_id,
                 locationId: row.location_id,
                 locationName: row.location_name,
                 storeCode: row.store_code,

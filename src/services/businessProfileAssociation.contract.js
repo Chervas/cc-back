@@ -13,7 +13,7 @@ const hash = v => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const fields = ['id','clinica_id','google_connection_id','location_id','is_active','broker_read_connection_ref','broker_read_asset_ref'];
 function identity(row) { return row ? fields.map(key => key === 'location_id' ? location(row[key]) : key === 'is_active' ? !!row[key] : row[key] ?? null) : null; }
 const fingerprint = row => hash(identity(row));
-const associationFingerprint = (row,impactDigest) => hash({mapping:identity(row),reviewImpactDigest:impactDigest});
+const associationFingerprint = (row,impactDigest,lineage=[]) => hash({mapping:identity(row),reviewImpactDigest:impactDigest,...(lineage.length?{lineage}:{})});
 const object = value => { if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = null; } } return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; };
 const array = value => { if (typeof value === 'string') { try { value = JSON.parse(value); } catch { fail(); } } if (!Array.isArray(value)) fail(); return value; };
 function address(raw) { const a = raw?.storefrontAddress || raw?.storefront_address || {}; return [...(Array.isArray(a.addressLines) ? a.addressLines : []), a.postalCode, a.locality, a.administrativeArea].filter(v => typeof v === 'string' && v.trim()).join(', ').slice(0, 1024); }
@@ -44,6 +44,8 @@ function reviewCampaign(row) {
 }
 function providerTarget(row) {
   if (!row || !external(row.accountId) || !external(row.locationId) || row.accountName !== 'accounts/' + row.accountId || row.name !== 'locations/' + row.locationId || typeof row.title !== 'string' || row.title.length > 1024 || /[\x00-\x1f]/.test(row.title)) fail('broker_response_invalid');
-  return { mappingId: null, name: row.title.slice(0, 256), address: address(row), accountName: row.accountName, locationName: row.name, storeCode: typeof row.storeCode === 'string' ? row.storeCode.slice(0,128) : null, isVerified: row.metadata?.hasVoiceOfMerchant === true, rawLocation: { name: row.name, title: row.title.slice(0,256), storefrontAddress: row.storefrontAddress || null, metadata: publicMetadata(row.metadata), accountName: row.accountName, accountDisplayName: row.accountDisplayName || row.accountName } };
+  const reassociation=row.reassociation;
+  if(reassociation!==undefined)require('../../services/integrations-broker/src/google-business-profile-enrollment-contract').validateReassociation(reassociation);
+  return { mappingId: null, name: row.title.slice(0, 256), address: address(row), accountName: row.accountName, locationName: row.name, storeCode: typeof row.storeCode === 'string' ? row.storeCode.slice(0,128) : null, isVerified: row.metadata?.hasVoiceOfMerchant === true,...(reassociation?{reassociation:structuredClone(reassociation)}:{}), rawLocation: { name: row.name, title: row.title.slice(0,256), storefrontAddress: row.storefrontAddress || null, metadata: publicMetadata(row.metadata), accountName: row.accountName, accountDisplayName: row.accountDisplayName || row.accountName } };
 }
 module.exports = { fail, positive, HASH, ref, external, resource, location, hash, identity, fingerprint, associationFingerprint, object, array, address, target, providerTarget, publicMetadata, reviewCampaign, dto, reviewReference, UUID, STATES, PENDING };

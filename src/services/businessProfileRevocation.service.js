@@ -29,8 +29,7 @@ async function enqueue({ models, transaction, connectionId, clinicIds, actorId, 
       attributes: ['attempt_id'], transaction, lock: transaction.LOCK.UPDATE, logging: false });
     if (pending) throw Object.assign(Error('Antes de desconectar Google, termina o cancela el cambio de ficha pendiente y consulta su resultado.'), { code: 'gbp_association_pending', httpStatus: 409 });
   }
-  const bindings = await models.BusinessProfileBrokerBinding.findAll({ where: { ...where, state: 'active' }, transaction, lock: transaction.LOCK.UPDATE,
-    order: [['external_location_id', 'ASC']], limit: 101, raw: true });
+  const bindings = await require('./businessProfileBindingGeneration.service').listEffectiveBindings({models,clinicIds,connectionId,transaction,forRevocation:true});
   const previous = await models.BusinessProfileBrokerRevocation.findAll({ where, transaction, lock: transaction.LOCK.UPDATE,
     order: [['external_location_id', 'ASC']], limit: 101, raw: true });
   if (!bindings.length && !previous.length) return 0;

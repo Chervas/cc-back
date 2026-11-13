@@ -1,0 +1,24 @@
+'use strict';
+const assert=require('node:assert/strict'),D=require('sequelize');
+module.exports=async({sql,models,report,target,old,unrelated,account,oldId})=>{
+ models.Sequelize=D;
+ const qi=sql.getQueryInterface();
+ for(const [column,type]of[['date',D.DATEONLY],['metric_type',D.STRING(64)],['metric_subtype',D.STRING(64)]])await qi.addColumn('BusinessProfileDailyMetrics',column,{type,allowNull:true});
+ await sql.query('CREATE TABLE MarketingPatientListItems(id INT PRIMARY KEY,list_id INT,clinica_id INT,sent_at DATETIME,paciente_id INT,phone VARCHAR(32))');
+ await sql.query('CREATE TABLE MarketingPatientContactEvents(id INT AUTO_INCREMENT PRIMARY KEY,list_id INT,item_id INT,event_type VARCHAR(64),occurred_at DATETIME,created_at DATETIME,payload JSON)');
+ await sql.query('CREATE TABLE MarketingContactOptOuts(clinica_id INT,channel VARCHAR(32),opted_out_at DATETIME)');
+ const list=await models.MarketingPatientList.create({clinica_id:71,objective_id:'review_requests',criteria:{review_request:true},status:'paused'});
+ await sql.query("INSERT INTO MarketingPatientListItems VALUES(7101,?,71,'2026-11-12 12:00:00',99901,'FICTITIOUS')",{replacements:[list.id]});
+ await sql.query("INSERT INTO MarketingPatientContactEvents(list_id,item_id,event_type,occurred_at,created_at,payload) VALUES(?,7101,'google_review_matched','2026-11-12 12:00:00','2026-11-12 12:00:00',?)",{replacements:[list.id,JSON.stringify({review_name:`accounts/${account}/locations/${oldId}/reviews/fictitious-review`,business_location_id:Number(old.id)})]});
+ await models.BusinessProfileReview.create({clinica_id:71,business_location_id:unrelated.id,review_name:'accounts/123/locations/999/reviews/FICTITIOUS_UNRELATED',create_time:new Date('2026-11-12T12:00:00Z')});
+ await models.BusinessProfileReview.create({clinica_id:72,business_location_id:target.id,review_name:`accounts/${account}/locations/${oldId}/reviews/FICTITIOUS_OWN`,create_time:new Date('2026-11-12T12:00:00Z')});
+ for(const [mappingId,date,value]of[[old.id,'2026-10-13',4700000],[old.id,'2026-11-12',4800000],[target.id,'2026-11-12',4900000]])await sql.query("INSERT INTO BusinessProfileDailyMetrics(clinica_id,business_location_id,date,metric_type,metric_subtype,value) VALUES(?,?,?,'GOOGLE_REVIEW_RATING','global_v1',?)",{replacements:[mappingId===old.id?71:72,mappingId,date,value]});
+ const activity=require('../../../services/reviewActivityReport.service'),options={clinicIds:[72],locationIds:[Number(target.id)],locationOwners:{[target.id]:[72]},userId:901,period:'30d',now:new Date('2026-11-13T12:00:00Z'),resolveEffectiveMappingIds:async()=>[Number(target.id)]};
+ const result=await activity.readReport(models,options);assert.equal(result.totals.google_reviews_total,3);assert.equal(result.totals.requests_sent,0);assert.equal(result.totals.google_reviews_attributed,0);assert.equal(result.comparison.metrics.converted_requests.current,0);
+ assert(result.by_clinic.every(row=>row.clinic_id===72),'public predecessor inventory is projected to the authorized destination, not source clinic access');
+ assert.equal(result.score_trends.length,1);assert.equal(result.score_trends[0].business_location_id,Number(target.id));assert.equal(result.score_trends[0].current,4.9);assert.equal(result.score_trends[0].previous,4.7);
+ const before=(await models.BusinessProfileReview.findAll({raw:true,order:[['id','ASC']]})).map(r=>[r.id,r.clinica_id,r.business_location_id]);
+ await models.Clinica.update({grupoClinicaId:6},{where:{id_clinica:71}});const ownOnly=await activity.readReport(models,options);assert.equal(ownOnly.totals.google_reviews_total,2);assert.equal(ownOnly.totals.requests_sent,0);await models.Clinica.update({grupoClinicaId:5},{where:{id_clinica:71}});
+ assert.deepEqual((await models.BusinessProfileReview.findAll({raw:true,order:[['id','ASC']]})).map(r=>[r.id,r.clinica_id,r.business_location_id]),before);
+ report.checks.push('Activity/report SQL includes only accepted same-asset public history and rating with head-first overlap; unrelated asset and original private CRM requests/matches remain excluded; cached group drift drops source history while own head data stays visible; origin record IDs/clinics remain exact');
+};

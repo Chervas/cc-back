@@ -68,7 +68,7 @@ async function authorize({ models, binding, requestScopeKey, actorId, sessionRef
     const match = /^(?:accounts\/[1-9]\d{0,29}\/)?(?:locations\/)?([1-9]\d{0,29})$/.exec(String(location.location_id));
     if (!match || !clinicIds.includes(Number(location.clinica_id)) || location.broker_read_connection_ref !== binding.connection_ref
       || typeof location.broker_read_asset_ref !== 'string' || location.broker_read_asset_ref.split(':')[2] !== match[1]) fail();
-    const record = await models.BusinessProfileBrokerBinding.findByPk(match[1], options);
+    const record = await require('./businessProfileBindingGeneration.service').resolveMappingBinding({models,mapping:{...location,google_connection_id:Number(binding.google_connection_id),is_active:true},transaction});
     if (!record || record.connection_ref !== binding.connection_ref || record.asset_ref !== location.broker_read_asset_ref
       || Number(record.google_connection_id) !== Number(binding.google_connection_id) || Number(record.clinica_id) !== Number(location.clinica_id)) fail();
     if (location.broker_read_asset_ref === binding.asset_ref && Number(location.clinica_id) === Number(binding.clinica_id)) {

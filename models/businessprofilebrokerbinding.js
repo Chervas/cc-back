@@ -3,6 +3,7 @@
 module.exports = (sequelize, DataTypes) => sequelize.define('BusinessProfileBrokerBinding', {
   state: { type: DataTypes.ENUM('active','staged','retired'), allowNull: false, defaultValue: 'active' },
   association_attempt_id: { type: DataTypes.UUID, allowNull: true, defaultValue: null },
+  current_generation_id: { type: DataTypes.UUID, allowNull: true, defaultValue: null },
   external_location_id: { type: DataTypes.STRING(30), primaryKey: true },
   connection_ref: { type: DataTypes.STRING(128), allowNull: false },
   asset_ref: { type: DataTypes.STRING(128), allowNull: false },

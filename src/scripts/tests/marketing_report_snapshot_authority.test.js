@@ -78,7 +78,8 @@ function businessProfileSnapshotFixture(sourceMode) {
     return payload;
   } };
   const controller = loadDiscoverySource('controllers/marketingReports.controller.js', {
-    sequelize, '../../models': { Sequelize: sequelize },
+    sequelize, '../../models': { Sequelize: sequelize,ClinicBusinessLocation:{findAll:async()=>[{id:f.mappingId}]} },
+    '../services/businessProfileHistoryScope.service':{createHistoryProjection:async()=>({lineages:[]})},
     // Keep the production capture/identity/guard/cache flow. The report's SQL
     // aggregation is covered above; this closed generator supplies observations
     // keyed to the selected mapping, without bootstrapping models or providers.

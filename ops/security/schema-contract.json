@@ -66,6 +66,18 @@
       "migrations": [
         "20261018150000-create-search-console-analytics.js"
       ]
+    },
+    "google_business_profile_binding_generations": {
+      "enabledWhenAny": {
+        "GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED": "true",
+        "GOOGLE_BUSINESS_PROFILE_ASSOCIATION_ENABLED": "true"
+      },
+      "tables": [
+        "BusinessProfileBrokerBindingGenerations"
+      ],
+      "migrations": [
+        "20261113160000-business-profile-binding-generations.js"
+      ]
     }
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
@@ -1909,13 +1921,97 @@
       "ENGINE": "InnoDB",
       "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
       "columns": [
-        {"COLUMN_NAME": "broker_read_connection_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"},
-        {"COLUMN_NAME": "broker_read_asset_ref","COLUMN_TYPE": "varchar(128)","IS_NULLABLE": "YES","COLUMN_DEFAULT": null,"EXTRA": "","CHARACTER_SET_NAME": "utf8mb4","COLLATION_NAME": "utf8mb4_0900_ai_ci"}
+        {
+          "COLUMN_NAME": "broker_read_connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci"
+        },
+        {
+          "COLUMN_NAME": "broker_read_asset_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci"
+        },
+        {
+          "COLUMN_NAME": "canonical_location_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "STORED GENERATED",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": "substring_index(`location_id`,_utf8mb4\\'/\\',-(1))"
+        },
+        {
+          "COLUMN_NAME": "active_canonical_location_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "STORED GENERATED",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": "(case when (`is_active` = 1) then substring_index(`location_id`,_utf8mb4\\'/\\',-(1)) else NULL end)"
+        }
       ],
       "indexes": [
+        {
+          "name": "cc_gbp_active_canonical",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_gbp_active_canonical",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "active_canonical_location_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_gbp_location_history",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_gbp_location_history",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "canonical_location_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "idx_clinicbusiness_locationid",
+          "columns": [
+            {
+              "INDEX_NAME": "idx_clinicbusiness_locationid",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "location_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
       ],
       "checks": [
-        {"CONSTRAINT_NAME": "cc_gbp_broker_read_pair","ENFORCED": "YES","CHECK_CLAUSE": "(((`broker_read_connection_ref` is null) and (`broker_read_asset_ref` is null)) or ((`broker_read_connection_ref` is not null) and (`broker_read_asset_ref` is not null)))"}
+        {
+          "CONSTRAINT_NAME": "cc_gbp_broker_read_pair",
+          "ENFORCED": "YES",
+          "CHECK_CLAUSE": "(((`broker_read_connection_ref` is null) and (`broker_read_asset_ref` is null)) or ((`broker_read_connection_ref` is not null) and (`broker_read_asset_ref` is not null)))"
+        },
+        {
+          "CONSTRAINT_NAME": "cc_gbp_location_grammar",
+          "ENFORCED": "YES",
+          "CHECK_CLAUSE": "(regexp_like(`location_id`,_utf8mb4\\'^(accounts/[1-9][0-9]{0,29}/)?(locations/)?[1-9][0-9]{0,29}$\\',_utf8mb4\\'c\\') and (`is_active` in (0,1)))"
+        }
       ]
     },
     "ClinicWebAssets": {
@@ -2025,6 +2121,16 @@
           "CHARACTER_SET_NAME": "utf8mb4",
           "COLLATION_NAME": "utf8mb4_bin",
           "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "current_generation_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
         }
       ],
       "indexes": [
@@ -2065,6 +2171,19 @@
               "NON_UNIQUE": 0,
               "SEQ_IN_INDEX": 1,
               "COLUMN_NAME": "external_location_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_gbp_generation_head",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_gbp_generation_head",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "current_generation_id",
               "SUB_PART": null,
               "INDEX_TYPE": "BTREE"
             }
@@ -6531,6 +6650,267 @@
         }
       ],
       "foreignKeys": []
+    },
+    "BusinessProfileBrokerBindingGenerations": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
+      "columns": [
+        {
+          "COLUMN_NAME": "generation_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "mapping_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "external_location_id",
+          "COLUMN_TYPE": "varchar(30)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "clinica_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "google_connection_id",
+          "COLUMN_TYPE": "int",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "connection_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "asset_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "scope_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "previous_asset_ref",
+          "COLUMN_TYPE": "varchar(128)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "state",
+          "COLUMN_TYPE": "enum('staged','active','retired')",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": "staged",
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "association_attempt_id",
+          "COLUMN_TYPE": "char(36)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "source_fingerprint",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "predecessor",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "reassociation",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "proof_digest",
+          "COLUMN_TYPE": "char(64)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "utf8mb4",
+          "COLLATION_NAME": "utf8mb4_0900_ai_ci",
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "created_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        },
+        {
+          "COLUMN_NAME": "updated_at",
+          "COLUMN_TYPE": "datetime(3)",
+          "IS_NULLABLE": "NO",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": [
+        {
+          "name": "association_attempt_id",
+          "columns": [
+            {
+              "INDEX_NAME": "association_attempt_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "association_attempt_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_gbp_generation_location",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_gbp_generation_location",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "external_location_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_gbp_generation_location",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "state",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "cc_gbp_generation_scope",
+          "columns": [
+            {
+              "INDEX_NAME": "cc_gbp_generation_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "google_connection_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            },
+            {
+              "INDEX_NAME": "cc_gbp_generation_scope",
+              "NON_UNIQUE": 1,
+              "SEQ_IN_INDEX": 2,
+              "COLUMN_NAME": "clinica_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "mapping_id",
+          "columns": [
+            {
+              "INDEX_NAME": "mapping_id",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "mapping_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        },
+        {
+          "name": "PRIMARY",
+          "columns": [
+            {
+              "INDEX_NAME": "PRIMARY",
+              "NON_UNIQUE": 0,
+              "SEQ_IN_INDEX": 1,
+              "COLUMN_NAME": "generation_id",
+              "SUB_PART": null,
+              "INDEX_TYPE": "BTREE"
+            }
+          ]
+        }
+      ],
+      "checks": [],
+      "foreignKeys": []
     }
   },
   "migrations": [
@@ -6777,6 +7157,7 @@
     {
       "name": "20261111150000-business-profile-managed-associations.js",
       "sha256": "5d74be56109cf2c93def72651731b3f447270e640c031124459c61de8cd00c79"
-    }
+    },
+    {"name": "20261113160000-business-profile-binding-generations.js", "sha256": "4110f2325abea16ba8aa7756a7cc6aff3cf7bc1eb28bb09f6e168375b2f62103"}
   ]
 }

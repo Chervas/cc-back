@@ -3,6 +3,8 @@ const {randomUUID} = require('node:crypto'); const {Op} = require('sequelize');
 const C = require('./businessProfileAssociation.contract'); const O = require('./googleOAuthCohort.contract');
 const {fromAssociation} = require('../../services/platform-audit/src/business-profile-association-event');
 const {createRepository} = require('./platformAudit.repository');
+const Generations = require('./businessProfileBindingGeneration.service');
+const Reassociation = require('./businessProfileReassociation.service');
 const plain = row => row?.get ? row.get({plain:true}) : row;
 const mapFields = ['id','clinica_id','google_connection_id','location_id','location_name','store_code','is_active','broker_read_connection_ref','broker_read_asset_ref','raw_payload'];
 function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=>new Date(),enabled=()=>process.env.GOOGLE_BUSINESS_PROFILE_ASSOCIATION_ENABLED === 'true'}) {
@@ -10,6 +12,10 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
   const opts = transaction => ({transaction,lock:transaction.LOCK.UPDATE,logging:false});
   const trans = fn => m().sequelize.transaction(fn);
   const bounded = rows => {if (!Array.isArray(rows) || rows.length > 1000) C.fail('gbp_association_limit'); return rows;};
+  async function sourceFingerprint(source,impact,auth,input,transaction,excludeId){
+    const lineage=(await Reassociation.lineageSnapshot({models:m(),scope:auth.scope,clinic:auth.clinic,actorId:input.actorId,transaction})).filter(v=>Number(v.mapping[0])!==Number(excludeId));
+    return C.associationFingerprint(source,impact.reviewCampaignImpactDigest,lineage);
+  }
   async function record(row,reason,transaction,actor={}) {
     const events = audit || createRepository(m().PlatformAuditEvent); const date=now(); const health=await events.health(date,{includeUnresolved:false,transaction});
     if (!Number.isSafeInteger(health.pending) || health.pending >= 9999 || !Number.isFinite(health.oldestAgeSeconds) || health.oldestAgeSeconds >= 3600) C.fail('audit_unavailable');
@@ -55,7 +61,7 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
     const row=rows[0] || null;
     if (row && Number(row.google_connection_id) !== Number(input.connectionId)) C.fail('gbp_association_scope_conflict');
     if (row) {
-      const binding=plain(await m().BusinessProfileBrokerBinding.findByPk(C.location(row.location_id),{...opts(transaction),raw:true}));
+      const binding=await Generations.resolveMappingBinding({models:m(),mapping:row,transaction});
       if (!binding || binding.state !== 'active' || Number(binding.clinica_id) !== Number(row.clinica_id) || Number(binding.google_connection_id) !== Number(row.google_connection_id) || binding.connection_ref !== row.broker_read_connection_ref || binding.asset_ref !== row.broker_read_asset_ref) C.fail('broker_binding_invalid');
       if (await m().BusinessProfileBrokerRevocation.findByPk(C.location(row.location_id),{...opts(transaction),attributes:['external_location_id'],raw:true})) C.fail('asset_revoked');
     }
@@ -90,7 +96,7 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
       if(expectedAuthority&&auth.authorityDigest!==expectedAuthority)C.fail('gbp_association_scope_changed');
       let impact={reviewDestinationChangeRequired:false,affectedReviewCampaignCount:0,reviewCampaignImpactDigest:C.hash([])};
       if (checkDependencies) {if(auth.effectiveAssetBlocked)C.fail('gbp_association_inherited_asset');impact=await dependencies(source,auth,transaction,{allowReviewChange});}
-      const fp=C.associationFingerprint(source,impact.reviewCampaignImpactDigest);if(expectedFingerprint&&fp!==expectedFingerprint)C.fail('gbp_association_scope_changed');
+      const fp=await sourceFingerprint(source,impact,auth,input,transaction);if(expectedFingerprint&&fp!==expectedFingerprint)C.fail('gbp_association_scope_changed');
       return {...auth,...impact,source,sourceFingerprint:fp};
     });
   }
@@ -101,15 +107,19 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
     if (Number(row.clinica_id) !== Number(input.clinicId) || Number(row.google_connection_id) !== Number(input.connectionId) || row.scope_key !== input.scopeKey || row.google_user_id !== auth.scope.google_user_id || row.connection_ref !== auth.scope.connection_ref || row.scope_ref !== auth.scope.scope_ref || !cleanup&&(row.authority_digest !== auth.authorityDigest || row.oauth_binding_digest !== auth.oauthDigest)) C.fail('gbp_association_scope_changed');
     if (!originalSession&&sourceRequired&&Number(row.actor_user_id)!==Number(input.actorId)) C.fail('gbp_association_original_session_required');
     if (originalSession && (Number(row.actor_user_id) !== Number(input.actorId) || row.session_ref !== input.sessionRef || new Date(row.session_expires_at).getTime() !== input.sessionExpiresAt)) C.fail('gbp_association_original_session_required');
-    if(sourceRequired){const source=await current(input,transaction);const saved=C.object(row.target_snapshot);const impact=await dependencies(source,auth,transaction,{allowReviewChange:saved.reviewDestinationChangeAccepted===true});if(saved.reviewCampaignImpactDigest&&saved.reviewCampaignImpactDigest!==impact.reviewCampaignImpactDigest)C.fail('gbp_association_review_impact_changed');if(C.associationFingerprint(source,impact.reviewCampaignImpactDigest)!==row.source_fingerprint)C.fail('gbp_association_scope_changed');}
+    if(sourceRequired){const source=await current(input,transaction);const saved=C.object(row.target_snapshot);const impact=await dependencies(source,auth,transaction,{allowReviewChange:saved.reviewDestinationChangeAccepted===true});if(saved.reviewCampaignImpactDigest&&saved.reviewCampaignImpactDigest!==impact.reviewCampaignImpactDigest)C.fail('gbp_association_review_impact_changed');if(await sourceFingerprint(source,impact,auth,input,transaction,row.target_mapping_id)!==row.source_fingerprint)C.fail('gbp_association_scope_changed');if(saved.reassociation)await Reassociation.inspectSource({models:m(),proof:saved.reassociation,accountId:row.account_id,locationId:row.location_id,targetClinic:auth.clinic,targetConnectionRef:auth.scope.connection_ref,targetConnectionId:auth.scope.google_connection_id,actorId:input.actorId,transaction});}
     const revoked=cleanup ? [] : await m().BusinessProfileBrokerRevocation.findAll({...opts(transaction),raw:true,attributes:['external_location_id'],where:{external_location_id:{[Op.in]:[row.location_id,...(row.previous_asset_ref ? [row.previous_asset_ref.split(':')[2]] : [])]}}});
     if (revoked.length) C.fail('asset_revoked'); return auth;
   }
   async function targetRow(row,transaction,active=false) {
     const target=await m().ClinicBusinessLocation.findByPk(Number(row.target_mapping_id),opts(transaction));
-    const binding=await m().BusinessProfileBrokerBinding.findByPk(row.location_id,opts(transaction));
+    const registry=await m().BusinessProfileBrokerBinding.findByPk(row.location_id,opts(transaction));
+    const saved=C.object(row.target_snapshot);
+    const binding=saved.generationId?await m().BusinessProfileBrokerBindingGeneration.findByPk(saved.generationId,opts(transaction)):registry;
+    if(saved.generationId&&(!registry||!binding||Number(binding.mapping_id)!==Number(row.target_mapping_id)||binding.generation_id!==saved.generationId||binding.previous_asset_ref!==row.previous_asset_ref
+      ||registry.current_generation_id!==(active?saved.generationId:(saved.previousGenerationId??null))))C.fail('broker_binding_invalid');
     if (!target || !binding || Number(target.clinica_id) !== Number(row.clinica_id) || Number(target.google_connection_id) !== Number(row.google_connection_id) || C.location(target.location_id) !== row.location_id || target.broker_read_connection_ref !== row.connection_ref || target.broker_read_asset_ref !== `gbp:${row.account_id}:${row.location_id}` || !!target.is_active !== active || binding.state !== (active ? 'active' : 'staged') || binding.association_attempt_id !== row.attempt_id || binding.connection_ref !== row.connection_ref || binding.asset_ref !== target.broker_read_asset_ref || Number(binding.clinica_id) !== Number(row.clinica_id) || Number(binding.google_connection_id) !== Number(row.google_connection_id)) C.fail('broker_binding_invalid');
-    return {target,binding};
+    return {target,binding,registry};
   }
   const release = async (row,patch,transaction) => {await row.update({...patch,updated_at:now(),lease_token:null,lease_until:null,next_attempt_at:now()},opts(transaction));return plain(row);};
   const owned=async(claim,transaction)=>{const row=await load(claim.attempt_id,transaction); if (row.lease_token !== claim.lease_token || new Date(row.lease_until).getTime() <= now().getTime() || row.state !== claim.state) C.fail('gbp_association_busy'); return row;};
@@ -120,7 +130,7 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
       const auth=await authority(input,transaction); if (auth.authorityDigest !== expectedAuthority) C.fail('gbp_association_scope_changed');
       const old=await m().BusinessProfileAssociationRequest.findByPk(payload.attemptId,opts(transaction));
       if (old) {if (old.source_fingerprint !== payload.sourceFingerprint || old.account_id !== C.resource(payload.accountName,'accounts') || old.location_id !== C.resource(payload.locationName,'locations') || (C.object(old.target_snapshot).reviewDestinationChangeAccepted===true)!==(payload.reviewDestinationChangeAccepted===true)) C.fail('idempotency_conflict'); await requestContext(input,old,transaction,{sourceRequired:!['retire_pending','active','cancelled'].includes(old.state),originalSession:false}); return plain(old);}
-      const source=await current(input,transaction);const impact=await dependencies(source,auth,transaction,{allowReviewChange:payload.reviewDestinationChangeAccepted===true});if(C.associationFingerprint(source,impact.reviewCampaignImpactDigest)!==payload.sourceFingerprint)C.fail('gbp_association_scope_changed');if(impact.reviewDestinationChangeRequired&&(!candidate.rawLocation?.metadata?.newReviewUri||typeof candidate.rawLocation.metadata.newReviewUri!=='string'))C.fail('gbp_association_review_link_unavailable');
+      const source=await current(input,transaction);const impact=await dependencies(source,auth,transaction,{allowReviewChange:payload.reviewDestinationChangeAccepted===true});if(await sourceFingerprint(source,impact,auth,input,transaction)!==payload.sourceFingerprint)C.fail('gbp_association_scope_changed');if(impact.reviewDestinationChangeRequired&&(!candidate.rawLocation?.metadata?.newReviewUri||typeof candidate.rawLocation.metadata.newReviewUri!=='string'))C.fail('gbp_association_review_link_unavailable');
       if (source && C.location(source.location_id) === C.resource(payload.locationName,'locations')) C.fail('gbp_association_already_current');
       const pending=await m().BusinessProfileAssociationRequest.findOne({...opts(transaction),where:{scope_key:input.scopeKey,state:{[Op.notIn]:['active','cancelled']}}}); if (pending) C.fail('gbp_association_busy');
       const accountId=C.resource(payload.accountName,'accounts'), locationId=C.resource(payload.locationName,'locations');
@@ -128,17 +138,30 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
       if (await m().BusinessProfileBrokerRevocation.findByPk(locationId,{...opts(transaction),attributes:['external_location_id']})) C.fail('asset_revoked');
       const existing=bounded(await m().ClinicBusinessLocation.findAll({...opts(transaction),where:{[Op.or]:[{location_id:{[Op.in]:[locationId,'locations/' + locationId]}},{location_id:{[Op.like]:'%/locations/' + locationId}}]},limit:1001}));
       const existingBinding=await m().BusinessProfileBrokerBinding.findByPk(locationId,opts(transaction));
-      let reusable=null;
+      let predecessor=null,cancelledCandidate=false;
       if (existing.length || existingBinding) {
-        const prior=existingBinding?.association_attempt_id ? await m().BusinessProfileAssociationRequest.findByPk(existingBinding.association_attempt_id,opts(transaction)) : null;
-        if (existing.length !== 1 || !existingBinding || existingBinding.state !== 'retired' || !prior || prior.state !== 'cancelled' || existing[0].is_active || Number(existing[0].clinica_id) !== Number(input.clinicId) || Number(existing[0].google_connection_id) !== Number(input.connectionId) || existingBinding.connection_ref !== auth.scope.connection_ref || existingBinding.asset_ref !== `gbp:${accountId}:${locationId}` || Number(prior.target_mapping_id) !== Number(existing[0].id)) C.fail('gbp_association_location_in_use');
-        reusable=existing[0];
+        const prior=existingBinding?.association_attempt_id?await m().BusinessProfileAssociationRequest.findByPk(existingBinding.association_attempt_id,opts(transaction)):null;
+        const cancelled=existing.length?await m().BusinessProfileAssociationRequest.findAll({...opts(transaction),where:{target_mapping_id:{[Op.in]:existing.map(v=>Number(v.id))},state:'cancelled'},attributes:['target_mapping_id'],raw:true,limit:1001}):[];
+        cancelledCandidate=existing.length>0&&existingBinding?.state==='retired'&&prior?.state==='cancelled'&&existing.some(v=>Number(prior.target_mapping_id)===Number(v.id))
+          &&existing.every(v=>!v.is_active&&Number(v.clinica_id)===Number(input.clinicId)&&Number(v.google_connection_id)===Number(input.connectionId)
+            &&v.broker_read_connection_ref===auth.scope.connection_ref&&v.broker_read_asset_ref===`gbp:${accountId}:${locationId}`&&cancelled.some(r=>Number(r.target_mapping_id)===Number(v.id)))
+          &&existingBinding.connection_ref===auth.scope.connection_ref&&existingBinding.asset_ref===`gbp:${accountId}:${locationId}`;
+        if(!cancelledCandidate){if(!candidate.reassociation||!existingBinding)C.fail('gbp_association_location_in_use');
+          predecessor=await Reassociation.inspectSource({models:m(),proof:candidate.reassociation,accountId,locationId,targetClinic:auth.clinic,targetConnectionRef:auth.scope.connection_ref,targetConnectionId:auth.scope.google_connection_id,actorId:input.actorId,transaction});}
       }
-      const target=reusable || await m().ClinicBusinessLocation.create({clinica_id:Number(input.clinicId),google_connection_id:Number(input.connectionId),location_id:'locations/' + locationId,location_name:candidate.name,store_code:candidate.storeCode,is_verified:candidate.isVerified,is_suspended:false,is_active:false,sync_status:'pending',last_synced_at:null,raw_payload:{...candidate.rawLocation,clinicaclick_association_attempt_id:payload.attemptId},broker_read_connection_ref:auth.scope.connection_ref,broker_read_asset_ref:`gbp:${accountId}:${locationId}`},{transaction,logging:false});
-      if(reusable)await reusable.update({location_name:candidate.name,store_code:candidate.storeCode,is_verified:candidate.isVerified,raw_payload:{...candidate.rawLocation,clinicaclick_association_attempt_id:payload.attemptId}},opts(transaction));
+      if(candidate.reassociation&&!predecessor)C.fail('gbp_association_scope_changed');
+      const generationId=predecessor||cancelledCandidate?randomUUID():null;
+      const target=await m().ClinicBusinessLocation.create({clinica_id:Number(input.clinicId),google_connection_id:Number(input.connectionId),location_id:'locations/' + locationId,location_name:candidate.name,store_code:candidate.storeCode,is_verified:candidate.isVerified,is_suspended:false,is_active:false,sync_status:'pending',last_synced_at:null,raw_payload:{...candidate.rawLocation,clinicaclick_association_attempt_id:payload.attemptId},broker_read_connection_ref:auth.scope.connection_ref,broker_read_asset_ref:`gbp:${accountId}:${locationId}`},{transaction,logging:false});
       const date=now(); const row=await m().BusinessProfileAssociationRequest.create({attempt_id:payload.attemptId,scope_key:input.scopeKey,clinica_id:Number(input.clinicId),google_connection_id:Number(input.connectionId),google_user_id:auth.scope.google_user_id,connection_ref:auth.scope.connection_ref,scope_ref:auth.scope.scope_ref,account_id:accountId,location_id:locationId,previous_asset_ref:source?.broker_read_asset_ref || null,source_mapping_id:source?.id || null,target_mapping_id:target.id,source_fingerprint:payload.sourceFingerprint,authority_digest:auth.authorityDigest,oauth_binding_digest:auth.oauthDigest,current_snapshot:C.target(source),target_snapshot:{...candidate,...impact,reviewDestinationChangeAccepted:payload.reviewDestinationChangeAccepted===true,mappingId:Number(target.id)},actor_user_id:Number(input.actorId),session_ref:input.sessionRef,session_expires_at:new Date(input.sessionExpiresAt),prepare_request_id:randomUUID(),activate_request_id:randomUUID(),retire_request_id:randomUUID(),abort_request_id:randomUUID(),command_history:[],state:'prepare_pending',requested_at:date,updated_at:date,next_attempt_at:date,attempts:0,lease_token:null,lease_until:null,last_error:null},{transaction,logging:false});
       const newBinding={external_location_id:locationId,connection_ref:row.connection_ref,asset_ref:`gbp:${accountId}:${locationId}`,clinica_id:Number(input.clinicId),google_connection_id:Number(input.connectionId),state:'staged',association_attempt_id:row.attempt_id};
-      if (existingBinding) await existingBinding.update(newBinding,opts(transaction));
+      if(generationId){
+        const {ancestors=[],...immediate}=predecessor||{};const predecessors=predecessor?[immediate,...ancestors]:[];
+        const saved={...C.object(row.target_snapshot),generationId,previousGenerationId:existingBinding.current_generation_id??null,predecessors,...(predecessor?{reassociation:candidate.reassociation,predecessor:immediate}:{})};
+        await row.update({target_snapshot:saved},opts(transaction));
+        await m().BusinessProfileBrokerBindingGeneration.create({generation_id:generationId,mapping_id:Number(target.id),...newBinding,scope_ref:row.scope_ref,previous_asset_ref:row.previous_asset_ref,
+          source_fingerprint:row.source_fingerprint,predecessor:predecessors,reassociation:predecessor?candidate.reassociation:null,proof_digest:predecessor?Reassociation.digestFor(row,candidate.reassociation):null,created_at:date,updated_at:date},{transaction,logging:false});
+      }
+      else if (existingBinding) C.fail('gbp_association_location_in_use');
       else await m().BusinessProfileBrokerBinding.create(newBinding,{transaction,logging:false});
       await record(row,'association_requested',transaction); await requestContext(input,row,transaction); return plain(row);
     });},
@@ -162,9 +185,10 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
     async rotateCommand(input,claim,kind) {if(!['prepare','activate','retire','abort'].includes(kind))C.fail();return trans(async transaction=>{await authority(input,transaction,{cleanup:true});const row=await owned(claim,transaction);await requestContext(input,row,transaction,{sourceRequired:!['retire_pending','cancel_pending'].includes(row.state),originalSession:row.state==='prepare_pending',cleanup:row.state==='cancel_pending'});const history=C.array(row.command_history);if(history.length>=100)C.fail('gbp_association_limit');const field=kind+'_request_id';await row.update({[field]:randomUUID(),command_history:[...history,{kind,requestId:row[field],retiredAt:now().toISOString()}]},opts(transaction));return plain(row);});},
     async prepared(input,claim) {return trans(async transaction=>{await authority(input,transaction);const row=await owned(claim,transaction);await requestContext(input,row,transaction);await targetRow(row,transaction);await record(row,'association_prepared',transaction);return release(row,{state:'prepared',last_error:null},transaction);});},
     async activated(input,claim) {return trans(async transaction=>{await authority(input,transaction);const row=await owned(claim,transaction);await requestContext(input,row,transaction,{originalSession:false});await targetRow(row,transaction);return release(row,{state:'broker_active',last_error:null},transaction);});},
-    async swap(input,claim) {return trans(async transaction=>{await authority(input,transaction);const row=await owned(claim,transaction);const auth=await requestContext(input,row,transaction,{originalSession:false});const {target,binding}=await targetRow(row,transaction);const old=await current(input,transaction);await dependencies(old,auth,transaction,{allowReviewChange:C.object(row.target_snapshot).reviewDestinationChangeAccepted===true});
-      if (old) {await oldRowUpdate(old,{is_active:false},transaction);const b=await m().BusinessProfileBrokerBinding.findByPk(C.location(old.location_id),opts(transaction));if (!b || b.state !== 'active') C.fail('broker_binding_invalid');await b.update({state:'retired'},opts(transaction));}
+    async swap(input,claim) {return trans(async transaction=>{await authority(input,transaction);const row=await owned(claim,transaction);const auth=await requestContext(input,row,transaction,{originalSession:false});const {target,binding,registry}=await targetRow(row,transaction);const old=await current(input,transaction);await dependencies(old,auth,transaction,{allowReviewChange:C.object(row.target_snapshot).reviewDestinationChangeAccepted===true});
+      if (old) {await oldRowUpdate(old,{is_active:false},transaction);const r=await m().BusinessProfileBrokerBinding.findByPk(C.location(old.location_id),opts(transaction));const b=r?.current_generation_id?await m().BusinessProfileBrokerBindingGeneration.findByPk(r.current_generation_id,opts(transaction)):r;if (!b || b.state !== 'active') C.fail('broker_binding_invalid');await b.update({state:'retired'},opts(transaction));}
       await target.update({is_active:true,sync_status:'pending'},opts(transaction));await binding.update({state:'active'},opts(transaction));
+      if(C.object(row.target_snapshot).generationId){const saved=C.object(row.target_snapshot);const [count]=await m().BusinessProfileBrokerBinding.update({current_generation_id:saved.generationId},{...opts(transaction),where:{external_location_id:row.location_id,current_generation_id:saved.previousGenerationId??null}});if(count!==1)C.fail('gbp_association_scope_changed');}
       await record(row,'association_confirmed',transaction);return release(row,{state:'retire_pending',last_error:null},transaction);
     });},
     async retired(input,claim) {return trans(async transaction=>{await authority(input,transaction);const row=await owned(claim,transaction);await requestContext(input,row,transaction,{sourceRequired:false,originalSession:false});await targetRow(row,transaction,true);const latest=await current(input,transaction);if (Number(latest?.id)!==Number(row.target_mapping_id)) C.fail('gbp_association_scope_changed');await record(row,'association_retired',transaction);return release(row,{state:'active',last_error:null},transaction);});},

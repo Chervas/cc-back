@@ -35,13 +35,13 @@ function createBusinessProfileBroker({ client, writerClient, loadLocation, loadM
   const managed = (location, context) => marked(location) || !!(context && typeof context === 'object' && contexts.has(context));
   async function recordedBinding(location, options = {}) {
     if (await loadRevocation(externalLocationId(location), options)) fail('asset_revoked');
-    const record = await loadManagedBinding(externalLocationId(location), options);
+    const record = await loadManagedBinding(externalLocationId(location), options, location);
     if (!record && !marked(location)) return null;
     if (!record || !marked(location) || record.state !== 'active') fail('broker_binding_invalid');
     const scope = binding(location);
     if (record.external_location_id !== externalLocationId(location) || record.connection_ref !== scope.connectionRef || record.asset_ref !== scope.assetRef
       || Number(record.clinica_id) !== Number(location.clinica_id) || Number(record.google_connection_id) !== Number(location.google_connection_id)) fail('broker_binding_invalid');
-    return scope;
+    return { ...scope, generationId: record.generation_id ?? null };
   }
   async function currentScope(location, context, options = {}, writing = false) {
     if (!enabled() || writing && !writesEnabled()) fail('broker_cohort_disabled');
@@ -85,7 +85,8 @@ function createBusinessProfileBroker({ client, writerClient, loadLocation, loadM
       if (Number(current.google_connection_id) !== captured.googleConnectionId
         || Object.keys(scope).some(k => scope[k] !== captured[k])) fail('broker_binding_invalid');
       const transportOptions = options?.beforeExecute ? await options.beforeExecute() : options;
-      const result = await client.execute({ ...scope, operation: PREFIX + family + '.read.v1', payload }, transportOptions);
+      const { generationId: _generationId, ...commandScope } = scope;
+      const result = await client.execute({ ...commandScope, operation: PREFIX + family + '.read.v1', payload }, transportOptions);
       if (!enabled()) fail('broker_cohort_disabled');
       const latest = await loadLocation(captured.id);
       if (!latest || !latest.is_active || !marked(latest) || Number(latest.google_connection_id) !== captured.googleConnectionId) fail('broker_binding_invalid');
@@ -101,7 +102,8 @@ function createBusinessProfileBroker({ client, writerClient, loadLocation, loadM
       await currentWriteScope(location, context);
       const transportOptions = await options.beforeExecute();
       const scope = await currentWriteScope(location, context);
-      const result = await writerClient.execute({ ...scope, operation: writeContract.OPERATIONS[kind], payload }, transportOptions);
+      const { generationId: _generationId, ...commandScope } = scope;
+      const result = await writerClient.execute({ ...commandScope, operation: writeContract.OPERATIONS[kind], payload }, transportOptions);
       // Session, asset permissions and mapping may change during the provider
       // call. Do not accept a receipt for a local update until reauthorized.
       await options.beforeExecute();
@@ -129,7 +131,7 @@ const writerClient = { execute(command, options) {
 } };
 const service = createBusinessProfileBroker({ client, writerClient,
   loadRevocation: (id, options) => require('../../models').BusinessProfileBrokerRevocation.findByPk(id, { ...options, attributes: ['external_location_id'], raw: true, logging: false }),
-  loadManagedBinding: (id, options) => require('../../models').BusinessProfileBrokerBinding.findByPk(id, { ...options, raw: true, logging: false }),
+  loadManagedBinding: (_id, options, mapping) => require('./businessProfileBindingGeneration.service').resolveMappingBinding({ models: require('../../models'), mapping, transaction: options?.transaction }),
   loadLocation: (id, options) => require('../../models').ClinicBusinessLocation.findByPk(id, { ...options, logging: false,
   attributes: ['id', 'clinica_id', 'google_connection_id', 'location_id', 'is_active', 'broker_read_connection_ref', 'broker_read_asset_ref'], raw: true,
 }) });

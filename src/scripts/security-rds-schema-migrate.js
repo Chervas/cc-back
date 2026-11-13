@@ -11,6 +11,7 @@ const SOURCE = path.resolve(__dirname, '../..');
 const OPERATOR_CODE = Object.freeze(['package.json', 'package-lock.json',
   'src/lib/rdsSchemaMigration.js', 'src/lib/rdsSchemaMigrationPolicy.js', 'src/lib/rdsSchemaMigrationTransport.js',
   'src/lib/rdsSchemaWarningPolicy.js', 'src/lib/rdsSchemaFirstCreateReconciliation.js', 'src/lib/mysqlEnumExtension.js',
+  'src/lib/rdsSchemaGbpGenerationIndexReplacement.js',
   'src/lib/securitySchemaContract.js', 'src/lib/schemaReleaseDatabase.js', 'src/lib/databaseTlsConfig.js',
   'src/lib/databaseEncryptionMetadata.js', 'src/scripts/security-rds-schema-migrate.js', 'src/scripts/security-schema-release.js',
   'src/scripts/security-email-login-metadata.js', 'src/scripts/security-database-metadata.js']);

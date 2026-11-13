@@ -6,6 +6,7 @@ const { readReport, invalidate } = require('../../services/reviewActivityReport.
 
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   models.Sequelize = S;
+  await sql.query('CREATE TABLE BusinessProfileDailyMetrics(business_location_id INT,date DATE,metric_type VARCHAR(64),metric_subtype VARCHAR(64),value INT)');
   await sql.query('CREATE TABLE MarketingPatientLists (id INT PRIMARY KEY,clinica_id INT,objective_id VARCHAR(32),criteria JSON)');
   await sql.query('CREATE TABLE MarketingPatientListItems (id INT PRIMARY KEY,list_id INT,clinica_id INT,sent_at DATETIME)');
   await sql.query(`CREATE TABLE MarketingPatientContactEvents (id INT AUTO_INCREMENT PRIMARY KEY,list_id INT,item_id INT,

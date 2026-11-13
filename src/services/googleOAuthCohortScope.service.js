@@ -54,10 +54,21 @@ async function consumers(models, kind, binding, options) {
   const connectionField = gbp ? 'google_connection_id' : 'googleConnectionId';
   const clinicField = gbp ? 'clinica_id' : 'clinicaId'; const activeField = gbp ? 'is_active' : 'isActive';
   const resourceField = gbp ? 'location_id' : spec.mappingResourceField;
-  const records = await bounded(models[spec.model].findAll({ ...options, where: { [Op.or]: [
+  let records = await bounded(models[spec.model].findAll({ ...options, where: { [Op.or]: [
     { google_connection_id: id(binding.google_connection_id) }, ...(!gbp ? [{ google_user_id: binding.google_user_id }] : []),
     ...(selected ? [{ connection_ref: binding.connection_ref }] : []),
   ] } }));
+  if(gbp){
+    const effective=[];
+    for(const record of records){
+      const generation=record.current_generation_id==null?null:await models.BusinessProfileBrokerBindingGeneration.findByPk(record.current_generation_id,options);
+      if(record.current_generation_id!=null&&(!generation||generation.generation_id!==record.current_generation_id||generation.external_location_id!==record.external_location_id))C.fail();
+      if(generation&&Number(generation.google_connection_id)!==Number(record.google_connection_id))C.fail();
+      const row=generation||record;
+      if(Number(row.google_connection_id)===Number(binding.google_connection_id)||selected&&row.connection_ref===binding.connection_ref)effective.push(row);
+    }
+    records=effective;
+  }
   const mappings = await bounded(models[spec.mappingModel].findAll({ ...options, attributes: ['id', clinicField, connectionField, activeField,
     resourceField, 'broker_read_connection_ref', 'broker_read_asset_ref'], where: { [Op.or]: [
     { [connectionField]: id(binding.google_connection_id) }, ...(selected ? [{ broker_read_connection_ref: binding.connection_ref }] : []),
@@ -76,7 +87,7 @@ async function consumers(models, kind, binding, options) {
     if (gbp) {
       C.validate({ ...binding, ...record, cohort: 'business_profile', scope_key: 'connection:' + id(binding.google_connection_id), policy_version: C.POLICY });
       if (String(record.external_location_id) !== record.asset_ref.split(':')[2]) C.fail();
-      matching = mappings.filter(row => /^(?:accounts\/[1-9]\d{0,29}\/)?(?:locations\/)?([1-9]\d{0,29})$/.exec(String(row.location_id))?.[1] === record.external_location_id);
+      matching = mappings.filter(row => record.mapping_id!=null ? id(row.id)===id(record.mapping_id) : /^(?:accounts\/[1-9]\d{0,29}\/)?(?:locations\/)?([1-9]\d{0,29})$/.exec(String(row.location_id))?.[1] === record.external_location_id);
     } else {
       properties.fromBinding(kind, record); matching = mappings.filter(row => id(row.id) === id(record.mapping_id));
     }

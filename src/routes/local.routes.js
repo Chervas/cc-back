@@ -51,7 +51,7 @@ async function requireClinicMarketingAccess(req, res, next) {
       return res.status(403).json({ success: false, error: 'scope_forbidden' });
     }
     req.localClinicId = clinicId;
-    req.localResolved = await businessProfileLocal.resolveEffectiveLocations(clinicId);
+    req.localResolved = await businessProfileLocal.resolveEffectiveLocations(clinicId,{userId:Number(req.userData?.userId)});
     return next();
   } catch (error) {
     return sendError(res, error);

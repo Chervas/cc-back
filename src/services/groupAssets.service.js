@@ -19,6 +19,8 @@ const {
   assertClinicWebRuntimeGroupChangeSafe,
 } = require('./clinicWebRuntimeMembership.service');
 
+const { prepareGroupAssetSelectionGuard } = require('./groupAssetSelectionGuard.service');
+
 const MODE_VALUES = ['group', 'clinic'];
 
 const META_TYPES = {
@@ -405,6 +407,7 @@ async function getGroupConfig(groupId) {
         { grupoClinicaId: group.id_grupo }
       ]
     },
+    attributes: ['id','metaAssetId','metaAssetName','assetType','clinicaId','assignmentScope','grupoClinicaId','isActive','assetAvatarUrl','metaConnectionId'],
     order: [['assetType', 'ASC'], ['metaAssetName', 'ASC']]
   });
 
@@ -782,7 +785,7 @@ function _ensureValidMode(value, field) {
   return value;
 }
 
-async function _updateMetaAssignments({ type, mode, primaryAssetId, clinicAssignments = {}, groupId, clinicIds, transaction }) {
+async function _updateMetaAssignments({ type, mode, primaryAssetId, clinicAssignments = {}, groupId, clinicIds, transaction, selectionGuard }) {
   const assetType = META_TYPES[type];
   const assetTypeKey = META_GROUP_ASSET_TYPE_BY_SECTION[type];
   if (!assetType || !assetTypeKey) {
@@ -799,7 +802,8 @@ async function _updateMetaAssignments({ type, mode, primaryAssetId, clinicAssign
         { grupoClinicaId: groupId }
       ]
     },
-    transaction
+    transaction, lock: transaction.LOCK.UPDATE,
+    attributes: ['id']
   });
   const accessibleAssetIds = accessibleAssets.map(asset => asset.id);
 
@@ -813,19 +817,12 @@ async function _updateMetaAssignments({ type, mode, primaryAssetId, clinicAssign
       transaction
     });
 
-    const otherAssetIds = accessibleAssetIds.filter(id => id !== Number(primaryAssetId));
-
-    if (otherAssetIds.length) {
+    if (!selectionGuard.managed(type, primaryAssetId)) {
       await ClinicMetaAsset.update(
-        { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
-        { where: { id: { [Op.in]: otherAssetIds } }, transaction }
+        { assignmentScope: 'group', grupoClinicaId: groupId },
+        { where: { id: primaryAssetId }, transaction }
       );
     }
-
-    await ClinicMetaAsset.update(
-      { assignmentScope: 'group', grupoClinicaId: groupId, isActive: true },
-      { where: { id: primaryAssetId }, transaction }
-    );
 
     await GrupoClinica.update(
       {
@@ -879,22 +876,12 @@ async function _updateMetaAssignments({ type, mode, primaryAssetId, clinicAssign
 
     const updatePayload = {
       assignmentScope: 'clinic',
-      grupoClinicaId: null,
-      isActive: clinicList.length > 0
+      grupoClinicaId: null
     };
     if (primaryClinicId != null) {
       updatePayload.clinicaId = primaryClinicId;
     }
-    await ClinicMetaAsset.update(updatePayload, { where: { id: assetId }, transaction });
-  }
-
-  const assignedAssetIds = new Set(assignmentsPerAsset.keys());
-  const unassignedAssetIds = accessibleAssetIds.filter(id => !assignedAssetIds.has(id));
-  if (unassignedAssetIds.length) {
-      await ClinicMetaAsset.update(
-        { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
-        { where: { id: { [Op.in]: unassignedAssetIds } }, transaction }
-      );
+    if (!selectionGuard.managed(type, assetId)) await ClinicMetaAsset.update(updatePayload, { where: { id: assetId }, transaction });
   }
 
   if (bulkRows.length) {
@@ -911,19 +898,20 @@ async function _updateMetaAssignments({ type, mode, primaryAssetId, clinicAssign
   );
 }
 
-async function _updateGoogleAssignments({ key, mode, primaryAssetId, clinicAssignments = {}, groupId, clinicIds, transaction }) {
+async function _updateGoogleAssignments({ key, mode, primaryAssetId, clinicAssignments = {}, groupId, clinicIds, transaction, selectionGuard }) {
   const config = GOOGLE_MODE_CONFIG[key];
   const assetTypeKey = GOOGLE_GROUP_ASSET_TYPE_BY_SECTION[key];
   if (!config || !assetTypeKey) {
     return;
   }
 
-  const { model, primaryField, modeField, updatedField, activeField, clinicField = 'clinicaId' } = config;
+  const { model, primaryField, modeField, updatedField, clinicField = 'clinicaId' } = config;
   const now = new Date();
 
   const accessibleAssets = await model.findAll({
     where: { [clinicField]: { [Op.in]: clinicIds } },
-    transaction
+    transaction, lock: transaction.LOCK.UPDATE,
+    attributes: ['id']
   });
   const accessibleAssetIds = accessibleAssets.map(asset => asset.id);
 
@@ -936,20 +924,6 @@ async function _updateGoogleAssignments({ key, mode, primaryAssetId, clinicAssig
       where: { grupoClinicaId: groupId, assetType: assetTypeKey },
       transaction
     });
-
-    if (activeField) {
-      await model.update(
-        { [activeField]: true },
-        { where: { id: primaryAssetId }, transaction }
-      );
-      const otherIds = accessibleAssetIds.filter(id => id !== Number(primaryAssetId));
-      if (otherIds.length) {
-        await model.update(
-          { [activeField]: false },
-          { where: { id: { [Op.in]: otherIds } }, transaction }
-        );
-      }
-    }
 
     await GrupoClinica.update(
       {
@@ -1002,23 +976,6 @@ async function _updateGoogleAssignments({ key, mode, primaryAssetId, clinicAssig
     await GroupAssetClinicAssignment.bulkCreate(bulkRows, { transaction });
   }
 
-  if (activeField) {
-    const assignedIds = Array.from(assignmentsPerAsset.keys());
-    if (assignedIds.length) {
-      await model.update(
-        { [activeField]: true },
-        { where: { id: { [Op.in]: assignedIds } }, transaction }
-      );
-    }
-    const unassignedIds = accessibleAssetIds.filter(id => !assignmentsPerAsset.has(id));
-    if (unassignedIds.length) {
-      await model.update(
-        { [activeField]: false },
-        { where: { id: { [Op.in]: unassignedIds } }, transaction }
-      );
-    }
-  }
-
   await GrupoClinica.update(
     {
       [modeField]: mode,
@@ -1029,7 +986,7 @@ async function _updateGoogleAssignments({ key, mode, primaryAssetId, clinicAssig
   );
 }
 
-async function _updateMetaAdAccounts({ mode, primaryAccountId, clinicAssignments = {}, groupId, clinicIds, transaction }) {
+async function _updateMetaAdAccounts({ mode, primaryAccountId, clinicAssignments = {}, groupId, clinicIds, transaction, selectionGuard }) {
   if (!mode) {
     return;
   }
@@ -1042,7 +999,7 @@ async function _updateMetaAdAccounts({ mode, primaryAccountId, clinicAssignments
     ]
   };
 
-  const accounts = await ClinicMetaAsset.findAll({ where, transaction });
+  const accounts = await ClinicMetaAsset.findAll({ where, transaction, lock: transaction.LOCK.UPDATE, attributes: ['id'] });
   if (!accounts.length) {
     return;
   }
@@ -1060,20 +1017,16 @@ async function _updateMetaAdAccounts({ mode, primaryAccountId, clinicAssignments
       transaction
     });
 
-    const remaining = accountIds.filter(id => id !== parsedPrimary);
-
-    if (remaining.length) {
+    if (!selectionGuard.managed('metaAds', parsedPrimary)) {
       await ClinicMetaAsset.update(
-        { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
-        { where: { id: { [Op.in]: remaining } }, transaction }
+        { assignmentScope: 'group', grupoClinicaId: groupId },
+        { where: { id: parsedPrimary }, transaction }
       );
     }
-
-    await ClinicMetaAsset.update(
-      { assignmentScope: 'group', grupoClinicaId: groupId, isActive: true },
-      { where: { id: parsedPrimary }, transaction }
+    // Explicit use is separate from the provider mapping's owner.
+    if (clinicIds.length) await GroupAssetClinicAssignment.bulkCreate(
+      clinicIds.map(clinicaId => ({ grupoClinicaId: groupId, assetType: GROUP_ASSET_TYPES.META_AD_ACCOUNT, assetId: parsedPrimary, clinicaId })), { transaction }
     );
-
     return;
   }
 
@@ -1116,22 +1069,12 @@ async function _updateMetaAdAccounts({ mode, primaryAccountId, clinicAssignments
 
     const updatePayload = {
       assignmentScope: 'clinic',
-      grupoClinicaId: null,
-      isActive: clinicsList.length > 0
+      grupoClinicaId: null
     };
     if (primaryClinic != null) {
       updatePayload.clinicaId = primaryClinic;
     }
-    await ClinicMetaAsset.update(updatePayload, { where: { id: accountId }, transaction });
-  }
-
-  const assignedAccountIds = new Set(assignmentsPerAccount.keys());
-  const unassignedIds = accountIds.filter(id => !assignedAccountIds.has(id));
-  if (unassignedIds.length) {
-    await ClinicMetaAsset.update(
-      { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
-      { where: { id: { [Op.in]: unassignedIds } }, transaction }
-    );
+    if (!selectionGuard.managed('metaAds', accountId)) await ClinicMetaAsset.update(updatePayload, { where: { id: accountId }, transaction });
   }
 
   if (bulkRows.length) {
@@ -1139,7 +1082,7 @@ async function _updateMetaAdAccounts({ mode, primaryAccountId, clinicAssignments
   }
 }
 
-async function _updateGoogleAdAccounts({ mode, primaryAccountId, clinicAssignments = {}, groupId, clinicIds, transaction }) {
+async function _updateGoogleAdAccounts({ mode, primaryAccountId, clinicAssignments = {}, groupId, clinicIds, transaction, selectionGuard }) {
   if (!mode) {
     return;
   }
@@ -1151,7 +1094,7 @@ async function _updateGoogleAdAccounts({ mode, primaryAccountId, clinicAssignmen
     ]
   };
 
-  const accounts = await ClinicGoogleAdsAccount.findAll({ where, transaction });
+  const accounts = await ClinicGoogleAdsAccount.findAll({ where, transaction, lock: transaction.LOCK.UPDATE, attributes: ['id'] });
   if (!accounts.length) {
     return;
   }
@@ -1169,17 +1112,15 @@ async function _updateGoogleAdAccounts({ mode, primaryAccountId, clinicAssignmen
       transaction
     });
 
-    const remaining = accountIds.filter(id => id !== parsedPrimary);
-    if (remaining.length) {
+    if (!selectionGuard.managed('googleAds', parsedPrimary)) {
       await ClinicGoogleAdsAccount.update(
-        { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
-        { where: { id: { [Op.in]: remaining } }, transaction }
+        { assignmentScope: 'group', grupoClinicaId: groupId },
+        { where: { id: parsedPrimary }, transaction }
       );
     }
-
-    await ClinicGoogleAdsAccount.update(
-      { assignmentScope: 'group', grupoClinicaId: groupId, isActive: true },
-      { where: { id: parsedPrimary }, transaction }
+    // Explicit use is separate from the provider mapping's owner.
+    if (clinicIds.length) await GroupAssetClinicAssignment.bulkCreate(
+      clinicIds.map(clinicaId => ({ grupoClinicaId: groupId, assetType: GROUP_ASSET_TYPES.GOOGLE_ADS_ACCOUNT, assetId: parsedPrimary, clinicaId })), { transaction }
     );
     return;
   }
@@ -1223,22 +1164,12 @@ async function _updateGoogleAdAccounts({ mode, primaryAccountId, clinicAssignmen
 
     const updatePayload = {
       assignmentScope: 'clinic',
-      grupoClinicaId: null,
-      isActive: clinicsList.length > 0
+      grupoClinicaId: null
     };
     if (primaryClinic != null) {
       updatePayload.clinicaId = primaryClinic;
     }
-    await ClinicGoogleAdsAccount.update(updatePayload, { where: { id: accountId }, transaction });
-  }
-
-  const assignedIds = new Set(assignmentsPerAccount.keys());
-  const unassigned = accountIds.filter(id => !assignedIds.has(id));
-  if (unassigned.length) {
-    await ClinicGoogleAdsAccount.update(
-      { assignmentScope: 'clinic', grupoClinicaId: null, isActive: false },
-      { where: { id: { [Op.in]: unassigned } }, transaction }
-    );
+    if (!selectionGuard.managed('googleAds', accountId)) await ClinicGoogleAdsAccount.update(updatePayload, { where: { id: accountId }, transaction });
   }
 
   if (bulkRows.length) {
@@ -1253,10 +1184,13 @@ async function updateGroupConfig(groupId, payload) {
   }
 
   let clinicIds = Array.isArray(ctx.clinicIds) ? [...ctx.clinicIds] : [];
-  const groupSnapshot = ctx.group;
+  const selectionClinicIds = Array.isArray(payload.clinics?.clinicIds)
+    ? [...new Set(payload.clinics.clinicIds.map(Number).filter(_positiveInteger))].sort((a,b) => a-b) : clinicIds;
+  const selectionGuard = await prepareGroupAssetSelectionGuard({ models: db, payload, groupId, clinicIds: selectionClinicIds });
   const transaction = await sequelize.transaction();
 
   try {
+    await selectionGuard.lock(transaction);
     const now = new Date();
 
     if (payload.nombre_grupo) {
@@ -1286,11 +1220,9 @@ async function updateGroupConfig(groupId, payload) {
     if (payload.ads) {
       const { mode, delimiter } = payload.ads;
       const updates = {};
-      let modeChanged = false;
 
       if (mode && ['automatic', 'manual'].includes(mode)) {
         updates.ads_assignment_mode = mode;
-        modeChanged = mode !== groupSnapshot.ads_assignment_mode;
       }
       if (typeof delimiter === 'string' && delimiter.trim().length) {
         updates.ads_assignment_delimiter = delimiter.trim();
@@ -1299,78 +1231,8 @@ async function updateGroupConfig(groupId, payload) {
         await GrupoClinica.update(updates, { where: { id_grupo: groupId }, transaction });
       }
 
-      if (modeChanged) {
-        if (mode === 'automatic') {
-          await ClinicMetaAsset.update(
-            {
-              assignmentScope: 'group',
-              grupoClinicaId: groupId
-            },
-            {
-              where: {
-                clinicaId: { [Op.in]: clinicIds },
-                assetType: 'ad_account'
-              },
-              transaction
-            }
-          );
-
-          await ClinicGoogleAdsAccount.update(
-            {
-              assignmentScope: 'group',
-              grupoClinicaId: groupId
-            },
-            {
-              where: {
-                clinicaId: { [Op.in]: clinicIds }
-              },
-              transaction
-            }
-          );
-
-          await GroupAssetClinicAssignment.destroy({
-            where: {
-              grupoClinicaId: groupId,
-              assetType: GROUP_ASSET_TYPES.META_AD_ACCOUNT
-            },
-            transaction
-          });
-          await GroupAssetClinicAssignment.destroy({
-            where: {
-              grupoClinicaId: groupId,
-              assetType: GROUP_ASSET_TYPES.GOOGLE_ADS_ACCOUNT
-            },
-            transaction
-          });
-        } else {
-          await ClinicMetaAsset.update(
-            {
-              assignmentScope: 'clinic',
-              grupoClinicaId: null
-            },
-            {
-              where: {
-                clinicaId: { [Op.in]: clinicIds },
-                assetType: 'ad_account'
-              },
-              transaction
-            }
-          );
-
-          await ClinicGoogleAdsAccount.update(
-            {
-              assignmentScope: 'clinic',
-              grupoClinicaId: null
-            },
-            {
-              where: {
-                clinicaId: { [Op.in]: clinicIds }
-              },
-              transaction
-            }
-          );
-        }
-      }
+      // Matching mode changes campaign attribution, not provider ownership or
+      // grants. Asset use is configured explicitly through adsAccounts.
     }
 
     if (payload.web) {
@@ -1417,7 +1279,7 @@ async function updateGroupConfig(groupId, payload) {
           clinicAssignments: facebook.clinicAssignments || {},
           groupId,
           clinicIds,
-          transaction
+          transaction, selectionGuard
         });
       }
 
@@ -1430,7 +1292,7 @@ async function updateGroupConfig(groupId, payload) {
           clinicAssignments: instagram.clinicAssignments || {},
           groupId,
           clinicIds,
-          transaction
+          transaction, selectionGuard
         });
       }
 
@@ -1459,7 +1321,7 @@ async function updateGroupConfig(groupId, payload) {
           clinicAssignments: searchConsole.clinicAssignments || {},
           groupId,
           clinicIds,
-          transaction
+          transaction, selectionGuard
         });
       }
 
@@ -1472,7 +1334,7 @@ async function updateGroupConfig(groupId, payload) {
           clinicAssignments: analytics.clinicAssignments || {},
           groupId,
           clinicIds,
-          transaction
+          transaction, selectionGuard
         });
       }
 
@@ -1485,7 +1347,7 @@ async function updateGroupConfig(groupId, payload) {
           clinicAssignments: businessProfile.clinicAssignments || {},
           groupId,
           clinicIds,
-          transaction
+          transaction, selectionGuard
         });
       }
     }
@@ -1501,7 +1363,7 @@ async function updateGroupConfig(groupId, payload) {
           clinicAssignments: meta.clinicAssignments || {},
           groupId,
           clinicIds,
-          transaction
+          transaction, selectionGuard
         });
       }
 
@@ -1513,11 +1375,12 @@ async function updateGroupConfig(groupId, payload) {
           clinicAssignments: google.clinicAssignments || {},
           groupId,
           clinicIds,
-          transaction
+          transaction, selectionGuard
         });
       }
     }
 
+    await selectionGuard.assertFinal();
     await transaction.commit();
 
     return getGroupConfig(groupId);

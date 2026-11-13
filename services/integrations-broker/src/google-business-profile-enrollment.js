@@ -3,10 +3,12 @@ const { createHash } = require('node:crypto');
 const C = require('./google-business-profile-enrollment-contract');
 const reads = require('./google-business-profile-contract');
 const { fail } = require('./errors');
+const { createBusinessProfileReassociation } = require('./google-business-profile-reassociation');
 
 function createBusinessProfileEnrollment({ store, http, cursor, now = Date.now }) {
   const get = (sql, ...args) => store.db.prepare(sql).get(...args);
   const all = (sql, ...args) => store.db.prepare(sql).all(...args);
+  const reassociations = createBusinessProfileReassociation({ store, now });
   const assetFor = p => `gbp:${p.accountId}:${p.locationId}`;
   const retired = request => !!get('SELECT 1 FROM google_business_profile_retirements WHERE tenant=? AND connection=? AND asset=?',
     request.tenantRef, request.connectionRef, request.assetRef);
@@ -60,18 +62,22 @@ function createBusinessProfileEnrollment({ store, http, cursor, now = Date.now }
     const p = request.payload;
     if (!s.accountIds.includes(p.accountId) || !s.locationIds.includes(p.locationId)
       || s.assetRef.startsWith('gbp-enroll:clinic:') && p.clinicCount !== 1) fail('scope_denied');
-    if (revokedLocation(p.locationId)) fail('asset_revoked');
+    const lineage = reassociations.capture(request, s, { discover: !p.enrollmentId });
+    if (!lineage && revokedLocation(p.locationId)) fail('asset_revoked');
     // The location ID is global. An alternate account prefix must not create a
     // second owner or evade a static registration/revocation.
     if (policy.grants.some(g => g.assetRef.startsWith('gbp:') && reads.asset(g.assetRef).locationId === p.locationId
-      && g.operations.some(op => C.resourceOperations.includes(op)))) fail('scope_denied');
-    const histories = all('SELECT tenant,connection,scope FROM google_business_profile_enrollments WHERE location=? AND verified=1', p.locationId);
-    if (histories.some(row => row.tenant !== request.tenantRef || row.connection !== request.connectionRef || row.scope !== request.assetRef)) fail('scope_denied');
+      && g.operations.some(op => C.resourceOperations.includes(op)) && !reassociations.allowsSourceGrant(lineage, g))) fail('scope_denied');
+    const histories = all('SELECT id,tenant,connection,scope,account,location,state,completed_at FROM google_business_profile_enrollments WHERE location=? AND verified=1', p.locationId);
+    if (histories.some(row => (row.tenant !== request.tenantRef || row.connection !== request.connectionRef || row.scope !== request.assetRef)
+      && !reassociations.allowsSourceHistory(lineage, row))) fail('scope_denied');
+    return lineage;
   }
   function assertCandidate(request, principal, policy) {
     const found = owned(request, principal, policy); const { row, binding, scope: s } = found; const p = request.payload;
     sameIdentity(row, p);
     if (row && (['cancelled', 'retired'].includes(row.state) || row.config_digest !== C.digestFor(binding, s))) fail('asset_revoked');
+    if (row && p.reassociation && !reassociations.ledger(row.id)) fail('scope_denied');
     candidateAllowed(request, policy, s); assertPredecessor(request, s, binding, policy, row);
     if (!row && request.operation === C.OPERATIONS.activate) fail('scope_denied');
     const other = get("SELECT id FROM google_business_profile_enrollments WHERE tenant=? AND connection=? AND scope=? AND state IN ('prepared','active') AND completed_at IS NULL AND id<>? LIMIT 1",
@@ -86,6 +92,9 @@ function createBusinessProfileEnrollment({ store, http, cursor, now = Date.now }
   function assertControl(request, principal, policy) {
     const found = owned(request, principal, policy, true); const { row, binding, scope: s } = found;
     sameIdentity(row, request.payload);
+    if (request.payload.reassociation || row && reassociations.ledger(row.id)) {
+      reassociations.capture(request, s, { cleanup: request.operation === C.OPERATIONS.abort });
+    }
     if (request.operation === C.OPERATIONS.retire) {
       if (!row || row.state !== 'active' || row.config_digest !== C.digestFor(binding, s)) fail('scope_denied');
       candidateAllowed(request, policy, s); assertPredecessor(request, s, binding, policy, row);
@@ -114,7 +123,8 @@ function createBusinessProfileEnrollment({ store, http, cursor, now = Date.now }
     if (!['prepared', 'active'].includes(row.state) || principal.id !== s.readPrincipalId || !s.readOperations.includes(request.operation)
       || row.state === 'prepared' && request.operation !== reads.PREFIX + 'discovery.read.v1'
       || row.config_digest !== C.digestFor(binding, s) || !s.accountIds.includes(row.account) || !s.locationIds.includes(row.location)) fail('scope_denied');
-    if (revokedLocation(row.location)) fail('asset_revoked');
+    const lineage = reassociations.forRow(row, s);
+    if (!lineage && revokedLocation(row.location)) fail('asset_revoked');
     store.assertAssetActive({ tenantRef: row.tenant, connectionRef: row.connection, assetRef: row.scope });
     return { ...policy, grants: [...policy.grants, { principalId: principal.id, tenantRef: row.tenant,
       connectionRef: row.connection, assetRef: request.assetRef, operations: [request.operation] }] };
@@ -138,12 +148,17 @@ function createBusinessProfileEnrollment({ store, http, cursor, now = Date.now }
       // still gates all ordinary reads; accessBlocked describes a separate
       // loss of authority, rather than treating preparation as revocation.
       accessBlocked = !['prepared', 'active'].includes(row.state) || row.config_digest !== C.digestFor(binding, s)
-        || !s.accountIds.includes(row.account) || !s.locationIds.includes(row.location) || revokedLocation(row.location);
-    } catch {}
+        || !s.accountIds.includes(row.account) || !s.locationIds.includes(row.location);
+      const lineage = request.payload.reassociation
+        ? reassociations.capture({ ...request, payload: { ...request.payload, ...reassociations.requestFor(row, request.payload.reassociation).payload } }, s)
+        : reassociations.forRow(row, s);
+      if (!lineage && revokedLocation(row.location)) accessBlocked = true;
+    } catch { accessBlocked = true; }
     return { enrollmentId: row.id, assetRef: `gbp:${row.account}:${row.location}`, scopeRef: row.scope,
       accountId: row.account, locationId: row.location, previousAssetRef: row.previous_asset,
       clinicCount: row.clinic_count, clinicSetDigest: row.clinic_digest, state: row.state,
-      previousAssetRetired: row.completed_at !== null, accessBlocked };
+      previousAssetRetired: row.completed_at !== null, accessBlocked,
+      ...reassociations.metadata(row, request, s) };
   }
   const draft = (request, found, state, verified = 1) => ({ id: request.payload.enrollmentId, principal: found.owner,
     tenant: request.tenantRef, connection: request.connectionRef, scope: request.assetRef,
@@ -207,7 +222,7 @@ function createBusinessProfileEnrollment({ store, http, cursor, now = Date.now }
     persistResult: name !== 'discover', requiredScopes: ['https://www.googleapis.com/auth/business.manage'],
     validate: C.validators[name],
     async execute(context) {
-      const request = { operation, connectionRef: context.binding.connectionRef, tenantRef: context.tenantRef,
+      const request = { requestId: context.requestId, operation, connectionRef: context.binding.connectionRef, tenantRef: context.tenantRef,
         assetRef: context.assetRef, payload: context.payload };
       const principal = { id: context.principalId }; const { binding, scope: s } = scope(request, context.policy);
       const withPolicy = { ...request, policy: context.policy };
@@ -224,7 +239,8 @@ function createBusinessProfileEnrollment({ store, http, cursor, now = Date.now }
       if (name !== 'discover') {
         const found = assertCandidate(request, principal, context.policy);
         if (name === 'activate' && found.row.state === 'active') return receipt(found.row, withPolicy, s);
-        await verify(context, s, request.payload);
+        await reassociations.withIO(request, principal, s,
+          () => assertCandidate(request, principal, context.policy), () => verify(context, s, request.payload));
         return receipt({ ...(found.row || draft(request, found, 'prepared')), state: name === 'activate' ? 'active' : found.row?.state || 'prepared' }, withPolicy, s);
       }
       await identity(context);
@@ -241,22 +257,37 @@ function createBusinessProfileEnrollment({ store, http, cursor, now = Date.now }
       const id = s.accountIds[index]; const observedAccount = await account(context, id);
       const result = await page(context, id, providerToken); count += result.rows.length;
       if (count > 1000 || result.next !== null && (count >= 1000 || result.next === providerToken)) fail('provider_failed');
-      const locations = result.rows.filter(row => s.locationIds.includes(row.name.slice('locations/'.length)))
-        .filter(row => { try { candidateAllowed({ ...request, payload: { accountId: id, locationId: row.name.slice(10), clinicCount: 1 } }, context.policy, s); return true; } catch { return false; } })
-        .map(row => ({ ...observedAccount, ...C.projectLocation(row) }));
+      const locations = [];
+      for (const row of result.rows.filter(row => s.locationIds.includes(row.name.slice('locations/'.length)))) {
+        let lineage;
+        try { lineage = candidateAllowed({ ...request, payload: { accountId: id, locationId: row.name.slice(10), clinicCount: 1 } }, context.policy, s); }
+        catch { continue; }
+        locations.push({ ...observedAccount, ...C.projectLocation(row), ...(lineage ? { reassociation: { ...lineage.proof } } : {}) });
+      }
       if (result.next === null) { index++; providerToken = null; } else providerToken = result.next;
       return { locations, nextPageToken: index < s.accountIds.length ? cursor.seal(JSON.stringify({ index, providerToken, count,
         epoch, digest: C.digestFor(binding, s) }), cursorScope) : null };
     },
     project(data) { if (!data || Buffer.byteLength(JSON.stringify(data)) > 786432) fail('provider_failed'); return structuredClone(data); },
-    ...(['prepare', 'activate', 'retire', 'abort'].includes(name) ? { commit({ request, principal, policy, result }) {
+    ...(['prepare', 'activate', 'retire', 'abort', 'status'].includes(name) ? { commit({ request, principal, policy, result }) {
       assert(request, principal, policy);
       if (store.backlog().pending >= policy.maxBacklog) fail('audit_unavailable');
+      if (name === 'status') {
+        const found = owned(request, principal, policy);
+        if (found.row) {
+          reassociations.reconcileCancelled(found.row, request.requestId);
+          result.data = receipt(found.row, { ...request, policy }, found.scope);
+        }
+        return;
+      }
       const found = ['retire', 'abort'].includes(name) ? assertControl(request, principal, policy) : assertCandidate(request, principal, policy);
       const { row, scope: s } = found; const p = request.payload;
       if (name === 'abort') {
         if (row) store.db.prepare("UPDATE google_business_profile_enrollments SET state='cancelled',updated_at=? WHERE id=? AND completed_at IS NULL").run(now(), row.id);
         else insert(draft(request, found, 'cancelled', 0));
+        if (request.payload.reassociation) reassociations.persist(request, s);
+        reassociations.reconcileCancelled(get('SELECT * FROM google_business_profile_enrollments WHERE id=?', p.enrollmentId), request.requestId);
+        result.data = receipt(get('SELECT * FROM google_business_profile_enrollments WHERE id=?', p.enrollmentId), { ...request, policy }, s);
         return;
       }
       if (name === 'retire') {
@@ -277,6 +308,7 @@ function createBusinessProfileEnrollment({ store, http, cursor, now = Date.now }
       }
       if (!row) {
         insert(draft(request, found, 'prepared'));
+        if (request.payload.reassociation) reassociations.persist(request, s);
         store.db.prepare('INSERT OR IGNORE INTO google_business_profile_scope_heads(tenant,connection,scope,asset,enrollment_id,revision,updated_at) VALUES (?,?,?,?,NULL,1,?)')
           .run(request.tenantRef, request.connectionRef, request.assetRef, p.previousAssetRef, now());
       }

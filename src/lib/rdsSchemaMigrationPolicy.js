@@ -105,6 +105,9 @@ function buildPlan({ info, before, identity, selected, moduleFiles, profile, at,
     policy: { schemaOnly: true, clinicalRowDml: false, dcl: false, automaticHistoricalMigrations: false,
       destructiveDdl: false, maxDdlPhaseMs: 600000, maxStatementMs: 300000,
       enumMemberAppendOnly: true,
+      ...(selected.includes('20261113160000-business-profile-binding-generations.js') ? { guardedIndexReplacement: {
+        migration:'20261113160000-business-profile-binding-generations.js',table:'ClinicBusinessLocations',index:'uniq_clinicbusiness_locationid',
+        guard:'gbp-active-canonical-index-replacement/1',metadataBeforeAndAfter:true,arbitraryDrop:false } } : {}),
       warningPolicy: 'mysql-8.4.11-tinyint1-display-width/1',
       bootstrapSequelizeMeta: !before.tables.some(table => table.TABLE_NAME === 'SequelizeMeta'),
       mysqlDdlIsAtomic: false, unknownRequiresManualReconciliation: true } };

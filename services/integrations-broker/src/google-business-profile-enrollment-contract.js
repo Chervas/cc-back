@@ -14,6 +14,17 @@ const object = properties => ({ type: 'object', additionalProperties: false, pro
 const externalId = { type: 'string', pattern: '^[1-9][0-9]{0,29}$' };
 const assetRef = { type: 'string', pattern: '^gbp:[1-9][0-9]{0,29}:[1-9][0-9]{0,29}$' };
 const UUID = { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' };
+const reassociationFields = {
+  descriptorId: UUID,
+  sourceTenantRef: { type: 'string', pattern: '^clinic:[1-9][0-9]{0,9}$' },
+  sourceConnectionRef: ref,
+  sourceScopeRef: { type: 'string', pattern: '^gbp-enroll:clinic:[1-9][0-9]{0,9}$' },
+  sourceAssetRef: assetRef,
+  retirementEnrollmentId: UUID,
+  retirementDigest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+};
+const reassociationSchema = object(reassociationFields);
+const validateReassociation = schema(reassociationFields);
 const scopeSchema = object({
   assetRef: { type: 'string', pattern: '^gbp-enroll:(clinic|group):[1-9][0-9]{0,9}$' },
   tenantRef: { type: 'string', pattern: '^clinic:[1-9][0-9]{0,9}$' },
@@ -24,6 +35,10 @@ const scopeSchema = object({
   readOperations: { type: 'array', minItems: 1, uniqueItems: true, items: { enum: reads.OPERATIONS } },
   maxAssets: { type: 'integer', minimum: 1, maximum: 1000 },
 });
+// Optional server policy only. Do not add it to legacy required fields or the
+// ordinary scope digest: existing intents and grants keep their exact identity.
+scopeSchema.properties.reassociationSources = { type: 'array', minItems: 1, maxItems: 20,
+  items: reassociationSchema };
 const identity = { enrollmentId: UUID, accountId: externalId, locationId: externalId,
   previousAssetRef: { ...assetRef, type: ['string', 'null'] },
   clinicCount: { type: 'integer', minimum: 1, maximum: 1000 },
@@ -31,7 +46,17 @@ const identity = { enrollmentId: UUID, accountId: externalId, locationId: extern
 const validators = {
   discover: schema({ pageToken: { type: ['string', 'null'], maxLength: 4096 } }),
   status: schema({ enrollmentId: UUID }),
-  ...Object.fromEntries(['prepare', 'activate', 'retire', 'abort'].map(name => [name, schema(identity)])),
+  ...Object.fromEntries(['prepare', 'activate', 'retire', 'abort'].map(name => {
+    const legacy = schema(identity);
+    return [name, value => {
+      if (value && Object.hasOwn(value, 'reassociation')) {
+        validateReassociation(value.reassociation);
+        const ordinary = { ...value }; delete ordinary.reassociation; legacy(ordinary);
+        return value;
+      }
+      return legacy(value);
+    }];
+  })),
 };
 const isOperation = value => Object.values(OPERATIONS).includes(value);
 const resourceOperations = [...reads.OPERATIONS, ...Object.values(writes.OPERATIONS)];
@@ -60,6 +85,7 @@ function ownerFor(policy, binding, scope) {
   return [...owners][0];
 }
 function validatePolicy(policy) {
+  const reassociationDescriptors = new Set();
   const roles = { read: new Set(), write: new Set(), control: new Set(), oauth: new Set(), enrollment: new Set() };
   for (const grant of policy.grants) {
     if (grant.operations.some(op => reads.OPERATIONS.includes(op))) roles.read.add(grant.principalId);
@@ -75,6 +101,17 @@ function validatePolicy(policy) {
       if (seen.has(scope.assetRef) || !scope.readOperations.includes(reads.PREFIX + 'discovery.read.v1')) fail('invalid_request');
       seen.add(scope.assetRef); roles.read.add(scope.readPrincipalId); roles.control.add(scope.controlPrincipalId);
       const owner = ownerFor(policy, binding, scope);
+      for (const proof of scope.reassociationSources || []) {
+        validateReassociation(proof);
+        const physical = reads.asset(proof.sourceAssetRef);
+        if (reassociationDescriptors.has(proof.descriptorId)
+          || proof.sourceTenantRef === scope.tenantRef
+          || proof.sourceConnectionRef !== binding.connectionRef
+          || proof.sourceScopeRef !== 'gbp-enroll:' + proof.sourceTenantRef
+          || !scope.assetRef.startsWith('gbp-enroll:clinic:')
+          || !scope.accountIds.includes(physical.accountId) || !scope.locationIds.includes(physical.locationId)) fail('invalid_request');
+        reassociationDescriptors.add(proof.descriptorId);
+      }
       for (const grant of policy.grants.filter(g => g.connectionRef === binding.connectionRef && g.assetRef === scope.assetRef)) {
         if (grant.tenantRef !== scope.tenantRef || grant.operations.some(op => !isOperation(op))
           || grant.operations.some(op => [OPERATIONS.retire, OPERATIONS.abort].includes(op)) && grant.principalId !== scope.controlPrincipalId
@@ -96,6 +133,18 @@ function validatePolicy(policy) {
   for (let i = 0; i < keys.length; i++) for (let j = i + 1; j < keys.length; j++) {
     if ([...keys[i]].some(value => keys[j].has(value))) fail('invalid_request');
   }
+}
+function retirementDigest(row) {
+  return createHash('sha256').update(canonical({ tenant: row.tenant, connection: row.connection,
+    asset: row.asset, location: row.location, enrollment_id: row.enrollment_id, retired_at: row.retired_at })).digest('hex');
+}
+function reassociationDigest(proof, request) {
+  validateReassociation(proof);
+  const p = request.payload;
+  return createHash('sha256').update(canonical({ descriptor: proof,
+    target: { tenant: request.tenantRef, connection: request.connectionRef, scope: request.assetRef,
+      enrollmentId: p.enrollmentId, accountId: p.accountId, locationId: p.locationId,
+      previousAssetRef: p.previousAssetRef, clinicCount: p.clinicCount, clinicSetDigest: p.clinicSetDigest } })).digest('hex');
 }
 const SUMMARY_READ_MASK = 'name,title,storeCode,storefrontAddress,metadata';
 const PUBLIC_GOOGLE_HOSTS = new Set(['google.com', 'www.google.com', 'maps.google.com', 'search.google.com',
@@ -133,4 +182,5 @@ function projectLocation(raw) {
     ...(Object.keys(metadata).length ? { metadata } : {}) };
 }
 module.exports = { PREFIX, OPERATIONS, scopeSchema, validators, scopeFor, digestFor, ownerFor,
-  validatePolicy, isOperation, resourceOperations, SUMMARY_READ_MASK, projectMetadata, projectLocation };
+  validatePolicy, isOperation, resourceOperations, SUMMARY_READ_MASK, projectMetadata, projectLocation,
+  reassociationSchema, validateReassociation, retirementDigest, reassociationDigest };

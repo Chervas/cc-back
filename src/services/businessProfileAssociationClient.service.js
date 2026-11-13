@@ -1,6 +1,8 @@
 'use strict';
 const fs = require('node:fs'); const path = require('node:path'); const {randomUUID} = require('node:crypto');
 const C = require('./businessProfileAssociation.contract');
+const Owner = require('../../services/integrations-broker/src/google-business-profile-enrollment-contract');
+const {digestFor} = require('./businessProfileReassociation.service');
 const {createIntegrationsBrokerClient} = require('../lib/integrationsBrokerClient');
 const PREFIX = 'google.business_profile.enrollment.';
 const exact = (v,keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === keys.slice().sort().join(',');
@@ -10,12 +12,16 @@ function createClient({client,controlClient}) {
     const control = ['retire','abort'].includes(kind); const id = kind === 'status' ? randomUUID() : row[kind + '_request_id'];
     if (!C.UUID.test(id) || typeof beforeExecute !== 'function') C.fail(); await beforeExecute();
     const payload = kind === 'status' ? {enrollmentId:row.attempt_id} : {enrollmentId:row.attempt_id,accountId:row.account_id,locationId:row.location_id,previousAssetRef:row.previous_asset_ref,clinicCount:1,clinicSetDigest:C.hash([Number(row.clinica_id)])};
+    const proof=C.object(row.target_snapshot).reassociation;
+    if(proof){Owner.validateReassociation(proof);if(kind!=='status')payload.reassociation=proof;}
     const result = await (control ? controlClient : client).execute({requestId:id,operation:PREFIX + kind + '.v1',tenantRef:'clinic:' + row.clinica_id,connectionRef:row.connection_ref,assetRef:row.scope_ref,payload},{timeoutMs:10000});
     await beforeExecute(); const data = envelope(result,id);
     if(kind === 'status' && exact(data,['enrollmentId','state','accessBlocked']) && data.enrollmentId === row.attempt_id && data.state === 'not_found' && data.accessBlocked === true) return data;
     const fields = ['enrollmentId','assetRef','scopeRef','accountId','locationId','previousAssetRef','clinicCount','clinicSetDigest','state','previousAssetRetired','accessBlocked'];
+    if(proof){fields.push('reassociation');if(!exact(data.reassociation,[...Object.keys(proof),'proofDigest'])||Object.keys(proof).some(k=>data.reassociation[k]!==proof[k])||data.reassociation.proofDigest!==digestFor(row,proof))C.fail('broker_response_invalid');}
+    if(Object.hasOwn(data,'reassociationCleanupPending')){if(!proof||typeof data.reassociationCleanupPending!=='boolean')C.fail('broker_response_invalid');fields.push('reassociationCleanupPending');}
     if (!exact(data,fields) || data.enrollmentId !== row.attempt_id || data.assetRef !== `gbp:${row.account_id}:${row.location_id}` || data.scopeRef !== row.scope_ref || data.accountId !== row.account_id || data.locationId !== row.location_id || data.previousAssetRef !== row.previous_asset_ref || data.clinicCount !== 1 || data.clinicSetDigest !== C.hash([Number(row.clinica_id)]) || !['prepared','active','cancelled','retired'].includes(data.state) || typeof data.previousAssetRetired !== 'boolean' || typeof data.accessBlocked !== 'boolean') C.fail('broker_response_invalid');
-    if (kind === 'prepare' && !['prepared','active'].includes(data.state) || kind === 'activate' && data.state !== 'active' || kind === 'retire' && (!data.previousAssetRetired || !['active','retired'].includes(data.state)) || kind === 'abort' && (data.state !== 'cancelled' || !data.accessBlocked) || !control && kind !== 'status' && data.accessBlocked) C.fail('broker_response_invalid');
+    if (kind === 'prepare' && !['prepared','active'].includes(data.state) || kind === 'activate' && data.state !== 'active' || kind === 'retire' && (!data.previousAssetRetired || !['active','retired'].includes(data.state)) || kind === 'abort' && (data.state !== 'cancelled' || !data.accessBlocked) || !control && kind !== 'status' && data.accessBlocked || data.reassociationCleanupPending===true) C.fail(data.reassociationCleanupPending===true?'outcome_unknown':'broker_response_invalid');
     return data;
   }
   return { command, async discover(scope,beforeExecute) {

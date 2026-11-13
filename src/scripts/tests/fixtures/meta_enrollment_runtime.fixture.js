@@ -117,6 +117,8 @@ module.exports=async({models,sql,sessions,service,callback,request,token,now,rep
   assert.deepEqual((await events()).map(v=>v.part).sort(),[1,2,3,4]);
   report.checks.push('Lost activation response and actual broker restart recover by status without another activate; failed final audit rolls back mappings/grant/bindings and subsequent status commits one canonical group row per asset');
 
+  if(process.env.META_ENROLLMENT_RUNTIME_CASE==='group_assets_guard')return require('./group_assets_guard_mysql.fixture')({models,sql,report,now,enrollmentId:id,commands,providerCalls:()=>f.state.httpCalls.length});
+
   const readerKey=path.join(f.dir,'reader-live.pem');fs.writeFileSync(readerKey,f.reader.privateKey.export({type:'pkcs8',format:'pem'}),{mode:0o600});
   const broker=require('../../../services/metaMarketingBrokerReader.service'),scope=require('../../../services/metaMarketingBrokerScope.service');
   const reader=broker.createMetaMarketingBroker({client:broker.createConfiguredMetaMarketingClient({env:{META_MARKETING_BROKER_ORIGIN:'https://127.0.0.1:'+f.config.port,

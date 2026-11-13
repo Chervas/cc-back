@@ -5,7 +5,7 @@
 const { Op } = require('sequelize');
 const broker = require('./businessProfileBroker.service');
 const fail = code => { throw Object.assign(new Error(code), { code }); };
-const FIELDS = ['external_location_id', 'connection_ref', 'asset_ref', 'clinica_id', 'google_connection_id', 'state'];
+const FIELDS = ['external_location_id', 'connection_ref', 'asset_ref', 'clinica_id', 'google_connection_id', 'state', 'mapping_id', 'generation_id'];
 const LOCATION_FIELDS = ['id', 'clinica_id', 'google_connection_id', 'location_id', 'is_active', 'broker_read_connection_ref', 'broker_read_asset_ref'];
 const fingerprint = rows => JSON.stringify(rows.map(row => FIELDS.map(key => row[key])));
 const CONFLICT_CODES = new Set(['broker_binding_invalid', 'broker_legacy_discovery_blocked', 'broker_discovery_scope_unconfigured', 'broker_discovery_limit']);
@@ -86,13 +86,11 @@ function createBusinessProfileDiscovery({ hasManagedBindings, listBindings, load
 const service = createBusinessProfileDiscovery({ broker,
   hasManagedBindings: async () => !!await require('../../models').BusinessProfileBrokerBinding.findOne({ attributes: ['external_location_id'], raw: true })
     || !!await require('../../models').BusinessProfileBrokerRevocation.findOne({ attributes: ['external_location_id'], raw: true }),
-  listBindings: (clinicIds, connectionId) => require('../../models').BusinessProfileBrokerBinding.findAll({
-    where: { clinica_id: { [Op.in]: clinicIds }, google_connection_id: connectionId, state: 'active' }, attributes: FIELDS,
-    order: [['external_location_id', 'ASC']], limit: 21, raw: true,
-  }),
+  listBindings: (clinicIds, connectionId) => require('./businessProfileBindingGeneration.service').listEffectiveBindings({models:require('../../models'),clinicIds,connectionId}),
   loadLocation: async binding => {
     const rows = await require('../../models').ClinicBusinessLocation.findAll({
       where: { clinica_id: binding.clinica_id, google_connection_id: binding.google_connection_id,
+        ...(binding.mapping_id ? {id:binding.mapping_id} : {}), is_active:true,
         broker_read_connection_ref: binding.connection_ref, broker_read_asset_ref: binding.asset_ref },
       attributes: LOCATION_FIELDS, limit: 2, raw: true,
     });

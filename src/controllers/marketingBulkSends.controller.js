@@ -226,6 +226,7 @@ exports.getReviewActivityReport = async (req, res) => {
     await requireReviewHistoryAccess(req, scope);
     res.set('Cache-Control', 'no-store');
     return res.json(await marketingBulkSendsService.getReviewActivityReport(scope, {
+      userId:Number(req.userData?.userId),
       review_group_clinic_ids: req.query.review_group_clinic_ids, period: req.query.period,
     }));
   } catch (error) {

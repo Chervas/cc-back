@@ -39,17 +39,18 @@ function projectScoreTrends(rows, locationIds, { range, previous }) {
   });
 }
 
-async function readScoreTrends(db, { locationIds = [], range, previous }) {
+async function readScoreTrends(db, { locationIds = [], range, previous,historyProjection=null }) {
   const ids = [...new Set(locationIds.map(Number).filter(id => Number.isSafeInteger(id) && id > 0))];
   if (!ids.length) return [];
   const oldest = new Date(previous.to + 'T12:00:00Z'); oldest.setUTCDate(oldest.getUTCDate() - 2);
   const rows = await db.sequelize.query(`SELECT business_location_id,date,value FROM BusinessProfileDailyMetrics
     WHERE business_location_id IN (:locationIds) AND metric_type=:metric AND metric_subtype=:subtype
       AND date >= :start AND date <= :end`, {
-    replacements: { locationIds: ids, metric: METRIC, subtype: SUBTYPE, start: oldest.toISOString().slice(0, 10), end: range.to },
+    replacements: { locationIds:historyProjection?.mappingIds||ids, metric: METRIC, subtype: SUBTYPE, start: oldest.toISOString().slice(0, 10), end: range.to },
     type: db.Sequelize.QueryTypes.SELECT,
   });
-  return projectScoreTrends(rows, ids, { range, previous });
+  const projected=require('./businessProfileHistoryScope.service').deduplicateMetrics(rows.map(r=>({...r,metric_type:METRIC,metric_subtype:SUBTYPE})),historyProjection);
+  return projectScoreTrends(projected, ids, { range, previous });
 }
 
 module.exports = { readScoreTrends, projectScoreTrends, providerScoreSnapshot };

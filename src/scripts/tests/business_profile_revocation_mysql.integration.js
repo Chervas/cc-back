@@ -14,7 +14,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const migration = require('../../../migrations/20260913010000-create-business-profile-broker-revocations');
   await migration.up(qi, D); await migration.down(qi); await migration.up(qi, D);
   await require('../../../migrations/20261111150000-business-profile-managed-associations').up(qi, D);
-  for (const [name, file] of [['ClinicBusinessLocation','clinicbusinesslocation'], ['BusinessProfileBrokerBinding','businessprofilebrokerbinding'],
+  await require('../../../migrations/20261113160000-business-profile-binding-generations').up(qi, D);
+  for (const [name, file] of [['ClinicBusinessLocation','clinicbusinesslocation'], ['BusinessProfileBrokerBinding','businessprofilebrokerbinding'],['BusinessProfileBrokerBindingGeneration','businessprofilebrokerbindinggeneration'],
     ['BusinessProfileBrokerRevocation','businessprofilebrokerrevocation'], ['PlatformAuditEvent','platformauditevent']]) models[name] = require('../../../models/' + file)(sql, D);
   const R = models.BusinessProfileBrokerRevocation; const A = models.PlatformAuditEvent; const B = models.BusinessProfileBrokerBinding; const L = models.ClinicBusinessLocation;
   const empty = { findAll: async () => [] };

@@ -17,6 +17,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   await migration.up(qi);
   await require('../../../migrations/20260913010000-create-business-profile-broker-revocations').up(qi, D);
   await require('../../../migrations/20261111150000-business-profile-managed-associations').up(qi, D);
+  await require('../../../migrations/20261113160000-business-profile-binding-generations').up(qi, D);
   models.BusinessProfileBrokerRevocation = require('../../../models/businessprofilebrokerrevocation')(sql, D);
   models.BusinessProfileBrokerBinding = require('../../../models/businessprofilebrokerbinding')(sql, D);
   models.ClinicBusinessLocation = require('../../../models/clinicbusinesslocation')(sql, D);
@@ -83,6 +84,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   report.checks.push('Actual full job uses all six broker operations, opaque pagination, existing caches and internal matching contract without tokens');
   const discovery = loadDiscoverySource('services/businessProfileDiscovery.service.js', {
     sequelize: require('sequelize'), '../../models': models, './businessProfileBroker.service': service,
+    './businessProfileBindingGeneration.service':require('../../services/businessProfileBindingGeneration.service'),
   }, { env: { GOOGLE_BUSINESS_PROFILE_BROKER_ENABLED: 'true' } });
   const discoveryRequest = { clinicIds: [71], connectionId: 81, revalidate: async () => {} };
   const inventory = await discovery.list(discoveryRequest);

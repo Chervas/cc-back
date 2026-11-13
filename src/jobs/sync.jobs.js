@@ -2839,14 +2839,19 @@ class MetaSyncJobs {
           if (value === null) {
             continue;
           }
-          await this._upsertBusinessProfileDailyMetric({
+          const payload = {
             clinica_id: location.clinica_id,
             business_location_id: location.id,
             metric_type: metric,
             metric_subtype: this._stringifyMetricSubtype(series.dailySubEntityType || series.daily_sub_entity_type),
             date,
             value
+          };
+          if(businessProfileBroker.managed(location,accessToken))await sequelize.transaction(async transaction=>{
+            await businessProfileBroker.assertRead(location,accessToken,{transaction,lock:transaction.LOCK.UPDATE});
+            await this._upsertBusinessProfileDailyMetric(payload,{transaction});
           });
+          else await this._upsertBusinessProfileDailyMetric(payload);
           rows += 1;
         }
       }
@@ -2928,6 +2933,10 @@ class MetaSyncJobs {
             raw_payload: review
           };
           const existing = existingByName.get(String(reviewName));
+          if(existing){
+            if(!await require('../services/businessProfileBindingGeneration.service').preserveObservationOrigin({models:require('../../models'),mapping:location,existing,transaction}))continue;
+            payload.clinica_id=existing.clinica_id;payload.business_location_id=existing.business_location_id;
+          }
           payload.first_seen_at = existing?.first_seen_at || existing?.created_at || observedAt;
           payload.last_seen_at = observedAt;
           payload.google_missing_at = null;
@@ -2962,8 +2971,6 @@ class MetaSyncJobs {
           await BusinessProfileReview.bulkCreate(payloads, {
             transaction,
             updateOnDuplicate: [
-              'clinica_id',
-              'business_location_id',
               'reviewer_name',
               'reviewer_profile_photo_url',
               'star_rating',
@@ -2997,7 +3004,7 @@ class MetaSyncJobs {
 
       const namesToEnqueue = enqueueOnlyNewReviews
         ? newReviewNames
-        : payloads.map((item) => item.review_name).filter(Boolean);
+        : payloads.filter(item=>Number(item.business_location_id)===Number(location.id)).map((item) => item.review_name).filter(Boolean);
       const rowsToEnqueue = namesToEnqueue.length
         ? await BusinessProfileReview.findAll({ where: { review_name: { [Op.in]: namesToEnqueue } } })
         : [];
@@ -3028,8 +3035,10 @@ class MetaSyncJobs {
       let afterId = 0, more = true;
       while (more) {
         const batch = await businessProfileCache.commit(observation, async transaction => {
+          const observationIds=businessProfileBroker.managed(location,accessToken)
+            ?await require('../services/businessProfileBindingGeneration.service').observationMappingIds({models:require('../../models'),mapping:location,transaction}):[Number(location.id)];
           const storedRows = await BusinessProfileReview.findAll({
-            where: { business_location_id: location.id, id: { [Op.gt]: afterId } },
+            where: { business_location_id: { [Op.in]:observationIds }, id: { [Op.gt]: afterId } },
             attributes: ['id', 'review_name', 'google_missing_at'], order: [['id', 'ASC']], limit: 500,
             raw: true, transaction, lock: transaction.LOCK.UPDATE,
           });
@@ -3103,12 +3112,15 @@ class MetaSyncJobs {
           visibility_state: post.state || post.visibilityState || null,
           raw_payload: post
         };
-        const existing = await BusinessProfilePost.findOne({ where: { post_name: postName } });
-        if (existing) {
-          await existing.update(payload);
-        } else {
-          await BusinessProfilePost.create(payload);
-        }
+        await sequelize.transaction(async transaction=>{
+          if(businessProfileBroker.managed(location,accessToken))await businessProfileBroker.assertRead(location,accessToken,{transaction,lock:transaction.LOCK.UPDATE});
+          const existing = await BusinessProfilePost.findOne({ where: { post_name: postName },transaction,lock:transaction.LOCK.UPDATE });
+          if (existing) {
+            if(!await require('../services/businessProfileBindingGeneration.service').preserveObservationOrigin({models:require('../../models'),mapping:location,existing,transaction}))return;
+            const {clinica_id:_clinic,business_location_id:_location,...observed}=payload;
+            await existing.update(observed,{transaction});
+          } else await BusinessProfilePost.create(payload,{transaction});
+        });
         processed += 1;
       }
       nextPageToken = response.data?.nextPageToken || null;
@@ -3245,11 +3257,11 @@ class MetaSyncJobs {
     params.append(`${prefix}.day`, String(d.getDate()));
   }
 
-  async _upsertBusinessProfileDailyMetric(payload) {
+  async _upsertBusinessProfileDailyMetric(payload,options={}) {
     await BusinessProfileDailyMetric.upsert({
       ...payload,
       metric_subtype: payload.metric_subtype || ''
-    });
+    },options);
   }
 
   _normalizeBusinessProfilePerformanceLocation(value) {

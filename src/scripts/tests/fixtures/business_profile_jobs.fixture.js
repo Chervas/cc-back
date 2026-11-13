@@ -13,6 +13,7 @@ function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credent
     '../config/scheduledJobCatalog': require('../../../config/scheduledJobCatalog'),
     'node-cron': { schedule: fail }, axios: { create: () => legacyHttp, post: fail },
     '../services/businessProfileBroker.service': broker,
+    '../services/businessProfileBindingGeneration.service': require('../../../services/businessProfileBindingGeneration.service'),
     '../services/businessProfileCache.service': require('../../../services/businessProfileCache.service')
       .createBusinessProfileCache({ models, enabled: () => true }),
     '../services/googleLegacyCredentials.service': credentials || new Proxy({}, { get: () => fail }),
