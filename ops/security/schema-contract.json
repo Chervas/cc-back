@@ -1192,6 +1192,15 @@
           "EXTRA": "",
           "CHARACTER_SET_NAME": "ascii",
           "COLLATION_NAME": "ascii_bin"
+        },
+        {
+          "COLUMN_NAME": "onboarding_mode",
+          "COLUMN_TYPE": "enum('cloud_api','coexistence')",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": "ascii",
+          "COLLATION_NAME": "ascii_bin"
         }
       ],
       "indexes": [
@@ -11189,6 +11198,10 @@
     }
   },
   "migrations": [
+    {
+      "name": "20261113010000-add-whatsapp-onboarding-mode.js",
+      "sha256": "9b3400dee93cdabe12273a97594d8d944268b9b8d48c87ea1be5fcbf6a68e46f"
+    },
     {
       "name": "20260912230000-index-platform-audit-view.js",
       "sha256": "dbbcad72b966056df5ca098c00cee3bf620dc46516d1bd43819b8de56ea30ae2"

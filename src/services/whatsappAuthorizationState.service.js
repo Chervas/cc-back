@@ -102,6 +102,7 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
       channelRole: C.channelRole(row.channel_role), scope: { type: row.scope_type, id: row.scope_id }, clinicIds: [...row.original_clinic_ids], expiresAt: row.expires_at.toISOString(),
       // Internal binding evidence for the broker bridge; public DTOs omit hashes.
       scopeDigest: row.scope_digest, clinicSetDigest: C.digest(JSON.stringify(row.original_clinic_ids)) };
+    if (C.onboardingMode(row.onboarding_mode) !== null) result.mode = row.onboarding_mode;
     if (row.replacement_asset_id != null) result.replacement = {
       assetId: row.replacement_asset_id, authorizationId: row.replacement_authorization_id,
       phoneDigest: row.replacement_phone_digest,
@@ -142,7 +143,7 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
           const channelRole = C.channelRole(input.channelRole);
           const target = await replacement(scope, current.ids, channelRole, input.replacementAssetId, transaction);
           row = { request_id: input.requestId, user_id: input.userId, session_ref: input.sessionRef,
-            channel_role: channelRole, replacement_asset_id: target?.assetId ?? null,
+            channel_role: channelRole, onboarding_mode: input.mode ?? null, replacement_asset_id: target?.assetId ?? null,
             replacement_authorization_id: target?.authorizationId ?? null,
             replacement_phone_digest: target?.phoneDigest ?? null,
             session_expires_at: new Date(input.sessionExpiresAt * 1000), scope_type: scope.type, scope_id: scope.id,
@@ -153,6 +154,7 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
           return { ...projection(row), state: C.stateFor(cfg.key, row) };
         }
         validateRow(row, input, cfg.key);
+        if (operation === 'issue' && (input.mode ?? null) !== C.onboardingMode(row.onboarding_mode)) C.fail('whatsapp_authorization_conflict', 409);
         if (operation === 'issue' && C.channelRole(input.channelRole) !== C.channelRole(row.channel_role)) C.fail('whatsapp_authorization_conflict', 409);
         if (operation === 'issue' && (input.replacementAssetId ?? null) !== (row.replacement_asset_id ?? null)) C.fail('whatsapp_authorization_conflict', 409);
         if (scope.type !== row.scope_type || scope.id !== row.scope_id || current && (current.digest !== row.scope_digest

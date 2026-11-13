@@ -5,6 +5,7 @@ module.exports = (sequelize, D) => sequelize.define('WhatsappAuthorizationState'
   session_expires_at: { type: D.DATE(3), allowNull: false },
   scope_type: { type: D.ENUM('clinic', 'group'), allowNull: false }, scope_id: { type: D.INTEGER, allowNull: false },
   channel_role: { type: D.ENUM('primary', 'secondary'), allowNull: true, defaultValue: null },
+  onboarding_mode: { type: D.ENUM('cloud_api', 'coexistence'), allowNull: true, defaultValue: null },
   replacement_asset_id: { type: D.INTEGER, allowNull: true },
   replacement_authorization_id: { type: D.UUID, allowNull: true },
   replacement_phone_digest: { type: D.STRING(64), allowNull: true },

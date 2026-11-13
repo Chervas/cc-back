@@ -32,6 +32,7 @@ function context(value) {
   try {
     S.exact(value, ['requestId','status','scope','clinicIds','expiresAt','scopeDigest','clinicSetDigest',
       ...(Object.hasOwn(value || {}, 'channelRole') ? ['channelRole'] : []),
+      ...(Object.hasOwn(value || {}, 'mode') ? ['mode'] : []),
       ...(Object.hasOwn(value || {}, 'replacement') ? ['replacement'] : []),
       ...(Object.hasOwn(value || {}, 'state') ? ['state'] : []), ...(Object.hasOwn(value || {}, 'mayExchange') ? ['mayExchange'] : [])]);
     S.exact(value.scope, ['type','id']);
@@ -39,6 +40,7 @@ function context(value) {
   } catch { fail('whatsapp_onboarding_binding_invalid'); }
   if (!value || !S.uuid(value.requestId) || !['awaiting', 'claimed', 'cancelled', 'expired'].includes(value.status)
     || Object.hasOwn(value, 'channelRole') && !['primary','secondary'].includes(value.channelRole)
+    || Object.hasOwn(value, 'mode') && !['cloud_api','coexistence'].includes(value.mode)
     || Object.hasOwn(value, 'replacement') && (!S.id(value.replacement.assetId)
       || value.replacement.authorizationId !== null && !S.uuid(value.replacement.authorizationId)
       || !/^[a-f0-9]{64}$/.test(value.replacement.phoneDigest))
@@ -120,6 +122,8 @@ function createWhatsappOnboardingBrokerClient({ client, loadBinding, prepareBind
     guard(); const row = context(value); const payload = structuredClone(input); let selected;
     try { selected = binding(await loadBinding(row.scope), row); } catch { fail('whatsapp_onboarding_binding_invalid'); }
     guard();
+    if (name === 'begin' && row.mode === 'cloud_api' && selected.customer?.providerGrantPolicy === C.PROVIDER_GRANT_POLICY)
+      fail('whatsapp_onboarding_preparation_unavailable');
     if (name === 'begin' && prepareBinding) {
       await prepareBinding(row, selected); guard();
     }
@@ -207,16 +211,19 @@ function configuredClient({ environment = () => process.env } = {}) {
         const current = configuration(environment());
         if (JSON.stringify(current) !== JSON.stringify(cfg)) fail('whatsapp_onboarding_binding_invalid');
         return current.bindings.find(b => b.scopeKey === scope.type + ':' + scope.id)
-          || current.automatic && P.publicBinding(current.automatic, scope.type + ':' + scope.id, row.clinicIds);
+          || current.automatic && P.publicBinding(current.automatic, scope.type + ':' + scope.id, row.clinicIds, row.mode);
       }, prepareBinding: cfg.automatic ? async (context, selected) => {
         if (cfg.bindings.some(b => b.scopeKey === selected.scopeKey)) return;
+        if (context.mode === 'coexistence' && selected.customer?.providerGrantPolicy !== C.PROVIDER_GRANT_POLICY)
+          fail('whatsapp_onboarding_preparation_unavailable');
         if (cfg.automaticPreparationEnabled === false) fail('whatsapp_onboarding_preparation_disabled');
         const requestId = randomUUID();
         let result;
         try {
           result = await client.execute({ requestId, tenantRef: 'clinic:' + context.clinicIds[0], assetRef: 'wa-enroll:' + selected.scopeKey,
             connectionRef: selected.connectionRef, operation: P.PREPARE, payload: { scopeKey: selected.scopeKey, clinicIds: context.clinicIds,
-              scopeDigest: context.scopeDigest, clinicSetDigest: context.clinicSetDigest, expiresAt: Date.parse(context.expiresAt) } });
+              scopeDigest: context.scopeDigest, clinicSetDigest: context.clinicSetDigest, expiresAt: Date.parse(context.expiresAt),
+              ...(Object.hasOwn(context,'mode') ? {mode:context.mode} : {}) } });
           S.exact(result, ['requestId','data','replayed']); S.exact(result.data,['status','connected','binding']);
           if (result.requestId !== requestId || typeof result.replayed !== 'boolean' || result.data.status !== 'prepared' || result.data.connected !== false
             || JSON.stringify(binding(result.data.binding, context)) !== JSON.stringify(selected)) throw Error();
