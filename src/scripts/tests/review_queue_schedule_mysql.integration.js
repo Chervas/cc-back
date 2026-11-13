@@ -8,7 +8,7 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
  const define=(name,fields)=>sql.define(name,fields,{tableName:name,timestamps:true,underscored:true});
  const List=define('MarketingPatientLists',{id:{type:S.INTEGER,primaryKey:true},objective_id:S.STRING,clinica_id:S.INTEGER,clinic_ids:S.JSON,status:S.STRING,criteria:S.JSON,counters:S.JSON});
  const Job=define('JobRequests',{id:{type:S.INTEGER,primaryKey:true},type:S.STRING,status:S.STRING,payload:S.JSON,next_run_at:S.DATE});
- const Item=define('MarketingPatientListItems',{id:{type:S.INTEGER,primaryKey:true},list_id:S.INTEGER,status:S.STRING,selected:S.BOOLEAN,dispatch_status:S.STRING,last_visit_at:S.DATE,appointment_at:S.DATE,custom_fields:S.JSON});
+ const Item=define('MarketingPatientListItems',{id:{type:S.INTEGER,primaryKey:true},list_id:S.INTEGER,status:S.STRING,selected:S.BOOLEAN,dispatch_status:S.STRING,app_message_id:S.INTEGER,provider_message_id:S.STRING,conversation_id:S.INTEGER,send_batch_index:S.INTEGER,sent_at:S.DATE,last_visit_at:S.DATE,appointment_at:S.DATE,custom_fields:S.JSON});
  const Event=define('MarketingPatientContactEvents',{id:{type:S.INTEGER,primaryKey:true,autoIncrement:true},list_id:S.INTEGER,event_type:S.STRING,channel:S.STRING,payload:S.JSON,occurred_at:S.DATE});
  await sql.sync();
  const scope={scope:'clinic',clinicIds:[59]}, namespace='isolated-review-schedule';
@@ -30,8 +30,8 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
  const reset=async(status='waiting_next_batch',jobStatus='waiting')=>{
   await Event.destroy({where:{}});await Item.destroy({where:{}});await List.destroy({where:{}});await Job.destroy({where:{}});
   await Job.create({id:10,type:'marketing_bulk_send_dispatch',status:jobStatus,payload:{list_id:1,__runtime_namespace:namespace},next_run_at:new Date(Date.now()+600000)});
-  const created=await List.create({id:1,objective_id:'mass_sends',clinica_id:59,clinic_ids:[59],status:status==='paused_config'?'paused':'sending',counters:{sent:7},criteria:{review_request:true,dispatch_config:{batch_size:1},
-   dispatch:{status,job_id:10,cancel_requested:status==='paused_config',paused_reason:status==='paused_config'?'billing':'waiting',batch_size:1,delay_ms:600000,context:'review_request',whatsapp_template_id:77,sender_origin_id:88,max_opt_out_rate:0.1,last_batch_index:7,last_batch_completed_at:new Date().toISOString()}}});
+  const created=await List.create({id:1,objective_id:'mass_sends',clinica_id:59,clinic_ids:[59],status:status.startsWith('paused')||status==='held_meta'?'paused':'sending',counters:{sent:7},criteria:{review_request:true,dispatch_config:{batch_size:1},
+   dispatch:{status,job_id:10,cancel_requested:status==='paused_config',paused_reason:status==='paused_config'?'billing':'waiting',batch_size:1,delay_ms:600000,context:'review_request',whatsapp_template_id:77,sender_origin_id:88,max_opt_out_rate:0.1,requires_admin_review:status==='paused_quality',resume_automatically:status==='held_meta',last_batch_index:7,last_batch_completed_at:new Date().toISOString()}}});
   return created.reload();
  };
  const body=list=>({configuration:config,revision:list.updatedAt.toISOString()});
@@ -46,16 +46,31 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
  list=await reset('paused_config','cancelled');await update(scope,1,body(list),91);after=await List.findByPk(1);job=await Job.findByPk(10);
  assert.equal(after.status,'paused');assert.equal(after.criteria.dispatch.status,'paused_config');assert.equal(after.criteria.dispatch.cancel_requested,true);assert.equal(job.status,'cancelled');
  report.checks.push('manual/technical pause, cancel request and terminal native job remain unchanged while future pace is edited');
- for(const kind of ['running','stale','inflight','foreign-job','foreign-runtime','completed-job']){
+ for(const queueStatus of ['waiting_next_batch','paused_config','paused_quality','held_meta','awaiting_delivery'])for(const pendingStatus of ['queued','accepted','held_quality']){
+  list=await reset(queueStatus,queueStatus==='waiting_next_batch'?'waiting':queueStatus==='paused_config'?'cancelled':'completed');
+  await Item.create({id:42,list_id:1,status:'ready',selected:true,dispatch_status:pendingStatus,
+   app_message_id:142,provider_message_id:'wamid.FICTITIOUS',conversation_id:242,send_batch_index:3,sent_at:null});
+  await Job.create({id:11,type:'outbound_whatsapp',status:'waiting',payload:{message_id:142,__runtime_namespace:namespace},next_run_at:new Date(Date.now()+3600000)});
+  const recipientBefore=(await Item.findByPk(42)).toJSON(),transportBefore=(await Job.findByPk(11)).toJSON(),campaignJobBefore=(await Job.findByPk(10)).toJSON();
+  const saved=await update(scope,1,body(list),91);
+  assert(saved.success);assert.deepEqual((await Item.findByPk(42)).toJSON(),recipientBefore,'cadence editing never requeues or rewrites pending recipients');
+  assert.deepEqual((await Job.findByPk(11)).toJSON(),transportBefore,'the existing message transport keeps its job and due time');
+  const changed=await List.findByPk(1);assert.equal(changed.criteria.dispatch.delay_ms,config.delay_ms);
+  for(const key of ['job_id','whatsapp_template_id','sender_origin_id','max_opt_out_rate','last_batch_index','last_batch_completed_at','cancel_requested','requires_admin_review','resume_automatically'])assert.equal(changed.criteria.dispatch[key],list.criteria.dispatch[key]);
+  if(queueStatus!=='waiting_next_batch'){assert.equal(changed.status,list.status);assert.equal(changed.criteria.dispatch.status,queueStatus);assert.deepEqual((await Job.findByPk(10)).toJSON(),campaignJobBefore,'saving future cadence never resumes a paused or delivery-waiting campaign');}
+  assert.equal(await Event.count(),1);assert.equal(await Job.count(),2);
+ }
+ report.checks.push('queued, provider-accepted and quality-held recipients cannot block future cadence editing; recipients, transport jobs, provider IDs, pause and governance stay unchanged');
+ for(const kind of ['running','stale','foreign-job','foreign-runtime','completed-job']){
   list=await reset('waiting_next_batch',kind==='running'?'running':kind==='completed-job'?'completed':'waiting');
-  if(kind==='inflight')await Item.create({id:1,list_id:1,status:'ready',selected:true,dispatch_status:'accepted'});
+  if(kind==='running')await Item.create({id:42,list_id:1,status:'ready',selected:true,dispatch_status:'queued'});
   if(kind==='foreign-job')await Job.update({payload:{list_id:2,__runtime_namespace:namespace}},{where:{id:10}});
   if(kind==='foreign-runtime')await Job.update({payload:{list_id:1,__runtime_namespace:'other'}},{where:{id:10}});
   const before=JSON.stringify((await List.findByPk(1)).criteria);
   await assert.rejects(update(scope,1,{...body(list),...(kind==='stale'?{revision:'old'}:{})},91),{status:409});
   assert.equal(JSON.stringify((await List.findByPk(1)).criteria),before);assert.equal(await Event.count(),0);
  }
- report.checks.push('running batch, stale revision, accepted transport and foreign/missing job ownership reject without changes');
+ report.checks.push('running batch, stale revision and foreign/missing job ownership reject without changes');
  list=await reset();auditFailure=true;const beforeJob=(await Job.findByPk(10)).next_run_at;
  await assert.rejects(update(scope,1,body(list),91),/FICTITIOUS_AUDIT_FAILURE/);auditFailure=false;
  assert.equal((await List.findByPk(1)).criteria.dispatch.batch_size,1);assert.equal(+(await Job.findByPk(10)).next_run_at,+beforeJob);

@@ -9316,8 +9316,9 @@ async function updateReviewQueueSchedule(scope, campaignId, body = {}, userId = 
     if (job?.status === 'running') throw Object.assign(new Error('Hay una tanda en curso. Espera a que termine y vuelve a guardar.'),{status:409});
     if (job && (job.type !== DISPATCH_JOB_TYPE || Number(job.payload?.list_id) !== Number(list.id)
       || job.payload?.__runtime_namespace !== (process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE))) throw Object.assign(new Error('El trabajo de esta cola no pertenece al entorno actual.'),{status:409});
-    const inFlight = await MarketingPatientListItem.count({where:{list_id:list.id,dispatch_status:{[Op.in]:['queued','accepted','held_quality']}},transaction});
-    if (inFlight) throw Object.assign(new Error('Hay envíos esperando resultado. Vuelve a guardar cuando termine la tanda.'),{status:409});
+    // This lock protects the campaign's next batch, not independent message
+    // transport/Meta receipts. Editing future cadence never changes recipients
+    // or their transport jobs; their pending result must not freeze this editor.
     const live = policy.LIVE.includes(dispatch.status) && dispatch.cancel_requested !== true;
     if (live && (!job || !['pending','queued','waiting'].includes(job.status))) throw Object.assign(new Error('Comprueba el estado del trabajo antes de modificar su programación.'),{status:409});
     const now = new Date(), scheduled = parseDate(config.scheduled_at);
