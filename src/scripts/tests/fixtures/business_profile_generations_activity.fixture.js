@@ -21,4 +21,5 @@ module.exports=async({sql,models,report,target,old,unrelated,account,oldId})=>{
  await models.Clinica.update({grupoClinicaId:6},{where:{id_clinica:71}});const ownOnly=await activity.readReport(models,options);assert.equal(ownOnly.totals.google_reviews_total,2);assert.equal(ownOnly.totals.requests_sent,0);await models.Clinica.update({grupoClinicaId:5},{where:{id_clinica:71}});
  assert.deepEqual((await models.BusinessProfileReview.findAll({raw:true,order:[['id','ASC']]})).map(r=>[r.id,r.clinica_id,r.business_location_id]),before);
  report.checks.push('Activity/report SQL includes only accepted same-asset public history and rating with head-first overlap; unrelated asset and original private CRM requests/matches remain excluded; cached group drift drops source history while own head data stays visible; origin record IDs/clinics remain exact');
+ await require('./business_profile_review_history_readers.fixture')({sql,models,report,target,old,unrelated,account,oldId});
 };

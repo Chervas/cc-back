@@ -89,6 +89,8 @@ async function providerHistoryForReport(db,options){
   if(!options.userId||!options.locationIds?.length)return null;
   const {Op}=require('sequelize'),H=require('./businessProfileHistoryScope.service');
   const rows=await db.ClinicBusinessLocation.findAll({where:{id:{[Op.in]:options.locationIds},is_active:true},raw:true});
+  const expected=[...new Set(options.locationIds.map(Number))].sort((a,b)=>a-b),observed=rows.map(r=>Number(r.id)).sort((a,b)=>a-b);
+  if(expected.length!==observed.length||expected.some((id,index)=>id!==observed[index]))throw Object.assign(Error('scope_denied'),{code:'scope_denied',status:403,httpStatus:403});
   const projections=[],clinicIds=[...new Set(options.clinicIds.map(Number))],candidates=new Map(),locationOwners={};
   const clinicMappings=async clinicId=>{
     if(typeof options.resolveEffectiveMappingIdsForClinic==='function')return options.resolveEffectiveMappingIdsForClinic(clinicId);
@@ -96,16 +98,19 @@ async function providerHistoryForReport(db,options){
     throw Object.assign(Error('scope_denied'),{code:'scope_denied',status:403,httpStatus:403});
   };
   for(const row of rows){
-    let clinicId=clinicIds.includes(Number(row.clinica_id))?Number(row.clinica_id):null;
-    if(clinicId==null)for(const candidate of clinicIds){
-      if(!candidates.has(candidate))candidates.set(candidate,await clinicMappings(candidate));
-      if(candidates.get(candidate).includes(Number(row.id))){clinicId=candidate;break;}
-    }
-    if(clinicId==null)throw Object.assign(Error('scope_denied'),{code:'scope_denied',status:403,httpStatus:403});
-    const projection=await H.createHistoryProjection({models:db,clinicId:Number(clinicId),userId:Number(options.userId),locations:[row],resolveEffectiveMappingIds:()=>clinicMappings(clinicId)});
-    projections.push(projection);
     const owners=(options.locationOwners?.[row.id]||[]).map(Number).filter(id=>clinicIds.includes(id));
-    for(const id of projection.mappingIds)locationOwners[id]=owners.length?owners:[clinicId];
+    let destinations=[...new Set(owners)];
+    if(!destinations.length&&clinicIds.includes(Number(row.clinica_id)))destinations=[Number(row.clinica_id)];
+    if(!destinations.length)for(const candidate of clinicIds){
+      if(!candidates.has(candidate))candidates.set(candidate,await clinicMappings(candidate));
+      if(candidates.get(candidate).includes(Number(row.id)))destinations.push(candidate);
+    }
+    if(!destinations.length)throw Object.assign(Error('scope_denied'),{code:'scope_denied',status:403,httpStatus:403});
+    for(const clinicId of destinations){
+      const projection=await H.createHistoryProjection({models:db,clinicId,userId:Number(options.userId),locations:[row],resolveEffectiveMappingIds:()=>clinicMappings(clinicId)});
+      projections.push(projection);
+      for(const id of projection.mappingIds)locationOwners[id]=[...new Set([...(locationOwners[id]||[]),...destinations])];
+    }
   }
   if(!projections.some(p=>p.lineages.some(l=>l.generationId)))return null;
   return {mappingIds:[...new Set(projections.flatMap(p=>p.mappingIds))],lineages:projections.flatMap(p=>p.lineages),locationOwners,fingerprint:projections.map(p=>p.fingerprint),assert:async()=>{for(const p of projections)await p.assert();}};
@@ -188,6 +193,9 @@ async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinic
   const ownershipCases = Object.entries({...locationOwners,...(providerHistory?.locationOwners||{})}).filter(([id, owners]) => Number.isSafeInteger(Number(id)) && Number(id)>0)
     .map(([id, owners]) => `WHEN ${Number(id)} THEN ${owners.length === 1 && clinicIds.includes(Number(owners[0])) ? Number(owners[0]) : 0}`).join(' ');
   const ownerExpression = ownershipCases ? `CASE r.business_location_id ${ownershipCases} ELSE r.clinica_id END` : 'r.clinica_id';
+  const publicReview=require('./businessProfileHistoryScope.service').reviewRankingSql(providerHistory);
+  const existingReviewScope=locationIds.length?`r.business_location_id IN (:providerLocationIds) AND ${publicReview.canonicalMapping}=m.canonical_mapping_id`:'r.business_location_id=m.location_id';
+  const currentMatchScope=locationIds.length?'location_id IN (:locationIds)':'clinic_id IN (:clinicIds)';
   const inventoryCte = `WITH matches AS (
     SELECT e.id,e.created_at,e.occurred_at,COALESCE(i.clinica_id,l.clinica_id) clinic_id,
       CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload,'$.business_location_id')) AS UNSIGNED) location_id,
@@ -198,20 +206,25 @@ async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinic
       AND JSON_UNQUOTE(JSON_EXTRACT(e.payload,'$.review_name')) IS NOT NULL
       AND JSON_UNQUOTE(JSON_EXTRACT(e.payload,'$.review_name')) NOT IN ('','null')
   ), ranked_matches AS (
-    SELECT matches.*,ROW_NUMBER() OVER (PARTITION BY location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1) ORDER BY created_at,id) rank_id FROM matches
+    SELECT matches.*,${publicReview.canonicalMatch} canonical_mapping_id,
+      ROW_NUMBER() OVER (PARTITION BY ${publicReview.canonicalMatch},BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1) ORDER BY created_at,id) rank_id FROM matches
+  ), ranked_current_matches AS (
+    SELECT matches.*,${publicReview.canonicalMatch} canonical_mapping_id,
+      ROW_NUMBER() OVER (PARTITION BY ${publicReview.canonicalMatch},BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1) ORDER BY created_at,id) rank_id
+      FROM matches WHERE ${currentMatchScope}
   ), ranked_reviews AS (
-    SELECT r.id,r.business_location_id,r.clinica_id,r.review_name,r.create_time,r.first_seen_at,r.created_at,r.google_missing_at,
-      ROW_NUMBER() OVER (PARTITION BY business_location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
-      ORDER BY google_missing_at IS NULL DESC,last_seen_at DESC,id DESC) rank_id FROM BusinessProfileReviews r WHERE ${locationScope}
+    SELECT r.id,r.business_location_id,${publicReview.canonicalMapping} canonical_mapping_id,r.clinica_id,r.review_name,r.create_time,r.first_seen_at,r.created_at,r.google_missing_at,
+      ROW_NUMBER() OVER (PARTITION BY ${publicReview.canonicalMapping},${publicReview.reviewKey}
+      ORDER BY ${publicReview.lineageRank},google_missing_at IS NULL DESC,last_seen_at DESC,id DESC) rank_id FROM BusinessProfileReviews r WHERE ${locationScope}
   ), inventory AS (
     SELECT COALESCE(r.create_time,r.first_seen_at,r.created_at) published_at,r.google_missing_at missing_at,
       IF(m.id IS NULL,0,1) attributed,IF(r.create_time IS NULL,1,0) observation_date,0 missing_without_date,${ownerExpression} clinic_id,m.clinic_id attributed_clinic_id
-    FROM ranked_reviews r LEFT JOIN ranked_matches m ON m.rank_id=1 AND m.location_id=r.business_location_id
+    FROM ranked_reviews r LEFT JOIN ranked_matches m ON m.rank_id=1 AND m.canonical_mapping_id=r.canonical_mapping_id
       AND BINARY SUBSTRING_INDEX(m.review_name,'/reviews/',-1)=BINARY SUBSTRING_INDEX(r.review_name,'/reviews/',-1)
     WHERE r.rank_id=1
     UNION ALL
-    SELECT m.occurred_at,NULL,1,0,1,m.clinic_id,m.clinic_id FROM ranked_matches m WHERE m.rank_id=1 AND ${matchScope}
-      AND NOT EXISTS (SELECT 1 FROM BusinessProfileReviews r WHERE r.business_location_id=m.location_id
+    SELECT m.occurred_at,NULL,1,0,1,m.clinic_id,m.clinic_id FROM ranked_current_matches m WHERE m.rank_id=1 AND ${matchScope}
+      AND NOT EXISTS (SELECT 1 FROM BusinessProfileReviews r WHERE ${existingReviewScope}
         AND BINARY SUBSTRING_INDEX(r.review_name,'/reviews/',-1)=BINARY SUBSTRING_INDEX(m.review_name,'/reviews/',-1))
   )`;
   const reviewRowsPromise = db.sequelize.query(`${inventoryCte}
@@ -233,4 +246,4 @@ async function readUncachedReport(db, { clinicIds = [], locationIds = [], clinic
   return { ...aggregateReport(rows, range, { ...quality, clinicNames }), comparison: compareReviewPeriods(rows, range), score_trends: scoreTrends };
 }
 
-module.exports = { invalidate, readReport, reportRange, previousReportRange, compareReviewPeriods, aggregateReport, METRICS, PERIODS };
+module.exports = { invalidate, readReport, reportRange, previousReportRange, compareReviewPeriods, aggregateReport, METRICS, PERIODS,providerHistoryForReport };

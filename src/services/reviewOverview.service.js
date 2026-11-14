@@ -85,7 +85,19 @@ function countPotential(patients, history, queued = [], optOuts = [], now = new 
   return contacts.size;
 }
 
-function createService({ db, resolveProfile, queues, ratingSummary, automation, now = () => new Date() }) {
+async function publicHistoryForOverview(db,resolveProfile,{profiles,clinicIds,userId}){
+  const locationIds=positiveIds(profiles.map(r=>r.business_location_id)),locationOwners={};
+  for(const profile of profiles)if(profile.business_location_id)locationOwners[profile.business_location_id]=[...new Set([...(locationOwners[profile.business_location_id]||[]),profile.clinic_id])];
+  return require('./reviewActivityReport.service').providerHistoryForReport(db,{clinicIds,locationIds,locationOwners,userId,
+    resolveEffectiveMappingIdsForClinic:async clinicId=>{
+      const clinic=await db.Clinica.findByPk(clinicId,{attributes:['id_clinica','nombre_clinica','configuracion','url_ficha_local','grupoClinicaId'],raw:true});
+      if(!clinic)return [];
+      const current=await resolveProfile(clinic);
+      return positiveIds([current?.location?.id||current?.links?.business_location_id]);
+    }});
+}
+
+function createService({ db, resolveProfile, queues, ratingSummary, automation, projectPublicHistory, now = () => new Date() }) {
   const query = (sql, replacements = {}) => db.sequelize.query(sql, { replacements, type: db.Sequelize.QueryTypes.SELECT });
   const aggregateCache = createReportReadCache({now:()=>+now()});
   const periodCache = createReportReadCache({now:()=>+now()});
@@ -147,33 +159,37 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
         profile_url: profile?.links?.url_perfil_google || null, review_url: profile?.links?.url_dejar_resena || null };
     }));
     const locationIds = positiveIds(profiles.map(r => r.business_location_id));
+    const publicHistory=projectPublicHistory?await projectPublicHistory({profiles,clinicIds,userId}):null;
+    const publicReview=require('./businessProfileHistoryScope.service').reviewRankingSql(publicHistory);
     // Eligibility, current Google reputation and historical conversion do not
     // depend on the chart window. Changing period must not re-plan all patients.
-    const key=scopeKey(scope)+':'+locationIds.slice().sort((a,b)=>a-b).join(',');
+    const key=JSON.stringify([scopeKey(scope),locationIds.slice().sort((a,b)=>a-b),userId||null,publicHistory?.fingerprint||null]);
     const [cached,queueRows,auto,periodSnapshot] = await Promise.all([
       aggregateCache.read(key,async()=>{
         const [potentials,ratingRows,counts,attributed,optOuts] = await Promise.all([
           potentialByClinic(clinicIds),
-      locationIds.length ? query(`WITH ranked AS (SELECT business_location_id,star_rating,last_seen_at,google_missing_at,ROW_NUMBER() OVER (
-        PARTITION BY business_location_id,BINARY SUBSTRING_INDEX(review_name,'/reviews/',-1)
-        ORDER BY google_missing_at IS NULL DESC,last_seen_at DESC,id DESC) rank_id
-        FROM BusinessProfileReviews r WHERE business_location_id IN (:locationIds))
+      locationIds.length ? query(`WITH ranked AS (SELECT ${publicReview.canonicalMapping} business_location_id,star_rating,last_seen_at,google_missing_at,ROW_NUMBER() OVER (
+        PARTITION BY ${publicReview.canonicalMapping},${publicReview.reviewKey}
+        ORDER BY ${publicReview.lineageRank},google_missing_at IS NULL DESC,last_seen_at DESC,id DESC) rank_id
+        FROM BusinessProfileReviews r WHERE business_location_id IN (:providerLocationIds))
         SELECT business_location_id,COUNT(*) total_reviews,SUM(CAST(star_rating AS UNSIGNED)) rating_sum,
         SUM(CAST(star_rating AS UNSIGNED)=5) five_star_reviews,MAX(last_seen_at) last_seen_at
         FROM ranked WHERE rank_id=1 AND google_missing_at IS NULL AND CAST(star_rating AS UNSIGNED) BETWEEN 1 AND 5
-        GROUP BY business_location_id`, { locationIds }) : [],
+        GROUP BY business_location_id`, { providerLocationIds:publicHistory?.mappingIds||locationIds }) : [],
       query(`SELECT COUNT(*) requests_sent FROM MarketingPatientListItems i JOIN MarketingPatientLists l ON l.id=i.list_id
         WHERE COALESCE(i.clinica_id,l.clinica_id) IN (:clinicIds) AND ${isReview} AND i.sent_at IS NOT NULL AND ${testExclusion}`, { clinicIds }),
           require('./googleReviewHistory.service').countHistoricalMatches(db, clinicIds),
           query(`SELECT COUNT(DISTINCT CONCAT(clinica_id,':',phone_digits)) total FROM MarketingContactOptOuts
             WHERE clinica_id IN (:clinicIds) AND status='active' AND channel='whatsapp'`, {clinicIds}),
         ]);
+        await publicHistory?.assert();
         return {potentials,ratingRows,counts,attributed,optOuts};
       }),
       readQueues(scope,{userId,scopeRaw}),
       scope.scope === 'clinic' ? automation(scope) : null,
       periodCache.read(scopeKey(scope)+':'+range.from+':'+range.to,()=>privateRatings(scope,{period,summaryOnly:true})),
     ]);
+    await publicHistory?.assert();
     const {potentials,ratingRows,counts,attributed,optOuts}=cached.value;
     const ratings=periodSnapshot.value;
     const googleProfiles = profiles.map(row => {
@@ -256,8 +272,10 @@ let currentService;
 function current() {
   if(currentService)return currentService;
   const db = require('../../models'), bulk = require('./marketingBulkSends.service');
-  return currentService=createService({ db, resolveProfile: require('./googleLocalLinks.service').resolveClinicGoogleReviewProfile,
+  const resolveProfile=require('./googleLocalLinks.service').resolveClinicGoogleReviewProfile;
+  return currentService=createService({ db, resolveProfile,
     queues: require('./sendQueues.service').listReviewQueues, ratingSummary: bulk.buildGoogleRatingSummary,
-    automation: scope => bulk.getReviewRequestAutomationStatus(scope) });
+    automation: scope => bulk.getReviewRequestAutomationStatus(scope),
+    projectPublicHistory:options=>publicHistoryForOverview(db,resolveProfile,options) });
 }
-module.exports = { createService, current, countPotential, positiveIds, queueSummary, queuePage, reviewPreview, isQueueIssue, queueCompact, invalidate:()=>currentService?.invalidate() };
+module.exports = { createService, current, countPotential, positiveIds, queueSummary, queuePage, reviewPreview, isQueueIssue, queueCompact,publicHistoryForOverview, invalidate:()=>currentService?.invalidate() };

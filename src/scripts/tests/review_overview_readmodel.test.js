@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
+const { resolveLastAttendedAppointmentDate } = require('../../lib/marketing-template-variables');
 const source = fs.readFileSync(path.resolve(__dirname, '../../services/marketingBulkSends.service.js'), 'utf8');
 
 function fixture() {
@@ -13,9 +14,10 @@ function fixture() {
     module: { exports: {} }, console, OBJECTIVE_ID: 'mass_sends', REVIEW_REQUEST_CANDIDATE_LIMIT: 100000,
     QueryTypes: { SELECT: 'SELECT' }, Op: { in: Symbol('in') },
     normalizeReviewRequestSource: value => value || 'manual_selection', parseReviewTreatmentIds: () => [],
+    resolveLastAttendedAppointmentDate,
     parseReviewImportListId: () => null, applyReviewClinicFilter: scope => scope,
     clampInteger: (value, fallback) => Number(value) || fallback, normalizeText: value => String(value || '').trim(),
-    buildItemsForReviewRequest: async () => { calls.candidates++; return [{ status: 'ready', name: 'FICTITIOUS' }]; },
+    buildItemsForReviewRequest: async () => { calls.candidates++; return [{ status: 'ready', name: 'FICTITIOUS', last_visit_at: '2026-10-15' }]; },
     buildReviewTreatmentOptions: async () => { calls.treatmentOptions++; return []; },
     resolveReviewBusinessLocationIdsForClinics: async () => [11],
     db: { sequelize: { query: async query => {
@@ -66,6 +68,7 @@ for (const scopeType of ['clinic', 'group']) {
     assert.equal(f.calls.treatmentOptions, 1);
     assert.equal(result.summary.audience_evaluated, true);
     assert.equal(result.summary.possible_patients, 1);
+    assert.equal(result.summary.care_dates_available, 1);
     assert.equal(result.summary.candidates_preview[0].name, 'FICTITIOUS');
   });
 }

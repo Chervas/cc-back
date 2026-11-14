@@ -60,4 +60,24 @@ function deduplicateMetrics(rows,projection){
   }
   return [...selected.values()].map(v=>v.row);
 }
-module.exports={createHistoryProjection,deduplicateMetrics};
+// The SQL readers keep stored mapping/clinic IDs intact. These expressions
+// identify the same public review across accepted generations for this read.
+function reviewRankingSql(projection){
+  const membership=new Map();
+  for(const lineage of projection?.lineages||[]){
+    const headId=Number(lineage.headId);
+    if(!Number.isSafeInteger(headId)||headId<=0)fail();
+    for(const [rank,value]of lineage.chain.entries()){
+      const mappingId=Number(value),previous=membership.get(mappingId);
+      if(!Number.isSafeInteger(mappingId)||mappingId<=0||previous&&previous.headId!==headId)fail();
+      if(!previous||rank<previous.rank)membership.set(mappingId,{headId,rank});
+    }
+  }
+  const entries=[...membership].sort((a,b)=>a[0]-b[0]);
+  const canonical=column=>entries.length?'CASE '+column+' '+entries.map(([id,{headId}])=>`WHEN ${id} THEN ${headId}`).join(' ')+' ELSE '+column+' END':column;
+  const rank=entries.length?'CASE r.business_location_id '+entries.map(([id,{rank}])=>`WHEN ${id} THEN ${rank}`).join(' ')+' ELSE 0 END':'CAST(0 AS UNSIGNED)';
+  const reviewKey=`BINARY CASE WHEN r.review_name IS NULL OR BINARY SUBSTRING_INDEX(r.review_name,'/reviews/',-1)=BINARY ''
+    THEN CONCAT('row:',r.id) ELSE CONCAT('review:',SUBSTRING_INDEX(r.review_name,'/reviews/',-1)) END`;
+  return {canonicalMapping:canonical('r.business_location_id'),canonicalMatch:canonical('location_id'),lineageRank:rank,reviewKey};
+}
+module.exports={createHistoryProjection,deduplicateMetrics,reviewRankingSql};
