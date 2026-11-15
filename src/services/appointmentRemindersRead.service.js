@@ -56,6 +56,41 @@ function object(value) {
   return value && typeof value==='object' && !Array.isArray(value)?value:{};
 }
 
+const CONFIRMED = new Set(['recordatorio_confirmado','ha_acudido','en_atencion','completada']);
+function matchesStatus(row, status) {
+  if (status==='all') return true;
+  if (status==='pending') return PENDING.includes(row.status);
+  if (status==='reception') return ['review','unclaimed'].includes(row.attention_status);
+  if (status==='confirmed') return CONFIRMED.has(row.appointment_status);
+  return row.status===status;
+}
+// Reduce only minimal scoped facts on the server. Never fetch bodies or build
+// totals from the visible page. Expanding this projection in multiple aggregate
+// expressions causes MySQL to repeatedly optimize the same nested CTEs.
+function summarize(rows, linked=[], includeLinked=false) {
+  const result={records:rows.length,patients:0,appointments:0,notices:0,scheduled:0,in_flight:0,sent:0,confirmed:0,reception:0,errors:0,unplanned:0,suppressed:0};
+  const patients=new Set(),appointments=new Set(),confirmed=new Set(),reception=new Set(),owners=new Map();
+  for (const row of rows) {
+    patients.add(Number(row.patient_id));appointments.add(Number(row.appointment_id));
+    owners.set(Number(row.appointment_id),Number(row.patient_id));
+    if (CONFIRMED.has(row.appointment_status)) confirmed.add(Number(row.appointment_id));
+    if (['review','unclaimed'].includes(row.attention_status)) reception.add(Number(row.patient_id));
+    if (row.source_kind!=='appointment') result.notices++;
+    if (row.status==='scheduled') result.scheduled++;
+    if (['queued','processing','sent'].includes(row.status)) result.in_flight++;
+    if (['sent','delivered','read'].includes(row.status)) result.sent++;
+    if (['failed','unknown','blocked'].includes(row.status)) result.errors++;
+    if (row.status==='unplanned') result.unplanned++;
+    if (row.status==='unplanned' && Number(row.suppressed)===1) result.suppressed++;
+  }
+  if (includeLinked) for (const row of linked) {
+    if (owners.get(Number(row.anchor_id))!==Number(row.paciente_id)) continue;
+    appointments.add(Number(row.id_cita));
+    if (CONFIRMED.has(row.estado)) confirmed.add(Number(row.id_cita));
+  }
+  return {...result,patients:patients.size,appointments:appointments.size,confirmed:confirmed.size,reception:reception.size};
+}
+
 function createAppointmentRemindersReadService({ db, canAccess, now=()=>new Date(), runtimePolicy=null,
   nativeEnabled=()=>process.env.APPOINTMENT_VISIT_COMMUNICATIONS_V1_ENABLED==='true',
   adminIds=()=>String(process.env.ADMIN_USER_IDS || '1,44').split(',').map(Number) } = {}) {
@@ -108,34 +143,30 @@ function createAppointmentRemindersReadService({ db, canAccess, now=()=>new Date
     const pagePredicate=[...where,...statusWhere].length?' WHERE '+[...where,...statusWhere].join(' AND '):'';
     const read = async transaction => {
       const opts={type:QueryTypes.SELECT,replacements,transaction,logging:false};
-      const [summary]=await db.sequelize.query(cte+` SELECT /*+ MAX_EXECUTION_TIME(5000) */
-        COUNT(*) records,COUNT(DISTINCT patient_id) patients,COUNT(DISTINCT appointment_id) appointments,
-        SUM(source_kind<>'appointment') notices,SUM(status='scheduled') scheduled,
-        SUM(status IN ('queued','processing','sent')) in_flight,SUM(status IN ('sent','delivered','read')) sent,
-        COUNT(DISTINCT CASE WHEN appointment_status IN ('recordatorio_confirmado','ha_acudido','en_atencion','completada') THEN appointment_id END) confirmed,
-        COUNT(DISTINCT CASE WHEN attention_status IN ('review','unclaimed') THEN patient_id END) reception,
-        SUM(status IN ('failed','unknown','blocked')) errors,SUM(status='unplanned') unplanned,
-        SUM(status='unplanned' AND JSON_UNQUOTE(JSON_EXTRACT(import_metadata,'$.notification_suppression.reason'))='manual_selection'
+      // Empty clinic-day ranges need no history/queue/message projection.
+      if (replacements.limit_appointments) {
+        const present=await db.sequelize.query(`SELECT /*+ MAX_EXECUTION_TIME(5000) */ a.id_cita FROM CitasPacientes a
+          JOIN Pacientes p ON p.id_paciente=a.paciente_id
+          WHERE a.clinica_id=:clinic_id AND a.inicio>=:appointment_from AND a.inicio < :appointment_to
+            AND (p.clinica_id=:clinic_id OR EXISTS(SELECT 1 FROM PacienteClinicas pc
+              WHERE pc.paciente_id=p.id_paciente AND pc.clinica_id=:clinic_id)) LIMIT 1`,opts);
+        if (!present.length) return {count:{total:0},rows:[],summary:summarize([]),history:[],linked:[]};
+      }
+      const facts=await db.sequelize.query(cte+` SELECT /*+ MAX_EXECUTION_TIME(5000) */
+        patient_id,appointment_id,appointment_status,status,source_kind,attention_status,
+        CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(import_metadata,'$.notification_suppression.reason'))='manual_selection'
           AND JSON_UNQUOTE(JSON_EXTRACT(import_metadata,'$.notification_suppression.day_before'))='true'
-          AND JSON_UNQUOTE(JSON_EXTRACT(import_metadata,'$.notification_suppression.same_day'))='true') suppressed
+          AND JSON_UNQUOTE(JSON_EXTRACT(import_metadata,'$.notification_suppression.same_day'))='true' THEN 1 ELSE 0 END suppressed
         FROM classified`+predicate,opts);
-      const [count]=await db.sequelize.query(cte+' SELECT /*+ MAX_EXECUTION_TIME(5000) */ COUNT(*) total FROM classified'+pagePredicate,opts);
-      const rows=await db.sequelize.query(cte+' SELECT /*+ MAX_EXECUTION_TIME(5000) */ * FROM classified'+pagePredicate+` ORDER BY (${filter.sort} IS NULL) ASC,${filter.sort} ${filter.direction.toUpperCase()},id ASC LIMIT :limit OFFSET :offset`,{...opts,replacements:{...replacements,limit:filter.pageSize,offset:filter.page*filter.pageSize}});
+      const count={total:facts.filter(row=>matchesStatus(row,filter.status)).length};
+      const rows=count.total?await db.sequelize.query(cte+' SELECT /*+ MAX_EXECUTION_TIME(5000) */ * FROM classified'+pagePredicate+` ORDER BY (${filter.sort} IS NULL) ASC,${filter.sort} ${filter.direction.toUpperCase()},id ASC LIMIT :limit OFFSET :offset`,{...opts,replacements:{...replacements,limit:filter.pageSize,offset:filter.page*filter.pageSize}}):[];
       const ids=rows.map(row=>Number(row.execution_id)).filter(Boolean);
       const history=ids.length?await db.sequelize.query(cte+` SELECT /*+ MAX_EXECUTION_TIME(5000) */ id,execution_id,status,sent_at,node_id,
         CASE WHEN id IN (SELECT id FROM notice_attempts) THEN 'notice_attempt' ELSE 'follow_up' END kind
         FROM valid_messages WHERE execution_id IN (:execution_ids) ORDER BY id`,{...opts,replacements:{...replacements,execution_ids:ids}}):[];
-      const linked=filter.coverage?await db.sequelize.query(cte+` SELECT /*+ MAX_EXECUTION_TIME(5000) */ id_cita,anchor_id,inicio,estado
+      const linked=filter.coverage?await db.sequelize.query(cte+` SELECT /*+ MAX_EXECUTION_TIME(5000) */ id_cita,anchor_id,paciente_id,inicio,estado
         FROM appointment_coverage WHERE anchor_id IS NOT NULL AND anchor_id<>id_cita`,opts):[];
-      if (filter.coverage && filter.dateField==='appointment') {
-        const [covered]=await db.sequelize.query(cte+`, selected AS (SELECT * FROM classified ${predicate}),
-          covered AS (SELECT appointment_id id,appointment_status estado FROM selected
-            UNION ALL SELECT a.id_cita,a.estado FROM appointment_coverage a
-            WHERE EXISTS(SELECT 1 FROM selected r WHERE r.appointment_id=a.anchor_id AND r.patient_id=a.paciente_id))
-          SELECT /*+ MAX_EXECUTION_TIME(5000) */ COUNT(DISTINCT id) appointments,
-            COUNT(DISTINCT CASE WHEN estado IN ('recordatorio_confirmado','ha_acudido','en_atencion','completada') THEN id END) confirmed FROM covered`,opts);
-        summary.appointments=Number(covered?.appointments)||0;summary.confirmed=Number(covered?.confirmed)||0;
-      }
+      const summary=summarize(facts,linked,filter.coverage && filter.dateField==='appointment');
       return {count,rows,summary,history,linked};
     };
     let result;
@@ -187,5 +218,5 @@ function createAppointmentRemindersReadService({ db, canAccess, now=()=>new Date
   return {list};
 }
 let singleton;
-module.exports={STATUSES,PENDING,SORTS,filters,createAppointmentRemindersReadService,
+module.exports={STATUSES,PENDING,SORTS,filters,summarize,matchesStatus,createAppointmentRemindersReadService,
   list:options=>(singleton || (singleton=createAppointmentRemindersReadService({db:require('../../models')}))).list(options)};

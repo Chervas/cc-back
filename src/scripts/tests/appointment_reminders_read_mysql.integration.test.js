@@ -142,4 +142,14 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   const dst=await dstReader.list({actorId:7,clinicId:1,query:{window:'today_tomorrow',date_field:'appointment',status:'all',include_unplanned:true,include_history:false}});
   assert.equal(dst.date_from,'2030-03-31');assert.equal(dst.date_to,'2030-04-01');
   report.checks.push('historical appointment snapshots separated, safe concrete failure reason, irregular import receipt isolation and clinic-local DST defaults');
+
+  const nativeQuery=sql.query.bind(sql),projectionQueries=[];
+  sql.query=async(text,...args)=>{if(typeof text==='string'&&/^WITH\b/.test(text))projectionQueries.push(text);return nativeQuery(text,...args);};
+  try {
+    const empty=await list({...current,date_from:'2030-02-20',date_to:'2030-02-21'});
+    assert.equal(empty.total,0);assert.equal(empty.summary.records,0);assert.equal(projectionQueries.length,0,'an empty clinic-day must not scan reminders/messages');
+    const page=await list({...current,page_size:1});assert(page.total>page.items.length);assert(page.summary.reception>=1);
+    assert(projectionQueries.length<=4,'one read for facts, one SQL page, optional history and linked appointments; no repeated aggregate expansion');
+  } finally {sql.query=nativeQuery;}
+  report.checks.push('empty clinic-day avoids the historical projection; nonempty summary remains server-wide with at most four projection reads');
 }).catch(error=>{console.error(error.stack||error.message);process.exitCode=1;});
