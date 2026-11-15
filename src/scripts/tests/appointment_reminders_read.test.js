@@ -2,7 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const {filters,createAppointmentRemindersReadService}=require('../../services/appointmentRemindersRead.service');
 test('read projection defaults to pending and validates bounded server paging',()=>{
-  assert.deepEqual(filters({}),{page:0,pageSize:25,status:'pending',sort:'scheduled_at',direction:'asc',q:'',from:null,to:null});
+  assert.deepEqual(filters({}),{page:0,pageSize:25,status:'pending',sort:'scheduled_at',direction:'asc',q:'',from:null,to:null,dateField:'notice',coverage:false,history:true});
   assert.throws(()=>filters({page_size:0}));assert.throws(()=>filters({page:-1}));assert.throws(()=>filters({page_size:101}));
 });
 test('sort and status allowlists reject SQL and unknown states',()=>{
@@ -24,4 +24,10 @@ test('unauthorized scope is rejected before any table capability/data read',asyn
 test('service refuses invalid actor/clinic before reading',async()=>{
   const service=createAppointmentRemindersReadService({db:{},canAccess:async()=>true});
   await assert.rejects(service.list({actorId:'1 OR 1=1',clinicId:1}));await assert.rejects(service.list({actorId:1,clinicId:'0'}));
+});
+
+test('coverage requires a bounded explicit date range and fixed date field',()=>{
+  for(const query of [{include_unplanned:true},{include_unplanned:true,date_from:'2030-01-01',date_to:'2031-01-01'},{date_field:'DROP'}]) assert.throws(()=>filters(query),{code:'appointment_reminders_invalid_filter'});
+  assert.equal(filters({date_field:'appointment',include_unplanned:true,date_from:'2030-01-01',date_to:'2030-01-02',include_history:false}).coverage,true);
+  assert.equal(filters({status:'reception'}).status,'reception');
 });

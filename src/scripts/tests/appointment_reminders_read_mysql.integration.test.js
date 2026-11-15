@@ -9,12 +9,12 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   define('Paciente','Pacientes',{id_paciente:id,public_id:D.STRING,clinica_id:D.INTEGER,nombre:D.STRING,apellidos:D.STRING});
   define('PacienteClinica','PacienteClinicas',{id,paciente_id:D.INTEGER,clinica_id:D.INTEGER});
   define('UsuarioClinica','UsuarioClinica',{id,id_usuario:D.INTEGER,id_clinica:D.INTEGER,rol_clinica:D.STRING,estado_invitacion:D.STRING});
-  define('CitaPaciente','CitasPacientes',{id_cita:id,clinica_id:D.INTEGER,paciente_id:D.INTEGER,estado:D.STRING,inicio:D.DATE,titulo:D.STRING});
+  define('CitaPaciente','CitasPacientes',{id_cita:id,clinica_id:D.INTEGER,paciente_id:D.INTEGER,estado:D.STRING,inicio:D.DATE,titulo:D.STRING,import_metadata:D.JSON});
   define('AutomationFlowTemplateV2','AutomationFlowTemplatesV2',{id,template_key:D.STRING,version:D.INTEGER,public_id:D.STRING,name:D.STRING,clinic_id:D.INTEGER,group_id:D.INTEGER,is_system:D.BOOLEAN,created_by:D.INTEGER,is_active:D.BOOLEAN,published_at:D.DATE});
   define('FlowExecutionV2','FlowExecutionsV2',{id,trigger_entity_id:D.INTEGER,trigger_entity_type:D.STRING,trigger_type:D.STRING,clinic_id:D.INTEGER,template_version_id:D.INTEGER,idempotency_key:D.STRING,status:D.STRING,wait_until:D.DATE,created_at:D.DATE,context:D.JSON});
   define('JobRequest','JobRequests',{id,type:D.STRING,status:D.STRING,payload:D.JSON,result_summary:D.JSON,next_run_at:D.DATE,created_at:D.DATE});
   define('Conversation','Conversations',{id,clinic_id:D.INTEGER,patient_id:D.INTEGER,channel:D.STRING});
-  define('Message','Messages',{id,conversation_id:D.INTEGER,status:D.STRING,direction:D.STRING,message_type:D.STRING,metadata:D.JSON,sent_at:D.DATE,createdAt:D.DATE});
+  define('Message','Messages',{id,conversation_id:D.INTEGER,status:D.STRING,direction:D.STRING,message_type:D.STRING,metadata:D.JSON,sender_id:D.INTEGER,sent_at:D.DATE,createdAt:D.DATE});
   await sql.sync({force:true});
   await db.Clinica.bulkCreate([{id_clinica:1,grupoClinicaId:5,configuracion:{timezone:'Europe/Madrid'}},{id_clinica:2,grupoClinicaId:6}]);
   await db.Paciente.bulkCreate([{id_paciente:1,public_id:'FICTICIO-1',clinica_id:1,nombre:'Prueba',apellidos:'%_ Uno'},{id_paciente:2,public_id:'AJENO',clinica_id:2,nombre:'Ajeno'}]);
@@ -89,4 +89,57 @@ withIsolatedCampaignMysql(async({sql,models:db,report})=>{
   }
   assert.equal((await list({q:'Regla ajena',status:'all'})).total,0);
   report.checks.push('a corrupt foreign template binding exposes neither its label/version/link nor a search-count oracle');
+
+  define('ConversationAutomationState','ConversationAutomationStates',{id,conversation_id:D.INTEGER,clinic_id:D.INTEGER,status:D.STRING,stage:D.STRING,source_message_id:D.INTEGER,appointment_id:D.INTEGER,manual_action_required:D.BOOLEAN,needs_response:D.BOOLEAN});
+  define('AutomationInboundMessageClaim','AutomationInboundMessageClaims',{id,message_id:D.INTEGER,conversation_id:D.INTEGER,clinic_id:D.INTEGER,owner_type:D.STRING,metadata:D.JSON});
+  define('AppointmentReminderSequence','AppointmentReminderSequences',{id,clinic_id:D.INTEGER,patient_id:D.INTEGER,anchor_appointment_id:D.INTEGER,time_zone:D.STRING,local_date:D.DATEONLY,arrival_at:D.DATE});
+  await db.ConversationAutomationState.sync();await db.AutomationInboundMessageClaim.sync();await db.AppointmentReminderSequence.sync();
+  await db.Paciente.bulkCreate(Array.from({length:5},(_,i)=>({id_paciente:i+3,public_id:'FICTION-'+i,clinica_id:1,nombre:'Ficticio '+i})));
+  await db.CitaPaciente.bulkCreate(Array.from({length:5},(_,i)=>({id_cita:300+i,clinica_id:1,paciente_id:i+3,estado:i===2?'recordatorio_confirmado':'recordatorio_enviado',inicio:'2030-01-20T10:00:00Z',titulo:'Solo prueba',import_metadata:i===4?{notification_suppression:{reason:'manual_selection',same_day:true,day_before:true}}:null})));
+  await db.CitaPaciente.create({id_cita:305,clinica_id:1,paciente_id:3,estado:'recordatorio_confirmado',inicio:'2030-01-20T11:00:00Z',titulo:'Segunda sesión ficticia'});
+  await db.AppointmentReminderSequence.create({id:1,clinic_id:1,patient_id:3,anchor_appointment_id:300,time_zone:'Europe/Madrid',local_date:'2030-01-20',arrival_at:'2030-01-20T10:00:00Z'});
+  await db.Conversation.bulkCreate(Array.from({length:4},(_,i)=>({id:10+i,clinic_id:1,patient_id:i+3,channel:'whatsapp'})));
+  await db.FlowExecutionV2.bulkCreate(Array.from({length:4},(_,i)=>({...execution(60+i,'completed',window+':fixture-'+i),trigger_entity_id:300+i})));
+  const msg=(id,conversation_id,direction,extra={})=>({id,conversation_id,direction,message_type:'text',status:direction==='outbound'?'read':'received',createdAt:'2030-01-09T09:00:00Z',metadata:{},...extra});
+  await db.Message.bulkCreate([
+    msg(59,10,'outbound',{status:'failed',metadata:{execution_id:60,node_id:'n2'}}),
+    msg(60,10,'outbound',{metadata:{execution_id:60,node_id:'n2'}}),msg(61,10,'inbound'),msg(62,10,'outbound',{metadata:{execution_id:60,node_id:'n8'}}),
+    msg(69,11,'inbound'),msg(70,11,'outbound',{metadata:{execution_id:61,node_id:'n2'}}),
+    msg(80,12,'outbound',{metadata:{execution_id:62,node_id:'n2'}}),msg(85,12,'inbound'),
+    msg(90,13,'outbound',{metadata:{execution_id:63,node_id:'n2'}}),msg(91,13,'inbound'),msg(99,13,'outbound',{sender_id:7})]);
+  await db.ConversationAutomationState.bulkCreate([{id:1,conversation_id:10,clinic_id:1,status:'review',stage:'review',source_message_id:61,appointment_id:300,manual_action_required:true},
+    {id:2,conversation_id:11,clinic_id:1,status:'completed',stage:'completed',source_message_id:50,appointment_id:301}]);
+  await db.AutomationInboundMessageClaim.bulkCreate([69,85,91].map((message_id,i)=>({id:i+1,message_id,conversation_id:i+11,clinic_id:1,owner_type:'unclaimed',metadata:{reason:'no_active_message_received_automation'}})));
+  const current={status:'all',date_field:'appointment',date_from:'2030-01-20',date_to:'2030-01-20',include_unplanned:true,include_history:false,page_size:100};
+  result=await list(current);
+  assert.equal(result.items.filter(r=>r.appointment_id===300).length,1);
+  const reviewed=result.items.find(r=>r.appointment_id===300);assert.equal(reviewed.source.message_id,60);assert.equal(reviewed.attention.status,'review');assert.equal(reviewed.history_total,3);assert.equal(reviewed.linked_appointments.length,1);assert.equal(reviewed.linked_appointments[0].id,305);
+  assert(!result.items.some(r=>r.appointment_id===305));
+  assert.equal(result.items.find(r=>r.appointment_id===301).attention.status,'unclaimed','a new automatic reminder must not resolve an earlier unhandled inbound');
+  const confirmed=result.items.find(r=>r.appointment_id===302);assert.equal(confirmed.appointment_status,'recordatorio_confirmado');assert.equal(confirmed.attention.status,'unclaimed');
+  assert.equal(result.items.find(r=>r.appointment_id===303).attention.status,null,'real human reply resolves pending, including mobile echoes');
+  const suppressed=result.items.find(r=>r.appointment_id===304);assert.equal(suppressed.status,'unplanned');assert.equal(suppressed.reason_code,'appointment_notification_suppressed');
+  assert.equal(result.summary.reception,3);assert.equal((await list({...current,page_size:1})).summary.reception,3,'KPIs must not count the current page');
+  assert.equal((await list({...current,status:'reception'})).total,3);
+  report.checks.push('notice vs acknowledgement vs retries, linked coverage, review vs delivery, pre-reminder unclaimed response, confirmed plus later question, human reply, suppression and scoped server KPIs');
+  await db.ConversationAutomationState.update({status:'completed',stage:'completed',source_message_id:69},{where:{id:2}});
+  assert.equal((await list(current)).items.find(r=>r.appointment_id===301).attention.status,null,'explicit handling closes the same or older pending response');
+  allowChat=false;result=await list(current);assert.equal(result.items.find(r=>r.appointment_id===300).attention.conversation_id,null);assert.equal(result.items.find(r=>r.appointment_id===300).attention.message_id,null);allowChat=true;
+  const beforeReads={jobs:await db.JobRequest.count(),messages:await db.Message.count(),appointments:await db.CitaPaciente.count(),states:await db.ConversationAutomationState.count(),claims:await db.AutomationInboundMessageClaim.count()};
+  result=await list({...current,window:'today_tomorrow'});assert.equal(result.date_from,'2030-01-10');assert.equal(result.date_to,'2030-01-11');
+  assert.deepEqual({jobs:await db.JobRequest.count(),messages:await db.Message.count(),appointments:await db.CitaPaciente.count(),states:await db.ConversationAutomationState.count(),claims:await db.AutomationInboundMessageClaim.count()},beforeReads);
+  report.checks.push('explicit completed handling, chat privacy, clinic-local prospective defaults and no source writes');
+
+  await db.FlowExecutionV2.create({...execution(1000,'completed',window+':obsolete'),trigger_entity_id:300,context:{trigger:{schedule_moment:'day_before'},appointment:{inicio:'2029-12-20T10:00:00.000Z'}}});
+  await db.Message.create(msg(1000,10,'outbound',{metadata:{execution_id:1000,node_id:'n2'}}));
+  assert.equal((await list(current)).items.filter(r=>r.appointment_id===300).length,1,'a prior appointment snapshot must not appear as a current notice');
+  const historical=(await list({...current,include_history:true})).items.find(r=>r.source.execution_id===1000);assert.equal(historical.superseded,true);assert.equal(historical.original_appointment_start,'2029-12-20T10:00:00.000Z');
+  await db.FlowExecutionV2.create({...execution(1001,'failed',window+':configuration-failure'),trigger_entity_id:304,context:{trigger:{schedule_moment:'day_before'},outputs:{n2:{error_message:'whatsapp_config_missing'}}}});
+  assert.equal((await list(current)).items.find(r=>r.appointment_id===304).reason_code,'whatsapp_config_missing');
+  await db.CitaPaciente.update({import_metadata:'unstructured import receipt'},{where:{id_cita:305}});
+  assert((await list(current)).items.length>0,'non-object legacy import metadata must not break other reminders');
+  const dstReader=require('../../services/appointmentRemindersRead.service').createAppointmentRemindersReadService({db,now:()=>new Date('2030-03-30T23:30:00Z'),runtimePolicy:{namespaces:['test'],claimUnscoped:false},canAccess:async()=>true});
+  const dst=await dstReader.list({actorId:7,clinicId:1,query:{window:'today_tomorrow',date_field:'appointment',status:'all',include_unplanned:true,include_history:false}});
+  assert.equal(dst.date_from,'2030-03-31');assert.equal(dst.date_to,'2030-04-01');
+  report.checks.push('historical appointment snapshots separated, safe concrete failure reason, irregular import receipt isolation and clinic-local DST defaults');
 }).catch(error=>{console.error(error.stack||error.message);process.exitCode=1;});

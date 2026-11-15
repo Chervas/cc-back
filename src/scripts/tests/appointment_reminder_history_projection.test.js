@@ -8,7 +8,7 @@ const { createRequire } = require('node:module');
 const classification = require('../../lib/appointment-reminder-sequence');
 const filename = require.resolve('../../services/appointmentReminderSequence.service');
 const source = fs.readFileSync(filename, 'utf8');
-const api = 'return Object.freeze({ inspectAppointment, claimExecution, authorizeMessage });';
+const api = 'return Object.freeze({ inspectAppointment, claimExecution, authorizeMessage, reconcileBookingHistory });';
 assert.equal(source.split(api).length, 2);
 
 // Expose only the private read projection in this isolated VM. No app models,
@@ -22,7 +22,7 @@ async function projection({ status = 'pending', waResponse = 0, wamid = null } =
     AppointmentReminderSequence: {}, FlowExecutionV2: {}, Message: {},
     sequelize: { query: async sql => {
       assert.match(sql, /JSON_TYPE\(JSON_EXTRACT\(m.metadata,'\$\.wa_response'\)\)<>'NULL'/);
-      return [[{ execution_id: 20, appointment_id: 10, context_patient_id: '30',
+      return [[{ trigger_type: 'appointment_reminder_window', execution_id: 20, appointment_id: 10, context_patient_id: '30',
         start_at: '2026-10-15T07:30:00.000Z', message_id: 40, status, sent_at: null,
         appointment_timeout: 'false', context_timeout: 'true',
         template_name: 'clinicaclick_recordatorio_dia_antes_es', wa_response: waResponse, wamid }]];
