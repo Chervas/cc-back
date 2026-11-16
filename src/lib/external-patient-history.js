@@ -77,7 +77,7 @@ function buildExternalPatientHistory(fields,{clinics=[]}={}) {
     const add=(label,value)=>{value=plainText(value);if(value)items.push({label,value});};
     add('Servicio registrado',record.service_label||record.service_name);
     add('Familia',record.service_family);add('Clasificación de origen',record.source_classification);
-    const site={explicit_aju:'Ajuriaguerra · indicada como AJU en origen',explicit_arenal:'Arenal · indicada en origen',default_arenal:'Arenal · asignada cuando el archivo no indica sede'}[record.site_assignment];
+    const site={explicit_aju:'Ajuriaguerra · indicada como AJU en origen',explicit_arenal:'Arenal · indicada en origen',default_arenal:'Arenal · asignada cuando el archivo no indica sede',inherited_explicit_aju:'Ajuriaguerra · heredada de la única sede explícita del paciente en el archivo'}[record.site_assignment];
     add('Sede del registro',site);
     const id=createHash('sha256').update(`${field.clinica_id}:${r.source_instance}:${r.source_key}`).digest('hex').slice(0,24);
     entries.push({id,provider:'arriaga_excel',source:'Excel Arriaga',kind:'clinical_note',category:'historical',
