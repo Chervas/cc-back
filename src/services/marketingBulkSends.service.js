@@ -2494,6 +2494,7 @@ async function assertReviewRequestCommunicationAllowed({ list, item = null, conv
       careItems = [];
     } else deniedScope();
   }
+  for (const careItem of careItems) require('../lib/review-attribution-hold').assertReviewAttributionClear(careItem);
   await guardReviewCare({ clinicIds: listIds }, storedList, careItems, { background: true, checkHold: true });
   const multi = ['group', 'multi'].includes(String(storedList.scope_type || '').toLowerCase()) || listIds.length > 1;
   const clinicId = positive(bound?.clinica_id) || (!multi && listIds.length === 1 ? listIds[0] : null);

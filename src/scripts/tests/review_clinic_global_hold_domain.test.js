@@ -10,7 +10,7 @@ const vm = require('node:vm');
 const eligibility = require('../../lib/whatsappAppointmentEligibility');
 
 function harness() {
-  const lists = new Map(), items = new Map(), messages = new Map(), appointments = new Map(), conversations = new Map();
+  const lists = new Map(), items = new Map(), messages = new Map(), chatMessages = new Map(), appointments = new Map(), conversations = new Map();
   const calls = { provider: 0, write: 0 };
   const forbidden = () => { calls.provider++; throw Error('FORBIDDEN_PROVIDER_OR_SERVICE'); };
   const model = rows => ({
@@ -20,7 +20,7 @@ function harness() {
     findAll: async () => [],
   });
   const db = { MarketingPatientList: model(lists), MarketingPatientListItem: model(items), EmailMessage: model(messages),
-    CitaPaciente: model(appointments), Conversation: model(conversations), Message: model(new Map()),
+    CitaPaciente: model(appointments), Conversation: model(conversations), Message: model(chatMessages),
     MarketingPatientContactEvent: model(new Map()) };
   const serviceStub = new Proxy({}, { get: (_, key) => key === 'normalizePhoneNumber' ? value => value : forbidden });
   let bulk, email;
@@ -51,7 +51,7 @@ function harness() {
     const item = { id: items.size + 1, list_id: list.id, clinica_id: clinicId, phone: 'SYNTHETIC', ...patch.item };
     delete list.item; lists.set(list.id, list); items.set(item.id, item); return { list, item };
   };
-  return { bulk, email, seed, lists, items, messages, appointments, conversations, calls };
+  return { bulk, email, seed, lists, items, messages, chatMessages, appointments, conversations, calls };
 }
 const held = error => error.code === 'whatsapp_appointment_nonoperational_clinic_held' && error.retryable === false;
 const unknown = error => error.code === 'review_communication_scope_unverified';
@@ -86,6 +86,25 @@ test('an attribution hold is fail-closed but does not apply to another recipient
   const h = harness(), ordinary = h.seed(70, { template_usage: 'marketing' }, { item: { custom_fields: { review_attribution_hold: { reason: 'owned' } } } });
   assert.equal((await h.bulk.assertReviewRequestCommunicationAllowed(ordinary)).review, false);
   assert.equal((await h.bulk.assertReviewRequestCommunicationAllowed(h.seed(1))).clinicId, 1);
+});
+
+test('a selected-recipient sample cannot bypass a correction hold on its stored original recipient', async () => {
+  const h = harness(), fingerprint = 'a'.repeat(64);
+  const scope = h.seed(70, { review_request: true, review_care_version: 1 }, {
+    item: { status: 'test_sample', paciente_id: null, selected: 0, dispatch_status: 'test_only', custom_fields: {
+      test_sample: true, review_test_data_mode: 'selected_recipient', review_test_source_item_id: 2,
+      review_test_render_fingerprint: fingerprint,
+    } },
+  });
+  h.items.set(2, { id: 2, list_id: scope.list.id, clinica_id: 70, paciente_id: 59235,
+    custom_fields: { review_attribution_hold: { reason: 'clinic_attribution_corrected', correctionRef: 'owned-case' } } });
+  h.chatMessages.set(100, { id: 100, conversation_id: 9, direction: 'outbound', metadata: {
+    source: 'marketing_bulk_sends', kind: 'mass_campaign_test', list_id: scope.list.id, item_id: scope.item.id,
+    recipient: 'SYNTHETIC', review_test_source_item_id: 2, review_test_render_fingerprint: fingerprint,
+  } });
+  await assert.rejects(h.bulk.assertReviewRequestCommunicationAllowed({ ...scope,
+    conversation: { id: 9 }, triggerMessage: { id: 100 } }), attributionHeld);
+  assert.equal(h.calls.provider, 0); assert.equal(h.calls.write, 0);
 });
 
 test('review purpose recognizes stored boolean/string/usage/dispatch variants without changing ordinary marketing', async () => {
