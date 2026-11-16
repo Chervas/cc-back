@@ -12,7 +12,7 @@ const recipient = (patientId = 11, clinicId = 1, extra = {}) => ({ paciente_id: 
   clinica_id: clinicId, status: 'ready', selected: true, custom_fields: { nombre: 'Ficticio' }, ...extra });
 const fact = (patientId, clinicId, date, kind = 'performed_service_import') => ({ patientId, clinicId,
   latestCare: date ? { date, kind, precision: 'day', provenance: [{ kind,
-    sourceRecordId: '90071992547409931', qualificationVersion: 'arriaga-confirmed-performed-services/1',
+    sourceRecordId: String(90071992547409931n + BigInt(patientId) * 100n + BigInt(clinicId)), qualificationVersion: 'arriaga-confirmed-performed-services/1',
     rowSha256: 'a'.repeat(64), notes: 'FICTITIOUS_PRIVATE_NOTE' }] } : null,
   importedMessagesHold: false });
 function sealed(patientId = 11, clinicId = 1) {
@@ -52,6 +52,17 @@ function fixture() {
     },
   };
   const db = { sequelize: { async query(sql, options) {
+    if (options.replacements.sourceRecordIds) {
+      state.calls.push(['current_source', [...options.replacements.sourceRecordIds]]);
+      assert.match(sql, /FROM PatientImportedSourceRecords r/);
+      assert(!/\b(?:UPDATE|DELETE|INSERT|ALTER|DROP)\b/i.test(sql));
+      return options.replacements.sourceRecordIds.map(id => {
+        const key = BigInt(id) - 90071992547409931n;
+        const patientId = Number(key / 100n), clinicId = Number(key % 100n);
+        return { id, patient_id: patientId, clinic_id: clinicId,
+          identity_patient_id: patientId, identity_clinic_id: clinicId, row_sha256: 'a'.repeat(64) };
+      });
+    }
     state.calls.push(['hold', [...options.replacements.patientIds]]);
     assert.equal(options.logging, false);
     assert.equal(options.type, 'SELECT');

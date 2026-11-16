@@ -1,6 +1,7 @@
 'use strict';
 const { QueryTypes } = require('sequelize');
 const snapshots = require('../lib/review-care-snapshot');
+const { assertCurrentImportedCare } = require('../lib/review-care-current-import');
 const { resolveLastAttendedAppointmentDate } = require('../lib/marketing-template-variables');
 const { parseImportedCareDate } = require('../lib/marketing-import-care-date');
 const { createPatientLastCareReader, createSqlPatientLastCareRepository } = require('./patientLastCare.service');
@@ -105,6 +106,7 @@ function createReviewCareContext({ db, access, createReader = createPatientLastC
     for (const batch of chunks(pairs, 1000)) await access.assertPatientPairs({ pairs: batch });
     for (const item of protectedItems) snapshots.validateCareSnapshot(item, list);
     if (checkHold) {
+      await assertCurrentImportedCare({ items: protectedItems, query });
       const held = await heldPatientIds(pairs.map(pair => pair.patientId));
       if (held.size) throw failure('review_care_messages_held', 'Las comunicaciones de este paciente siguen retenidas por la importación.', 409);
       if (protectedList && items.some(value => !snapshots.hasCareSnapshot(value))) {

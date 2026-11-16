@@ -1,0 +1,26 @@
+'use strict';
+const assert=require('node:assert/strict'),S=require('sequelize');
+const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fixture');
+const {assertCurrentImportedCare}=require('../../lib/review-care-current-import');
+const snapshots=require('../../lib/review-care-snapshot');
+withIsolatedCampaignMysql(async({sql,report})=>{
+ const Identity=require('../../../models/patientimportedidentity')(sql,S.DataTypes),Record=require('../../../models/patientimportedsourcerecord')(sql,S.DataTypes);
+ await Identity.sync();await Record.sync();
+ const h='a'.repeat(64),base={patient_id:11,source_system:'arriaga_excel',source_patient_id:'master-row-11',source_history_number:'21444',bundle_sha256:h,messages_hold:false,imported_at:new Date(),actor_user_id:1};
+ await Identity.bulkCreate([{...base,id:21,catalog_id:2,clinic_id:1,source_instance:'fixture:clinic-1'}, {...base,id:22,catalog_id:3,clinic_id:70,source_instance:'fixture:clinic-70'}]);
+ await Record.create({id:'31',identity_id:22,patient_id:11,clinic_id:70,source_key:h,source_database:'fixture.xlsx',source_table:'Sheet',category:'historical',record_date:'2026-09-30',row_sha256:h,database_sha256:h,bundle_sha256:h,record_json:'{}',imported_at:new Date()});
+ const item=(clinic,identity,catalog)=>{const r={paciente_id:11,clinica_id:clinic,list_id:9,custom_fields:{}};r.custom_fields[snapshots.KEY]=snapshots.sealCareSnapshot({item:r,listId:9,actorId:1,care:{patientId:11,clinicId:clinic,latestCare:{date:'2026-09-30',kind:'performed_service_import',provenance:[{kind:'performed_service_import',sourceRecordId:'31',identityId:String(identity),catalogId:String(catalog),sourceSystem:'arriaga_excel',sourceInstance:`fixture:clinic-${clinic}`,sourceKey:h,rowSha256:h,databaseSha256:h,bundleSha256:h}]}}});return r;};
+ const query=(statement,replacements)=>sql.query(statement,{replacements,type:S.QueryTypes.SELECT,logging:false});
+ const before=item(70,22,3),frozen=JSON.stringify(before);await assertCurrentImportedCare({items:[before],query});
+ report.checks.push('A valid frozen import snapshot authorizes only the current patient/site/source identity.');
+ await Record.update({clinic_id:1,identity_id:21},{where:{id:'31'}});
+ await assert.rejects(assertCurrentImportedCare({items:[before],query}),{status:409,code:'review_care_source_attribution_changed'});
+ assert.equal(JSON.stringify(before),frozen);snapshots.validateCareSnapshot(before,{id:9});assert(await Identity.findByPk(22));
+ report.checks.push('After a real SQL attribution repair, the old Arenal snapshot stops further communications even while the historical Arenal identity remains; the original receipt is unchanged.');
+ await assertCurrentImportedCare({items:[item(1,21,2)],query});
+ report.checks.push('A new authorized selection in Ajuriaguerra validates against the same original source hashes after relinking.');
+ const fingerprint=JSON.stringify(await Record.findAll({raw:true}));await assertCurrentImportedCare({items:[item(1,21,2)],query});assert.equal(JSON.stringify(await Record.findAll({raw:true})),fingerprint);
+ report.checks.push('The communication guard reads without changing sources or manufacturing messages/jobs.');
+ await Record.update({patient_id:12},{where:{id:'31'}});await assert.rejects(assertCurrentImportedCare({items:[item(1,21,2)],query}),{code:'review_care_source_attribution_changed'});
+ report.checks.push('A crossed patient is rejected rather than healed by a matching site.');
+}).catch(error=>{process.stderr.write(String(error.stack||error)+'\n');process.exitCode=1;});
