@@ -11,6 +11,69 @@ function context(g) {
     clinicSetDigest: C.hash('[71,72]'), state: randomBytes(32).toString('base64url') };
 }
 const finish = row => ({ state: row.state, code: 'FICTITIOUS_GATEWAY_CODE_' + row.requestId, wabaId: '301', phoneId: '401' });
+test('an exact legacy adoption passes its server proof without changing the signed receipt', async () => {
+  const row={requestId:randomUUID(),status:'claimed',scope:{type:'clinic',id:71},clinicIds:[71],mode:'coexistence',channelRole:'primary',
+    expiresAt:new Date(Date.now()+600000).toISOString(),scopeDigest:C.hash('FICTITIOUS_LEGACY_SCOPE'),clinicSetDigest:C.hash('[71]')};
+  const saved=JSON.stringify(row),proof=C.hash('34600000401');let command;
+  const client=createWhatsappOnboardingBrokerClient({guard:()=>{},loadBinding:async scope=>({connectionRef:'qa-legacy',scopeKey:scope.type+':'+scope.id,clinicIds:[71],
+    appId:'101',configId:'201',redirectUri:'https://crm.example.invalid/whatsapp',scopes:['whatsapp_business_management','whatsapp_business_messaging']}),
+    client:{execute:async value=>{command=value;throw Object.assign(Error('FICTITIOUS_STOP'),{code:'scope_denied'});}}});
+  await assert.rejects(client.activate(row,991,proof),{code:'scope_denied'});
+  assert.equal(command.payload.legacyPhoneDigest,proof);assert.equal(JSON.stringify(row),saved);assert(!Object.hasOwn(row,'replacement'));
+  for(const change of [{mode:'cloud_api'},{mode:undefined},{replacement:{assetId:991,authorizationId:null,phoneDigest:proof}}]){
+    command=null;await assert.rejects(client.activate({...row,...change},991,proof),{code:'whatsapp_onboarding_binding_invalid'});assert.equal(command,null);
+  }
+  for(const invalid of [null,'bad','A'.repeat(64)]){
+    command=null;await assert.rejects(client.activate(row,991,invalid),{code:'whatsapp_onboarding_binding_invalid'});assert.equal(command,null);
+  }
+  command=null;await assert.rejects(client.activate({...row,scope:{type:'group',id:9}},991,proof),{code:'whatsapp_onboarding_binding_invalid'});assert.equal(command,null);
+});
+test('configured gateway forwards the legacy proof over TLS and prevents Cloud registration after a coexistence change', async t => {
+  const g=brokerForGateway(t,{customer:{selectionOnly:true},scopes:['public_profile','whatsapp_business_management','whatsapp_business_messaging']});
+  const f=g.f,file=name=>f.dir+'/'+name,net=require('node:net');
+  Object.assign(f.binding.whatsappOnboarding,{scopeKey:'clinic:71',clinicIds:[71]});
+  Object.assign(g.metadata,{scopeKey:'clinic:71',clinicIds:[71]});
+  for(const grant of f.policy.grants)grant.assetRef='wa-enroll:clinic:71';
+  const slot=f.records.get(f.binding.secretArn).get(f.binding.whatsappOnboarding.slotVersionId);
+  slot.body=JSON.stringify({...JSON.parse(slot.body),scopeKey:'clinic:71'});
+  const {allowPort,removePort}=require('../../../services/integrations-broker/test/offline-guard.cjs');
+  const cert=file('legacy-tls.crt'),key=file('legacy-tls.key');
+  require('node:child_process').execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,
+    '-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'});
+  for(const path of [cert,key])fs.chmodSync(path,0o600);
+  const probe=net.createServer();await new Promise(resolve=>probe.listen(0,'127.0.0.1',resolve));const port=probe.address().port;
+  await new Promise(resolve=>probe.close(resolve));
+  fs.writeFileSync(file('capture.json'),JSON.stringify({version:1,appId:'101',scopes:[]}),{mode:0o640});
+  fs.writeFileSync(file('broker.json'),JSON.stringify({enabled:true,cohort:C.COHORT,listenAddress:'127.0.0.1',port,
+    stateFile:file('runtime.sqlite'),tlsCertFile:cert,tlsKeyFile:key,policy:f.policy,activationEnabled:true,activationScopesFile:file('capture.json')}),{mode:0o600});
+  let isOnBizApp=true,subscribed=false;const calls=[];
+  const app=await require('../../../services/integrations-broker/src/whatsapp-onboarding-main').main(file('broker.json'),{
+    awsFactory:async()=>({secrets:f.aws,sink:{write:async row=>({digest:row.digest,versionId:'FICTITIOUS_AUDIT_VERSION'})},close(){}}),
+    http:f.http,exchangeFactory:f.exchangeFactory,activationHttp:async request=>{
+      calls.push(request.action);
+      if(request.action==='profile')return {id:'401',display_phone_number:'+34600000401',status:isOnBizApp?'CONNECTED':'PENDING',
+        platform_type:'CLOUD_API',is_on_biz_app:isOnBizApp,code_verification_status:'VERIFIED'};
+      if(request.action==='subscriptions')return {data:subscribed?[{whatsapp_business_api_data:{id:'101'}}]:[]};
+      if(request.action==='subscribe'){subscribed=true;return {success:true};}
+      assert.notEqual(request.action,'register_phone','legacy adoption never registers a Cloud phone');return f.http(request);
+    }});
+  allowPort(port);t.after(async()=>{await app.close();removePort(port);});
+  fs.writeFileSync(file('gateway.pem'),f.gateway.privateKey.export({type:'pkcs8',format:'pem'}),{mode:0o600});
+  fs.writeFileSync(file('state.key'),Buffer.alloc(32,7),{mode:0o600});
+  fs.writeFileSync(file('gateway.json'),JSON.stringify({version:1,origin:`https://127.0.0.1:${port}`,audience:f.policy.audience,
+    keyId:'qa-gateway',privateKeyFile:file('gateway.pem'),caFile:cert,bindings:[g.metadata]}),{mode:0o600});
+  const env={WHATSAPP_ONBOARDING_ENABLED:'true',RUNTIME_ROLE:'gateway',JOB_RUNTIME_NAMESPACE:'gateway',QUEUE_PREFIX:'gateway',JOBS_WORKER_ENABLED:'false',CRON_ENABLED:'false',
+    AUTH_SESSION_MODE:'enforce',AUTH_EMAIL_MFA_MODE:'enforce',PLATFORM_AUDIT_AUTH_ENABLED:'true',PLATFORM_AUDIT_AUTH_POLICY:'auth-durable-v1',
+    PLATFORM_AUDIT_WHATSAPP_ONBOARDING_ENABLED:'true',PLATFORM_AUDIT_WHATSAPP_ONBOARDING_POLICY:'whatsapp-onboarding-v1',
+    WHATSAPP_ONBOARDING_STATE_KEY_FILE:file('state.key'),WHATSAPP_ONBOARDING_BROKER_CONFIG_FILE:file('gateway.json')};
+  const client=configuredClient({environment:()=>env}),row={...context(g),scope:{type:'clinic',id:71},clinicIds:[71],clinicSetDigest:C.hash('[71]'),mode:'coexistence'},saved=JSON.stringify(row),proof=C.hash('34600000401');
+  await client.begin(row);await client.finish(row,finish(row));assert.equal((await client.profile(row)).state,'prepared');
+  isOnBizApp=false;await assert.rejects(client.activate(row,991,proof),{code:'whatsapp_onboarding_configuration_invalid'});
+  assert(!calls.includes('register_phone'));assert.equal(subscribed,false);
+  assert.equal(app.store.db.prepare('SELECT legacy_phone_digest FROM whatsapp_activations WHERE flow_id=?').get(row.requestId).legacy_phone_digest,proof);
+  isOnBizApp=true;assert.equal((await client.activate(row,991,proof)).state,'active');
+  assert.equal(JSON.stringify(row),saved);assert.equal(calls.filter(action=>action==='subscribe').length,1);assert.equal(f.state.codes,1);
+});
 test('preparation timeouts and busy leases report uncertainty without transport retry or weakening identity failures', async t => {
   const g = brokerForGateway(t); const row = context(g);
   for (const [name, operation] of [['profile', A.PROFILE], ['activate', A.ACTIVATE], ['activationStatus', A.STATUS]]) {

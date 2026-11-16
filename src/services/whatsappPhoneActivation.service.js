@@ -58,7 +58,7 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
       const options={transaction,lock:transaction.LOCK.UPDATE};
       const existing=await db().WhatsappPhoneActivation.findByPk(context.requestId,options);
       if(existing?.state==='archived')S.fail('whatsapp_authorization_cancelled',409);
-      let asset,previous=null,rotated=false,replacing=false,previousWabaId=null;
+      let asset,previous=null,rotated=false,replacing=false,legacyAdoption=false,previousWabaId=null;
       if(existing){
         if(existing.phone_id!==remote.phoneId||existing.waba_id!==remote.wabaId||existing.scope_type!==context.scope.type
           ||existing.scope_id!==context.scope.id||JSON.stringify(existing.clinic_ids)!==JSON.stringify(context.clinicIds))S.fail('whatsapp_authorization_conflict',409);
@@ -106,11 +106,31 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
             ||Number(context.scope.type==='group'?asset.grupoClinicaId:asset.clinicaId)!==context.scope.id)S.fail('whatsapp_authorization_conflict',409);
           const active=await db().WhatsappPhoneActivation.findAll({where:{asset_id:asset.id,state:{[Op.in]:['active','archived']}},limit:2,
             transaction,lock:transaction.LOCK.UPDATE});
-          if(active.length!==1)S.fail('whatsapp_authorization_conflict',409);
-          previous=active[0];
-          if(previous.phone_id!==remote.phoneId||previous.waba_id!==remote.wabaId||previous.scope_type!==context.scope.type
-            ||previous.scope_id!==context.scope.id||JSON.stringify(previous.clinic_ids)!==JSON.stringify(context.clinicIds)
-            ||asset.whatsappAuthorizationId!==previous.authorization_id)S.fail('whatsapp_authorization_conflict',409);
+          if(active.length===0){
+            // A saved coexistence receipt may meet the exact inactive legacy
+            // identity left by an older connection. Adopt no other history or
+            // routing, and keep the legacy row unchanged until broker activation.
+            const metadata=asset.additionalData&&typeof asset.additionalData==='object'?asset.additionalData:{};
+            const history=await db().WhatsappPhoneActivation.findAll({where:{asset_id:asset.id},limit:1,...options});
+            const routes=db().WhatsappChannelBinding?await db().WhatsappChannelBinding.findAll({where:{asset_id:asset.id,is_active:true},
+              attributes:['clinic_id','role'],limit:2,...options}):[];
+            if(context.scope.type!=='clinic'||context.mode!=='coexistence'||asset.isActive!==false||asset.whatsappAuthorizationId!=null
+              ||history.length||metadata.whatsappConnectionMode!=='coexistence'||metadata.platformType!=='CLOUD_API'||metadata.isOnBizApp!==true
+              ||['brokerManaged','activationState','whatsappManualDisconnect','whatsappArchive','routing_disabled'].some(key=>Object.hasOwn(metadata,key))
+              ||(context.channelRole||'primary')!==remote.channelRole||(await channelRoleFor(asset,context,options))!==remote.channelRole
+              ||routes.some(route=>Number(route.clinic_id)!==context.scope.id||route.role!==remote.channelRole)
+              ||!samePhone(asset.metaAssetName,remote.profile.displayPhoneNumber)||!coexistence(remote.profile)
+              ||remote.assetId!==null&&remote.assetId!==asset.id
+              ||remote.state==='active'&&(remote.assetId!==asset.id||!Number.isSafeInteger(remote.activatedAt)||remote.activatedAt<=0))S.fail('whatsapp_authorization_conflict',409);
+            legacyAdoption=true;
+            if(remote.state!=='active')return {assetId:asset.id,state:remote.state,legacyPhoneDigest:S.digest(normalizePhoneDigits(asset.metaAssetName))};
+          }else{
+            if(active.length!==1)S.fail('whatsapp_authorization_conflict',409);
+            previous=active[0];
+            if(previous.phone_id!==remote.phoneId||previous.waba_id!==remote.wabaId||previous.scope_type!==context.scope.type
+              ||previous.scope_id!==context.scope.id||JSON.stringify(previous.clinic_ids)!==JSON.stringify(context.clinicIds)
+              ||asset.whatsappAuthorizationId!==previous.authorization_id)S.fail('whatsapp_authorization_conflict',409);
+          }
           replacing=true;previousWabaId=asset.wabaId;
           if(remote.state!=='active')return {assetId:asset.id,state:remote.state,replacement:true};
         }else{
@@ -132,7 +152,8 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
         delete additionalData.whatsappArchive;
       }
       // Keep user-selected role and policies after the first successful activation.
-      if(existing?.state==='active'||replacing)for(const key of ['routing','whatsapp_channel_role'])if(asset.additionalData?.[key])additionalData[key]=asset.additionalData[key];
+      if(existing?.state==='active'||replacing)for(const key of ['routing','whatsapp_channel_role','requireClinicSelection'])
+        if(Object.hasOwn(asset.additionalData||{},key))additionalData[key]=asset.additionalData[key];
       await asset.update({metaAssetName:remote.profile.displayPhoneNumber,waVerifiedName:remote.profile.verifiedName,
         quality_rating:remote.profile.qualityRating,isActive:state==='active',additionalData,
         ...(replacing?{whatsappAuthorizationId:context.requestId,metaAssetId:remote.phoneId,
@@ -145,9 +166,9 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
       if(previous)await previous.update({state:'superseded',updated_by:actor.userId},{transaction});
       if(!existing||newlyActive)await require('./whatsappConnectionAudit').append({db:db(),audit,actor,scope:context.scope,
         requestId:context.requestId,assetIds:[asset.id],action:'integration.whatsapp.activate',
-        reason:rotated?'connection_identity_rotated':replacing?'connection_reauthorized':newlyActive?'connection_activated':'catalog_prepared',transaction,now:now()});
+        reason:rotated?'connection_identity_rotated':replacing&&!legacyAdoption?'connection_reauthorized':newlyActive?'connection_activated':'catalog_prepared',transaction,now:now()});
       if(existing)await existing.update(values,{transaction});else await db().WhatsappPhoneActivation.create(values,{transaction});
-      if(state==='active'&&(!replacing||previousWabaId!==remote.wabaId||context.replacement?.authorizationId===null))
+      if(state==='active'&&(!replacing||legacyAdoption||previousWabaId!==remote.wabaId||context.replacement?.authorizationId===null))
         await enqueueTemplates({activation:values,actor,transaction,models:db()});
       return {assetId:asset.id,state};
     }));
@@ -158,7 +179,7 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
     let remote=await broker.profile(context);context=await states.resume(input);
     let local=await persist(context,remote,input);
     if(remote.state!=='active'){
-      remote=await broker.activate(context,local.assetId);context=await states.resume(input);
+      remote=await broker.activate(context,local.assetId,local.legacyPhoneDigest);context=await states.resume(input);
       local=await persist(context,remote,input);
     }
     guard();return {requestId:input.requestId,assetId:local.assetId,state:local.state,connected:local.state==='active',profile:remote.profile};

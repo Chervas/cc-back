@@ -106,6 +106,95 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   await assert.rejects(migration.down(qi),/Preserve WhatsApp/);
   report.checks.push('Migration up/up/down/up, exact renewal, native ID rotation and legacy coexistence adoption; another visible phone is rejected without mutating the active asset, routing cutoff remains immutable');
   }
+  if(process.env.WHATSAPP_ROUTING_ONLY_TEST!=='true'){
+    const inactiveLegacy=await models.ClinicMetaAsset.create({metaConnectionId:1,assetType:'whatsapp_phone_number',metaAssetId:'901',
+      metaAssetName:'+34 600 000 901',phoneNumberId:'901',wabaId:'902',assignmentScope:'clinic',clinicaId:73,isActive:false,
+      additionalData:{whatsappConnectionMode:'coexistence',platformType:'CLOUD_API',isOnBizApp:true,whatsapp_channel_role:'primary',
+        requireClinicSelection:true,routing:{purposes:['review_requests'],unavailableAction:'pause'},customLegacyMetadata:{preserved:true}}});
+    const receipt={requestId:randomUUID(),scope:{type:'clinic',id:73},clinicIds:[73],channelRole:'primary',mode:'coexistence'};
+    const candidate={...remote,flowId:receipt.requestId,connectionRef:A.connectionRef(receipt.requestId),scopeKey:'clinic:73',clinicIds:[73],
+      phoneId:'901',wabaId:'902',assetId:null,state:'prepared',activatedAt:null,
+      profile:{...remote.profile,phoneId:'901',displayPhoneNumber:'+34600000901',status:'CONNECTED',platformType:'CLOUD_API',isOnBizApp:true}};
+    await inactiveLegacy.reload();
+    const receiptBefore=JSON.stringify(receipt),legacyBefore=JSON.stringify(inactiveLegacy.toJSON()),legacyFields=inactiveLegacy.toJSON();
+    const otherPhones=async()=>JSON.stringify((await models.ClinicMetaAsset.findAll({order:[['id','ASC']],raw:true})).filter(row=>row.id!==inactiveLegacy.id));
+    const otherPhonesBefore=await otherPhones(),activatedAt=Date.now()-1234;let proof,legacyActivations=0;
+    const adopt=require('../../services/whatsappPhoneActivation.service').createService({models,audit:injectedAudit,guard:()=>{},enabled:()=>true,
+      states:{resume:async()=>receipt},publish:value=>{published=value},enqueueTemplates:async({activation,transaction})=>{
+        if(denyTemplateJob)throw Error('TEMPLATE_JOB_UNAVAILABLE');
+        await models.ActivationTestJob.findOrCreate({where:{authorization_id:activation.authorization_id},defaults:{waba_id:activation.waba_id},transaction});},
+      broker:{profile:async()=>({...candidate}),activate:async(c,assetId,legacyPhoneDigest)=>{
+        legacyActivations++;proof=legacyPhoneDigest;candidate.assetId=assetId;candidate.state='active';candidate.activatedAt=activatedAt;return {...candidate};}}});
+    const candidateFields=structuredClone(candidate),receiptFields=structuredClone(receipt);
+    const rejectLegacy=async label=>{
+      const before=JSON.stringify((await inactiveLegacy.reload()).toJSON());
+      await assert.rejects(adopt.persist(receipt,candidate,actor),{code:'whatsapp_authorization_conflict'},label);
+      assert.equal(JSON.stringify((await inactiveLegacy.reload()).toJSON()),before,label+' preserves legacy row');
+      assert.equal(await models.ActivationTestJob.count({where:{authorization_id:receipt.requestId}}),0,label+' creates no template job');
+    };
+    for(const [label,patch] of [
+      ['already active',{isActive:true}],['authorization exists',{whatsappAuthorizationId:randomUUID()}],
+      ['different displayed number',{metaAssetName:'+34600000999'}],['missing displayed number',{metaAssetName:null}],
+      ['wrong local role',{additionalData:{...legacyFields.additionalData,whatsapp_channel_role:'secondary'}}],
+      ['wrong local coexistence',{additionalData:{...legacyFields.additionalData,isOnBizApp:false}}],
+      ...['brokerManaged','activationState','whatsappManualDisconnect','whatsappArchive','routing_disabled']
+        .flatMap(key=>[true,null,false].map(value=>[key+'='+value,{additionalData:{...legacyFields.additionalData,[key]:value}}])),
+    ]){
+      await inactiveLegacy.update(patch,{silent:true});await rejectLegacy(label);
+      await inactiveLegacy.update({isActive:false,whatsappAuthorizationId:null,metaAssetName:legacyFields.metaAssetName,
+        additionalData:legacyFields.additionalData},{silent:true});
+    }
+    for(const [label,patch] of [['different broker asset',{assetId:inactiveLegacy.id+10000}],
+      ['wrong remote role',{channelRole:'secondary'}],['wrong remote coexistence',{profile:{...candidateFields.profile,isOnBizApp:false}}],
+      ['unknown remote platform',{profile:{...candidateFields.profile,platformType:null}}],['missing activation time',{state:'active',assetId:inactiveLegacy.id,activatedAt:null}],
+      ['active broker missing asset',{state:'active',assetId:null,activatedAt:Date.now()}]]){
+      Object.assign(candidate,patch);await rejectLegacy(label);Object.assign(candidate,structuredClone(candidateFields));
+    }
+    for(const mode of [undefined,'cloud_api']){
+      receipt.mode=mode;await rejectLegacy('non-coexistence receipt');Object.assign(receipt,receiptFields);
+    }
+    receipt.channelRole='secondary';await rejectLegacy('changed signed role');Object.assign(receipt,receiptFields);
+    for(const state of ['prepared','active','archived','superseded']){
+      const historyId=randomUUID();await models.WhatsappPhoneActivation.create({authorization_id:historyId,asset_id:inactiveLegacy.id,
+        scope_type:'clinic',scope_id:73,clinic_ids:[73],connection_ref:A.connectionRef(historyId),phone_id:'901',waba_id:'902',state,
+        profile:candidate.profile,message_not_before:new Date(),updated_by:actor.userId});
+      await rejectLegacy(state+' activation history');await models.WhatsappPhoneActivation.destroy({where:{authorization_id:historyId}});
+    }
+    for(const route of [{clinic_id:71,role:'primary'},{clinic_id:73,role:'secondary'}]){
+      const binding=await models.WhatsappChannelBinding.create({asset_id:inactiveLegacy.id,...route});
+      await rejectLegacy('incompatible active binding');await binding.destroy();
+    }
+    const prepared=await adopt.persist(receipt,candidate,actor);
+    assert.equal(prepared.assetId,inactiveLegacy.id);assert.equal(prepared.state,'prepared');
+    assert.equal(JSON.stringify((await inactiveLegacy.reload()).toJSON()),legacyBefore);
+    assert.equal(await models.WhatsappPhoneActivation.count({where:{asset_id:inactiveLegacy.id}}),0);
+    const auditsBefore=await models.PlatformAuditEvent.count(),catalogBefore=JSON.stringify(published);
+    denyAudit=true;await assert.rejects(adopt.complete({...actor,requestId:receipt.requestId}),/AUDIT_OFFLINE/);denyAudit=false;
+    assert.equal(JSON.stringify((await inactiveLegacy.reload()).toJSON()),legacyBefore);
+    assert.equal(await models.WhatsappPhoneActivation.count({where:{asset_id:inactiveLegacy.id}}),0);
+    assert.equal(await models.PlatformAuditEvent.count(),auditsBefore);
+    assert.equal(JSON.stringify(published),catalogBefore);
+    denyTemplateJob=true;await assert.rejects(adopt.complete({...actor,requestId:receipt.requestId}),/TEMPLATE_JOB_UNAVAILABLE/);denyTemplateJob=false;
+    assert.equal(JSON.stringify((await inactiveLegacy.reload()).toJSON()),legacyBefore);
+    assert.equal(await models.WhatsappPhoneActivation.count({where:{asset_id:inactiveLegacy.id}}),0);
+    assert.equal(await models.PlatformAuditEvent.count(),auditsBefore);
+    assert.equal(await models.ActivationTestJob.count({where:{authorization_id:receipt.requestId}}),0);
+    assert.equal(JSON.stringify(published),catalogBefore);
+    const adopted=await adopt.complete({...actor,requestId:receipt.requestId});
+    assert.equal(adopted.connected,true);assert.equal(adopted.assetId,inactiveLegacy.id);assert.equal(legacyActivations,1);
+    assert.equal(proof,require('node:crypto').createHash('sha256').update('34600000901').digest('hex'));
+    assert.equal(JSON.stringify(receipt),receiptBefore);
+    await inactiveLegacy.reload();assert.equal(inactiveLegacy.metaConnectionId,1);assert.equal(inactiveLegacy.whatsappAuthorizationId,receipt.requestId);
+    assert.equal(inactiveLegacy.additionalData.requireClinicSelection,true);
+    assert.deepEqual(inactiveLegacy.additionalData.routing,{purposes:['review_requests'],unavailableAction:'pause'});
+    assert.deepEqual(inactiveLegacy.additionalData.customLegacyMetadata,{preserved:true});
+    await adopt.complete({...actor,requestId:receipt.requestId});assert.equal(legacyActivations,1);
+    assert.equal(await models.WhatsappPhoneActivation.count({where:{asset_id:inactiveLegacy.id}}),1);
+    assert.equal((await models.WhatsappPhoneActivation.findByPk(receipt.requestId)).message_not_before.getTime(),activatedAt);
+    assert.equal(await models.ActivationTestJob.count({where:{authorization_id:receipt.requestId}}),1);
+    assert.equal(await models.PlatformAuditEvent.count(),auditsBefore+1);assert.equal(await otherPhones(),otherPhonesBefore);
+    report.checks.push('Exact inactive legacy clinic coexistence adopts its saved receipt and asset without changing signed context, routing, metadata or other phones; rejects history, explicit blocks, foreign roles/targets and bindings; audit/template rollback, broker cutoff and replay are verified');
+  }
   const own=await models.ClinicMetaAsset.create({metaConnectionId:1,assetType:'whatsapp_phone_number',metaAssetId:'402',phoneNumberId:'402',wabaId:'302',assignmentScope:'clinic',clinicaId:71,isActive:true,additionalData:{whatsapp_channel_role:'primary'}});
   const bindings=id=>[{assetId:asset.id,phoneId:asset.phoneNumberId,wabaId:asset.wabaId,sendEnabled:true},...(id===71?[{assetId:own.id,phoneId:'402',wabaId:'302',sendEnabled:true}]:[])];
   let blocked=false,sessionValid=true;
