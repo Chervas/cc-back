@@ -2450,6 +2450,7 @@ async function assertReviewRequestCommunicationAllowed({ list, item = null, conv
     attributes: ['id', 'list_id', 'clinica_id', 'paciente_id', 'custom_fields', 'status', 'selected', 'dispatch_status'],
   }) : null;
   if (item?.id && !bound) deniedScope();
+  require('../lib/review-attribution-hold').assertReviewAttributionClear(bound);
   const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
   const listIds = [...new Set([storedList.clinica_id, ...(Array.isArray(storedList.clinic_ids) ? storedList.clinic_ids : [])]
     .map(positive).filter(Boolean))];

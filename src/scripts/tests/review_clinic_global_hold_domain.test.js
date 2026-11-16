@@ -33,6 +33,7 @@ function harness() {
         if (name === 'crypto' || name === 'sequelize') return require(name);
         if (name === '../lib/whatsappAppointmentEligibility') return eligibility;
         if (name === '../lib/review-care-snapshot') return require('../../lib/review-care-snapshot');
+        if (name === '../lib/review-attribution-hold') return require('../../lib/review-attribution-hold');
         if (name === '../lib/marketing-import-care-date') return require('../../lib/marketing-import-care-date');
         if (name === '../lib/bs-privacy-commercial-preferences') return { assertCommercialAllowed: async () => true };
         if (name === './marketingBulkSends.service') return bulk;
@@ -54,6 +55,38 @@ function harness() {
 }
 const held = error => error.code === 'whatsapp_appointment_nonoperational_clinic_held' && error.retryable === false;
 const unknown = error => error.code === 'review_communication_scope_unverified';
+const attributionHeld = error => error.code === 'review_attribution_held' && error.retryable === false && error.status === 409;
+
+test('a stored request-cycle attribution hold defeats stale caller data without changing its historical clinic or snapshot', async () => {
+  const h = harness(), scope = h.seed(70, { review_request: true }, {
+    item: { paciente_id: 59235, custom_fields: { review_attribution_hold: { reason: 'clinic_attribution_corrected', correctionRef: 'owned-case' } } },
+  });
+  const before = JSON.stringify(scope.item);
+  await assert.rejects(h.bulk.assertReviewRequestCommunicationAllowed({ ...scope, item: { ...scope.item, custom_fields: {} } }), attributionHeld);
+  assert.equal(JSON.stringify(scope.item), before);
+  assert.equal(h.calls.provider, 0); assert.equal(h.calls.write, 0);
+});
+
+test('attribution holds stop reminder, Google rating follow-up, feedback acknowledgement and dispatch before materialization', async () => {
+  const h = harness(), scope = h.seed(70, { review_request: true }, {
+    item: { custom_fields: { review_attribution_hold: { reason: 'source_venue_unverified', correctionRef: 'owned-case' } } },
+  });
+  await assert.rejects(h.bulk.sendReviewRequestReminder({ listId: scope.list.id, itemId: scope.item.id }), attributionHeld);
+  await assert.rejects(h.bulk.__testing.sendReviewRatingFollowUp({ ...scope, rating: 5, clinicId: 70 }), attributionHeld);
+  await assert.rejects(h.bulk.__testing.sendReviewPrivateFeedbackAcknowledgement({ ...scope,
+    triggerMessage: { metadata: { kind: 'review_private_feedback_request' } } }), attributionHeld);
+  await assert.rejects(h.bulk.__testing.sendDispatchItem({ ...scope, template: { name: 'custom_generic' }, clinicConfig: { clinicId: 70 } }), attributionHeld);
+  assert.equal(h.calls.provider, 0); assert.equal(h.calls.write, 0);
+});
+
+test('an attribution hold is fail-closed but does not apply to another recipient or ordinary non-review marketing', async () => {
+  const { assertReviewAttributionClear } = require('../../lib/review-attribution-hold');
+  for (const value of [false, '', [], { active: false }]) assert.throws(() => assertReviewAttributionClear({ custom_fields: { review_attribution_hold: value } }), attributionHeld);
+  assert.doesNotThrow(() => assertReviewAttributionClear({ custom_fields: {} }));
+  const h = harness(), ordinary = h.seed(70, { template_usage: 'marketing' }, { item: { custom_fields: { review_attribution_hold: { reason: 'owned' } } } });
+  assert.equal((await h.bulk.assertReviewRequestCommunicationAllowed(ordinary)).review, false);
+  assert.equal((await h.bulk.assertReviewRequestCommunicationAllowed(h.seed(1))).clinicId, 1);
+});
 
 test('review purpose recognizes stored boolean/string/usage/dispatch variants without changing ordinary marketing', async () => {
   const h = harness();
