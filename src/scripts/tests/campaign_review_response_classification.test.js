@@ -1,5 +1,7 @@
 'use strict';
 
+require('./fixtures/security_offline_runtime.cjs');
+
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { Op } = require('sequelize');
@@ -150,9 +152,12 @@ test('resolver un número erróneo exige un teléfono realmente distinto y deja 
 
 test('adjunta restricciones sin consultar timestamps virtuales como columnas reales', async () => {
   const originalFindAll = db.MarketingContactOptOut.findAll;
+  const originalDocuments = db.PatientConsentDocument.findAll;
   let selectedAttributes = [];
   let selectedScopes = [];
   try {
+    // No signed privacy refusal in this fixture; never query a real database.
+    db.PatientConsentDocument.findAll = async () => [];
     db.MarketingContactOptOut.findAll = async (options) => {
       selectedAttributes = options.attributes;
       selectedScopes = options.where.scope[Op.in];
@@ -190,5 +195,6 @@ test('adjunta restricciones sin consultar timestamps virtuales como columnas rea
     assert.equal(restrictions.get(91).care_communications_opt_out, true);
   } finally {
     db.MarketingContactOptOut.findAll = originalFindAll;
+    db.PatientConsentDocument.findAll = originalDocuments;
   }
 });

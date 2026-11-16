@@ -2432,7 +2432,7 @@ function isReviewRequestList(list) {
  * Re-read persisted recipient/list scope: a group sender or caller clinic is not
  * authority to release another clinic's recipient. No patient or clinical DML. */
 async function assertReviewRequestCommunicationAllowed({ list, item = null, conversation = null,
-  forceReview = false, templateName = null, channel = null, deliveryClinicId = null } = {}) {
+  forceReview = false, templateName = null, channel = null, deliveryClinicId = null, triggerMessage = null } = {}) {
   const eligibility = require('../lib/whatsappAppointmentEligibility');
   const storedList = list?.id ? await MarketingPatientList.findByPk(list.id, {
     attributes: ['id', 'criteria', 'scope_type', 'clinica_id', 'clinic_ids', 'grupo_clinica_id', 'created_by'],
@@ -2446,13 +2446,54 @@ async function assertReviewRequestCommunicationAllowed({ list, item = null, conv
   }); };
   if (!storedList) deniedScope();
   const bound = item?.id ? await MarketingPatientListItem.findOne({
-    where: { id: item.id, list_id: storedList.id }, attributes: ['id', 'list_id', 'clinica_id', 'paciente_id', 'custom_fields'],
+    where: { id: item.id, list_id: storedList.id },
+    attributes: ['id', 'list_id', 'clinica_id', 'paciente_id', 'custom_fields', 'status', 'selected', 'dispatch_status'],
   }) : null;
   if (item?.id && !bound) deniedScope();
   const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
   const listIds = [...new Set([storedList.clinica_id, ...(Array.isArray(storedList.clinic_ids) ? storedList.clinic_ids : [])]
     .map(positive).filter(Boolean))];
-  await guardReviewCare({ clinicIds: listIds }, storedList, bound ? [bound] : [], { background: true, checkHold: true });
+  let careItems = bound ? [bound] : [];
+  if (bound?.status === 'test_sample' && Number(storedList.criteria?.review_care_version) === 1) {
+    // The sample is deliberately not a patient and has no clinical snapshot.
+    // Revalidate the original selected patient, using only persisted test bindings.
+    // Never accept a caller-supplied sample/source as an alternative to clinical evidence.
+    const fields = asPlainObject(bound.custom_fields);
+    const readTestMessage = id => Message.findByPk(id, {
+      attributes: ['id', 'conversation_id', 'direction', 'metadata'],
+    });
+    let testMessage = triggerMessage?.id ? await readTestMessage(triggerMessage.id) : null;
+    const matchesSample = message => isBulkSendTestMessage(message) && message.direction === 'outbound'
+      && Number(message.conversation_id) === Number(conversation?.id)
+      && Number(message.metadata?.list_id) === Number(storedList.id)
+      && Number(message.metadata?.item_id) === Number(bound.id);
+    if (!matchesSample(testMessage) || !conversation?.id || bound.paciente_id != null
+      || Number(bound.selected) !== 0 || bound.dispatch_status !== 'test_only' || fields.test_sample !== true) deniedScope();
+    const recipient = whatsappService.normalizePhoneNumber(testMessage.metadata.recipient || '');
+    if (testMessage.metadata.kind !== 'mass_campaign_test') {
+      const initialId = positive(testMessage.metadata.trigger_message_id);
+      testMessage = initialId ? await readTestMessage(initialId) : null;
+    }
+    if (!matchesSample(testMessage) || testMessage.metadata.kind !== 'mass_campaign_test' || !recipient
+      || whatsappService.normalizePhoneNumber(testMessage.metadata.recipient || '') !== recipient
+      || !/^[a-f0-9]{64}$/.test(fields.review_test_render_fingerprint || '')
+      || testMessage.metadata.review_test_render_fingerprint !== fields.review_test_render_fingerprint) deniedScope();
+    const sourceId = positive(fields.review_test_source_item_id);
+    if (positive(testMessage.metadata.review_test_source_item_id) !== sourceId) deniedScope();
+    if (fields.review_test_data_mode === 'selected_recipient' && sourceId) {
+      const source = await MarketingPatientListItem.findOne({
+        where: { id: sourceId, list_id: storedList.id },
+        attributes: ['id', 'list_id', 'clinica_id', 'paciente_id', 'custom_fields', 'status'],
+      });
+      if (!source || !positive(source.paciente_id) || source.status === 'test_sample'
+        || Number(source.clinica_id) !== Number(bound.clinica_id)) deniedScope();
+      careItems = [source];
+    } else if (fields.review_test_data_mode === 'explicit_example' && !sourceId) {
+      // No patient data was selected. The guard still checks the campaign creator/clinic.
+      careItems = [];
+    } else deniedScope();
+  }
+  await guardReviewCare({ clinicIds: listIds }, storedList, careItems, { background: true, checkHold: true });
   const multi = ['group', 'multi'].includes(String(storedList.scope_type || '').toLowerCase()) || listIds.length > 1;
   const clinicId = positive(bound?.clinica_id) || (!multi && listIds.length === 1 ? listIds[0] : null);
   const assertClinic = id => eligibility.assertClinicNonOperationalAllowed(id, {
@@ -2867,7 +2908,7 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
   if (!isReviewRequestList(list) || triggerMetadata.kind !== 'review_private_feedback_request') {
     return { sent: false, reason: 'not_private_feedback_reply' };
   }
-  const allowedScope = await assertReviewRequestCommunicationAllowed({ list, item, conversation, forceReview: true, channel: 'whatsapp' });
+  const allowedScope = await assertReviewRequestCommunicationAllowed({ list, item, conversation, triggerMessage, forceReview: true, channel: 'whatsapp' });
 
   const isTestSend = isBulkSendTestMessage(triggerMessage);
   const ackEventType = isTestSend ? 'review_test_private_feedback_ack_sent' : 'review_private_feedback_ack_sent';
@@ -2914,7 +2955,7 @@ async function sendReviewPrivateFeedbackAcknowledgement({ list, item, conversati
   let clinicConfig = null;
 
   try {
-    await assertReviewRequestCommunicationAllowed({ list, item, conversation, forceReview: true, channel: 'whatsapp' });
+    await assertReviewRequestCommunicationAllowed({ list, item, conversation, triggerMessage, forceReview: true, channel: 'whatsapp' });
     clinicConfig = await whatsappService.getClinicConfig(clinicId, {
       purpose: getWhatsappRoutingPurposeForList(list),
     });
@@ -3084,7 +3125,7 @@ async function sendReviewRatingFollowUpOrStoreInlineFeedback({ list, item, conve
 
 async function sendReviewRatingFollowUp({ list, item, conversation, rating, clinicId, triggerMessage, occurredAt }) {
   if (!isReviewRequestList(list) || !rating) return { sent: false, reason: 'not_review_rating' };
-  const allowedScope = await assertReviewRequestCommunicationAllowed({ list, item, conversation, forceReview: true, channel: 'whatsapp' });
+  const allowedScope = await assertReviewRequestCommunicationAllowed({ list, item, conversation, triggerMessage, forceReview: true, channel: 'whatsapp' });
   clinicId = allowedScope.clinicId;
 
   const triggerMetadata = asPlainObject(triggerMessage?.metadata);
@@ -3135,6 +3176,22 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
     }
   }
 
+  if (isTestSend && triggerMessage?.id) {
+    // A process may stop after persisting/sending the message but before its
+    // contact event. Its transport owns that message; never send a second one.
+    const recordedMessage = await Message.findOne({
+      where: {
+        conversation_id: conversation.id, direction: 'outbound',
+        'metadata.source': 'marketing_bulk_sends', 'metadata.kind': followUpKind,
+        'metadata.list_id': Number(list.id), 'metadata.item_id': Number(item.id),
+        'metadata.trigger_message_id': Number(triggerMessage.id), 'metadata.test_send': true,
+      },
+      order: [['id', 'DESC']],
+    });
+    if (recordedMessage) return { sent: false, reason: 'already_recorded', status: recordedMessage.status,
+      app_message_id: recordedMessage.id };
+  }
+
   const clinic = await loadClinicForTemplateVariables(clinicId);
   const criteria = asPlainObject(list.criteria);
   const googleReviewUrl = normalizeText(clinic?.url_dejar_resena || criteria?.link_tracking?.google_review_url || '');
@@ -3182,7 +3239,7 @@ async function sendReviewRatingFollowUp({ list, item, conversation, rating, clin
   let reminderSender = null;
 
   try {
-    await assertReviewRequestCommunicationAllowed({ list, item, conversation, forceReview: true, channel: 'whatsapp' });
+    await assertReviewRequestCommunicationAllowed({ list, item, conversation, triggerMessage, forceReview: true, channel: 'whatsapp' });
     const clinicConfig = await whatsappService.getClinicConfig(clinicId, {
       purpose: getWhatsappRoutingPurposeForList(list),
     });
@@ -10907,21 +10964,27 @@ async function materializeMessageStatusFromWebhook({ message, status, mappedStat
 
 async function materializeTestInboundReply({ list, item, conversation, inboundMessage, triggerMessage, repliedAt, ratingDetails }) {
   const previous = await MarketingPatientContactEvent.findAll({
-    where: { list_id: list.id, item_id: item.id, event_type: 'mass_campaign_test_replied' },
+    where: { list_id: list.id, item_id: item.id, event_type: { [Op.in]: [
+      'mass_campaign_test_replied', 'review_test_rating_received', 'mass_campaign_test_reply_completed',
+    ] } },
     order: [['occurred_at', 'DESC']],
-    limit: 25,
+    limit: 75,
   });
-  if (previous.some(event => Number(event.payload?.inbound_message_id) === Number(inboundMessage.id))) {
-    return { applied: false, reason: 'test_reply_already_processed', test_send: true };
+  const sameInbound = event => Number(event.payload?.inbound_message_id) === Number(inboundMessage.id);
+  if (previous.some(event => event.event_type === 'mass_campaign_test_reply_completed' && sameInbound(event))) {
+    // A duplicate still belongs to the test circuit, never to appointment AI.
+    return { applied: true, reason: 'test_reply_already_processed', test_send: true, list_id: list.id, item_id: item.id };
   }
   const rating = isReviewRequestList(list) && isReviewRatingTriggerMessage(triggerMessage)
     ? ratingDetails.rating || null : null;
-  await MarketingPatientContactEvent.create({
-    list_id: list.id, item_id: item.id, paciente_id: null,
-    event_type: 'mass_campaign_test_replied', channel: 'whatsapp',
-    payload: { inbound_message_id: inboundMessage.id, trigger_message_id: triggerMessage.id, test_send: true, rating },
-    occurred_at: repliedAt,
-  });
+  if (!previous.some(event => event.event_type === 'mass_campaign_test_replied' && sameInbound(event))) {
+    await MarketingPatientContactEvent.create({
+      list_id: list.id, item_id: item.id, paciente_id: null,
+      event_type: 'mass_campaign_test_replied', channel: 'whatsapp',
+      payload: { inbound_message_id: inboundMessage.id, trigger_message_id: triggerMessage.id, test_send: true, rating },
+      occurred_at: repliedAt,
+    });
+  }
   const privateFeedback = await materializeReviewPrivateFeedback({
     list, item, inboundMessage, triggerMessage, occurredAt: repliedAt,
   });
@@ -10931,12 +10994,14 @@ async function materializeTestInboundReply({ list, item, conversation, inboundMe
       list, item, conversation, inboundMessage, triggerMessage, occurredAt: repliedAt,
     });
   } else if (rating) {
-    await MarketingPatientContactEvent.create({
-      list_id: list.id, item_id: item.id, paciente_id: null,
-      event_type: 'review_test_rating_received', channel: 'whatsapp',
-      payload: { inbound_message_id: inboundMessage.id, trigger_message_id: triggerMessage.id, test_send: true, rating },
-      occurred_at: repliedAt,
-    });
+    if (!previous.some(event => event.event_type === 'review_test_rating_received' && sameInbound(event))) {
+      await MarketingPatientContactEvent.create({
+        list_id: list.id, item_id: item.id, paciente_id: null,
+        event_type: 'review_test_rating_received', channel: 'whatsapp',
+        payload: { inbound_message_id: inboundMessage.id, trigger_message_id: triggerMessage.id, test_send: true, rating },
+        occurred_at: repliedAt,
+      });
+    }
     followUp = await sendReviewRatingFollowUpOrStoreInlineFeedback({
       list, item, conversation, rating,
       clinicId: conversation.clinic_id,
@@ -10944,6 +11009,14 @@ async function materializeTestInboundReply({ list, item, conversation, inboundMe
       inlineFeedbackReason: ratingDetails.reason || '',
     });
   }
+  // Persist completion only after the continuation. A failed guard/read can be
+  // retried without duplicating the rating; send/ack retain their own deduplication.
+  await MarketingPatientContactEvent.create({
+    list_id: list.id, item_id: item.id, paciente_id: null,
+    event_type: 'mass_campaign_test_reply_completed', channel: 'whatsapp',
+    payload: { inbound_message_id: inboundMessage.id, trigger_message_id: triggerMessage.id, test_send: true },
+    occurred_at: new Date(),
+  });
   return { applied: true, test_send: true, list_id: list.id, item_id: item.id, review_rating: rating, follow_up: followUp };
 }
 

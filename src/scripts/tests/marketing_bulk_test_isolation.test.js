@@ -15,10 +15,11 @@ function functionSource(name, next) {
 function fixture(extra = {}) {
   const events = [], sends = [], updates = [];
   const context = {
+    Op: require('sequelize').Op,
     asPlainObject: value => value || {}, normalizeKey: value => String(value || '').toLowerCase(),
     normalizeDispatchContext: value => value, isReviewRequestList: () => true,
     isReviewRatingTriggerMessage: message => message.metadata.kind === 'mass_campaign_test',
-    MarketingPatientContactEvent: { findAll: async () => [], create: async event => events.push(event) },
+    MarketingPatientContactEvent: { findAll: async () => events, create: async event => events.push(event) },
     MarketingPatientListItem: { findOne() { throw Error('test must not load or mutate a real recipient'); } },
     materializeReviewPrivateFeedback: async () => ({ applied: false }),
     sendReviewPrivateFeedbackAcknowledgement: async () => { sends.push('ack'); },
@@ -60,17 +61,34 @@ test('a test rating still gets its follow-up but never changes the example patie
   assert.equal(result.test_send, true);
   assert.equal(f.sends.length, 1);
   assert.equal(f.sends[0].clinicId, 59);
-  assert.deepEqual(f.events.map(event => event.event_type), ['mass_campaign_test_replied', 'review_test_rating_received']);
+  assert.deepEqual(f.events.map(event => event.event_type), ['mass_campaign_test_replied', 'review_test_rating_received', 'mass_campaign_test_reply_completed']);
   assert(f.events.every(event => event.paciente_id === null));
 });
 
 test('a duplicate test inbound does not send a second follow-up', async () => {
   const f = fixture({ MarketingPatientContactEvent: {
-    findAll: async () => [{ payload: { inbound_message_id: 200 } }], create() { throw Error('duplicate event'); },
+    findAll: async () => [{ event_type: 'mass_campaign_test_reply_completed', payload: { inbound_message_id: 200 } }], create() { throw Error('duplicate event'); },
   } });
   const result = await f.context.materializeTestInboundReply({ list: { id: 1 }, item: { id: 2 }, inboundMessage: { id: 200 } });
   assert.equal(result.reason, 'test_reply_already_processed');
+  assert.equal(result.applied, true);
   assert.equal(f.sends.length, 0);
+});
+
+test('a continuation failing after the rating resumes on retry without a second rating or patient mutation',async()=>{
+  let attempts=0;
+  const f=fixture({sendReviewRatingFollowUpOrStoreInlineFeedback:async()=>{
+    if(++attempts===1)throw Error('temporary_guard_read_failure');
+    return {sent:true};
+  }});
+  const args={list:{id:1},item:{id:2},conversation:{id:3,clinic_id:44},inboundMessage:{id:200},
+    triggerMessage:{id:199,metadata:{kind:'mass_campaign_test'}},repliedAt:new Date(),ratingDetails:{rating:5}};
+  await assert.rejects(f.context.materializeTestInboundReply(args),/temporary_guard_read_failure/);
+  assert.equal(f.events.length,2);
+  assert.equal((await f.context.materializeTestInboundReply(args)).applied,true);
+  assert.equal(f.events.length,3);assert.equal(attempts,2);
+  assert.equal((await f.context.materializeTestInboundReply(args)).reason,'test_reply_already_processed');
+  assert.equal(attempts,2);assert(f.events.every(event=>event.paciente_id===null));
 });
 
 test('synthetic rows cannot change totals, sent, delivered, replied, failed or exclusions', () => {
