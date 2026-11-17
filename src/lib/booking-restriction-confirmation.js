@@ -67,7 +67,10 @@ function effectiveSelectedProfile(profile, selections, doctorOnly = false) {
 
 function assessment({ profile: raw, context, start: rawStart, selections = {}, additionalStaffIds = [],
   clinicId = null, clinicName = '', treatmentId = null, treatmentName = '', patientId = null, appointmentId = null,
-  actorId = null, previous = null, acknowledgement = null, eligible = true, canonicalSolution = null, doctorOnly = false }) {
+  actorId = null, previous = null, acknowledgement = null, eligible = true, canonicalSolution = null, doctorOnly = false,
+  prospectivePatientIdentity = null }) {
+  if (prospectivePatientIdentity != null && (typeof prospectivePatientIdentity !== 'string'
+    || !/^[a-f0-9]{64}$/.test(prospectivePatientIdentity) || appointmentId != null || previous != null)) throw selectionError();
   const profile = doctorOnly ? normalizeDoctorOnlyBookingProfile(raw) : normalizeBookingProfile(raw), chosen = normalizedSelections(profile, selections);
   const start = new Date(rawStart), end = new Date(+start + bookingProfileDurationMinutes(profile) * 60000);
   if (!Number.isFinite(+start)) throw selectionError();
@@ -254,7 +257,8 @@ function assessment({ profile: raw, context, start: rawStart, selections = {}, a
   // Linked moves must seal evidence for unrestricted members too: a changed
   // earlier phase can invalidate the confirmation for the whole move.
   const expected = eligible && explicit && scopeValid && !!solution && Number.isSafeInteger(Number(actorId)) && Number(actorId) > 0 ? createHash('sha256').update(canonical({ schema: 'manual-booking-restrictions/1', actor: Number(actorId),
-    clinic: Number(clinicId), treatment: id(treatmentId), patient: id(patientId), appointment: id(appointmentId),
+    clinic: Number(clinicId), treatment: id(treatmentId),
+    patient: prospectivePatientIdentity ? { prospective_identity: prospectivePatientIdentity } : id(patientId), appointment: id(appointmentId),
     previous: previous ? [previous.inicio, previous.fin, previous.estado, previous.updated_at] : null,
     profile, selections: chosen, additional_staff: additionalStaffIds, range: [start.toISOString(), end.toISOString()],
     solution, clinicWindows: stableRows(context.clinicWindows), doctors: resourceFacts(context.doctors), installations: resourceFacts(context.installations),

@@ -48,6 +48,7 @@ const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
 const { getIO } = require('../services/socket.service');
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
+const { normalizeAppointmentClinicId, withAppointmentPatientIdentity } = require('../lib/appointment-patient-identity');
 const {
     createAppointmentWithPatientLanguage,
     applyExplicitPatientLanguage,
@@ -431,25 +432,27 @@ function attachResolvedAppointmentPricesToCitas(citas) {
     return citas;
 }
 
-async function generateUniquePacientePublicId() {
+async function generateUniquePacientePublicId(transaction = null) {
     for (let i = 0; i < 8; i++) {
         const publicId = generatePacientePublicId();
-        const existing = await Paciente.findOne({ where: { public_id: publicId }, attributes: ['id_paciente'] });
+        const existing = await Paciente.findOne({ where: { public_id: publicId }, attributes: ['id_paciente'], ...(transaction ? { transaction } : {}) });
         if (!existing) return publicId;
     }
     throw new Error('paciente_public_id_generation_failed');
 }
 
-async function findPacienteByIdentifier(id) {
+async function findPacienteByIdentifier(id, transaction = null) {
     const value = String(id || '').trim();
     if (!value) return null;
     if (/^\d+$/.test(value)) {
         return Paciente.findByPk(Number(value), {
+            ...(transaction ? { transaction } : {}),
             include: [{ model: db.PacienteClinica, as: 'clinicasVinculadas', required: false }]
         });
     }
     const publicIds = value.startsWith('pat_') ? [value, `pac_${value.slice(4)}`] : [value];
     return Paciente.findOne({
+        ...(transaction ? { transaction } : {}),
         where: { public_id: { [Op.in]: publicIds } },
         include: [{ model: db.PacienteClinica, as: 'clinicasVinculadas', required: false }]
     });
@@ -1215,16 +1218,17 @@ const DEFAULT_TIMEZONE = 'Europe/Madrid';
 /**
  * Helper: asegurar vínculo paciente-clínica sin romper por duplicados
  */
-async function ensurePacienteClinica({ paciente_id, clinica_id, es_principal }) {
+async function ensurePacienteClinica({ paciente_id, clinica_id, es_principal, transaction = null }) {
     try {
         const [vinculo] = await db.PacienteClinica.findOrCreate({
+            ...(transaction ? { transaction } : {}),
             where: { paciente_id, clinica_id },
             defaults: { es_principal }
         });
         return vinculo;
     } catch (err) {
         if (err && err.name === 'SequelizeUniqueConstraintError') {
-            return db.PacienteClinica.findOne({ where: { paciente_id, clinica_id } });
+            return db.PacienteClinica.findOne({ where: { paciente_id, clinica_id }, ...(transaction ? { transaction } : {}) });
         }
         throw err;
     }
@@ -1233,24 +1237,26 @@ async function ensurePacienteClinica({ paciente_id, clinica_id, es_principal }) 
 /**
  * Helper: encontrar o crear paciente por teléfono/email en una clínica
  */
-async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, email, id_paciente }) {
+async function findOrCreatePaciente({ clinica_id: requestedClinicId, nombre, apellidos, telefono, email, id_paciente, transaction = null }) {
+    const clinica_id = normalizeAppointmentClinicId(requestedClinicId);
     if (!telefono && !email && !id_paciente) {
         throw new Error('Se requiere teléfono o email para crear el paciente');
     }
 
     // Si viene un id_paciente, vincularlo si hace falta y devolverlo
     if (id_paciente) {
-        const existente = await findPacienteByIdentifier(id_paciente);
+        const existente = await findPacienteByIdentifier(id_paciente, transaction);
         if (!existente) {
             throw new Error('Paciente no encontrado');
         }
-        const yaVinculado = existente.clinica_id === clinica_id ||
-            (existente.clinicasVinculadas || []).some(vc => vc.clinica_id === clinica_id);
+        const yaVinculado = Number(existente.clinica_id) === clinica_id ||
+            (existente.clinicasVinculadas || []).some(vc => Number(vc.clinica_id) === clinica_id);
         if (!yaVinculado) {
             await ensurePacienteClinica({
                 paciente_id: existente.id_paciente,
                 clinica_id,
-                es_principal: false
+                es_principal: false,
+                transaction,
             });
         }
         return { patient: existente, created: false };
@@ -1276,7 +1282,11 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
     }
 
     const candidatos = await Paciente.findAll({
-        where: { [Op.or]: whereContacto },
+        ...(transaction ? { transaction } : {}),
+        where: { [Op.and]: [
+            { [Op.or]: whereContacto },
+            { [Op.or]: [{ clinica_id }, { '$clinicasVinculadas.clinica_id$': clinica_id }] },
+        ] },
         include: [
             {
                 model: db.PacienteClinica,
@@ -1284,6 +1294,12 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
                 required: false
             }
         ],
+        // Scope the joined row before LIMIT; otherwise many foreign contact
+        // matches can hide the existing local/linked patient from resolution.
+        subQuery: false,
+        // Keep an existing identity stable even if earlier failed attempts
+        // left several contact matches. This does not merge or delete them.
+        order: [['id_paciente', 'ASC']],
         limit: 20
     });
     const paciente = candidatos.find((row) => {
@@ -1295,25 +1311,26 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
             return false;
         }
         return (
-        row.clinica_id === clinica_id ||
-        (row.clinicasVinculadas || []).some((vc) => vc.clinica_id === clinica_id)
+        Number(row.clinica_id) === clinica_id ||
+        (row.clinicasVinculadas || []).some((vc) => Number(vc.clinica_id) === clinica_id)
         );
     }) || null;
     if (paciente) {
         // Asegurar vínculo explícito
-        const yaVinculado = (paciente.clinicasVinculadas || []).some(vc => vc.clinica_id === clinica_id);
+        const yaVinculado = (paciente.clinicasVinculadas || []).some(vc => Number(vc.clinica_id) === clinica_id);
         if (!yaVinculado) {
             await ensurePacienteClinica({
                 paciente_id: paciente.id_paciente,
                 clinica_id,
-                es_principal: false
+                es_principal: false,
+                transaction,
             });
         }
         return { patient: paciente, created: false };
     }
 
     const nuevoPaciente = await Paciente.create({
-        public_id: await generateUniquePacientePublicId(),
+        public_id: await generateUniquePacientePublicId(transaction),
         nombre: normalizeHumanName(nombre || 'Sin nombre') || 'Sin nombre',
         apellidos: normalizeHumanName(apellidos || ''),
         telefono_movil: normalizedPhone || telefono || '',
@@ -1322,12 +1339,13 @@ async function findOrCreatePaciente({ clinica_id, nombre, apellidos, telefono, e
         // Así un fallo al crear la cita no deja un cambio de idioma persistido.
         idioma_preferido: 'es',
         clinica_id: clinica_id
-    });
+    }, transaction ? { transaction } : undefined);
 
     await ensurePacienteClinica({
         paciente_id: nuevoPaciente.id_paciente,
         clinica_id,
-        es_principal: true
+        es_principal: true,
+        transaction,
     });
 
     return { patient: nuevoPaciente, created: true };
@@ -1944,7 +1962,7 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
 exports.createCita = asyncHandler(async (req, res) => {
     try {
         const {
-            clinica_id,
+            clinica_id: requestedClinicId,
             inicio,
             fin,
             duracion_min = null,
@@ -1967,9 +1985,10 @@ exports.createCita = asyncHandler(async (req, res) => {
         } = req.body || {};
 
         const hasExplicitDurationChoice = Object.hasOwn(req.body || {}, 'duration_minutes') || Object.hasOwn(req.body || {}, 'phase_durations');
-        if (!clinica_id || !inicio || (!fin && !duracion_min && !(tratamiento_id && hasExplicitDurationChoice)) || !datosPaciente) {
+        if (!requestedClinicId || !inicio || (!fin && !duracion_min && !(tratamiento_id && hasExplicitDurationChoice)) || !datosPaciente) {
             return res.status(400).json({ message: 'clinica_id, inicio, (fin o duracion_min) y paciente son obligatorios' });
         }
+        const clinica_id = normalizeAppointmentClinicId(requestedClinicId);
 
         // Validar antes de reservar recursos o modificar el paciente. El campo
         // ausente es deliberadamente distinto de enviar `es` explícitamente.
@@ -2159,119 +2178,130 @@ exports.createCita = asyncHandler(async (req, res) => {
             // wantsForce && canForce -> seguimos
         }
 
-        // Resolver/crear paciente
-        const { patient: paciente } = await findOrCreatePaciente({
-            clinica_id,
-            nombre: datosPaciente.nombre,
-            apellidos: datosPaciente.apellidos,
-            telefono: datosPaciente.telefono,
-            email: datosPaciente.email,
-            id_paciente: datosPaciente.id_paciente || datosPaciente.id,
-        });
-
-        const shouldAutoLinkLead = !lead
-            && String(tipo_cita || '').trim().toLowerCase() !== 'continuacion';
-        const autoLinkPhone = datosPaciente.telefono || paciente?.telefono_movil || null;
-        if (shouldAutoLinkLead) {
-            lead = await findUniqueAppointmentLead({
-                models: db, clinicId: clinica_id, phone: autoLinkPhone, patientId: paciente.id_paciente,
-            });
-            resolvedLeadIntakeId = parsePositiveInt(lead?.id) || null;
-        }
-
-        // La cita y un cambio explícito de idioma forman una única unidad. Si
-        // falla la actualización del paciente, la transacción elimina también
-        // la cita y ningún flujo puede arrancar con el idioma anterior.
-        const createOptions = {
-            sequelize: db.sequelize,
-            AppointmentModel: { create: async (values, { transaction }) => {
-                // The legacy writer is still live while profile flags are off.
-                // Recheck within its transaction before inserting a new row;
-                // a self-authored completed appointment cannot prove its care.
-                if (!pastHistoryOnly && values.tratamiento_id) {
-                    const treatment = await loadScopedTreatment({ db, treatmentId: values.tratamiento_id, clinic: clinica, transaction });
-                    requireOperationalProfile(treatment, { durationSelection });
-                    await assertTreatmentBookingVisibility({ db, treatment, appointmentValues: values, transaction });
-                }
-                return CitaPaciente.create(values, { transaction });
-            } },
-            appointmentValues: {
+        // Patient identity, history number, links and booking either commit
+        // together or leave no patient behind after a warning/error/cancel.
+        const { cita, visitBirth } = await withAppointmentPatientIdentity({
+            db, clinic: clinica, patient: datosPaciente, leadId: explicitLeadIntakeId,
+            resolve: transaction => findOrCreatePaciente({
                 clinica_id,
-                paciente_id: paciente.id_paciente,
-                lead_intake_id: resolvedLeadIntakeId || null,
-                doctor_id,
-                instalacion_id,
-                tratamiento_id,
-                campana_id: campana_id || lead?.campana_id || null,
-                created_by: req.userData?.userId || null,
-                updated_by: req.userData?.userId || null,
-                titulo: datosPaciente.titulo || null,
-                nota: nota || null,
-                motivo: motivo || (isHistoricalRegistration ? 'Cita pasada registrada manualmente desde Leads' : null),
-                tipo_cita,
-                estado: estadoRaw,
-                inicio: inicioDate,
-                fin: finDate,
-                source_system: isHistoricalRegistration
-                    ? 'lead_resolution_historical'
-                    : cleanOptionalString(source_system, 40),
-                source_reference: cleanOptionalString(source_reference, 120),
-                import_metadata: Object.keys(appointmentImportMetadata).length ? appointmentImportMetadata : null,
-            },
-            patient: paciente,
-            requestedLanguage: datosPaciente.idioma_preferido,
-            afterPersist: async (appointment, transaction) => {
-                await require('../services/newPatientWhatsappConversation.service').link({
-                    db, patient: paciente, clinicId: clinica_id, transaction, appointment,
-                });
-                if (!bookingEnabled || pastHistoryOnly) {
-                    await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, appointment, transaction });
+                nombre: datosPaciente.nombre,
+                apellidos: datosPaciente.apellidos,
+                telefono: datosPaciente.telefono,
+                email: datosPaciente.email,
+                id_paciente: datosPaciente.id_paciente || datosPaciente.id,
+                transaction,
+            }),
+            work: async ({ patient: paciente, prospectivePatientIdentity, transaction }) => {
+                const shouldAutoLinkLead = !lead
+                    && String(tipo_cita || '').trim().toLowerCase() !== 'continuacion';
+                const autoLinkPhone = datosPaciente.telefono || paciente?.telefono_movil || null;
+                if (shouldAutoLinkLead) {
+                    lead = await findUniqueAppointmentLead({
+                        models: db, clinicId: clinica_id, phone: autoLinkPhone, patientId: paciente.id_paciente,
+                        transaction,
+                    });
+                    resolvedLeadIntakeId = parsePositiveInt(lead?.id) || null;
                 }
-                lead = await recordCreatedAppointmentLead({ models: db, lead, appointment, transaction,
-                    autoLinkPhone: !explicitLeadIntakeId && lead ? autoLinkPhone : null,
-                    explicitLeadIntakeId,
-                    actorId: req.userData?.userId,
-                });
-                await enqueueCreatedAppointmentCrmSignals({ lead, appointment, transaction });
+
+                // La cita y un cambio explícito de idioma forman una única unidad. Si
+                // falla la actualización del paciente, la transacción elimina también
+                // la cita y ningún flujo puede arrancar con el idioma anterior.
+                const createOptions = {
+                    sequelize: db.sequelize,
+                    transaction,
+                    AppointmentModel: { create: async (values, { transaction }) => {
+                        // The legacy writer is still live while profile flags are off.
+                        // Recheck within its transaction before inserting a new row;
+                        // a self-authored completed appointment cannot prove its care.
+                        if (!pastHistoryOnly && values.tratamiento_id) {
+                            const treatment = await loadScopedTreatment({ db, treatmentId: values.tratamiento_id, clinic: clinica, transaction });
+                            requireOperationalProfile(treatment, { durationSelection });
+                            await assertTreatmentBookingVisibility({ db, treatment, appointmentValues: values, transaction });
+                        }
+                        return CitaPaciente.create(values, { transaction });
+                    } },
+                    appointmentValues: {
+                        clinica_id,
+                        paciente_id: paciente.id_paciente,
+                        lead_intake_id: resolvedLeadIntakeId || null,
+                        doctor_id,
+                        instalacion_id,
+                        tratamiento_id,
+                        campana_id: campana_id || lead?.campana_id || null,
+                        created_by: req.userData?.userId || null,
+                        updated_by: req.userData?.userId || null,
+                        titulo: datosPaciente.titulo || null,
+                        nota: nota || null,
+                        motivo: motivo || (isHistoricalRegistration ? 'Cita pasada registrada manualmente desde Leads' : null),
+                        tipo_cita,
+                        estado: estadoRaw,
+                        inicio: inicioDate,
+                        fin: finDate,
+                        source_system: isHistoricalRegistration
+                            ? 'lead_resolution_historical'
+                            : cleanOptionalString(source_system, 40),
+                        source_reference: cleanOptionalString(source_reference, 120),
+                        import_metadata: Object.keys(appointmentImportMetadata).length ? appointmentImportMetadata : null,
+                    },
+                    patient: paciente,
+                    requestedLanguage: datosPaciente.idioma_preferido,
+                    afterPersist: async (appointment, transaction) => {
+                        await require('../services/newPatientWhatsappConversation.service').link({
+                            db, patient: paciente, clinicId: clinica_id, transaction, appointment,
+                        });
+                        if (!bookingEnabled || pastHistoryOnly) {
+                            await require('../services/appointmentConsentEligibility.service').assertClinicalCompletion({ db, appointment, transaction });
+                        }
+                        lead = await recordCreatedAppointmentLead({ models: db, lead, appointment, transaction,
+                            autoLinkPhone: !explicitLeadIntakeId && lead ? autoLinkPhone : null,
+                            explicitLeadIntakeId,
+                            actorId: req.userData?.userId,
+                        });
+                        await enqueueCreatedAppointmentCrmSignals({ lead, appointment, transaction });
+                    },
+                };
+                const visitBirth = bookingEnabled && !pastHistoryOnly && req.body?.booking_request_key !== undefined
+                    ? await require('../services/appointmentVisitManaged.service').current().prepareBirth({
+                        requestKey: req.body.booking_request_key, values: createOptions.appointmentValues, clinic: clinica,
+                        actorId: req.userData?.userId,
+                        profile: selectedDurationProfile || (bookingTreatment ? requireOperationalProfile(bookingTreatment, { durationSelection }) : null),
+                    }) : null;
+                if (bookingEnabled && !pastHistoryOnly) await require('../services/appointmentPatientLinks.service').choiceRequired(
+                    db, { ...createOptions.appointmentValues, patient_link_combined: (selectedDurationProfile?.phases?.length
+                        || bookingTreatment?.clinical_config?.booking_profile?.phases?.length || 0) > 1 }, clinica, req.body?.same_day_choice, transaction);
+                const cita = bookingEnabled && !pastHistoryOnly
+                    ? await mutateAppointmentBooking({
+                        db,
+                        transaction,
+                        appointmentValues: createOptions.appointmentValues,
+                        durationSelection,
+                        additionalStaffIds,
+                        force: parseBool(force),
+                        restrictionConfirmation: { actorId: Number(req.userData?.userId), acknowledgement: req.body?.booking_restriction_acknowledgement,
+                            prospectivePatientIdentity },
+                        selections: req.body?.booking_selection || {},
+                        priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
+                        expectedPlanSha256: req.body?.booking_plan_sha256,
+                        visitBirth,
+                        persist: async ({ values, existing, transaction, sealedBirth }) => {
+                            // Recheck while holding the canonical patient/resource locks:
+                            // two concurrent bookings must not bypass the same-day choice.
+                            if (!sealedBirth) await require('../services/appointmentPatientLinks.service').choiceRequired(db,
+                                { ...values, patient_link_combined: (selectedDurationProfile?.phases?.length
+                                    || bookingTreatment?.clinical_config?.booking_profile?.phases?.length || 0) > 1 },
+                                clinica, req.body?.same_day_choice, transaction);
+                            const created = sealedBirth ? existing : await CitaPaciente.create(values, { transaction });
+                            await applyExplicitPatientLanguage(paciente, datosPaciente.idioma_preferido, { transaction });
+                            await createOptions.afterPersist(created, transaction);
+                            await require('../services/appointmentPatientLinks.service').linkAtBirth(db, created,
+                                req.body?.same_day_choice, Number(req.userData?.userId), transaction);
+                            return created;
+                        },
+                    })
+                    : await createAppointmentWithPatientLanguage(createOptions);
+                return { cita, visitBirth };
             },
-        };
-        const visitBirth = bookingEnabled && !pastHistoryOnly && req.body?.booking_request_key !== undefined
-            ? await require('../services/appointmentVisitManaged.service').current().prepareBirth({
-                requestKey: req.body.booking_request_key, values: createOptions.appointmentValues, clinic: clinica,
-                actorId: req.userData?.userId,
-                profile: selectedDurationProfile || (bookingTreatment ? requireOperationalProfile(bookingTreatment, { durationSelection }) : null),
-            }) : null;
-        if (bookingEnabled && !pastHistoryOnly) await require('../services/appointmentPatientLinks.service').choiceRequired(
-            db, { ...createOptions.appointmentValues, patient_link_combined: (selectedDurationProfile?.phases?.length
-                || bookingTreatment?.clinical_config?.booking_profile?.phases?.length || 0) > 1 }, clinica, req.body?.same_day_choice);
-        const cita = bookingEnabled && !pastHistoryOnly
-            ? await mutateAppointmentBooking({
-                db,
-                appointmentValues: createOptions.appointmentValues,
-                durationSelection,
-                additionalStaffIds,
-                force: parseBool(force),
-                restrictionConfirmation: { actorId: Number(req.userData?.userId), acknowledgement: req.body?.booking_restriction_acknowledgement },
-                selections: req.body?.booking_selection || {},
-                priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
-                expectedPlanSha256: req.body?.booking_plan_sha256,
-                visitBirth,
-                persist: async ({ values, existing, transaction, sealedBirth }) => {
-                    // Recheck while holding the canonical patient/resource locks:
-                    // two concurrent bookings must not bypass the same-day choice.
-                    if (!sealedBirth) await require('../services/appointmentPatientLinks.service').choiceRequired(db,
-                        { ...values, patient_link_combined: (selectedDurationProfile?.phases?.length
-                            || bookingTreatment?.clinical_config?.booking_profile?.phases?.length || 0) > 1 },
-                        clinica, req.body?.same_day_choice, transaction);
-                    const created = sealedBirth ? existing : await CitaPaciente.create(values, { transaction });
-                    await applyExplicitPatientLanguage(paciente, datosPaciente.idioma_preferido, { transaction });
-                    await createOptions.afterPersist(created, transaction);
-                    await require('../services/appointmentPatientLinks.service').linkAtBirth(db, created,
-                        req.body?.same_day_choice, Number(req.userData?.userId), transaction);
-                    return created;
-                },
-            })
-            : await createAppointmentWithPatientLanguage(createOptions);
+        });
 
         // Disparar motor v2 de automatizaciones de cita (si el tratamiento tiene plantilla v2 asignada).
         try {

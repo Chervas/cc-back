@@ -68,12 +68,13 @@ async function createAppointmentWithPatientLanguage({
   patient,
   requestedLanguage,
   afterPersist = null,
+  transaction = null,
 }) {
   if (!sequelize?.transaction || !AppointmentModel?.create) {
     throw new Error('appointment_language_transaction_dependencies_missing');
   }
 
-  return sequelize.transaction(async (transaction) => {
+  const persist = async (transaction) => {
     const appointment = await AppointmentModel.create(
       appointmentValues,
       { transaction },
@@ -85,7 +86,8 @@ async function createAppointmentWithPatientLanguage({
     );
     if (afterPersist) await afterPersist(appointment, transaction);
     return appointment;
-  });
+  };
+  return transaction ? persist(transaction) : sequelize.transaction(persist);
 }
 
 module.exports = {

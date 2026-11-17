@@ -479,6 +479,11 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
       && !session && !trustedProgramSession && !preparedSeries
       && Number.isSafeInteger(restrictionConfirmation.actorId) && restrictionConfirmation.actorId > 0
       && restrictionConfirmation.actorId === Number(values.updated_by || values.created_by);
+    const prospectivePatientIdentity = restrictionConfirmation?.prospectivePatientIdentity ?? null;
+    if (prospectivePatientIdentity != null && (!manualRestrictions || existing || session || trustedProgramSession || preparedSeries
+      || typeof prospectivePatientIdentity !== 'string' || !/^[a-f0-9]{64}$/.test(prospectivePatientIdentity))) {
+      throw bookingError('booking_patient_identity_invalid', 'Revisa el paciente antes de confirmar esta reserva.', null, 400);
+    }
     // A previously accepted exception does not rewrite the catalog. Retain the
     // original requirements for a fresh, exact confirmation when it is moved.
     if (manualRestrictions && snapshot && Number(previous.tratamiento_id) === Number(values.tratamiento_id)
@@ -558,6 +563,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
           treatmentName: treatment?.nombre || '', patientId: values.paciente_id, appointmentId: existing?.id_cita || null,
           actorId: restrictionConfirmation.actorId, previous: existing ? previous : null,
           acknowledgement: restrictionConfirmation.acknowledgement,
+          prospectivePatientIdentity,
           eligible: !['ha_acudido', 'en_atencion', 'completada', 'no_asistio'].includes(previous.estado)
             && !previous.care_started_at && !previous.care_completed_at
             && previous.care_legacy_attendance !== true && previous.care_legacy_attendance !== 1 && !values.es_provisional });
@@ -571,6 +577,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
           patientConflict = false;
           importMetadata.booking_restriction_confirmation = { version: 1, confirmed_by: restrictionConfirmation.actorId,
             confirmed_at: new Date().toISOString(), acknowledgement: result.acknowledgement,
+            ...(prospectivePatientIdentity ? { prospective_patient_identity: prospectivePatientIdentity } : {}),
             start_at: start.toISOString(), end_at: end.toISOString(), restrictions: result.restrictions,
             original_profile: (doctorOnly ? normalizeDoctorOnlyBookingProfile : normalizeBookingProfile)({ ...originalProfile,
               version: solution.phases.some(phase => phase.staff_attention) && originalProfile.version < 3 ? 3 : originalProfile.version,
