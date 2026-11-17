@@ -189,6 +189,14 @@ function normalizeText(value) {
   return repairMojibake(String(value ?? '')).trim();
 }
 
+function campaignEmailPreheader(body = {}, previous = null) {
+  // An explicit empty string clears the campaign preheader. Missing input
+  // retains the stored value; legacy null still permits the template fallback.
+  const value = body.email_preheader !== undefined ? body.email_preheader : body.emailPreheader;
+  if (value === undefined) return previous;
+  return value === null ? null : normalizeText(value);
+}
+
 const CAMPAIGN_SENDER_VARIABLE_KEYS = new Set(['usuario_nombre', 'nombre_remitente', 'sender_name']);
 
 function normalizeCampaignSenderName(value) {
@@ -6776,7 +6784,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         email_template_id: Number(body.email_template_id || 0) || null,
         email_sender_identity_id: Number(body.email_sender_identity_id || 0) || null,
         email_subject: normalizeText(body.email_subject || body.emailSubject) || null,
-        email_preheader: normalizeText(body.email_preheader || body.emailPreheader) || null,
+        email_preheader: campaignEmailPreheader(body),
         opt_out_text: templateCommercial ? normalizeText(body.opt_out_text) : null,
         consent_acknowledged: !!body.consent_acknowledged,
         list_source: source,
@@ -7160,7 +7168,7 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
     nextCriteria.email_subject = normalizeText(body.email_subject || body.emailSubject) || null;
   }
   if (body.email_preheader !== undefined || body.emailPreheader !== undefined) {
-    nextCriteria.email_preheader = normalizeText(body.email_preheader || body.emailPreheader) || null;
+    nextCriteria.email_preheader = campaignEmailPreheader(body);
   }
   if (
     body.sender_origin_id !== undefined
@@ -8555,7 +8563,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       email_template_id: emailTemplateId,
       email_sender_identity_id: emailSenderIdentityId,
       email_subject: normalizeText(body.email_subject || body.emailSubject || list.criteria?.email_subject) || null,
-      email_preheader: normalizeText(body.email_preheader || body.emailPreheader || list.criteria?.email_preheader) || null,
+      email_preheader: campaignEmailPreheader(body, list.criteria?.email_preheader ?? null),
       template_usage: templateUsage,
       template_commercial: templateCommercial,
       sender_name: campaignSenderName || null,

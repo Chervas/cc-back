@@ -7,6 +7,7 @@ const db = require('../../models');
 const emailDelivery = require('./emailDelivery.service');
 const emailTemplates = require('./emailTemplates.service');
 const emailHtml = require('./marketingEmailHtml.service');
+const { formatMarketingDate } = require('../lib/marketing-template-variables');
 const emailProvider = require('./emailProvider.service');
 const { createEmailBroker } = require('./emailBroker.service');
 
@@ -225,6 +226,41 @@ const PREVIEW_VARIABLES = Object.freeze({
   firma_resenas: 'Equipo de la clínica', fecha_ultima_cita_asistida: '10/11/2026',
 });
 
+function previewVariableContext(supplied) {
+  if (supplied !== undefined && (!supplied || typeof supplied !== 'object' || Array.isArray(supplied))) {
+    fail('email_preview_variables_invalid', 400, 'Las variables de vista previa deben ser un objeto.');
+  }
+  if (supplied && Buffer.byteLength(JSON.stringify(supplied), 'utf8') > 16 * 1024) {
+    fail('email_preview_variables_too_large', 400, 'Las variables de vista previa superan el tamaño permitido.');
+  }
+  const entries = Object.entries(supplied || {});
+  const forbidden = new Set(['__proto__', 'constructor', 'prototype']);
+  if (entries.some(([key, value]) => !/^[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*$/.test(key)
+    || key.split('.').some(segment => forbidden.has(segment)) || typeof value !== 'string')) {
+    fail('email_preview_variables_invalid', 400, 'Las variables de vista previa deben tener nombres válidos y valores de texto.');
+  }
+  const context = Object.assign(Object.create(null), PREVIEW_VARIABLES);
+  // Input remains a flat string map. Expand exact-case token paths only into
+  // own, null-prototype objects; sorting makes scalar/path conflicts deterministic.
+  for (const [key, rawValue] of entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    const segments = key.split('.');
+    let target = context;
+    for (const segment of segments.slice(0, -1)) {
+      if (!Object.prototype.hasOwnProperty.call(target, segment)) target[segment] = Object.create(null);
+      if (!target[segment] || typeof target[segment] !== 'object') {
+        fail('email_preview_variables_invalid', 400, 'Una variable no puede ser a la vez texto y un grupo de valores.');
+      }
+      target = target[segment];
+    }
+    const leaf = segments[segments.length - 1];
+    if (Object.prototype.hasOwnProperty.call(target, leaf) && typeof target[leaf] === 'object') {
+      fail('email_preview_variables_invalid', 400, 'Una variable no puede ser a la vez texto y un grupo de valores.');
+    }
+    target[leaf] = key === 'fecha_ultima_cita_asistida' ? formatMarketingDate(rawValue) : rawValue;
+  }
+  return context;
+}
+
 function previewTemplate(body = {}) {
   const warnings = [];
   let design = body.design;
@@ -248,20 +284,7 @@ function previewTemplate(body = {}) {
     }
   }
   const content = normalizeTemplateContent({ ...body, design, name: clean(body.name) || 'Vista previa', subject: clean(body.subject) || 'Novedades de tu clínica' });
-  const supplied = body.variables;
-  if (supplied !== undefined && (!supplied || typeof supplied !== 'object' || Array.isArray(supplied))) {
-    fail('email_preview_variables_invalid', 400, 'Las variables de vista previa deben ser un objeto.');
-  }
-  if (supplied && Buffer.byteLength(JSON.stringify(supplied), 'utf8') > 16 * 1024) {
-    fail('email_preview_variables_too_large', 400, 'Las variables de vista previa superan el tamaño permitido.');
-  }
-  if (supplied && Object.entries(supplied).some(([key, value]) =>
-    !/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(key)
-      || ['__proto__', 'constructor', 'prototype'].includes(key)
-      || typeof value !== 'string')) {
-    fail('email_preview_variables_invalid', 400, 'Las variables de vista previa deben tener nombres válidos y valores de texto.');
-  }
-  const variables = { ...PREVIEW_VARIABLES, ...(supplied || {}) };
+  const variables = previewVariableContext(body.variables);
   const missing = emailTemplates.missingTemplateVariables(variables, content.subject, content.preheader, content.rendered_html, content.rendered_text);
   if (content.design.content_mode === 'html' && emailHtml.compileHtmlSource(content.design.html_source) !== content.design.html_source.trim()) {
     warnings.push('Se ha normalizado el HTML y eliminado el contenido, los estilos o las URL no permitidos.');

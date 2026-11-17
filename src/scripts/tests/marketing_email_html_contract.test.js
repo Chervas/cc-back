@@ -9,6 +9,7 @@ const html = require('../../services/marketingEmailHtml.service');
 const dispatch = require('../../services/marketingEmailDispatch.service');
 const delivery = require('../../services/emailDelivery.service');
 const provider = require('../../services/emailProvider.service');
+const bulk = require('../../services/marketingBulkSends.service');
 const scope = { scope: 'clinic', clinicIds: [21] };
 const draft = (source, extra = {}) => ({ name: 'HTML de prueba', subject: 'Hola {{nombre}}', preheader: 'Novedades para {{nombre}}', design: { content_mode: 'html', html_source: source }, ...extra });
 
@@ -17,6 +18,51 @@ test('draft previews reject non-text variable contexts without rendering or touc
     assert.throws(() => marketing.previewTemplate({ ...draft('<p>Hola {{nombre}}</p>'), variables }),
       { code: 'email_preview_variables_invalid', status: 400 });
   }
+});
+
+test('flat preview token values preserve case, hyphens, numeric and nested paths with HTML escaping', () => {
+  const variables = { PROMO: 'ESPECIAL', 'promo-code': 'Á & B', 'contact.ciudad': 'Málaga', 'contact.1': '<img src=x onerror=bad()>', '2': 'Dos' };
+  const before = JSON.stringify(variables);
+  const result = marketing.previewTemplate(draft('<p>{{PROMO}} {{promo-code}} {{contact.ciudad}} {{contact.1}} {{2}} {{nombre}}</p>', { subject: 'Hola', variables }));
+  assert.deepEqual(result.missing_variables, []);
+  assert.match(result.html, /ESPECIAL Á &amp; B Málaga &lt;img/);
+  assert.doesNotMatch(result.html, /<img src=x/);
+  assert.match(result.text, /ESPECIAL Á & B Málaga <img src=x onerror=bad\(\)> Dos Ana/);
+  assert.equal(JSON.stringify(variables), before);
+});
+
+test('preview token maps reject prototype segments, nested input and scalar/path collisions without side effects', () => {
+  const forbidden = [
+    { 'contact.__proto__.polluted': 'yes' }, { 'contact.constructor.polluted': 'yes' },
+    { 'contact.prototype.polluted': 'yes' }, { '__proto__.polluted': 'yes' },
+    { 'contact': { ciudad: 'Madrid' } }, { 'contact..ciudad': 'Madrid' },
+    { contact: 'Madrid', 'contact.ciudad': 'Madrid' },
+    { 'contact.ciudad': 'Madrid', contact: 'Madrid' }, { 'nombre.apellido': 'García' },
+  ];
+  for (const variables of forbidden) {
+    assert.throws(() => marketing.previewTemplate(draft('<p>Hola</p>', { variables })), { code: 'email_preview_variables_invalid', status: 400 });
+  }
+  assert.equal(Object.prototype.polluted, undefined);
+});
+
+test('preview token map enforces the exact serialized 16 KiB UTF-8 boundary', () => {
+  const overhead = Buffer.byteLength(JSON.stringify({ promo: '' }), 'utf8');
+  const value = 'x'.repeat(16 * 1024 - overhead);
+  const result = marketing.previewTemplate(draft('<p>{{promo}}</p>', { variables: { promo: value } }));
+  assert.match(result.text, new RegExp('^' + 'x'.repeat(20)));
+  assert.throws(() => marketing.previewTemplate(draft('<p>Hola</p>', { variables: { promo: value + 'x' } })), { code: 'email_preview_variables_too_large', status: 400 });
+});
+
+test('preview care dates share delivery formatting and explicit empty dates retain their missing state', () => {
+  const source = '<p>{{fecha_ultima_cita_asistida}}</p>';
+  for (const date of ['2026-11-10T22:30:00Z', '10-11-2026', '10 de noviembre de 2026']) {
+    const result = marketing.previewTemplate(draft(source, { variables: { fecha_ultima_cita_asistida: date } }));
+    assert.match(result.html, /10\/11\/2026/);
+    assert.deepEqual(result.missing_variables, []);
+  }
+  const cleared = marketing.previewTemplate(draft(source, { variables: { fecha_ultima_cita_asistida: '' } }));
+  assert.deepEqual(cleared.missing_variables, ['fecha_ultima_cita_asistida']);
+  assert.doesNotMatch(cleared.html, /10\/11\/2026/);
 });
 
 test('incomplete editor blocks keep a safe draft preview without becoming saveable content', async () => {
@@ -307,4 +353,77 @@ test('test overrides reject invalid IDs and cannot change stored campaign scope'
   const isolated = dispatch.__testing.testConfiguration(list, { clinic_id: 22, scope: 'group:999', email_template_id: 31 });
   assert.equal(isolated.clinica_id, 21);
   assert.equal(list.email_template_id, undefined);
+});
+
+function campaignStorage(t) {
+  let list;
+  let items = [];
+  const events = [];
+  t.mock.method(db.sequelize, 'transaction', async callback => callback({ id: 'offline' }));
+  t.mock.method(db.MarketingPatientList, 'create', async value => {
+    list = { id: 92, ...value, async update(next) { Object.assign(this, next); return this; }, async reload() { return this; } };
+    return list;
+  });
+  t.mock.method(db.MarketingPatientList, 'findByPk', async () => list);
+  t.mock.method(db.MarketingPatientList, 'update', async value => { Object.assign(list, value); return [1]; });
+  t.mock.method(db.MarketingPatientListItem, 'findAll', async () => items);
+  t.mock.method(db.MarketingPatientListItem, 'count', async () => items.length);
+  t.mock.method(db.MarketingPatientContactEvent, 'create', async value => { events.push(value.event_type); return value; });
+  t.mock.method(db.Clinica, 'findByPk', async () => null);
+  const template = { id: 31, version: 1, subject: 'Hola', preheader: 'Preheader legado', design: { content_mode: 'html', html_source: '<p>Hola {{nombre}}</p>', show_clinicaclick_branding: false }, rendered_text: 'Hola {{nombre}}' };
+  template.rendered_html = marketing.renderTemplateDocument({ subject: template.subject, design: template.design });
+  t.mock.method(db.MarketingEmailTemplate, 'findOne', async () => template);
+  t.mock.method(db.EmailSenderIdentity, 'findOne', async () => ({ id: 41, status: 'active', verification_status: 'verified', email: 'equipo@example.test', display_name: 'Equipo', domain: { verification_status: 'verified', dkim_status: 'verified' } }));
+  return { get list() { return list; }, template, events, setItems(value) { items = value; } };
+}
+
+test('persisted campaign create/update/prepare preserve explicit empty preheaders through the actual dispatch renderer', async t => {
+  const stored = campaignStorage(t);
+  const payload = { name: 'Campaña de prueba', channels: ['email'], template_usage: 'notificacion', email_template_id: 31, email_sender_identity_id: 41, email_subject: 'Hola', email_preheader: '' };
+  const created = await bulk.createCampaign(scope, payload, 1);
+  assert.equal(created.campaign.criteria.email_preheader, '');
+  await bulk.updateCampaign(scope, stored.list.id, { email_preheader: 'Anterior' }, 1);
+  assert.equal(stored.list.criteria.email_preheader, 'Anterior');
+  await bulk.updateCampaign(scope, stored.list.id, { email_preheader: '' }, 1);
+  assert.equal(stored.list.criteria.email_preheader, '');
+  await bulk.prepareCampaign(scope, stored.list.id, {}, 1);
+  assert.equal(stored.list.criteria.email_preheader, '');
+  await bulk.prepareCampaign(scope, stored.list.id, { email_preheader: 'Guardado' }, 1);
+  await bulk.prepareCampaign(scope, stored.list.id, { email_preheader: '' }, 1);
+  assert.equal(stored.list.criteria.email_preheader, '');
+  assert.ok(stored.events.includes('mass_campaign_created'));
+  assert.ok(stored.events.includes('mass_campaign_updated'));
+  assert.ok(stored.events.includes('mass_campaign_prepared'));
+  const item = { id: 5, list_id: stored.list.id, name: 'Ana García', clinica_id: 21, email: 'ana@example.test', status: 'ready', selected: true, channel_status: {}, async update(next) { Object.assign(this, next); return this; } };
+  stored.setItems([item]);
+  t.mock.method(provider, 'publicConfig', () => ({ provider: 'mock', enabled: true, marketingEnabled: true }));
+  t.mock.method(marketing, 'issueUnsubscribe', async () => 'https://example.test/email/baja');
+  t.mock.method(bulk, 'assertReviewRequestCommunicationAllowed', async () => ({ review: false }));
+  let sent;
+  t.mock.method(delivery, 'queueEmail', async input => {
+    sent = templates.renderMarketingCampaign(input.templateContext);
+    return { emailMessage: { id: 1, status: 'queued' } };
+  });
+  await dispatch.runDispatchJob({ list_id: stored.list.id });
+  assert.ok(sent, 'real dispatch must have rendered the queued message');
+  assert.doesNotMatch(sent.html, /data-email-preheader|Preheader legado|Anterior|Guardado/);
+  const preview = marketing.previewTemplate({ subject: payload.email_subject, preheader: '', design: stored.template.design });
+  assert.equal(sent.html, preview.html);
+  assert.equal(sent.text, preview.text);
+});
+
+test('missing and legacy-null campaign preheaders retain template fallback while explicit camelCase clears persist', async t => {
+  const stored = campaignStorage(t);
+  await bulk.createCampaign(scope, { name: 'Campaña antigua', channels: ['email'], template_usage: 'notificacion', email_template_id: 31, email_sender_identity_id: 41 }, 1);
+  assert.equal(stored.list.criteria.email_preheader, null);
+  await bulk.updateCampaign(scope, stored.list.id, { emailPreheader: '  Vista guardada  ' }, 1);
+  assert.equal(stored.list.criteria.email_preheader, 'Vista guardada');
+  await bulk.updateCampaign(scope, stored.list.id, {}, 1);
+  await bulk.prepareCampaign(scope, stored.list.id, {}, 1);
+  assert.equal(stored.list.criteria.email_preheader, 'Vista guardada');
+  await bulk.prepareCampaign(scope, stored.list.id, { emailPreheader: '  ' }, 1);
+  assert.equal(stored.list.criteria.email_preheader, '');
+  await bulk.updateCampaign(scope, stored.list.id, { email_preheader: null }, 1);
+  await bulk.prepareCampaign(scope, stored.list.id, {}, 1);
+  assert.equal(stored.list.criteria.email_preheader, null);
 });
