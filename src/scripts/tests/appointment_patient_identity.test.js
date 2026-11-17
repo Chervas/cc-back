@@ -33,25 +33,37 @@ function transactionFixture() {
   const db = { sequelize: { transaction: async (options, work) => {
     calls.push(['begin', options]); try { const result = await work(transaction); calls.push(['commit']); return result; }
     catch (error) { calls.push(['rollback']); throw error; }
-  } }, Clinica: { findByPk: async (...args) => { calls.push(['clinicLock', ...args]); return { id_clinica: 35 }; } } };
+  }, query: async (sql, options) => {
+    calls.push(['query', sql, options]);
+    if (sql.startsWith('SELECT id_clinica')) return [[{ id_clinica: 35, grupoClinicaId: 50 }]];
+    if (sql.startsWith('SELECT next_number')) return [[{ next_number: '7' }]];
+    return [[], {}];
+  } }, Clinica: { findByPk: async () => { throw Error('CLINIC_EXCLUSIVE_LOCK_BEFORE_NHC_IS_FORBIDDEN'); } } };
   return { db, transaction, calls };
 }
-test('contact resolution and booking work share the same READ COMMITTED transaction and clinic lock', async () => {
+test('contact resolution and booking work lock the native NHC scope first without consuming a number or locking the clinic exclusively', async () => {
   const f = transactionFixture(), input = draft();
   const output = await withAppointmentPatientIdentity({ db: f.db, clinic: { id_clinica: '35' }, patient: input.patient, leadId: input.leadId,
     resolve: async transaction => { assert.equal(transaction, f.transaction); f.calls.push(['resolve']); return { patient: { id_paciente: 10 }, created: true }; },
     work: async value => { assert.equal(value.transaction, f.transaction); assert.equal(value.created, true);
       assert.equal(value.prospectivePatientIdentity, prospectiveAppointmentPatientIdentity(input)); f.calls.push(['work']); return 'saved'; } });
-  assert.equal(output, 'saved'); assert.deepEqual(f.calls.map(x => x[0]), ['begin', 'clinicLock', 'resolve', 'work', 'commit']);
-  assert.equal(f.calls[0][1].isolationLevel, 'READ COMMITTED'); assert.equal(f.calls[1][1], 35);
-  assert.equal(f.calls[1][2].lock, 'UPDATE'); assert.equal(f.calls[1][2].transaction, f.transaction);
+  assert.equal(output, 'saved'); assert.deepEqual(f.calls.map(x => x[0]), ['begin', 'query', 'query', 'query', 'resolve', 'work', 'commit']);
+  assert.equal(f.calls[0][1].isolationLevel, 'READ COMMITTED');
+  const queries = f.calls.filter(x => x[0] === 'query');
+  assert(queries.every(x => x[2].transaction === f.transaction));
+  assert.equal(queries[0][2].replacements.clinicId, 35);
+  assert.match(queries[1][1], /^INSERT INTO PatientHistoryCounters/);
+  assert.match(queries[2][1], /^SELECT next_number.*FOR UPDATE$/);
+  assert.equal(queries[2][2].replacements.scope, 'group:50');
+  assert(!queries.some(x => /next_number\s*=\s*next_number\s*\+/.test(x[1])), 'Identity serialization never consumes an NHC');
+  assert(!queries.some(x => /Clinicas.*FOR UPDATE/.test(x[1])), 'The counter-to-clinic-FK order must not be inverted');
 });
 test('existing explicit patient retains its durable ID and does not receive a prospective identity', async () => {
   const f = transactionFixture(); let observed;
   await withAppointmentPatientIdentity({ db: f.db, clinic: { id_clinica: 35 }, patient: { id_paciente: 20 },
     resolve: async () => ({ patient: { id_paciente: 20 }, created: false }), work: async input => { observed = input; } });
   assert.equal(observed.prospectivePatientIdentity, null); assert.equal(observed.patient.id_paciente, 20);
-  assert(!f.calls.some(x => x[0] === 'clinicLock'));
+  assert(!f.calls.some(x => x[0] === 'query'), 'An explicit durable patient needs no creation counter lock');
 });
 test('a rejected booking rejects the enclosing transaction instead of committing a new patient alone', async () => {
   const f = transactionFixture();

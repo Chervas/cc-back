@@ -97,7 +97,66 @@ test('lead booking HTTP: stable occupied-slot confirmation, patient/NHC rollback
           assert.equal(resolved.patient.clinica_id, 100);
           assert.equal(await db.PacienteClinica.count({ where: { paciente_id: foreign.id_paciente, clinica_id: 100 } }), 0);
         });
-        context.report.checks.push('Actual createCita controller and patient resolver, native patient/NHC hooks, clinic/resource locks and canonical writer over owned MySQL: repeated/cancelled warnings roll back every patient-side write; an exact acknowledgement saves once; downstream failure is atomic; concurrency shares one patient; clinic scope precedes the twenty-contact limit. Synthetic ACL and post-commit observer boundaries, zero provider/network/business-DB calls.');
+        await t.test('normal registration holding its native NHC counter and a simultaneous lead booking both commit without a clinic-FK deadlock', async () => {
+          const [[schema]] = await f.sql.query('SHOW CREATE TABLE Pacientes');
+          assert.match(schema['Create Table'], /FOREIGN KEY \(`clinica_id`\) REFERENCES `Clinicas` \(`id_clinica`\)/,
+            'This interleaving requires the actual native patient-to-clinic foreign key');
+          await f.lead(707);
+          const beforePatients = await db.Paciente.count(), beforeAppointments = await db.CitaPaciente.count();
+          const beforeCounter = Number((await db.PatientHistoryCounter.findByPk('group:50')).next_number);
+          let releaseNormal, sawNormalCounter;
+          const normalCanInsert = new Promise(resolve => { releaseNormal = resolve; });
+          const normalOwnsCounter = new Promise(resolve => { sawNormalCounter = resolve; });
+          // This hook is registered AFTER the native beforeCreate hook. Reaching
+          // it proves the ordinary Paciente.create has already allocated/locked
+          // its real group NHC and has not yet INSERTed or taken the clinic FK.
+          const hook = 'owned-normal-registration-after-native-nhc';
+          db.Paciente.addHook('beforeCreate', hook, async row => {
+            if (row.public_id !== 'pac_owned_concurrent_normal') return;
+            sawNormalCounter(); await normalCanInsert;
+          });
+          let normal, booking;
+          try {
+            normal = f.sql.transaction(async transaction => {
+              const row = await db.Paciente.create({ public_id: 'pac_owned_concurrent_normal', nombre: 'Alta normal ficticia',
+                apellidos: 'Concurrente', telefono_movil: '34600000907', clinica_id: 100 }, { transaction });
+              await db.PacienteClinica.create({ paciente_id: row.id_paciente, clinica_id: 100, es_principal: true }, { transaction });
+              return row;
+            });
+            normal.catch(() => {});
+            await normalOwnsCounter;
+            booking = f.post(f.body({ lead_intake_id: 707, inicio: '2030-01-16T09:00:00Z', fin: '2030-01-16T09:16:00Z',
+              paciente: { nombre: 'Reserva ficticia', apellidos: 'Concurrente', telefono: '34600000707' } }));
+            booking.catch(() => {});
+            let counterWait = [];
+            const deadline = Date.now() + 10000;
+            do {
+              [counterWait] = await f.sql.query(`SELECT requested.OBJECT_NAME, requested.LOCK_MODE, requested.LOCK_STATUS
+                FROM performance_schema.data_lock_waits waits
+                JOIN performance_schema.data_locks requested ON requested.ENGINE_LOCK_ID=waits.REQUESTING_ENGINE_LOCK_ID
+                WHERE requested.OBJECT_SCHEMA=DATABASE() AND requested.OBJECT_NAME='PatientHistoryCounters'`);
+              if (!counterWait.length) await new Promise(resolve => setTimeout(resolve, 15));
+            } while (!counterWait.length && Date.now() < deadline);
+            assert(counterWait.length, 'The lead booking must be observed actually waiting for the ordinary registration NHC lock');
+            // On the old Clinic UPDATE -> NHC order this INSERT now waits for
+            // the booking's clinic lock and MySQL detects a real deadlock. The
+            // corrected order holds no incompatible clinic lock while waiting.
+            releaseNormal();
+            const [registered, reserved] = await Promise.all([normal, booking]);
+            assert.equal(reserved.statusCode, 201, JSON.stringify(reserved.body));
+            assert.notEqual(registered.id_paciente, reserved.body.paciente_id);
+            assert.equal(await db.Paciente.count(), beforePatients + 2);
+            assert.equal(await db.CitaPaciente.count(), beforeAppointments + 1);
+            assert.equal(Number((await db.PatientHistoryCounter.findByPk('group:50')).next_number), beforeCounter + 2);
+            assert.equal(Number(registered.numero_historia), beforeCounter);
+            assert.equal(Number((await db.Paciente.findByPk(reserved.body.paciente_id)).numero_historia), beforeCounter + 1);
+            assert.equal(await db.PacienteClinica.count({ where: { paciente_id: [registered.id_paciente, reserved.body.paciente_id], clinica_id: 100 } }), 2);
+          } finally {
+            releaseNormal(); db.Paciente.removeHook('beforeCreate', hook);
+            await Promise.allSettled([normal, booking].filter(Boolean));
+          }
+        });
+        context.report.checks.push('Actual createCita controller and patient resolver, native patient/NHC hooks, identity/resource locks and canonical writer over owned MySQL: repeated/cancelled warnings roll back every patient-side write; an exact acknowledgement saves once; downstream failure is atomic; concurrency shares one patient; clinic scope precedes the twenty-contact limit. Native ordinary registration and lead booking interleave under an observed performance_schema NHC wait and both commit without a clinic-FK deadlock. Synthetic ACL and post-commit observer boundaries, zero provider/network/business-DB calls.');
       } finally { await f.close(); }
-    });
+    }, { performanceSchema: true });
   });

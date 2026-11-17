@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test');const assert=require('node:assert/strict');
-const {normalizeHistoryNumber,historyScope,allocatePatientHistoryNumber}=require('../../services/patientHistoryNumber.service');
+const {normalizeHistoryNumber,historyScope,lockPatientHistoryCounter,allocatePatientHistoryNumber}=require('../../services/patientHistoryNumber.service');
 const {createHistoryImportPlan}=require('../../lib/patient-history-import');
 const patient=(id,name='Ana',surname='Pérez')=>({id_paciente:id,nombre:name,apellidos:surname,telefono_movil:'600111222'});
 const contact=(id,number,extra={})=>({IDCONTACTO:String(id),NUM:String(number),NOMBRE:'Ana',APELLIDOS:'Pérez','TELF. MOVIL':'600111222',ALTA:'01-01-2026',...extra});
@@ -45,4 +45,22 @@ test('sequential allocation locks the counter inside the caller transaction',asy
     return sql.startsWith('SELECT id_clinica')?[[{id_clinica:72,grupoClinicaId:29}]]:sql.startsWith('SELECT next_number')?[[{next_number:'14527'}]]:[[],{}];}};
   assert.deepEqual(await allocatePatientHistoryNumber(db,72,tx),{numero_historia:'14527',historia_scope:'group:29'});
   assert.ok(calls.some(c=>c.sql.includes('FOR UPDATE')));assert.ok(calls.every(c=>c.options.transaction===tx));
+});
+test('contact resolution can hold the shared NHC scope without consuming a history number',async()=>{
+  const calls=[],tx={id:'shared-counter-order'};let number=14527;
+  const db={query:async(sql,options)=>{
+    calls.push({sql,options});
+    if(sql.startsWith('SELECT id_clinica'))return [[{id_clinica:options.replacements.clinicId,grupoClinicaId:29}]];
+    if(sql.startsWith('SELECT next_number'))return [[{next_number:String(number)}]];
+    if(sql.startsWith('UPDATE PatientHistoryCounters SET next_number'))number++;
+    return [[],{}];
+  }};
+  await assert.rejects(lockPatientHistoryCounter(db,72),/patient_history_counter_transaction_required/);
+  assert.equal(calls.length,0);
+  assert.deepEqual(await lockPatientHistoryCounter(db,72,tx),{scope:'group:29',nextNumber:'14527'});
+  assert.equal(number,14527);
+  assert.deepEqual(await allocatePatientHistoryNumber(db,66,tx),{numero_historia:'14527',historia_scope:'group:29'});
+  assert.equal(number,14528);
+  assert.equal(calls.filter(call=>call.sql.startsWith('UPDATE PatientHistoryCounters SET next_number')).length,1);
+  assert(calls.every(call=>call.options.transaction===tx));
 });
