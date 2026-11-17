@@ -4,6 +4,7 @@ const {BrokerError,fail}=require('./errors'),{eventFor}=require('./audit'),{cano
 const C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),M=require('./meta-marketing-contract'),E=require('./meta-marketing-enrollment-contract');
 const A=require('./meta-marketing-ads-contract'),X=require('./meta-marketing-enrolled-asset-access-contract');
 const L=require('./meta-marketing-leads-contract'),{timingSafeEqual}=require('node:crypto');
+const V=require('./meta-marketing-enrollment-assets-contract'),R=require('./meta-marketing-credential-renewal-contract');
 function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,leadRecovery,credentialEpochs,businessConfig,enrolledAssetAccess}){
   if(adsRead!==undefined){A.config(adsRead);if(typeof adsHttp?.read!=='function')fail('invalid_request');}
   if(leadAds!==undefined){L.config(leadAds);if(typeof leadsHttp?.read!=='function'||typeof secrets?.withLeadVerification!=='function')fail('invalid_request');}
@@ -74,6 +75,12 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     const credential=credentialEpochs?credentialEpochs.current(row,binding):null,metadata=credential?.metadata||originalMetadata;
     if(!allowExpired&&[metadata.expiresAt,metadata.dataAccessExpiresAt].some(v=>v!==null&&v<=now()))fail('credential_revoked');
     return {flow:credential?.flow||flow,metadata,assets,credential};
+  }
+  function renewalAuthority(enrollmentId,binding){
+    if(!credentialEpochs||!C.uuid(enrollmentId))fail('operation_denied');
+    const row=rowFor(enrollmentId);if(!row||row.state!=='active'||succession(row.id))fail('scope_denied');binding=grantBinding(row,binding);
+    const authority=enrollmentActive(row,binding,{requireActive:true,allowExpired:true});
+    return {row,binding,assets:authority.assets,credential:authority.credential};
   }
   // The initial slot deadline remains immutable. Only a completed, locally
   // journalled business handover can supply the separate normal grant authority.
@@ -195,6 +202,54 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       previousContexts:()=>selected(row).filter(asset=>asset.kind==='ad_account'&&asset.assetRef!==account.assetRef)
         .map(asset=>leadContextForRecipient(row,binding,page,asset,current.recipientClinicId)),
     });
+  }
+  async function inventory({request,principal,binding:base,policy}){
+    E.validators.assets(request.payload);E.authorize({request,principal,binding:base},environment);
+    const p=request.payload,id=p.enrollmentId,authPin=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey])),basePin=K.fingerprint(base);
+    if(closed)fail('connection_blocked');if(running.has(id)||running.size>=2)fail('oauth_flow_busy');
+    const task={enrollmentId:id,flowId:null,assets:[],controller:new AbortController()},signal=task.controller.signal;
+    const timer=setTimeout(()=>task.controller.abort(),25000);timer.unref?.();running.set(id,task);
+    let revision,grantPin,metadataPin;
+    const check=()=>{
+      if(closed)fail('connection_blocked');if(signal.aborted)fail('provider_timeout');
+      const key=currentPrincipal(principal,policy,authPin),live=source(policy,request.connectionRef);
+      if(K.fingerprint(live)!==basePin)fail('scope_denied');require('./auth').authorize(key,request,policy);
+      const connection=store.connection(request.connectionRef,now());store.assertAssetActive(request);
+      if(revision!==undefined&&connection.revision!==revision)fail('connection_blocked');revision=connection.revision;
+      const v=renewalAuthority(id,live);owned(request,v.row);E.authorize({request,principal:key,binding:v.binding},environment);
+      credentialEpochs.expected(v.credential,p);
+      if(v.row.scope_digest!==p.scopeDigest||v.row.selection_digest!==p.selectionDigest
+        ||C.clinicDigest(K.bindingFor(v.binding))!==p.clinicSetDigest||R.assetSetDigest(v.assets)!==p.assetSetDigest)fail('scope_denied');
+      const nextGrant=credentialEpochs.grantDigest(v.row),nextMetadata=C.hash(JSON.stringify(v.credential.metadata));
+      if(grantPin!==undefined&&grantPin!==nextGrant)fail('scope_denied');grantPin=nextGrant;
+      if(metadataPin!==undefined&&metadataPin!==nextMetadata)fail('secret_version_changed');metadataPin=nextMetadata;
+      if([v.credential.metadata.expiresAt,v.credential.metadata.dataAccessExpiresAt].some(value=>value!==null&&value<=now()))fail('credential_revoked');
+      for(const asset of v.assets)M.assertAssetCredential(v.credential.metadata,asset);
+      task.flowId=v.row.flow;task.assets=v.assets;return v;
+    };
+    const log=(action,result,reason)=>{if(store.backlog().pending>=policy.maxBacklog)fail('audit_unavailable');store.appendAudit(eventFor(request,principal,policy,action,result,reason,now()));};
+    try{
+      const v=check();if(store.backlog().pending+2>policy.maxBacklog)fail('audit_unavailable');
+      log('integration.requested','accepted','meta_enrollment_assets_requested');
+      const response=await secrets.withCandidate(v.binding,v.credential.flow,v.credential.digest,async borrowed=>{
+        let current=check();if(JSON.stringify(borrowed.metadata)!==current.credential.flow.credential_metadata)fail('secret_unavailable');
+        const discovered=await http.discover({binding:current.binding,...borrowed,signal,authorize:check,assetRefs:current.assets.map(asset=>asset.assetRef)});
+        current=check();
+        const data=V.result({assets:discovered,selected:current.assets,metadata:current.credential.metadata,request,binding:current.binding,row:current.row,credential:current.credential,now:now()});
+        let serialized=JSON.stringify(data);
+        for(let round=0;round<3;round++){
+          if(serialized.includes(borrowed.token.toString('utf8'))||serialized.includes(borrowed.appSecret.toString('ascii')))fail('provider_failed');
+          let decoded;try{decoded=decodeURIComponent(serialized);}catch{break;}if(decoded===serialized)break;serialized=decoded;
+        }
+        check();
+        return {requestId:request.requestId,data,replayed:false};
+      },signal,{retentionStage:v.credential.retentionStage});
+      check();log('integration.completed','success','meta_enrollment_assets_verified');return response;
+    }catch(error){
+      const safe=error instanceof BrokerError?error:new BrokerError('internal_error');
+      if(safe.code==='rate_limited'&&Number.isSafeInteger(error.retryAfterMs)&&error.retryAfterMs>0)safe.retryAfterMs=error.retryAfterMs;
+      throw safe;
+    }finally{clearTimeout(timer);running.delete(id);}
   }
   async function execute({request,principal,binding,policy}){
     if(closed)fail('connection_blocked');
@@ -334,7 +389,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     }finally{clearTimeout(timer);running.delete(enrollmentId);}
   }
   const operations=Object.fromEntries(Object.entries(E.OPERATIONS).map(([name,op])=>[op,{provider:C.PROVIDER,control:'meta_marketing_oauth',validate:E.validators[name],
-    authorize:context=>E.authorize(context,environment),execute}]));
+    authorize:context=>E.authorize(context,environment),...(name==='assets'?{persistResult:false}:{}),execute:name==='assets'?inventory:execute}]));
   for(const op of M.OPERATIONS)operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>M.validate(op,payload),execute};
   if(adsRead)for(const op of Object.values(A.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>A.validate(op,payload),execute};
   if(leadAds)for(const op of Object.values(L.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>L.validate(op,payload),persistResult:false,execute};
@@ -361,12 +416,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       for(const receiptRef of receiptRefs){const receiptRow=get('SELECT * FROM meta_marketing_lead_receipts WHERE id=?',receiptRef);if(!receiptRow||receiptRow.enrollment!==old.id&&!get('SELECT 1 FROM meta_marketing_business_receipt_lineage WHERE receipt=? AND new_enrollment=?',receiptRef,old.id))fail('scope_denied');store.db.prepare('INSERT INTO meta_marketing_business_receipt_lineage VALUES (?,?,?,?)').run(receiptRef,newEnrollmentId,handoverId,old.id);}
       return receipt(rowFor(newEnrollmentId),binding);
     },
-    renewalAuthority(enrollmentId,binding){
-      if(!credentialEpochs||!C.uuid(enrollmentId))fail('operation_denied');
-      const row=rowFor(enrollmentId);if(!row||row.state!=='active'||succession(row.id))fail('scope_denied');binding=grantBinding(row,binding);
-      const authority=enrollmentActive(row,binding,{requireActive:true,allowExpired:true});
-      return {row,binding,assets:authority.assets,credential:authority.credential};
-    },
+    renewalAuthority,
     assertRenewalCredential(enrollmentId,binding,metadata){
       if(!credentialEpochs||!C.uuid(enrollmentId))fail('operation_denied');
       const row=rowFor(enrollmentId),authority=enrollmentActive(row,grantBinding(row,B.baseBinding(binding)),{requireActive:true,allowExpired:true});

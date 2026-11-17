@@ -80,6 +80,7 @@ function createView({ model, audit, reader, codec, now = () => new Date() }) {
           whatsappAuthorization: v.version === 15 ? { requestRef: v.requestRef } : null,
           metaOAuth: v.version === 22 ? { requestRef: v.correlationId, clinicCount: v.clinicCount } : null,
           metaDiscovery: v.version === 23 ? { flowRef: v.flowRef, clinicCount: v.clinicCount, assetCount: v.assetCount } : null,
+          metaActiveInventory: v.version === 32 ? { enrollmentRef: v.enrollmentRef, credentialVersionRef: v.credentialVersionRef, epoch: v.epoch, clinicCount: v.clinicCount, assetCount: v.assetCount } : null,
           metaEnrollment: v.version === 24 ? { requestRef: v.requestRef, flowRef: v.flowRef, clinicCount: v.clinicCount, assetCount: v.assetCount, state: v.state } : null,
           metaCredentialRenewal: v.version === 28 ? { requestRef: v.requestRef, enrollmentRef: v.enrollmentRef, epoch: v.epoch, clinicCount: v.clinicCount, assetCount: v.assetCount } : null,
           metaBusinessContinuity: [29,30].includes(v.version) ? { requestRef:v.requestRef,enrollmentRef:v.enrollmentRef,previousEnrollmentRef:v.previousEnrollmentRef,epoch:v.epoch,clinicCount:v.clinicCount,assetCount:v.assetCount } : null,

@@ -10,7 +10,7 @@ module.exports=async({models,sql,sessions,service,callback,request,token,now,rep
   for(const [name,file] of [['MetaMarketingEnrollmentRequest','metamarketingenrollmentrequest'],['MetaMarketingEnrollmentClaim','metamarketingenrollmentclaim'],['MetaMarketingEnrollmentIdentity','metamarketingenrollmentidentity']])models[name]=require('../../../../models/'+file)(sql,D);
   const R=models.MetaMarketingEnrollmentRequest,inputFor=async()=>{const claims=await sessions.verify(token());return {scopeKey:'group:5',actorId:claims.userId,sessionRef:claims.jti,sessionExpiresAt:new Date(claims.exp*1000)};};
   let enabled=true,workerEnabled=true,lostReply=null,beforeWire=null,afterWire=null;const commands=[];
-  const enrollment=require('../../../services/metaMarketingEnrollment.service').createService({models,sessions,oauth:service,now,enabled:()=>enabled,workerEnabled:()=>workerEnabled,
+  const enrollment=require('../../../services/metaMarketingEnrollment.service').createService({models,sessions,oauth:service,now,enabled:()=>enabled,workerEnabled:()=>workerEnabled,discoveryEnabled:()=>process.env.META_ENROLLMENT_RUNTIME_CASE==='active_inventory',
     client:{execute:async(command,budget)=>{commands.push({operation:command.operation,requestId:command.requestId});await beforeWire?.(command);const response=await wire.execute(command,budget);await afterWire?.(command);
       if(lostReply===command.operation){lostReply=null;throw Object.assign(Error('FICTITIOUS_LOST_RESPONSE'),{code:'broker_timeout'});}return response;}}});
   app.use('/oauth/meta/marketing',require('../../../routes/metaMarketingEnrollment.routes').createRouter({service:enrollment,sessions}));
@@ -22,6 +22,7 @@ module.exports=async({models,sql,sessions,service,callback,request,token,now,rep
   assert.equal((await request('GET',endpoint+'?assignment_scope=group&group_id=6')).status,403);
   assert.equal((await api()).selection,null);assert.equal(commands.length,0);
   const input=await inputFor(),flow=await service.begin(input);await callback(flow);
+  if(process.env.META_ENROLLMENT_RUNTIME_CASE==='active_inventory')return require('./meta_active_inventory_mysql.fixture')({models,sql,sessions,service,enrollment,flow,api,request,token,now,report,wire,f,mfa,app,setAfterWire:fn=>{afterWire=fn;},commands});
   if(process.env.META_ENROLLMENT_RUNTIME_CASE==='selection_ui')return require('./meta_enrollment_selection_visual.fixture')({models,sql,sessions,service,enrollment,flow,api,token,now,report,app,server,base,advance,restart,mfa,
     loseActivationReply:()=>{lostReply=C.E.OPERATIONS.activate;},closeEnrollment:()=>{enabled=false;},commands});
   const reserved=await api('POST','',{flowId:flow.requestId,assetRefs:['meta-ad_account:301','meta-instagram_business:501']});

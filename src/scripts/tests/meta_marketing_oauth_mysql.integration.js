@@ -4,7 +4,8 @@ const {execFileSync}=require('node:child_process'),{randomUUID,randomBytes}=requ
 const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fixture');
 withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})=>{
   const discovery=process.env.META_OAUTH_DISCOVERY_TEST==='1',enrollmentAuthority=process.env.META_ENROLLMENT_AUTHORITY_TEST==='1',enrollmentRuntime=process.env.META_ENROLLMENT_RUNTIME_TEST==='1';
-  const cleanup=[],{fixture,TOKEN,APP}=require('../../../services/integrations-broker/test/meta-marketing-oauth-fixture.cjs'),f=fixture({after:fn=>cleanup.push(fn)},{discovery,enrollment:enrollmentRuntime});
+  const reviewerInventory=process.env.META_ENROLLMENT_RUNTIME_CASE==='active_inventory',userId=reviewerInventory?225:91002;
+  const cleanup=[],{fixture,TOKEN,APP}=require('../../../services/integrations-broker/test/meta-marketing-oauth-fixture.cjs'),f=fixture({after:fn=>cleanup.push(fn)},{discovery,enrollment:enrollmentRuntime,renewal:reviewerInventory});
   const B=require('../../../services/integrations-broker/src/meta-marketing-oauth-contract'),C=require('../../services/metaMarketingOAuth.contract');
   let brokerApp,server,browser,clock=new Date(),queryCount=0;
   try{
@@ -17,15 +18,16 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     const migration=require('../../../migrations/20260919060000-meta-marketing-oauth'),qi=sql.getQueryInterface();await migration.up(qi);await migration.down(qi);await migration.up(qi);
     models.MetaMarketingOAuthSlot=require('../../../models/metamarketingoauthslot')(sql,D);models.MetaMarketingOAuthRequest=require('../../../models/metamarketingoauthrequest')(sql,D);
     const Slot=models.MetaMarketingOAuthSlot,Requests=models.MetaMarketingOAuthRequest;
+    if(!enrollmentAuthority&&!enrollmentRuntime){models.MetaMarketingEnrollmentIdentity=require('../../../models/metamarketingenrollmentidentity')(sql,D);await models.MetaMarketingEnrollmentIdentity.sync();}
     await models.GrupoClinica.bulkCreate([{id_grupo:5,nombre_grupo:'Grupo ficticio'},{id_grupo:6,nombre_grupo:'Grupo ajeno'}]);
     await models.Clinica.bulkCreate([59,71,88].map(id=>({id_clinica:id,nombre_clinica:'Clínica ficticia '+id,grupoClinicaId:id===88?6:5,estado_clinica:true})));
-    const role=require('../../lib/role-helpers').MARKETING_WRITE_ROLES[0];await models.UsuarioClinica.bulkCreate([59,71].map(id_clinica=>({id_usuario:91002,id_clinica,rol_clinica:role,estado_invitacion:'aceptada'})));
-    const user=await models.Usuario.create({id_usuario:91002,nombre:'Responsable ficticio',email_usuario:'meta-oauth@example.invalid',password_usuario:'FICTITIOUS_PASSWORD_HASH'});
+    const role=require('../../lib/role-helpers').MARKETING_WRITE_ROLES[0];await models.UsuarioClinica.bulkCreate([59,71].map(id_clinica=>({id_usuario:userId,id_clinica,rol_clinica:role,estado_invitacion:'aceptada'})));
+    const user=await models.Usuario.create({id_usuario:userId,nombre:'Responsable ficticio',email_usuario:'meta-oauth@example.invalid',password_usuario:'FICTITIOUS_PASSWORD_HASH'});
     const secret='FICTITIOUS_META_OAUTH_SESSION',sessions=require('../../services/accessSession.service').createService({models,now:()=>clock,config:()=>({mode:'enforce',ttl:3600,secret})});
     let token=(await sessions.authenticated(user)).body.token;
     const mfa=async()=>{
       const at=new Date(Math.floor(+clock/1000)*1000),id=randomUUID();
-      await models.AuthEmailChallenge.create({challenge_id:id,user_id:91002,challenge_hash:C.hash(id),code_hash:C.hash('fictitious-code:'+id),credential_binding:require('../../services/accessSession.service').binding(user,secret),email_hash:C.hash('fictitious-email'),
+      await models.AuthEmailChallenge.create({challenge_id:id,user_id:userId,challenge_hash:C.hash(id),code_hash:C.hash('fictitious-code:'+id),credential_binding:require('../../services/accessSession.service').binding(user,secret),email_hash:C.hash('fictitious-email'),
         state:'verified',created_at:at,expires_at:new Date(+at+300000),absolute_expires_at:new Date(+at+300000),last_sent_at:at,verified_at:at});
       token=(await sessions.authenticated(user,{emailChallengeId:id})).body.token;return token;
     };
@@ -111,7 +113,7 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     await brokerApp.close();brokerApp=null;await start();clock=new Date(+clock+61000);const result=await service.run();assert.equal(result.failed,0);assert.equal((await latest(lost.requestId)).state,'staged');
     assert.equal(f.state.codes,codes+2);clock=new Date();await cancel(lost);
     report.checks.push('Lost candidate write ACK keeps SQL processing; actual broker restart and gated worker reconcile the original version without code replay');
-    const revoked=await begin();await models.AuthSession.update({state:'revoked'},{where:{user_id:91002}});const n=f.state.codes;await callback(revoked);assert.equal(f.state.codes,n);assert.equal((await latest(revoked.requestId)).state,'cancel_pending');
+    const revoked=await begin();await models.AuthSession.update({state:'revoked'},{where:{user_id:userId}});const n=f.state.codes;await callback(revoked);assert.equal(f.state.codes,n);assert.equal((await latest(revoked.requestId)).state,'cancel_pending');
     clock=new Date(+clock+1000);await service.run();assert.equal((await latest(revoked.requestId)).state,'cancelled');clock=new Date();await mfa();
     report.checks.push('Session revoked before callback prevents exchange and worker completes durable cancellation after logout');
     const changed=await begin();afterWire=async command=>{if(command.operation===B.OPERATIONS.finish)await models.UsuarioClinica.update({rol_clinica:'personaldeclinica'},{where:{id_clinica:71}});};
@@ -122,7 +124,7 @@ withIsolatedCampaignMysql(async({sql,models,report,registerOwnedLoopbackServer})
     report.checks.push('Permission lost after remote success prevents local candidate readiness and confirms withdrawal through the independent control path');
     const history=await begin(),beforeHistory=f.state.codes;
     await models.MetaMarketingBrokerRevocation.create({tuple_hash:C.hash('FICTITIOUS_EXISTING_REVOCATION'),connection_ref:'meta:previous',asset_ref:'page:123',tenant_clinic_id:59,
-      meta_connection_id:2,meta_user_id:'123',app_id:mb.appId,scope_key:'group:5',clinic_ids:'[59,71]',mapping_ids:'[1]',request_id:randomUUID(),actor_user_id:91002,requested_at:clock,next_attempt_at:clock,state:'confirmed'});
+      meta_connection_id:2,meta_user_id:'123',app_id:mb.appId,scope_key:'group:5',clinic_ids:'[59,71]',mapping_ids:'[1]',request_id:randomUUID(),actor_user_id:userId,requested_at:clock,next_attempt_at:clock,state:'confirmed'});
     await callback(history);assert.equal(f.state.codes,beforeHistory);assert.equal((await latest(history.requestId)).state,'cancel_pending');
     clock=new Date(+clock+1000);await service.run();assert.equal((await latest(history.requestId)).state,'cancelled');clock=new Date();
     assert.equal(await models.MetaMarketingBrokerRevocation.count(),1);

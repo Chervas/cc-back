@@ -18,7 +18,7 @@ const root = process.argv[1], c = require(path.join(root, 'src/event'));
 const reader = require(path.join(root, 'src/reader-protocol'));
 const id = '11111111-1111-4111-8111-111111111111', child = '22222222-2222-4222-8222-222222222222';
 const digest = '0'.repeat(64), referenceVersions = [];
-for (let v = 1; v <= 27; v++) {
+for (let v = 1; v <= 32; v++) {
   try { reader.refFor({ key: `app/platform/v${v}/2026-10-28/${id}-${digest}.json`, digest, versionId: 'fictitious-version' }, 'confirmed'); referenceVersions.push(v); } catch {}
 }
 const fixture = { version: 27, eventId: id, correlationId: id, requestCorrelationId: id,
@@ -29,7 +29,14 @@ const fixture = { version: 27, eventId: id, correlationId: id, requestCorrelatio
   capturePolicy: 'delegated-session-durable-v1' };
 let delegationCodec = false;
 try { const row = c.pack(fixture); delegationCodec = c.unpack(row).event.version === 27; } catch {}
-process.stdout.write(JSON.stringify({ referenceVersions, delegationCodec, syntheticOnly: true, networkOperations: 0 }));
+let activeInventoryCodec = false;
+try {
+ const value = require(path.join(root, 'src/meta-active-inventory-event')).fromActiveInventory({
+  row: { scope_key:'clinic:95', connection_ref:'fictitious-connection', enrollment_id:id, clinicIds:[95], clinic_ids:'[95]' },
+  effective: { versionId:child, epoch:2 } }, { actorId:225, sessionRef:child }, id, 'inventory_requested', new Date('2026-11-17T06:00:00.000Z'));
+ const row = c.pack(value); activeInventoryCodec = c.unpack(row).event.version === 32;
+} catch {}
+process.stdout.write(JSON.stringify({ referenceVersions, delegationCodec, activeInventoryCodec, syntheticOnly: true, networkOperations: 0 }));
 '''
 
 

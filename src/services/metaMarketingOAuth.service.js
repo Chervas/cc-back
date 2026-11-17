@@ -4,7 +4,7 @@ const C=require('./metaMarketingOAuth.contract'),B=require('../../services/integ
 const {fromFlow}=require('../../services/platform-audit/src/meta-oauth-event');
 const D=require('../../services/integrations-broker/src/meta-marketing-discovery-contract'),{fromDiscovery}=require('../../services/platform-audit/src/meta-discovery-event');
 const SAFE=new Set(['meta_oauth_unavailable','meta_oauth_disabled','meta_oauth_scope_invalid','meta_oauth_scope_changed','meta_oauth_scope_forbidden','meta_oauth_scope_blocked',
-  'meta_oauth_session_required','auth_email_verification_required','meta_oauth_busy','meta_oauth_state_invalid','meta_oauth_outcome_unknown','meta_oauth_unconfigured',
+  'meta_oauth_session_required','meta_oauth_authorization_expired','meta_oauth_inventory_not_pending','auth_email_verification_required','meta_oauth_busy','meta_oauth_state_invalid','meta_oauth_outcome_unknown','meta_oauth_unconfigured',
   'broker_response_invalid','broker_configuration_invalid','broker_timeout','broker_unavailable','audit_unavailable']);
 const safe=e=>SAFE.has(e?.code)?e.code:'meta_oauth_unavailable';
 function createService({models,sessions,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_OAUTH_ENABLED==='true',
@@ -123,7 +123,14 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
         gate();if(!discoveryEnabled())C.fail('meta_oauth_disabled');
         await scope.authorize(input,transaction);const row=await R.findByPk(id,locked(transaction));
         if(!row||row.scope_key!==input.scopeKey||Number(row.actor_user_id)!==input.actorId)C.fail('meta_oauth_scope_forbidden',403);
-        await authorizedRow(plain(row),transaction);
+        const linked=models.MetaMarketingEnrollmentRequest&&await models.MetaMarketingEnrollmentRequest.findOne({attributes:['state'],where:{flow_id:id},...locked(transaction)});
+        if(linked&&['active','revoke_pending','revoked','superseded'].includes(linked.state))C.fail('meta_oauth_inventory_not_pending',409);
+        try{await authorizedRow(plain(row),transaction);}catch(error){
+          // The browser's current login was checked above. An expired bound
+          // authorization is a domain conflict, never evidence to log it out.
+          if(error.httpStatus!==401||error.code!=='meta_oauth_session_required')throw error;
+          await scope.authorize(input,transaction);C.fail('meta_oauth_authorization_expired',409);
+        }
         if(row.state!=='staged'||!row.candidate_metadata||captured&&captured.candidate_metadata!==row.candidate_metadata)C.fail('meta_oauth_scope_changed',409);
         const candidate=C.candidate(JSON.parse(row.candidate_metadata),plain(row));
         if([candidate.expiresAt,candidate.dataAccessExpiresAt].some(v=>v!==null&&v<=+now()))C.fail('meta_oauth_scope_changed',409);

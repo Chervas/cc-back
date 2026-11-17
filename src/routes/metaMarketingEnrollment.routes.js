@@ -13,13 +13,13 @@ function createRouter({service=require('../services/metaMarketingEnrollment.serv
         ||type==='clinic'&&req.query.group_id!==undefined||type==='group'&&req.query.clinic_id!==undefined)C.fail('meta_enrollment_invalid',400);
       const body=req.body===undefined?{}:req.body,keys=name==='reserve'?'flowId,assetRefs':name==='confirm'?'selectionDigest':'';
       if(!body||Object.getPrototypeOf(body)!==Object.prototype||Object.keys(body).sort().join(',')!==keys.split(',').filter(Boolean).sort().join(','))C.fail('meta_enrollment_invalid',400);
-      if(['confirm','cancel'].includes(name)&&!C.UUID.test(req.params.id))C.fail('meta_enrollment_invalid',400);
+      if(['confirm','cancel','assets'].includes(name)&&!C.UUID.test(req.params.id))C.fail('meta_enrollment_invalid',400);
       if(name==='reserve'&&(typeof body.flowId!=='string'||!C.UUID.test(body.flowId)||!Array.isArray(body.assetRefs)||!body.assetRefs.length||body.assetRefs.length>100
         ||new Set(body.assetRefs).size!==body.assetRefs.length||body.assetRefs.some(v=>typeof v!=='string'||!/^meta-(ad_account|facebook_page|instagram_business):[1-9][0-9]{0,29}$/.test(v))))C.fail('meta_enrollment_invalid',400);
       if(name==='confirm'&&(typeof body.selectionDigest!=='string'||!C.HASH.test(body.selectionDigest)))C.fail('meta_enrollment_invalid',400);
       const input={scopeKey:type+':'+id,actorId:claims.userId,sessionRef:claims.jti,sessionExpiresAt:new Date(claims.exp*1000)};
       const result=name==='reserve'?await service.reserve(input,body.flowId,body.assetRefs):name==='confirm'?await service.confirm(input,req.params.id,body.selectionDigest):
-        name==='cancel'?await service.cancel(input,req.params.id):await service.overview(input);
+        name==='cancel'?await service.cancel(input,req.params.id):name==='assets'?await service.assets(input,req.params.id):await service.overview(input);
       return res.json(result);
     }catch(error){
       const status=['JsonWebTokenError','TokenExpiredError'].includes(error?.name)?401:[400,401,403,409,429].includes(error?.httpStatus)?error.httpStatus:503;
@@ -27,6 +27,6 @@ function createRouter({service=require('../services/metaMarketingEnrollment.serv
     }
   };
   router.get('/enrollment',handler('overview'));router.post('/enrollment',handler('reserve'));
-  router.post('/enrollment/:id/confirmation',handler('confirm'));router.delete('/enrollment/:id',handler('cancel'));return router;
+  router.post('/enrollment/:id/confirmation',handler('confirm'));router.post('/enrollment/:id/assets',handler('assets'));router.delete('/enrollment/:id',handler('cancel'));return router;
 }
 module.exports={createRouter};

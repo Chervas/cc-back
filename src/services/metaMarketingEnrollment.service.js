@@ -11,13 +11,15 @@ const safe=error=>SAFE.has(error?.code)?error.code:'meta_enrollment_unavailable'
 const claimSql=id=>`SELECT enrollment_id FROM MetaMarketingEnrollmentRequests
   WHERE delivery_due_at <= $now AND state <> 'superseded' AND (lease_until IS NULL OR lease_until <= $now)
   ${id?'AND enrollment_id = $id':''} ORDER BY delivery_due_at,enrollment_id LIMIT 1 FOR UPDATE SKIP LOCKED`;
-function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_ENROLLMENT_ENABLED==='true',
+function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_ENROLLMENT_ENABLED==='true',discoveryEnabled=()=>process.env.META_MARKETING_OAUTH_DISCOVERY_ENABLED==='true',
   workerEnabled=()=>process.env.META_MARKETING_ENROLLMENT_WORKER_ENABLED==='true'}){
   const R=models.MetaMarketingEnrollmentRequest,scope=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now});
   const authority=require('./metaMarketingEnrollmentAuthority.service').createAuthority({models,sessions,oauth,now,enabled});
   const bindings=require('./metaMarketingEnrollmentBinding.service').createBindings({models,sessions,authority,now});
   const tx=fn=>models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},fn),lock=transaction=>({transaction,lock:transaction.LOCK.UPDATE,logging:false});
   const order=require('./metaMarketingTransactionOrder.service').createOrder({models,authorize:scope.authorize,unavailable:()=>C.fail('meta_enrollment_unavailable',503)});
+  let activeInventory;
+  const inventory=()=>activeInventory||=require('./metaMarketingActiveInventory.service').createActiveInventory({models,sessions,client,now,enabled:()=>enabled()&&discoveryEnabled()});
   const project=row=>({requestId:row.enrollment_id,flowId:row.flow_id,state:row.state,connected:row.state==='active',clinicCount:row.clinicIds.length,
     assets:row.selected,selectionDigest:row.selection_digest,mappingIds:row.mappingIds,lastError:row.last_error,cancellationConfirmed:row.state==='revoked'});
   async function current(id,transaction){
@@ -133,14 +135,15 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
   let running=false;
   return {
     async overview(input){return order.scope(input,{},async({transaction,enrollment,input})=>{
-      if(!enrollment)return {enabled:enabled(),canSelect:enabled(),selection:null};
-      const row=await current(enrollment.enrollment_id,transaction);let selection=project(row);
-      if(row.state==='active')try{await bindings.committed(row.enrollment_id,transaction);}
-      catch(error){selection={...selection,connected:false,attentionRequired:true,lastError:safe(error)};}
-      return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',selection:{...selection,
+      if(!enrollment)return {enabled:enabled(),canSelect:enabled(),selection:null,discovery:{mode:'pending'}};
+      const row=await current(enrollment.enrollment_id,transaction);let selection=project(row),discovery={mode:row.state==='active'?'unavailable':'pending'};
+      if(row.state==='active')try{await bindings.committed(row.enrollment_id,transaction);if(enabled()&&discoveryEnabled())discovery=await inventory().describe(input,row,transaction);}
+      catch(error){if([401,403].includes(error.httpStatus))throw error;selection={...selection,connected:false,attentionRequired:true,lastError:safe(error)};}
+      return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',discovery,selection:{...selection,
         canConfirm:enabled()&&row.state==='prepared'&&Number(row.actor_user_id)===input.actorId&&row.session_ref===input.sessionRef
           &&+row.session_expires_at===+input.sessionExpiresAt&&+row.session_expires_at>+now(),canCancel:!['revoke_pending','revoked'].includes(row.state)}};
     });},
+    async assets(input,id){return inventory().assets(input,id);},
     async cancelFromOAuth(flowId,transaction,actor){
       if(!transaction||!C.UUID.test(flowId))C.fail();
       const row=await R.findOne({...lock(transaction),where:{flow_id:flowId}});
@@ -188,6 +191,6 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
 let singleton;
 const instance=()=>singleton||=createService({models:require('../../models'),sessions:require('./accessSession.service'),
   oauth:require('./metaMarketingOAuth.service'),client:require('./metaMarketingOAuthClient.service').createClient()});
-module.exports={createService,safe,claimSql,...Object.fromEntries(['overview','reserve','status','confirm','cancel'].map(k=>[k,(...args)=>instance()[k](...args)])),
+module.exports={createService,safe,claimSql,...Object.fromEntries(['overview','reserve','status','confirm','cancel','assets'].map(k=>[k,(...args)=>instance()[k](...args)])),
   run:options=>process.env.RUNTIME_ROLE==='gateway'?Promise.resolve({status:'completed',skipped:true,reason:'gateway_runtime'}):
     process.env.META_MARKETING_ENROLLMENT_WORKER_ENABLED==='true'?instance().run(options):Promise.resolve({status:'completed',skipped:true,reason:'meta_enrollment_worker_disabled'})};
