@@ -72,6 +72,20 @@ exports.createTemplate = async (req, res) => {
   try { return res.status(201).json({ success: true, template: await service.saveTemplate(await scope(req, 'write'), req.body || {}, req.userData?.userId) }); }
   catch (error) { return handle(res, error, 'No se pudo crear la plantilla.'); }
 };
+exports.previewTemplate = async (req, res) => {
+  try {
+    service.scopeDescriptor(await scope(req));
+    return res.json({ success: true, preview: service.previewTemplate(req.body || {}) });
+  }
+  catch (error) { return handle(res, error, 'No se pudo generar la vista previa de email.'); }
+};
+exports.previewCatalogTemplate = async (req, res) => {
+  try {
+    assertAdmin(req);
+    return res.json({ success: true, preview: service.previewTemplate(req.body || {}) });
+  }
+  catch (error) { return handle(res, error, 'No se pudo generar la vista previa del catálogo.'); }
+};
 exports.updateTemplate = async (req, res) => {
   try { return res.json({ success: true, template: await service.saveTemplate(await scope(req, 'write'), req.body || {}, req.userData?.userId, req.params.id) }); }
   catch (error) { return handle(res, error, 'No se pudo actualizar la plantilla.'); }

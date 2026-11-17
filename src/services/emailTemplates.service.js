@@ -1,6 +1,7 @@
 'use strict';
 
 const MAX_SUBJECT_LENGTH = 160;
+const marketingHtml = require('./marketingEmailHtml.service');
 
 function cleanString(value) {
   const normalized = String(value || '').trim();
@@ -59,11 +60,13 @@ function assertSafeSubject(subject) {
   if (!normalized) {
     const error = new Error('email_subject_required');
     error.code = 'email_subject_required';
+    error.status = 400;
     throw error;
   }
   if (normalized.length > MAX_SUBJECT_LENGTH) {
     const error = new Error('email_subject_too_long');
     error.code = 'email_subject_too_long';
+    error.status = 400;
     throw error;
   }
   const forbiddenPatterns = [
@@ -75,6 +78,7 @@ function assertSafeSubject(subject) {
   if (forbiddenPatterns.some((pattern) => pattern.test(normalized))) {
     const error = new Error('email_subject_contains_sensitive_detail');
     error.code = 'email_subject_contains_sensitive_detail';
+    error.status = 400;
     throw error;
   }
   return normalized;
@@ -224,12 +228,12 @@ function renderAutomationGeneric(context = {}) {
 
 function renderMarketingCampaign(context = {}) {
   const subject = assertSafeSubject(cleanString(context.subject) || 'Novedades de tu clínica');
-  const bodyHtml = cleanString(context.body_html);
-  const bodyText = cleanString(context.body_text) || stripHtml(bodyHtml || '');
-  const unsubscribeUrl = cleanString(context.unsubscribe_url);
+  const bodyHtml = marketingHtml.sanitizeEmailHtml(cleanString(context.body_html));
+  const bodyText = cleanString(context.body_text) || marketingHtml.textFromHtml(bodyHtml);
+  const unsubscribeUrl = marketingHtml.httpsUrl(context.unsubscribe_url);
   const preheader = cleanString(context.preheader);
   const showBranding = context.show_clinicaclick_branding !== false;
-  if ((!bodyHtml && !bodyText) || !unsubscribeUrl || !/^https:\/\//i.test(unsubscribeUrl)) {
+  if ((!bodyHtml && !bodyText) || !unsubscribeUrl) {
     const error = new Error('marketing_email_body_or_unsubscribe_invalid');
     error.code = 'marketing_email_body_or_unsubscribe_invalid';
     throw error;
@@ -242,22 +246,22 @@ function renderMarketingCampaign(context = {}) {
     ].join('')
     : '';
   const footer = [
-    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td style="padding:20px 24px;text-align:center;font:12px/1.5 Arial,sans-serif;color:#64748b">',
+    '<table data-email-footer="unsubscribe" role="presentation" width="100%" cellspacing="0" cellpadding="0" style="display:table;background:#ffffff;color:#64748b"><tr><td style="padding:20px 24px;text-align:center;font:12px/1.5 Arial,sans-serif;color:#64748b">',
     '<a href="', escapeHtml(unsubscribeUrl), '" style="color:#475569;text-decoration:underline">Dejar de recibir estas comunicaciones</a>',
     branding,
     '</td></tr></table>',
   ].join('');
   const preheaderHtml = preheader
-    ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">${escapeHtml(preheader)}</div>`
+    ? `<div data-email-preheader="true" style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">${escapeHtml(preheader)}</div>`
     : '';
-  const html = bodyHtml
-    ? bodyHtml.replace(/<body([^>]*)>/i, `<body$1>${preheaderHtml}`).replace(/<\/body>\s*<\/html>\s*$/i, `${footer}</body></html>`)
-    : `<!doctype html><html><body>${preheaderHtml}<p>${escapeHtml(bodyText)}</p>${footer}</body></html>`;
-  return {
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(subject)}</title></head><body style="margin:0;background:#ffffff">${preheaderHtml}${bodyHtml || `<p>${escapeHtml(bodyText)}</p>`}${footer}</body></html>`;
+  const rendered = {
     subject,
-    html: html.includes('Dejar de recibir estas comunicaciones') ? html : `${html}${footer}`,
+    html,
     text: `${bodyText}\n\nDejar de recibir estas comunicaciones: ${unsubscribeUrl}${showBranding ? '\nEnviado con Clinicaclick' : ''}`,
   };
+  marketingHtml.assertContentBudget(rendered);
+  return rendered;
 }
 
 function renderTemplate(templateKey, context = {}) {

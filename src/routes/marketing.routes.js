@@ -228,11 +228,13 @@ router.post('/email/domains/:id/refresh', marketingEmailController.refreshDomain
 router.post('/email/senders', marketingEmailController.addSender);
 router.post('/email/senders/:id/default', marketingEmailController.setDefaultSender);
 router.get('/email/templates', marketingEmailController.listTemplates);
+router.post('/email/preview', marketingEmailController.previewTemplate);
 router.post('/email/templates', marketingEmailController.createTemplate);
 router.get('/email/templates/:id', marketingEmailController.getTemplate);
 router.put('/email/templates/:id', marketingEmailController.updateTemplate);
 router.post('/email/templates/:id/duplicate', marketingEmailController.duplicateTemplate);
 router.get('/email/template-catalog', marketingEmailController.listCatalogTemplates);
+router.post('/email/template-catalog/preview', marketingEmailController.previewCatalogTemplate);
 router.post('/email/template-catalog', marketingEmailController.createCatalogTemplate);
 router.put('/email/template-catalog/:id', marketingEmailController.updateCatalogTemplate);
 router.post('/email/template-catalog/:id/duplicate', marketingEmailController.duplicateCatalogTemplate);

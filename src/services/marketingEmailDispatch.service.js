@@ -139,6 +139,7 @@ async function assertReady(list, { validateRecipients = false } = {}) {
       const missing = emailTemplates.missingTemplateVariables(
         context,
         campaignSubject(list, assets.template),
+        campaignPreheader(list, assets.template),
         assets.template.rendered_html,
         assets.template.rendered_text
       );
@@ -312,13 +313,14 @@ function campaignSubject(list, template) {
 }
 
 function campaignPreheader(list, template) {
-  return String(list.criteria?.email_preheader || template.preheader || '').trim();
+  return String(list.criteria?.email_preheader ?? template.preheader ?? '').trim();
 }
 
 function assertTemplateVariables(template, variables, list) {
   const missing = emailTemplates.missingTemplateVariables(
     variables,
     campaignSubject(list, template),
+    campaignPreheader(list, template),
     template.rendered_html,
     template.rendered_text
   );
@@ -475,7 +477,37 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   return { status: 'waiting', nextRunAt: next, nextAllowedAt: next, result: { list_id: list.id, queued, failed, remaining } };
 }
 
+function testConfiguration(list, body) {
+  const stored = plain(list);
+  const draft = { ...stored, criteria: { ...(stored.criteria || {}) } };
+  for (const key of ['email_template_id', 'email_sender_identity_id']) {
+    if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
+    const id = Number(body[key]);
+    if (!Number.isSafeInteger(id) || id <= 0 || !/^\d+$/.test(String(body[key]))) {
+      fail('marketing_email_test_asset_invalid', 400, 'Selecciona una plantilla y un remitente válidos para la prueba.');
+    }
+    draft[key] = id;
+    draft.criteria[key] = id;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'email_subject')) {
+    if (body.email_subject !== null && typeof body.email_subject !== 'string') fail('email_subject_invalid', 400);
+    const subject = String(body.email_subject || '').trim();
+    emailTemplates.assertSafeSubject(subject);
+    draft.criteria.email_subject = subject;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'email_preheader')) {
+    if (body.email_preheader !== null && typeof body.email_preheader !== 'string') fail('email_preheader_invalid', 400);
+    const preheader = String(body.email_preheader || '').trim();
+    if (preheader.length > 255) fail('email_template_preheader_too_long', 400);
+    draft.criteria.email_preheader = preheader;
+  }
+  return draft;
+}
+
 async function sendTest(list, body = {}) {
+  // Draft-only overrides go through the same scoped asset lookup and recipient
+  // gates, and never modify the persisted campaign or affect real dispatch.
+  list = testConfiguration(list, body);
   const { sender, template, scopeKey } = await assertReady(list);
   const recipientEmail = emailDelivery.normalizeEmail(body.to || body.email);
   const item = body.item_id
@@ -597,5 +629,6 @@ module.exports = {
   reconcileEmailDispatchCompletion,
   __testing: {
     templateContext,
+    testConfiguration,
   },
 };

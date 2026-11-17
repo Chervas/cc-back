@@ -6,6 +6,7 @@ const { Op } = require('sequelize');
 const db = require('../../models');
 const emailDelivery = require('./emailDelivery.service');
 const emailTemplates = require('./emailTemplates.service');
+const emailHtml = require('./marketingEmailHtml.service');
 const emailProvider = require('./emailProvider.service');
 const { createEmailBroker } = require('./emailBroker.service');
 
@@ -95,18 +96,64 @@ function normalizeBlock(raw = {}) {
   return { type, text };
 }
 
+function inactiveDraftUrl(value) {
+  const normalized = clean(value);
+  if (normalized && normalized.length > 2048) {
+    fail('email_template_url_invalid', 400, 'La URL del borrador no puede superar 2048 caracteres.');
+  }
+  // Older editors used this inert placeholder for an unfinished block. It is
+  // stored only as inactive draft data; active block validation still rejects it.
+  if (normalized === 'https://') return normalized;
+  return safeHttpsUrl(normalized);
+}
+
+function normalizeInactiveBlock(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    fail('email_template_block_invalid', 400, 'La plantilla contiene un bloque no permitido.');
+  }
+  const type = String(raw.type || '').trim().toLowerCase();
+  if (!BLOCKS.has(type)) fail('email_template_block_invalid', 400, 'La plantilla contiene un bloque no permitido.');
+  if (type === 'divider') return { type };
+  if (type === 'image') {
+    return { type, url: inactiveDraftUrl(raw.url), alt: clean(raw.alt)?.slice(0, 160) || '' };
+  }
+  const text = clean(raw.text)?.slice(0, type === 'text' ? 5000 : 220) || '';
+  return type === 'button' ? { type, text, url: inactiveDraftUrl(raw.url) } : { type, text };
+}
+
 function normalizeDesign(raw = {}) {
-  const blocks = Array.isArray(raw.blocks) ? raw.blocks.slice(0, 20).map(normalizeBlock) : DEFAULT_DESIGN.blocks;
-  if (!blocks.length) fail('email_template_blocks_required', 400, 'Añade al menos un bloque a la plantilla.');
-  return {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('email_template_design_invalid', 400, 'El diseño de la plantilla no es válido.');
+  if (raw.content_mode !== undefined && !['blocks', 'html'].includes(raw.content_mode)) {
+    fail('email_template_content_mode_invalid', 400, 'Selecciona bloques o HTML como formato de contenido.');
+  }
+  const common = {
     header_color: hexColor(raw.header_color, DEFAULT_DESIGN.header_color),
     footer_color: hexColor(raw.footer_color, DEFAULT_DESIGN.footer_color),
     background_color: hexColor(raw.background_color, DEFAULT_DESIGN.background_color),
     content_color: hexColor(raw.content_color, DEFAULT_DESIGN.content_color),
     text_color: hexColor(raw.text_color, DEFAULT_DESIGN.text_color),
-    logo_url: safeHttpsUrl(raw.logo_url),
+    logo_url: raw.content_mode === 'html' ? inactiveDraftUrl(raw.logo_url) : safeHttpsUrl(raw.logo_url),
     show_clinicaclick_branding: raw.show_clinicaclick_branding !== false,
+  };
+  if (raw.content_mode === 'html') {
+    if (Object.prototype.hasOwnProperty.call(raw, 'blocks') && !Array.isArray(raw.blocks)) {
+      fail('email_template_block_invalid', 400, 'La plantilla contiene bloques no válidos.');
+    }
+    return {
+      content_mode: 'html',
+      ...common,
+      html_source: emailHtml.validateHtmlSourceCode(raw.html_source),
+      ...(Array.isArray(raw.blocks) ? { blocks: raw.blocks.slice(0, 20).map(normalizeInactiveBlock) } : {}),
+    };
+  }
+  const blocks = Array.isArray(raw.blocks) ? raw.blocks.slice(0, 20).map(normalizeBlock) : DEFAULT_DESIGN.blocks;
+  if (!blocks.length) fail('email_template_blocks_required', 400, 'Añade al menos un bloque a la plantilla.');
+  return {
+    ...(raw.content_mode === 'blocks' ? { content_mode: 'blocks' } : {}),
+    ...common,
     blocks,
+    ...(Object.prototype.hasOwnProperty.call(raw, 'html_source')
+      ? { html_source: emailHtml.validateHtmlSourceCode(raw.html_source, { allowEmpty: true }) } : {}),
   };
 }
 
@@ -124,6 +171,9 @@ function renderBlock(block, design) {
 }
 
 function renderTemplateDocument({ subject, preheader, layoutKey, design }) {
+  if (design.content_mode === 'html') {
+    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(subject)}</title></head><body style="margin:0">${emailHtml.compileHtmlSource(design.html_source)}</body></html>`;
+  }
   const logo = design.logo_url
     ? `<img src="${escapeHtml(design.logo_url)}" alt="" width="180" style="display:block;max-width:180px;max-height:72px;width:auto;height:auto;border:0">`
     : '<span style="font:700 18px Arial,sans-serif;color:#ffffff">{{clinica}}</span>';
@@ -132,7 +182,6 @@ function renderTemplateDocument({ subject, preheader, layoutKey, design }) {
   return [
     '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
     `<title>${escapeHtml(subject)}</title></head><body style="margin:0;background:${design.background_color}">`,
-    `<div style="display:none;max-height:0;overflow:hidden;opacity:0">${escapeHtml(preheader || '')}</div>`,
     '<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center" style="padding:28px 12px">',
     `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:${design.content_color};border-collapse:collapse">`,
     header,
@@ -143,6 +192,7 @@ function renderTemplateDocument({ subject, preheader, layoutKey, design }) {
 }
 
 function textFromDesign(design) {
+  if (design.content_mode === 'html') return emailHtml.textFromHtml(emailHtml.compileHtmlSource(design.html_source));
   return design.blocks.filter(block => ['heading', 'text', 'button'].includes(block.type)).map(block => block.text).join('\n\n');
 }
 
@@ -154,7 +204,8 @@ function normalizeTemplateContent(body = {}) {
   const layoutKey = LAYOUTS.has(body.layout_key || body.layoutKey) ? (body.layout_key || body.layoutKey) : 'classic';
   const design = normalizeDesign(body.design || {});
   const preheader = clean(body.preheader);
-  return {
+  if (preheader && preheader.length > 255) fail('email_template_preheader_too_long', 400, 'El texto de vista previa no puede superar 255 caracteres.');
+  const content = {
     name,
     subject,
     preheader,
@@ -163,6 +214,48 @@ function normalizeTemplateContent(body = {}) {
     rendered_html: renderTemplateDocument({ subject, preheader, layoutKey, design }),
     rendered_text: textFromDesign(design),
   };
+  emailHtml.assertContentBudget({ html: content.rendered_html, text: content.rendered_text, subject, preheader });
+  return content;
+}
+
+const PREVIEW_VARIABLES = Object.freeze({
+  nombre: 'Ana', nombre_paciente: 'Ana', apellido: 'García', nombre_completo: 'Ana García',
+  clinica: 'Clínica Ejemplo', nombre_clinica: 'Clínica Ejemplo',
+  email: 'ana@example.test', telefono: '+34 600 000 000',
+  firma_resenas: 'Equipo de la clínica', fecha_ultima_cita_asistida: '10/11/2026',
+});
+
+function previewTemplate(body = {}) {
+  const content = normalizeTemplateContent({ ...body, name: clean(body.name) || 'Vista previa', subject: clean(body.subject) || 'Novedades de tu clínica' });
+  const supplied = body.variables;
+  if (supplied !== undefined && (!supplied || typeof supplied !== 'object' || Array.isArray(supplied))) {
+    fail('email_preview_variables_invalid', 400, 'Las variables de vista previa deben ser un objeto.');
+  }
+  if (supplied && Buffer.byteLength(JSON.stringify(supplied), 'utf8') > 16 * 1024) {
+    fail('email_preview_variables_too_large', 400, 'Las variables de vista previa superan el tamaño permitido.');
+  }
+  if (supplied && Object.entries(supplied).some(([key, value]) =>
+    !/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(key)
+      || ['__proto__', 'constructor', 'prototype'].includes(key)
+      || typeof value !== 'string')) {
+    fail('email_preview_variables_invalid', 400, 'Las variables de vista previa deben tener nombres válidos y valores de texto.');
+  }
+  const variables = { ...PREVIEW_VARIABLES, ...(supplied || {}) };
+  const missing = emailTemplates.missingTemplateVariables(variables, content.subject, content.preheader, content.rendered_html, content.rendered_text);
+  const warnings = [];
+  if (content.design.content_mode === 'html' && emailHtml.compileHtmlSource(content.design.html_source) !== content.design.html_source.trim()) {
+    warnings.push('Se ha normalizado el HTML y eliminado el contenido, los estilos o las URL no permitidos.');
+  }
+  if (missing.length) warnings.push('Faltan valores para algunas variables de la plantilla.');
+  const rendered = emailTemplates.renderMarketingCampaign({
+    subject: emailTemplates.replaceVars(content.subject, variables),
+    preheader: emailTemplates.replaceVars(content.preheader, variables),
+    body_html: emailTemplates.replaceVars(content.rendered_html, variables, { html: true }),
+    body_text: emailTemplates.replaceVars(content.rendered_text, variables),
+    unsubscribe_url: 'https://example.test/email/baja',
+    show_clinicaclick_branding: content.design.show_clinicaclick_branding !== false,
+  });
+  return { html: rendered.html, text: rendered.text, warnings, missing_variables: missing };
 }
 
 function templateIdentifier(id) {
@@ -761,4 +854,5 @@ module.exports = {
   buildDevMockIdentity,
   serializeSender,
   serializeTemplate,
+  previewTemplate,
 };

@@ -13,6 +13,8 @@ const explicitContracts = new Set([
   'google_ads_sync_pipeline.test.js',
   'google_lead_lifecycle_conversion.test.js',
   'marketing_web_campaign_integration.test.js',
+  'marketing_email_contract.test.js',
+  'marketing_email_html_contract.test.js',
   'qualified_lead_milestone.test.js',
   'scheduled_jobs_orchestration.test.js',
 ]);
