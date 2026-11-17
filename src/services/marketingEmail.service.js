@@ -143,7 +143,7 @@ function normalizeDesign(raw = {}) {
       content_mode: 'html',
       ...common,
       html_source: emailHtml.validateHtmlSourceCode(raw.html_source),
-      ...(Array.isArray(raw.blocks) ? { blocks: raw.blocks.slice(0, 20).map(normalizeInactiveBlock) } : {}),
+      blocks: Array.isArray(raw.blocks) ? raw.blocks.slice(0, 20).map(normalizeInactiveBlock) : [],
     };
   }
   const blocks = Array.isArray(raw.blocks) ? raw.blocks.slice(0, 20).map(normalizeBlock) : DEFAULT_DESIGN.blocks;
@@ -226,7 +226,28 @@ const PREVIEW_VARIABLES = Object.freeze({
 });
 
 function previewTemplate(body = {}) {
-  const content = normalizeTemplateContent({ ...body, name: clean(body.name) || 'Vista previa', subject: clean(body.subject) || 'Novedades de tu clínica' });
+  const warnings = [];
+  let design = body.design;
+  if (design && typeof design === 'object' && !Array.isArray(design)) {
+    design = { ...design };
+    if (design.content_mode === 'html' && typeof design.html_source === 'string' && !design.html_source.trim()) {
+      design.html_source = '<p>Pega el código HTML para ver el email.</p>';
+      warnings.push('Pega el código HTML para completar la plantilla.');
+    } else if (design.content_mode !== 'html' && Array.isArray(design.blocks)) {
+      design.blocks = design.blocks.filter(block => {
+        if (!block || typeof block !== 'object' || !BLOCKS.has(block.type)) return true;
+        const missingText = ['heading', 'text', 'button'].includes(block.type) && !clean(block.text);
+        const missingUrl = ['image', 'button'].includes(block.type) && (!clean(block.url) || clean(block.url) === 'https://');
+        if (missingText || missingUrl) {
+          warnings.push('Completa el texto y las imágenes o enlaces de los bloques pendientes.');
+          return false;
+        }
+        return true;
+      });
+      if (!design.blocks.length) design.blocks = [{ type: 'text', text: 'Añade contenido para ver tu email.' }];
+    }
+  }
+  const content = normalizeTemplateContent({ ...body, design, name: clean(body.name) || 'Vista previa', subject: clean(body.subject) || 'Novedades de tu clínica' });
   const supplied = body.variables;
   if (supplied !== undefined && (!supplied || typeof supplied !== 'object' || Array.isArray(supplied))) {
     fail('email_preview_variables_invalid', 400, 'Las variables de vista previa deben ser un objeto.');
@@ -242,7 +263,6 @@ function previewTemplate(body = {}) {
   }
   const variables = { ...PREVIEW_VARIABLES, ...(supplied || {}) };
   const missing = emailTemplates.missingTemplateVariables(variables, content.subject, content.preheader, content.rendered_html, content.rendered_text);
-  const warnings = [];
   if (content.design.content_mode === 'html' && emailHtml.compileHtmlSource(content.design.html_source) !== content.design.html_source.trim()) {
     warnings.push('Se ha normalizado el HTML y eliminado el contenido, los estilos o las URL no permitidos.');
   }
@@ -255,7 +275,7 @@ function previewTemplate(body = {}) {
     unsubscribe_url: 'https://example.test/email/baja',
     show_clinicaclick_branding: content.design.show_clinicaclick_branding !== false,
   });
-  return { html: rendered.html, text: rendered.text, warnings, missing_variables: missing };
+  return { html: rendered.html, text: rendered.text, warnings: [...new Set(warnings)], missing_variables: missing };
 }
 
 function templateIdentifier(id) {

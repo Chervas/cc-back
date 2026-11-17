@@ -19,6 +19,28 @@ test('draft previews reject non-text variable contexts without rendering or touc
   }
 });
 
+test('incomplete editor blocks keep a safe draft preview without becoming saveable content', async () => {
+  const body = { name: 'En edición', subject: 'Hola', design: { blocks: [
+    { type: 'heading', text: 'Contenido que ya está completo' },
+    { type: 'image', url: '', alt: 'Imagen pendiente' },
+    { type: 'button', text: 'Abrir', url: '' },
+  ] } };
+  const before = JSON.stringify(body);
+  const preview = marketing.previewTemplate(body);
+  assert.match(preview.html, /Contenido que ya está completo/);
+  assert.doesNotMatch(preview.html, /src=""/);
+  assert.equal(preview.warnings.length, 1);
+  assert.equal(JSON.stringify(body), before);
+  await assert.rejects(marketing.saveTemplate(scope, body, 1), { code: 'email_template_url_invalid' });
+});
+
+test('an empty HTML editor shows instructions without changing or accepting its empty source', async () => {
+  const body = draft('');
+  assert.match(marketing.previewTemplate(body).html, /Pega el código HTML/);
+  assert.equal(body.design.html_source, '');
+  await assert.rejects(marketing.saveTemplate(scope, body, 1), { code: 'email_template_html_required' });
+});
+
 test('campaign test overrides require the current subject and honor the stored preheader length', () => {
   const list = { id: 1, scope_type: 'clinic', clinica_id: 21, criteria: { email_subject: 'Anterior' } };
   assert.throws(() => dispatch.__testing.testConfiguration(list, { email_subject: '' }), { code: 'email_subject_required', status: 400 });
