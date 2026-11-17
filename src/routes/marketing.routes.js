@@ -82,6 +82,8 @@ const webRateLimit = createMarketingWebRateLimiter();
 router.use((req,res,next)=>{
   if(['POST','PUT','PATCH','DELETE'].includes(req.method)
     && /^\/(bulk-sends|review-requests)(?:\/|$)/.test(req.path)
+    // Schedule edits invalidate only the queue cache after their transaction.
+    && !(req.method==='PATCH' && /^\/bulk-sends\/campaigns\/\d+\/review-schedule\/?$/.test(req.path))
     && !/\/(draft|preview|test(?:-send)?)(?:\/|$)/.test(req.path)) {
     res.once('finish',()=>{if(res.statusCode<400)require('../services/reviewOverview.service').invalidate();});
   }

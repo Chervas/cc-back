@@ -423,7 +423,7 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
       next_at: dispatch.next_allowed_at || null,
       cadence: cadence.cadence,
       cadence_note: cadence.cadence_note,
-      batch_size: numberValue(dispatch.delivery_governance?.effective_batch_size, dispatch.batch_size || 1),
+      batch_size: require('../lib/review-queue-presentation').effectiveDispatchCadence(dispatch).batchSize,
       configured_batch_size: numberValue(dispatch.batch_size, 1),
       schedule: (reviewOnly ? describeReviewSchedule(businessHours) : null) || businessHours.label || (
         businessHours.start_time && businessHours.end_time

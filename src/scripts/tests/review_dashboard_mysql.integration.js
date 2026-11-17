@@ -134,6 +134,13 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const groupQueues = await nativeQueues({userId:1,scopeRaw:'group:5'});
   assert.equal(groupQueues.find(r=>r.source_id===4).pending,2,'group list excludes an unrelated clinic item');
   assert(!groupQueues.some(r=>r.source_id===2),'ordinary mass sends are not review queues');
+  await db.MarketingPatientList.update({criteria:{review_request:true,dispatch:{status:'scheduled',batch_size:50,delay_ms:600000,
+    business_hours:{start_time:'09:00',end_time:'18:00'},delivery_governance:{requested_batch_size:1,effective_batch_size:1,
+      requested_delay_ms:3600000,effective_delay_ms:3600000,template_quality:'GREEN',warmup:false,available_capacity:30}}}}, {where:{id:1}});
+  const paced=(await nativeQueues({userId:1,scopeRaw:'31'})).find(r=>r.source_id===1);
+  assert.equal(paced.batch_size,30);assert.equal(paced.delivery_plan.batch_size,30);
+  assert.equal(paced.delivery_plan.delay_minutes,10);assert.match(paced.cadence,/Hasta 30 mensajes.*tras 10 minutos$/);
+  report.checks.push('native queue projection keeps batch_size, cadence and daily capacity consistent after a saved change with portfolio capacity still enforced');
   await db.MarketingPatientList.create({id:5,clinica_id:31,objective_id:'mass_sends',status:'completed',criteria:{review_request:true},updated_at:new Date('2026-01-01T00:00:00Z')});
   const allHistory=await nativeQueues({userId:1,scopeRaw:'31',includeHistory:true});
   assert(allHistory.some(r=>r.source_id===5),'history must not be cut at 72 hours');

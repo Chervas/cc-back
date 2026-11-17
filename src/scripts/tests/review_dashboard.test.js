@@ -115,6 +115,8 @@ test('changing the chart period reuses invariant aggregates but refreshes period
  assert.equal(changed.period,'7d');assert.equal(changed.aggregate_cache.status,'hit');assert.equal(potentialReads(),1);
  assert.equal(ratingReads(),firstRatings+1);
  await service.overview(scope,{...options,period:'30d'});assert.equal(potentialReads(),1);assert.equal(ratingReads(),firstRatings+1);
+ service.invalidateQueues();await service.overview(scope,{...options,period:'30d'});
+ assert.equal(potentialReads(),1);assert.equal(ratingReads(),firstRatings+1);
  await service.overview({scope:'group',groupId:6,clinicIds:[99]},options);assert.equal(potentialReads(),2);
  service.invalidate();await service.overview(scope,{...options,period:'7d'});assert.equal(potentialReads(),3);
 });
