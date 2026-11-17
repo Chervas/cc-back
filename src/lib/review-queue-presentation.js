@@ -1,5 +1,6 @@
 'use strict';
 const calendar = require('./availability-calendar');
+const { computeEffectiveDispatchPolicy } = require('./whatsapp-dispatch-policy');
 const TERMINAL = new Set(['completed','cancelled','archived','failed']);
 const minute = value => /^\d{2}:\d{2}$/.test(String(value)) ? Number(value.slice(0,2))*60+Number(value.slice(3,5)) : null;
 const clock = value => `${String(Math.floor(value/60)).padStart(2,'0')}:${String(value%60).padStart(2,'0')}`;
@@ -20,13 +21,33 @@ function countSlots(ranges, delay, batch, start=0) {
   for(const [from,to] of ranges){next=Math.max(next,from);if(next>=to)continue;const n=Math.ceil((to-next)/delay);count+=n*batch;next+=(n*delay);}
   return count;
 }
+function effectiveDispatchCadence(dispatch = {}) {
+  const governance = dispatch.delivery_governance || {};
+  const finite = value => value !== null && value !== undefined && Number.isFinite(Number(value));
+  const batchSize = Math.max(1, Number(dispatch.batch_size) || 1);
+  const delayMs = Math.max(0, Number(dispatch.delay_ms) || 0);
+  const observedBatch = finite(governance.effective_batch_size) ? Math.max(0, Number(governance.effective_batch_size)) : batchSize;
+  const observedDelay = finite(governance.effective_delay_ms) ? Math.max(0, Number(governance.effective_delay_ms)) : delayMs;
+  const hasRequested = finite(governance.requested_batch_size) && finite(governance.requested_delay_ms);
+  if (hasRequested && (Number(governance.requested_batch_size) !== batchSize || Number(governance.requested_delay_ms) !== delayMs)) {
+    const policy = computeEffectiveDispatchPolicy({
+      requestedBatchSize: batchSize, requestedDelayMs: delayMs,
+      templateQuality: governance.template_quality, pauseCount: governance.warmup === true ? 1 : 0,
+      successfulMessages: governance.warmup_successful_messages, failedMessages: governance.warmup_failed_messages,
+      availableCapacity: governance.available_capacity,
+    });
+    return { batchSize: policy.effectiveBatchSize, delayMs: policy.effectiveDelayMs };
+  }
+  // A current assessment is authoritative. Legacy snapshots without their
+  // requested inputs retain known restrictions rather than inventing headroom.
+  return { batchSize: Math.min(batchSize, observedBatch), delayMs: Math.max(delayMs, observedDelay) };
+}
 function deliveryPlan(dispatch={}, {now=new Date(),pending=Infinity,status='sending'}={}) {
-  const governance=dispatch.delivery_governance||{}, hours=dispatch.business_hours||{};
-  const batch=Math.max(1,Number(governance.effective_batch_size||dispatch.batch_size||1));
-  const delay=Number(governance.effective_delay_ms||dispatch.delay_ms)/60000;
+  const hours=dispatch.business_hours||{}, cadence=effectiveDispatchCadence(dispatch);
+  const batch=cadence.batchSize, delay=cadence.delayMs/60000;
   if(!Number.isFinite(delay)||delay<=0)return null;
   const byWeekday=Array.from({length:7},(_,i)=>{const ranges=intervals(hours,i+1);return {weekday:i+1,capacity:countSlots(ranges,delay,batch),windows:ranges.map(([a,b])=>`${clock(a)}–${clock(b)}`)};});
-  const capacities=byWeekday.filter(d=>d.capacity>0).map(d=>d.capacity);
+  const capacities=byWeekday.filter(d=>d.windows.length>0).map(d=>d.capacity);
   if(!capacities.length)return null;
   const timezone=hours.timezone||'Europe/Madrid',today=calendar.formatDateLocal(now,timezone);
   const weekday=(new Date(today+'T12:00:00Z').getUTCDay()+6)%7+1;
@@ -70,4 +91,4 @@ function liveQueue(row,{group=false}={}) {
   if(row.status_group==='active')return !group||!!row.started;
   return Number(row.pending)>0;
 }
-module.exports={deliveryPlan,queueAttention,liveQueue,intervals,countSlots};
+module.exports={deliveryPlan,queueAttention,liveQueue,intervals,countSlots,effectiveDispatchCadence};

@@ -36,3 +36,31 @@ test('forecast starts on the next allowed local day and respects remaining recip
 });
 
 test('payment rejection is a configuration pause, independent of Meta quality holds',()=>{const p=queueAttention({paused_reason:'meta_error_131042_payment_missing'},'paused_config');assert.equal(p.source,'configuration');assert.equal(p.automatic,false);});
+
+test('saved hourly pace replaces the last ten-minute assessment in cadence and daily capacity',()=>{
+ const changed={...dispatch,delay_ms:3600000,business_hours:{...dispatch.business_hours,start_time:'08:00',end_time:'19:00'},
+  delivery_governance:{requested_batch_size:1,effective_batch_size:1,requested_delay_ms:600000,effective_delay_ms:600000,
+   template_quality:'UNKNOWN',warmup:true,warmup_successful_messages:0,warmup_failed_messages:0,available_capacity:null}};
+ const p=deliveryPlan(changed,{now:new Date('2026-11-17T07:00:00Z'),pending:200});
+ assert.equal(p.delay_minutes,60);assert.equal(p.max_per_day,11);assert.equal(p.planned_today,11);
+ const {effectiveDispatchCadence}=require('../../lib/review-queue-presentation');
+ assert.deepEqual(effectiveDispatchCadence(changed),{batchSize:1,delayMs:3600000});
+ const {describeDispatchCadence}=require('../../services/sendQueues.service');
+ assert.match(describeDispatchCadence(changed).cadence,/tras 1 hora$/);
+});
+
+test('speeding up a saved queue keeps actual quality, warmup and portfolio restrictions',()=>{
+ const {effectiveDispatchCadence}=require('../../lib/review-queue-presentation');
+ const changed={...dispatch,batch_size:50,delay_ms:600000,delivery_governance:{
+  requested_batch_size:1,effective_batch_size:1,requested_delay_ms:3600000,effective_delay_ms:3600000,
+  template_quality:'GREEN',warmup:false,warmup_successful_messages:200,warmup_failed_messages:0,available_capacity:30}};
+ assert.deepEqual(effectiveDispatchCadence(changed),{batchSize:30,delayMs:600000});
+ const yellow={...changed,delivery_governance:{...changed.delivery_governance,template_quality:'YELLOW',warmup:true,effective_delay_ms:10800000}};
+ assert.deepEqual(effectiveDispatchCadence(yellow),{batchSize:5,delayMs:10800000});
+ const warming={...changed,delivery_governance:{...changed.delivery_governance,template_quality:'UNKNOWN',warmup:true,warmup_successful_messages:0}};
+ assert.deepEqual(effectiveDispatchCadence(warming),{batchSize:5,delayMs:600000});
+ const zero={...changed,delivery_governance:{...changed.delivery_governance,available_capacity:0,effective_batch_size:0}};
+ const p=deliveryPlan(zero,{now:new Date('2026-11-17T08:00:00Z'),pending:200});
+ assert.equal(p.batch_size,0);assert.equal(p.max_per_day,0);assert.equal(p.planned_today,0);
+ assert.deepEqual(effectiveDispatchCadence({...changed,delivery_governance:{effective_delay_ms:10800000,effective_batch_size:2}}),{batchSize:2,delayMs:10800000});
+});

@@ -9395,6 +9395,7 @@ async function updateReviewQueueSchedule(scope, campaignId, body = {}, userId = 
     await MarketingPatientContactEvent.create({list_id:list.id,event_type:'review_dispatch_schedule_updated',channel:'whatsapp',
       payload:{user_id:userId,before:policy.pick(dispatch),after:patch,paused_preserved:!live,next_run_at:live ? next.toISOString() : null},occurred_at:now},{transaction});
   });
+  require('./reviewOverview.service').invalidateQueues();
   const updated = await MarketingPatientList.findByPk(campaignId);
   return {success:true,campaign:serializeCampaign(updated),dispatch:getDispatchProgress(updated,updated.counters || null),
     schedule:await getReviewQueueSchedule(scope,campaignId)};

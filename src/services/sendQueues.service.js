@@ -235,11 +235,8 @@ function formatDuration(milliseconds) {
 }
 
 function describeDispatchCadence(dispatch = {}) {
-  const governance = dispatch.delivery_governance || {};
   const configuredBatch = Math.max(1, numberValue(dispatch.batch_size, 1));
-  const effectiveBatch = Math.max(1, numberValue(governance.effective_batch_size, configuredBatch));
-  const configuredDelay = numberValue(dispatch.delay_ms, 0);
-  const effectiveDelay = numberValue(governance.effective_delay_ms, configuredDelay);
+  const { batchSize: effectiveBatch, delayMs: effectiveDelay } = require('../lib/review-queue-presentation').effectiveDispatchCadence(dispatch);
   if (!effectiveDelay) {
     return { cadence: `${effectiveBatch} ${effectiveBatch === 1 ? 'mensaje' : 'mensajes'} por tanda`, cadence_note: null };
   }

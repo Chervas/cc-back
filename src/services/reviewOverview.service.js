@@ -106,7 +106,8 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
   async function readQueues(scope,{userId,scopeRaw}) {
     return (await queueCache.read(scopeKey(scope)+':'+userId,()=>queues({userId,scopeRaw,includeHistory:true}))).value;
   }
-  function invalidate(){aggregateCache.clear();periodCache.clear();queueCache.clear();require('./reviewActivityReport.service').invalidate();}
+  function invalidateQueues(){queueCache.clear();}
+  function invalidate(){aggregateCache.clear();periodCache.clear();invalidateQueues();require('./reviewActivityReport.service').invalidate();}
 
   async function potentialByClinic(clinicIds) {
     const [patients, queued, optOuts, histories] = await Promise.all([
@@ -264,7 +265,7 @@ function createService({ db, resolveProfile, queues, ratingSummary, automation, 
     const failure_groups=failureRows.map(r=>({code:/^[a-z0-9_.:-]{1,64}$/i.test(r.code)?r.code:'unknown',count:Number(r.count),last_failed_at:r.last_failed_at,label:labels[r.code]||'Error de entrega'}));
     return {success:true,summary:{...row,preview_body:reviewPreview(row),failure_groups}};
   }
-  return { overview, privateRatings, potentialByClinic, queueReport, queueDetail, invalidate };
+  return { overview, privateRatings, potentialByClinic, queueReport, queueDetail, invalidate, invalidateQueues };
 
 }
 
@@ -278,4 +279,4 @@ function current() {
     automation: scope => bulk.getReviewRequestAutomationStatus(scope),
     projectPublicHistory:options=>publicHistoryForOverview(db,resolveProfile,options) });
 }
-module.exports = { createService, current, countPotential, positiveIds, queueSummary, queuePage, reviewPreview, isQueueIssue, queueCompact,publicHistoryForOverview, invalidate:()=>currentService?.invalidate() };
+module.exports = { createService, current, countPotential, positiveIds, queueSummary, queuePage, reviewPreview, isQueueIssue, queueCompact,publicHistoryForOverview, invalidate:()=>currentService?.invalidate(), invalidateQueues:()=>currentService?.invalidateQueues() };
