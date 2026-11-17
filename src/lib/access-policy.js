@@ -246,6 +246,17 @@ const DEFAULT_FEATURES = {
     accountant: false,
     unknown: false,
   },
+  'patients.group.link': {
+    propietario: true,
+    agencia: false,
+    doctor: false,
+    assistant: false,
+    reception: true,
+    admin_staff: true,
+    accountant: false,
+    patient_director: false,
+    unknown: false,
+  },
   'leads.sensitive.view': {
     propietario: true,
     agencia: false,
@@ -483,6 +494,7 @@ const PATIENT_DIRECTOR_DEFAULTS = Object.freeze({
   'patients.view': true,
   'patients.sensitive.view': true,
   'patients.edit': true,
+  'patients.group.link': false,
   'leads.sensitive.view': true,
   'leads.manage': true,
   'marketing.web.view': false,
@@ -583,6 +595,14 @@ const FEATURE_CATALOG = [
     group: 'clinical_operations',
     kind: 'read',
     label: 'Ver datos identificativos y clínicos de pacientes',
+    enforcement_status: 'backend',
+    sensitive: true,
+  },
+  {
+    key: 'patients.group.link',
+    group: 'clinical_operations',
+    kind: 'action',
+    label: 'Reutilizar pacientes del grupo en esta clínica',
     enforcement_status: 'backend',
     sensitive: true,
   },
@@ -962,16 +982,17 @@ function defaultForFeature(featureKey, roleCode) {
   return Boolean(DEFAULT_FEATURES[featureKey]?.[roleCode] ?? false);
 }
 
-async function getClinicGroupId(clinicId) {
+async function getClinicGroupId(clinicId, transaction = null) {
   const clinic = await Clinica.findByPk(clinicId, {
     attributes: ['id_clinica', 'grupoClinicaId'],
     raw: true,
+    ...(transaction ? { transaction } : {}),
   });
   const groupId = Number(clinic?.grupoClinicaId);
   return Number.isFinite(groupId) ? groupId : null;
 }
 
-async function getFeatureOverride({ featureKey, roleCode, clinicId, groupId }) {
+async function getFeatureOverride({ featureKey, roleCode, clinicId, groupId, transaction = null }) {
   const clauses = [{ scope_type: 'clinic', scope_id: clinicId }];
   if (Number.isFinite(Number(groupId))) {
     clauses.push({ scope_type: 'group', scope_id: Number(groupId) });
@@ -985,6 +1006,7 @@ async function getFeatureOverride({ featureKey, roleCode, clinicId, groupId }) {
     },
     attributes: ['scope_type', 'scope_id', 'effect'],
     raw: true,
+    ...(transaction ? { transaction } : {}),
   });
 
   const clinicOverride = rows.find((row) => row.scope_type === 'clinic' && Number(row.scope_id) === Number(clinicId));
@@ -998,7 +1020,7 @@ async function getFeatureOverride({ featureKey, roleCode, clinicId, groupId }) {
   return undefined;
 }
 
-async function canUserAccessFeature({ actorId, featureKey, clinicId }) {
+async function canUserAccessFeature({ actorId, featureKey, clinicId, transaction = null }) {
   const normalizedFeatureKey = normalizeFeatureKey(featureKey);
   const normalizedClinicId = Number(clinicId);
 
@@ -1019,6 +1041,7 @@ async function canUserAccessFeature({ actorId, featureKey, clinicId }) {
       },
       attributes: ['rol_clinica', 'subrol_clinica'],
       raw: true,
+      ...(transaction ? { transaction } : {}),
     }),
     PatientDirectionProfile?.findOne({
       where: { user_id: Number(actorId), is_active: true },
@@ -1031,17 +1054,19 @@ async function canUserAccessFeature({ actorId, featureKey, clinicId }) {
       }],
       attributes: ['user_id'],
       raw: true,
+      ...(transaction ? { transaction } : {}),
     }),
   ]);
   if (!membership && !directorProfile) return false;
 
   const roleCode = directorProfile ? 'patient_director' : roleCodeFromMembership(membership);
-  const groupId = await getClinicGroupId(normalizedClinicId);
+  const groupId = await getClinicGroupId(normalizedClinicId, transaction);
   const override = await getFeatureOverride({
     featureKey: normalizedFeatureKey,
     roleCode,
     clinicId: normalizedClinicId,
     groupId,
+    transaction,
   });
 
   return override ?? defaultForFeature(normalizedFeatureKey, roleCode);
@@ -1115,8 +1140,8 @@ async function getAccessibleClinicIdsForFeature({ actorId, featureKey, clinicIds
   return decisions.filter((decision) => decision.allowed).map((decision) => decision.clinicId);
 }
 
-async function assertUserCanAccessFeature({ actorId, featureKey, clinicId }) {
-  const allowed = await canUserAccessFeature({ actorId, featureKey, clinicId });
+async function assertUserCanAccessFeature({ actorId, featureKey, clinicId, transaction = null }) {
+  const allowed = await canUserAccessFeature({ actorId, featureKey, clinicId, transaction });
   if (allowed) return true;
 
   const error = new Error('access_policy_forbidden');

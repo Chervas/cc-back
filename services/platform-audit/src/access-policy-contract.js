@@ -22,6 +22,7 @@ const FEATURE_KEYS = Object.freeze([
   'patients.view',
   'patients.sensitive.view',
   'patients.edit',
+  'patients.group.link',
   'leads.sensitive.view',
   'leads.manage',
   'marketing.web.view',

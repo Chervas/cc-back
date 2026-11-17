@@ -16,6 +16,7 @@ const {
 
 const PATIENT_EVENT_TYPES = Object.freeze({
   created: 'patient.created',
+  clinicLinked: 'patient.clinic_linked',
   whatsappAuthorized: 'patient.whatsapp_contact_authorized',
   whatsappConversationStarted: 'patient.whatsapp_conversation_started',
   phoneChanged: 'patient.whatsapp_phone_changed',

@@ -21,6 +21,13 @@ const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 const patientReadAudit = require('../services/platformAudit.patientReads');
 const { normalizePhoneDigits } = require('../lib/phone');
+const {
+  GROUP_LINK_FEATURE,
+  samePositivePatientGroup,
+  hasMatchingPatientGroupContact,
+  groupLinkCandidate,
+  basicLinkedPatient,
+} = require('../lib/patient-group-link');
 const { validatePatientDeclaredOrigin } = require('../lib/patient-declared-origin');
 const { normalizeHumanName } = require('../lib/name');
 const {
@@ -95,7 +102,7 @@ const generatePacientePublicId = () => `pac_${crypto.randomBytes(10).toString('h
 
 const isNumericPacienteIdentifier = (value) => /^\d+$/.test(String(value || '').trim());
 
-async function assertPatientEditAccess(req, clinicId) {
+async function assertPatientEditAccess(req, clinicId, { transaction = null } = {}) {
   const actorId = Number(req.userData?.userId);
   const normalizedClinicId = Number(clinicId);
 
@@ -115,6 +122,7 @@ async function assertPatientEditAccess(req, clinicId) {
     actorId,
     featureKey: 'patients.edit',
     clinicId: normalizedClinicId,
+    ...(transaction ? { transaction } : {}),
   });
 }
 
@@ -127,7 +135,9 @@ function sendAccessPolicyError(error, res) {
     return res.status(403).json({
       message: featureKey === 'patients.edit'
         ? 'No tienes permiso para editar pacientes'
-        : 'No tienes permiso para ver pacientes en esta clínica',
+        : featureKey === GROUP_LINK_FEATURE
+          ? 'No tienes permiso para vincular pacientes del grupo en esta clínica'
+          : 'No tienes permiso para ver pacientes en esta clínica',
       details: error.details || null,
     });
   }
@@ -193,19 +203,23 @@ async function allClinicsAccessibleToActor(req, featureKey) {
   return getAccessibleClinicIdsForFeature({ actorId, featureKey });
 }
 
-function auditPatientResponse(req, { clinicIds = [], patients = [], resultCount = 0, includesSensitive = false, checks = [], requireAllMemberships = false }) {
+function auditPatientResponse(req, { clinicIds = [], patients = [], resultCount = 0, includesSensitive = false, checks = [], requireAllMemberships = false, revalidate = null }) {
   patientReadAudit.track(req, () => ({ clinicIds, patientIds: patientReadAudit.patientIds(patients), resultCount, includesSensitive }), async () => {
     for (const check of checks) {
       if (check.clinicIds.length) await accessibleClinicIds(req, check.featureKey, check.clinicIds, { requireAll: true });
     }
     const ids = patientReadAudit.patientIds(patients, { excludeRedactedRelations: true }).map(Number);
-    if (!ids.length) return;
+    if (!ids.length) {
+      if (revalidate) await revalidate();
+      return;
+    }
     const current = await Paciente.findAll({ where: { id_paciente: { [Op.in]: ids } }, attributes: ['id_paciente', 'clinica_id'],
       include: [{ model: PacienteClinica, as: 'clinicasVinculadas', required: false, attributes: ['clinica_id'] }] });
     if (current.length !== ids.length || current.some(row => {
       const linked = patientClinicIds(row);
       return !linked.some(id => clinicIds.includes(id)) || requireAllMemberships && linked.some(id => !clinicIds.includes(id));
     })) throw Object.assign(new Error('access_policy_forbidden'), { status: 403 });
+    if (revalidate) await revalidate();
   });
 }
 
@@ -811,8 +825,38 @@ const buildPacienteDuplicadoPayload = ({ paciente, clinicaId, normPhone, normEma
   };
 };
 
+async function getGroupLinkCandidateForRequest(req, { paciente, clinicaId, normPhone, normEmail }) {
+  const actorId = Number(req.userData?.userId);
+  if (!Number.isSafeInteger(actorId) || actorId <= 0) return null;
+  const [mayEdit, mayLink] = await Promise.all([
+    canUserAccessFeature({ actorId, featureKey: 'patients.edit', clinicId: clinicaId }),
+    canUserAccessFeature({ actorId, featureKey: GROUP_LINK_FEATURE, clinicId: clinicaId }),
+  ]);
+  if (!mayEdit || !mayLink) return null;
+  const [sourceClinic, targetClinic] = await Promise.all([
+    Clinica.findByPk(paciente.clinica_id, { attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }),
+    Clinica.findByPk(clinicaId, { attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'] }),
+  ]);
+  return groupLinkCandidate({ patient: paciente, sourceClinic, targetClinic,
+    contact: { telefono: normPhone, email: normEmail }, permitted: mayEdit && mayLink,
+    alreadyLinked: isPacienteLinkedToClinic(paciente, clinicaId) });
+}
+
+async function revalidateGroupLinkCandidates(req, candidates, { clinicaId, normPhone, normEmail }) {
+  for (const candidate of candidates) {
+    const paciente = await findPacienteByIdentifier(candidate.id_paciente, {
+      attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'numero_historia', 'clinica_id', 'telefono_movil', 'email'],
+      include: [{ model: PacienteClinica, as: 'clinicasVinculadas', required: false, attributes: ['clinica_id'] }],
+    });
+    const current = paciente && await getGroupLinkCandidateForRequest(req, { paciente, clinicaId, normPhone, normEmail });
+    if (!current || JSON.stringify(current) !== JSON.stringify(candidate)) {
+      throw Object.assign(new Error('access_policy_forbidden'), { status: 403 });
+    }
+  }
+}
+
 const buildPacienteDuplicadoPayloadForRequest = async (req, args) => {
-  const { paciente, clinicaId, normPhone, normEmail } = args;
+  const { paciente, clinicaId, normPhone, normEmail, allowGroupLinkCandidate = false } = args;
   const base = buildPacienteDuplicadoPayload(args);
   const actorId = Number(req.userData?.userId);
   const linkedClinicIds = patientClinicIds(paciente);
@@ -825,12 +869,16 @@ const buildPacienteDuplicadoPayloadForRequest = async (req, args) => {
     : [];
 
   if (!allowedClinicIds.length) {
+    // Identifying group candidates are returned only by the audited duplicate
+    // GET. A create/update 409 stays redacted and the client rechecks that GET.
+    const candidate = allowGroupLinkCandidate === true ? await getGroupLinkCandidateForRequest(req, args) : null;
     return {
       ...base,
       message: `Ya existe un paciente con este ${resolveDuplicateContactLabel({ normPhone, normEmail })} en otra clínica del grupo`,
       paciente: null,
-      clinicaNombre: null,
-      reuseCandidate: false,
+      clinicaNombre: candidate?.clinicaNombre || null,
+      reuseCandidate: !!candidate,
+      ...(candidate ? { group_link_candidate: candidate } : {}),
       vinculos: [],
       privacy_redacted: true,
     };
@@ -1196,18 +1244,24 @@ exports.checkDuplicates = async (req, res) => {
       if (normEmail && normalizeEmail(candidate.email) === normEmail) reasons.push('Mismo correo');
       if (fullName && normalizeSearchTerm(`${candidate.nombre} ${candidate.apellidos}`) === fullName) reasons.push('Mismo nombre');
       const payload = await buildPacienteDuplicadoPayloadForRequest(req, { paciente: candidate,
-        clinicaId: parseInt(clinica_id,10), normPhone, normEmail });
+        clinicaId: parseInt(clinica_id,10), normPhone, normEmail, allowGroupLinkCandidate: true });
       return { exists: true, ...payload, reasons, contactMatch: reasons.some(reason => reason !== 'Mismo nombre') };
     }));
     matches.sort((a, b) => Number(b.contactMatch) - Number(a.contactMatch));
     const duplicatePayload = matches[0];
     const sensitiveMatches = matches.filter(match => !match.privacy_redacted);
+    const groupLinkCandidates = matches.map(match => match.group_link_candidate).filter(Boolean);
     const sensitiveClinicIds = normalizeClinicIds(sensitiveMatches.flatMap(match => patientClinicIds(match.paciente)));
-    const duplicateClinicIds = sensitiveClinicIds.length ? sensitiveClinicIds : normalizeClinicIds([clinica_id]);
-    auditPatientResponse(req, { clinicIds: duplicateClinicIds, patients: matches.map(match => match.paciente).filter(Boolean), resultCount: matches.length,
-      includesSensitive: sensitiveMatches.length > 0,
+    const duplicateClinicIds = groupLinkCandidates.length
+      ? normalizeClinicIds([clinica_id, ...sensitiveClinicIds, ...groupLinkCandidates.map(candidate => candidate.clinica_id)])
+      : sensitiveClinicIds.length ? sensitiveClinicIds : normalizeClinicIds([clinica_id]);
+    auditPatientResponse(req, { clinicIds: duplicateClinicIds, patients: matches.map(match => match.paciente || match.group_link_candidate).filter(Boolean), resultCount: matches.length,
+      includesSensitive: sensitiveMatches.length > 0 || groupLinkCandidates.length > 0,
       checks: [{ featureKey: 'patients.edit', clinicIds: normalizeClinicIds([clinica_id]) },
-        ...(sensitiveMatches.length ? [{ featureKey: 'patients.sensitive.view', clinicIds: sensitiveClinicIds }] : [])] });
+        ...(sensitiveMatches.length ? [{ featureKey: 'patients.sensitive.view', clinicIds: sensitiveClinicIds }] : []),
+        ...(groupLinkCandidates.length ? [{ featureKey: GROUP_LINK_FEATURE, clinicIds: normalizeClinicIds([clinica_id]) }] : [])],
+      revalidate: groupLinkCandidates.length ? () => revalidateGroupLinkCandidates(req, groupLinkCandidates,
+        { clinicaId: Number(clinica_id), normPhone, normEmail }) : null });
     return res.json({ exists: true, ...duplicatePayload, reasons: matches[0].reasons,
       contactMatch: matches[0].contactMatch, matches });
   } catch (error) {
@@ -1512,6 +1566,11 @@ exports.getPacienteActivity = async (req, res) => {
         icono: 'heroicons_outline:user-plus',
         color: 'success',
         descripcion: (sourceLabel) => `Paciente creado desde ${sourceLabel}.`,
+      },
+      [PATIENT_EVENT_TYPES.clinicLinked]: {
+        tipo: 'patient_clinic_linked', titulo: 'Paciente vinculado a esta clínica',
+        icono: 'heroicons_outline:link', color: 'info',
+        descripcion: () => 'Se ha vinculado su ficha a esta clínica, conservando su número de historia.',
       },
       [PATIENT_EVENT_TYPES.whatsappAuthorized]: {
         tipo: 'patient_whatsapp_contact_authorized',
@@ -2251,51 +2310,66 @@ exports.createPaciente = async (req, res) => {
 exports.vincularPacienteAClinica = async (req, res) => {
   try {
     const { id } = req.params;
-    const { clinica_id } = req.body || {};
-    const targetClinicaId = parseInt(clinica_id, 10);
+    const { clinica_id, contacto = {} } = req.body || {};
+    const targetClinicaId = ['number', 'string'].includes(typeof clinica_id) ? Number(clinica_id) : NaN;
 
-    if (!targetClinicaId) {
+    if (!Number.isSafeInteger(targetClinicaId) || targetClinicaId <= 0) {
       return res.status(400).json({ message: 'clinica_id es obligatorio' });
     }
     await assertPatientEditAccess(req, targetClinicaId);
 
-    const paciente = await findPacienteByIdentifier(id, { include: [{ model: Clinica, as: 'clinica' }] });
-    if (!paciente) {
-      return res.status(404).json({ message: 'Paciente no encontrado' });
-    }
-    await assertPatientEditAccess(req, paciente.clinica_id);
+    const result = await sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+      // Serialize links of this existing identity; no patient creation or NHC
+      // allocation is involved. Shared clinic locks keep group membership stable.
+      const paciente = await findPacienteByIdentifier(id, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!paciente) throw Object.assign(new Error('Paciente no encontrado'), { status: 404 });
+      const clinics = await Clinica.findAll({
+        where: { id_clinica: { [Op.in]: normalizeClinicIds([paciente.clinica_id, targetClinicaId]) } },
+        attributes: ['id_clinica', 'grupoClinicaId'], order: [['id_clinica', 'ASC']],
+        transaction, lock: transaction.LOCK.SHARE,
+      });
+      const clinicaOrigen = clinics.find(clinic => Number(clinic.id_clinica) === Number(paciente.clinica_id));
+      const clinicaDestino = clinics.find(clinic => Number(clinic.id_clinica) === targetClinicaId);
+      if (!clinicaOrigen || !clinicaDestino) throw Object.assign(new Error('Clínica no encontrada'), { status: 404 });
 
-    const clinicaOrigen = paciente.clinica;
-    const clinicaDestino = await Clinica.findByPk(targetClinicaId);
+      const actorId = Number(req.userData?.userId);
+      const mayEditSource = await canUserAccessFeature({ actorId, featureKey: 'patients.edit', clinicId: paciente.clinica_id, transaction });
+      if (mayEditSource) {
+        // Preserve the existing authorized source+destination editing route.
+        if (clinicaOrigen.grupoClinicaId && clinicaDestino.grupoClinicaId
+          && Number(clinicaOrigen.grupoClinicaId) !== Number(clinicaDestino.grupoClinicaId)) {
+          throw Object.assign(new Error('El paciente solo puede vincularse a clínicas del mismo grupo'), { status: 400 });
+        }
+      } else {
+        await assertUserCanAccessFeature({ actorId, featureKey: GROUP_LINK_FEATURE, clinicId: targetClinicaId, transaction });
+        if (!samePositivePatientGroup(clinicaOrigen, clinicaDestino)
+          || !hasMatchingPatientGroupContact(paciente, contacto)) {
+          throw Object.assign(new Error('access_policy_forbidden'), { status: 403,
+            details: { feature_key: GROUP_LINK_FEATURE, clinic_ids: [targetClinicaId] } });
+        }
+      }
+      await assertPatientEditAccess(req, targetClinicaId, { transaction });
 
-    if (!clinicaDestino) {
-      return res.status(404).json({ message: 'Clínica destino no encontrada' });
-    }
-
-    // Solo permitimos vincular dentro del mismo grupo de clínicas
-    if (clinicaOrigen?.grupoClinicaId && clinicaDestino.grupoClinicaId && clinicaOrigen.grupoClinicaId !== clinicaDestino.grupoClinicaId) {
-      return res.status(400).json({ message: 'El paciente solo puede vincularse a clínicas del mismo grupo' });
-    }
-
-    const existente = await PacienteClinica.findOne({
-      where: { paciente_id: paciente.id_paciente, clinica_id: targetClinicaId }
+      const existente = await PacienteClinica.findOne({
+        where: { paciente_id: paciente.id_paciente, clinica_id: targetClinicaId }, transaction,
+      });
+      if (!existente) {
+        await PacienteClinica.create({ paciente_id: paciente.id_paciente, clinica_id: targetClinicaId,
+          es_principal: false }, { transaction });
+        await recordPatientOperationalEvent({ patientId: paciente.id_paciente, clinicId: targetClinicaId,
+          actorUserId: actorId, eventType: PATIENT_EVENT_TYPES.clinicLinked,
+          source: normalizeOperationalSource(req.body?.creation_source),
+          metadata: { source_clinic_id: Number(paciente.clinica_id), target_clinic_id: targetClinicaId }, transaction });
+      }
+      return { message: existente ? 'Paciente ya vinculado a la clínica' : 'Paciente vinculado correctamente',
+        vinculado: true, paciente: basicLinkedPatient(paciente, targetClinicaId, contacto) };
     });
-
-    if (existente) {
-      return res.json({ message: 'Paciente ya vinculado a la clínica', vinculado: true });
-    }
-
-    await PacienteClinica.create({
-      paciente_id: paciente.id_paciente,
-      clinica_id: targetClinicaId,
-      es_principal: false
-    });
-
-    return res.json({ message: 'Paciente vinculado correctamente', vinculado: true });
+    return res.json(result);
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
-    res.status(500).json({ message: 'Error al vincular paciente', error: error.message });
+    if ([400, 404].includes(error.status)) return res.status(error.status).json({ message: error.message });
+    res.status(500).json({ message: 'Error al vincular paciente', error: 'patient_link_failed' });
   }
 };
 
