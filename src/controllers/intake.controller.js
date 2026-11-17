@@ -5,6 +5,7 @@ const axios = require('axios');
 const asyncHandler = require('express-async-handler');
 const db = require('../../models');
 const { Op, literal } = db.Sequelize;
+const { resolveClinicTimezone } = require('../lib/availability-calendar');
 
 const LeadIntake = db.LeadIntake;
 const LeadAttributionAudit = db.LeadAttributionAudit;
@@ -2378,12 +2379,14 @@ const buildLinkedAppointmentSummary = (appointmentRow) => {
   }
 
   const inicio = appointment.inicio ? new Date(appointment.inicio) : null;
+  const timeZone = resolveClinicTimezone(appointment.clinica);
   return {
     id: appointment.id_cita,
     fecha: inicio && Number.isFinite(inicio.getTime()) ? inicio.toISOString() : appointment.inicio || null,
     hora: inicio && Number.isFinite(inicio.getTime())
-      ? inicio.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+      ? inicio.toLocaleTimeString('es-ES', { timeZone, hour: '2-digit', minute: '2-digit' })
       : null,
+    time_zone: timeZone,
     tipo_cita: cleanString(appointment.tipo_cita),
     estado: cleanString(appointment.estado),
     tratamiento: cleanString(appointment?.tratamiento?.nombre),
@@ -2415,7 +2418,7 @@ const enrichLeadsWithLinkedAppointments = async (leadRows = []) => {
   ));
 
   const include = [
-    { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'], required: false },
+    { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica', 'configuracion'], required: false },
     { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'nombre', 'apellidos'], required: false },
     db.Tratamiento ? { model: db.Tratamiento, as: 'tratamiento', attributes: ['id_tratamiento', 'nombre'], required: false } : null,
   ].filter(Boolean);

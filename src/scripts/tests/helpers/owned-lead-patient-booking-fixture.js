@@ -7,7 +7,7 @@ const crypto = require('node:crypto'), { createRequire } = require('node:module'
 const S = require('sequelize');
 const { createOwnedBookingDurationFixture } = require('./owned-booking-duration-fixture');
 
-async function createOwnedLeadPatientBookingFixture(context) {
+async function createOwnedLeadPatientBookingFixture(context, { nativeContactLink = false } = {}) {
   const { sql, models: db, registerOwnedLoopbackServer } = context;
   const physical = await createOwnedBookingDurationFixture({ ...context, includePatientScope: true, nativePatientModel: true });
   const D = S.DataTypes;
@@ -15,9 +15,17 @@ async function createOwnedLeadPatientBookingFixture(context) {
     grupo_clinica_id: D.INTEGER, campana_id: D.INTEGER, nombre: D.STRING, telefono: D.STRING,
     status_lead: D.STRING, call_outcome_appointment_id: D.INTEGER, archived_at: D.DATE,
     call_initiated: D.BOOLEAN, call_outcome: D.STRING, call_outcome_at: D.DATE, call_outcome_notes: D.STRING,
+    ...(nativeContactLink ? { created_at: { type: D.DATE, defaultValue: D.NOW }, updated_at: D.DATE, email: D.STRING } : {}),
   }, { tableName: 'LeadIntakes', timestamps: false });
   await db.LeadIntake.sync();
   db.CitaPaciente.belongsTo(db.LeadIntake, { foreignKey: 'lead_intake_id', as: 'lead' });
+  // Older booking-only scenarios have no chat. Keep an actual empty SQL table
+  // so the new identity guard can execute its normal read/lock path as well.
+  if (!nativeContactLink) {
+    db.Conversation = sql.define('Conversation', { id: { type: D.INTEGER, primaryKey: true, autoIncrement: true },
+      clinic_id: D.INTEGER, lead_id: D.INTEGER, patient_id: D.INTEGER }, { tableName: 'Conversations', timestamps: false });
+    await db.Conversation.sync();
+  }
   const file = require.resolve('../../../controllers/citas.controller'), nativeRequire = createRequire(file);
   const source = fs.readFileSync(file, 'utf8');
   const section = (start, end) => {
@@ -52,6 +60,7 @@ async function createOwnedLeadPatientBookingFixture(context) {
     actorCanReadPatientSensitive: async (_req, patient) => allowed && Number(patient.clinica_id) === 100,
     recordCreatedAppointmentLead: leadLink.recordCreatedAppointmentLead,
     findUniqueAppointmentLead: leadLink.findUniqueAppointmentLead,
+    assertAppointmentLeadPatientConsistency: leadLink.assertAppointmentLeadPatientConsistency,
     enqueueCreatedAppointmentCrmSignals: async ({ transaction }) => {
       assertTransaction(transaction); if (failAfterPersist) throw Error('OWNED_AFTER_PERSIST_FAILURE');
     },
@@ -64,7 +73,7 @@ async function createOwnedLeadPatientBookingFixture(context) {
     attachAppointmentProgramContexts: async () => {}, attachResolvedAppointmentPricesToCitas: () => {},
     emitAppointmentSocketEvent: (_type, row) => observers.push(['socket', row.id_cita]),
     protectAppointmentsForRequest: async (_request, row) => row.toJSON(),
-    require: name => name === '../services/newPatientWhatsappConversation.service' ? { link: async () => {} }
+    require: name => name === '../services/newPatientWhatsappConversation.service' && !nativeContactLink ? { link: async () => {} }
       : name === '../services/appointmentConsentEligibility.service' ? { assertClinicalCompletion: async () => {} }
       : nativeRequire(name),
   };

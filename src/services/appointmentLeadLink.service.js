@@ -2,12 +2,44 @@
 
 const { Op } = require('sequelize');
 const { normalizePhoneE164, getPhoneLookupCandidates } = require('../lib/phone');
+const { LEAD_PATIENT_CONTEXT_TYPE, readContextSnapshot, jsonObject } = require('../lib/lead-patient-context');
 const OPEN_STATUSES = ['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'cualificado', 'citado'];
 const ACTIVE_APPOINTMENTS = new Set(['pendiente', 'info_enviada', 'info_confirmada',
   'recordatorio_enviado', 'recordatorio_confirmado', 'cambio_solicitado', 'reprogramada']);
 const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const conflict = () => { throw Object.assign(new Error('El interesado ha cambiado. Revisa la cita antes de guardarla.'),
   { status: 409, code: 'appointment_lead_link_changed' }); };
+
+async function persistedLeadPatientId({ models, leadId, transaction = null }) {
+  if (typeof models.LeadAttributionAudit?.findAll !== 'function') return null;
+  const rows = await models.LeadAttributionAudit.findAll({ where: { lead_intake_id: positive(leadId),
+    'attribution_steps.type': LEAD_PATIENT_CONTEXT_TYPE }, attributes: ['attribution_steps'],
+    order: [['id', 'ASC']], limit: 1, transaction, raw: true });
+  const steps = jsonObject(rows[0]?.attribution_steps);
+  const snapshot = steps?.type === LEAD_PATIENT_CONTEXT_TYPE ? readContextSnapshot(steps[LEAD_PATIENT_CONTEXT_TYPE]) : null;
+  return snapshot?.relationship === 'existing_patient' ? positive(snapshot.patient_id) : null;
+}
+
+// Exact stored identity, never a name, phone suffix or a freshly inferred family
+// match. The caller already owns the booking resources. Keep the established
+// patient -> conversation -> lead lock order before linking or recording CRM.
+async function assertAppointmentLeadPatientConsistency({ models, lead, appointment, transaction }) {
+  if (!lead) return;
+  if (!transaction || !positive(appointment?.paciente_id)) throw Error('appointment_lead_transaction_required');
+  const patientId = positive(appointment.paciente_id), clinicId = positive(appointment.clinica_id);
+  const patient = await models.Paciente.findByPk(patientId, { transaction, lock: transaction.LOCK.UPDATE });
+  if (!patient) conflict();
+  const conversations = await models.Conversation.findAll({ where: { clinic_id: clinicId, lead_id: positive(lead.id) },
+    attributes: ['id', 'patient_id'], order: [['id', 'ASC']], limit: 21, transaction, lock: transaction.LOCK.UPDATE });
+  const fresh = await models.LeadIntake.findByPk(lead.id, { transaction, lock: transaction.LOCK.UPDATE });
+  if (!fresh || fresh.archived_at || fresh.clinica_id != null && positive(fresh.clinica_id) !== clinicId) conflict();
+  const canonicalPatientId = await persistedLeadPatientId({ models, leadId: fresh.id, transaction });
+  if (conversations.length > 20 || canonicalPatientId && canonicalPatientId !== patientId
+    || conversations.some(row => positive(row.patient_id) && positive(row.patient_id) !== patientId)) {
+    throw Object.assign(new Error('Esta solicitud ya está vinculada a otra ficha. Selecciona el paciente de la solicitud o agenda a la otra persona sin asociar este lead.'),
+      { status: 409, code: 'appointment_lead_patient_mismatch' });
+  }
+}
 
 // Phone suffixes narrow the indexed clinic lookup only. Identity must match the
 // complete normalized number; never select the newest of several candidates.
@@ -25,6 +57,8 @@ async function findUniqueAppointmentLead({ models, clinicId, phone, patientId = 
   if (matches.length !== 1) return null;
   const lead = matches[0];
   if (patientId) {
+    const canonicalPatientId = await persistedLeadPatientId({ models, leadId: lead.id, transaction });
+    if (canonicalPatientId && canonicalPatientId !== patientId) return null;
     const otherConversation = await models.Conversation.findOne({ where: {
       clinic_id: clinicId, lead_id: lead.id, patient_id: { [Op.ne]: patientId },
     }, attributes: ['id'], transaction });
@@ -87,4 +121,4 @@ async function recordCreatedAppointmentLead({ models, lead, appointment, transac
   return fresh;
 }
 
-module.exports = { findUniqueAppointmentLead, recordCreatedAppointmentLead };
+module.exports = { findUniqueAppointmentLead, recordCreatedAppointmentLead, assertAppointmentLeadPatientConsistency, persistedLeadPatientId };

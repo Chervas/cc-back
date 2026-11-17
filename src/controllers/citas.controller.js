@@ -70,7 +70,7 @@ const {
     uploadScheduleForLinkedAppointment,
 } = require('../services/leadQualificationMilestone.service');
 const { enqueueCreatedAppointmentCrmSignals } = require('../services/leadCrmSignalPersistence.service');
-const { findUniqueAppointmentLead, recordCreatedAppointmentLead } = require('../services/appointmentLeadLink.service');
+const { findUniqueAppointmentLead, recordCreatedAppointmentLead, assertAppointmentLeadPatientConsistency } = require('../services/appointmentLeadLink.service');
 const {
     assertUserCanAccessFeature,
     canUserAccessFeature,
@@ -2246,6 +2246,7 @@ exports.createCita = asyncHandler(async (req, res) => {
                     patient: paciente,
                     requestedLanguage: datosPaciente.idioma_preferido,
                     afterPersist: async (appointment, transaction) => {
+                        await assertAppointmentLeadPatientConsistency({ models: db, lead, appointment, transaction });
                         await require('../services/newPatientWhatsappConversation.service').link({
                             db, patient: paciente, clinicId: clinica_id, transaction, appointment,
                         });
@@ -2385,7 +2386,7 @@ exports.createCita = asyncHandler(async (req, res) => {
         }
         return res.status(201).json(payload);
     } catch (err) {
-        if (err?.code === 'appointment_lead_link_changed') {
+        if (['appointment_lead_link_changed', 'appointment_lead_patient_mismatch'].includes(err?.code)) {
             return res.status(409).json({ code: err.code, message: err.message });
         }
         if (/^(care_|booking_|appointment_visit_|appointment_consent_|appointment_link_|appointment_same_day_|treatment_not_)/.test(String(err?.code || ''))) {
@@ -2884,7 +2885,6 @@ exports.recordAppointmentCare = asyncHandler(async (req, res) => {
     try {
         const result = await require('../services/appointmentCare.service').record({ appointmentId: id, clinicId: cita.clinica_id, actorId: Number(req.userData.userId), action });
         if (!result.replayed) {
-            emitAppointmentSocketEvent('appointment:updated', result.appointment);
             const effects = [
                 ['cancel_flows', () => appointmentAutomationV2Runtime.cancelActiveExecutionsForCita(result.appointment, {
                     reason: `appointment_status_${result.appointment.estado}`,
@@ -2903,6 +2903,9 @@ exports.recordAppointmentCare = asyncHandler(async (req, res) => {
                 try { await run(); }
                 catch (error) { console.warn(`[appointment-care] ${name} pendiente para cita ${id}:`, error.code || error.name); }
             }
+            // The native refresh must observe the committed lead milestone too.
+            // Keep one event after the already-awaited optional consumers.
+            emitAppointmentSocketEvent('appointment:updated', result.appointment);
         }
         return res.json({ ...await protectAppointmentsForRequest(req, result.appointment), care: result.care, replayed: result.replayed,
             ...(result.confirmation_undo ? { confirmation_undo: result.confirmation_undo } : {}) });

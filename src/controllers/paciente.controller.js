@@ -1572,6 +1572,11 @@ exports.getPacienteActivity = async (req, res) => {
         icono: 'heroicons_outline:link', color: 'info',
         descripcion: () => 'Se ha vinculado su ficha a esta clínica, conservando su número de historia.',
       },
+      [PATIENT_EVENT_TYPES.identityReconciled]: {
+        tipo: 'patient_identity_reconciled', titulo: 'Ficha reconciliada',
+        icono: 'heroicons_outline:arrows-right-left', color: 'info',
+        descripcion: () => 'Se ha reconciliado una ficha duplicada, conservando la cita y el historial.',
+      },
       [PATIENT_EVENT_TYPES.whatsappAuthorized]: {
         tipo: 'patient_whatsapp_contact_authorized',
         titulo: 'Contacto por WhatsApp autorizado',
