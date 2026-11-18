@@ -44,7 +44,6 @@ function createAdSharingAuthority({ models, createScope = () => createMetaMarket
     if (!migrated) return { authority: 'legacy' };
     // A malformed, staged, revoked or partially deleted broker installation is
     // still broker-exclusive. Never retry it using a remaining legacy token.
-    if (revocations.length) fail('asset_revoked');
     const clinicId = Number(campaign.clinicId);
     const clinic = inventory.selectedClinics.find(row => Number(row.id_clinica) === clinicId);
     const candidates = mappings.filter(row => [true, 1].includes(row.isActive)

@@ -35,7 +35,8 @@ function fixture({ legacy = false, snapshot = true } = {}) {
     ClinicMetaAsset: { findAll: async () => { state.metadataReads++; return [{ ...mapping }]; }, findByPk: async id => Number(id) === mapping.id ? { ...mapping } : null },
     MetaMarketingBrokerBinding: { findAll: async ({ where }) => bindings.filter(row => where.mapping_id ? row.mapping_id === Number(where.mapping_id)
       : typeof where.asset_ref === 'string' ? row.asset_ref === where.asset_ref : true).map(row => ({ ...row })) },
-    MetaMarketingBrokerRevocation: { findAll: async () => state.revocations.map(row => ({ ...row })) },
+    MetaMarketingBrokerRevocation: { findAll: async ({ where }) => state.revocations
+      .filter(row => !row.asset_ref || row.asset_ref === where.asset_ref).map(row => ({ ...row })) },
     MetaMarketingEnrollmentClaim: { findAll: async () => state.claims.map(row => ({ ...row })) },
     MetaConnection: { findAll: async options => {
       assert.ok(!options.attributes?.includes('accessToken'), 'broker and classifier must not select the token');
@@ -130,6 +131,19 @@ test('the after phase rejects revocation, grants, mapping and clinic changes eve
     await assert.rejects(f.authorize({ ...f.args, models: { ...f.models } }));
     assert.equal(f.state.legacyReads, 0);
   }
+});
+
+test('revocation history selects broker authority but only the canonical scope decides whether it blocks', async () => {
+  const unrelated = fixture();
+  unrelated.state.revocations.push({ tuple_hash: 'a'.repeat(64), asset_ref: 'meta-ad_account:999', connection_ref: 'meta:old' });
+  assert.equal((await unrelated.authorize(unrelated.args)).authority, 'broker');
+  const sameAsset = fixture();
+  sameAsset.state.revocations.push({ tuple_hash: 'b'.repeat(64), asset_ref: 'meta-ad_account:123', connection_ref: 'meta:old' });
+  await assert.rejects(sameAsset.authorize(sameAsset.args), { code: 'asset_revoked' });
+  // The current shared contract deliberately blocks a physical asset across
+  // old connection tuples. The picker must delegate that policy, not redefine it.
+  assert.equal(sameAsset.state.prepares, 1);
+  assert.equal(sameAsset.state.legacyReads, 0);
 });
 
 test('removing all migration metadata after the first phase cannot reopen a legacy credential', async () => {
