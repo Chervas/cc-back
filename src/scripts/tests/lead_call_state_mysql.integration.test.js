@@ -15,7 +15,7 @@ test('actual MySQL last-human-call classification, history/audit receipts, canon
     const model = require('../../../models/' + file)(sql, D); db[model.name] = model;
   }
   await sql.sync();
-  await sql.models.Clinica.bulkCreate([{ id_clinica: 72 }, { id_clinica: 66 }]);
+  await sql.models.Clinica.bulkCreate([{ id_clinica: 72 }, { id_clinica: 66 }, { id_clinica: 35 }]);
   const cases = [];
   const lead = async (label, expected, fields = {}) => {
     const row = await db.LeadIntake.create({ clinica_id: 72, status_lead: 'nuevo', created_at: START, ...fields }, { hooks: false });
@@ -62,6 +62,8 @@ test('actual MySQL last-human-call classification, history/audit receipts, canon
     clinica_id: null, grupo_clinica_id: 48 }); await call(groupOnly, 'no_contesta');
   const foreignGroup = await lead('other group remains outside caller scope', 'no_answer', {
     clinica_id: null, grupo_clinica_id: 99 }); await call(foreignGroup, 'no_contesta');
+  const foreignClinic = await lead('clinic outside the indicator payload remains outside its list', 'no_answer', {
+    clinica_id: 35 }); await call(foreignClinic, 'no_contesta');
   const [classified] = await sql.query(`SELECT LeadIntake.id,(${leadCallStateSql('LeadIntake', { now: NOW })}) AS state FROM LeadIntakes AS LeadIntake ORDER BY id`);
   for (const item of cases) assert.equal(classified.find(row => row.id === item.row.id).state, item.expected, item.label);
   const where = { clinica_id: 72 };
@@ -93,7 +95,30 @@ test('actual MySQL last-human-call classification, history/audit receipts, canon
   assert.equal(groupView[0].call_state, 'no_answer');
   const wrongGroup = await enrichLeadCallState({ models: db, leads: [{ ...foreignGroup.toJSON(), grupo_clinica_id: 48 }], now: NOW });
   assert.equal(wrongGroup[0].call_state, null, 'a group-only request cannot be projected through another group identity');
+  const { createLeadCallScopeFixture, dashboardTaskItems } = require('./fixtures/lead_call_scope.fixture');
+  const clinicScope = { clinica_id: { [Op.in]: [66,72] } };
+  const indicatorCounts = await countLeadCallStates({ LeadIntake: db.LeadIntake, where: clinicScope, now: NOW });
+  const links = dashboardTaskItems()({ leadsNeverCalled: indicatorCounts.never_called, leadsNoAnswer: indicatorCounts.no_answer },
+    '2026-11-18', [66,72]).filter(item => item.id.startsWith('leads_'));
+  for (const link of links) {
+    assert.equal(link.queryParams.clinica_id, '66,72');
+    for (const globalAdmin of [false,true]) {
+      const resolver = createLeadCallScopeFixture({ globalAdmin }), listWhere = {};
+      await resolver.applyLeadScopeWhere(listWhere, link.queryParams, globalAdmin ? 1 : 144);
+      listWhere[Op.and].push(leadCallStateWhere(link.queryParams.call_state, { now: NOW }));
+      const listed = await db.LeadIntake.findAll({ where: listWhere, attributes: ['id'], order: [['id','ASC']], raw: true });
+      assert.equal(listed.length, link.count, 'group CSV and All-selector links use the exact authorized indicator count scope');
+      const actualIds = listed.map(row => row.id);
+      assert.equal(actualIds.includes(groupOnly.id), false); assert.equal(actualIds.includes(foreignGroup.id), false);
+      assert.equal(actualIds.includes(foreignClinic.id), false);
+    }
+  }
+  const deniedWhere = {}, resolver = createLeadCallScopeFixture();
+  await resolver.applyLeadScopeWhere(deniedWhere, { clinica_id: '35' }, 144);
+  deniedWhere[Op.and].push(leadCallStateWhere('no_answer', { now: NOW }));
+  assert.equal(await db.LeadIntake.count({ where: deniedWhere }), 0, 'a foreign URL scope cannot become an unfiltered list');
   report.callProfiles = cases.length;
   report.checks.push('Native core receipt models: last human call from normalized/legacy/audit, mirror dedup, UTC offsets and fractional timestamps; phone clicks/WhatsApp/automation/invalid actors/foreign clinic/future receipts excluded.');
   report.checks.push('One canonical SQL classifier feeds scoped counters and paginated WHERE with equal matching IDs/counts; archive and closed phases excluded, empty scope zero, one metadata-only bulk DTO query and redacted/cross-clinic projection denied.');
+  report.checks.push('Real scope parser and server task payload: explicit indicator CSV gives the same IDs/count for group and All-selector callers, excludes NULL-group and foreign clinics, and an empty permission intersection yields zero instead of all.');
 }));

@@ -702,6 +702,9 @@ async function countTasks({ clinicIds, clinicMap, todayDate, reviewSources = nul
 
 function taskItems(counts, todayDate, clinicIds, pendingAttendanceCount = 0) {
   const singleClinicId = clinicIds.length === 1 ? clinicIds[0] : null;
+  // Carry the exact authorized count scope. In particular "all" in the menu
+  // must not widen a clinic-only count to unassigned group-level requests.
+  const leadsClinicScope = singleClinicId ?? clinicIds.join(',');
   const pendingAttendance = Number(pendingAttendanceCount || 0);
   const items = [
     ...(pendingAttendance > 0
@@ -718,14 +721,14 @@ function taskItems(counts, todayDate, clinicIds, pendingAttendanceCount = 0) {
       label: 'Leads sin llamar',
       count: counts.leadsNeverCalled || 0,
       link: '/marketing/leads',
-      queryParams: { call_state: 'never_called', clinica_id: singleClinicId },
+      queryParams: { call_state: 'never_called', clinica_id: leadsClinicScope },
     },
     {
       id: 'leads_no_answer',
       label: 'Leads sin respuesta',
       count: counts.leadsNoAnswer || 0,
       link: '/marketing/leads',
-      queryParams: { call_state: 'no_answer', clinica_id: singleClinicId },
+      queryParams: { call_state: 'no_answer', clinica_id: leadsClinicScope },
     },
     {
       id: 'unconfirmed_today',

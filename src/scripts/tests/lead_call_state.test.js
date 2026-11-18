@@ -153,3 +153,26 @@ test('real stats handler exposes the same bucket contract and filter inside its 
   assert.deepEqual(response.call_state_counts, { never_called: 0, no_answer: 2 });
   for (const where of readWhere) { assert.equal(where.clinica_id, 72); assert.match(where[Op.and][0].val, /='no_answer'$/); }
 });
+
+test('real CSV scope parser and task payload keep group/all links clinic-only, with no foreign scope expansion', async () => {
+  const { createLeadCallScopeFixture, dashboardTaskItems } = require('./fixtures/lead_call_scope.fixture');
+  const scoped = createLeadCallScopeFixture(), items = dashboardTaskItems();
+  const links = items({ leadsNeverCalled: 2, leadsNoAnswer: 3 }, '2026-11-18', [66,72])
+    .filter(row => row.id.startsWith('leads_'));
+  for (const link of links) {
+    assert.equal(link.queryParams.clinica_id, '66,72');
+    const scope = await scoped.resolveLeadScopeFilter(link.queryParams, 144);
+    assert.deepEqual([...scope.clinicIds], [66,72]); assert.deepEqual([...scope.groupIds], []);
+  }
+  const allSelector = createLeadCallScopeFixture({ globalAdmin: true });
+  assert.equal(await allSelector.resolveLeadScopeFilter({ clinicId: 'all' }, 1), null,
+    'all alone is wider; the widget must use its server-provided CSV, not reconstruct an all link');
+  const narrowedAll = await allSelector.resolveLeadScopeFilter(links[0].queryParams, 1);
+  assert.deepEqual([...narrowedAll.clinicIds], [66,72]); assert.deepEqual([...narrowedAll.groupIds], []);
+  const forbidden = await scoped.resolveLeadScopeFilter({ clinica_id: '35' }, 144);
+  assert.deepEqual([...forbidden.clinicIds], []); assert.deepEqual([...forbidden.groupIds], []);
+  const where = {}; await scoped.applyLeadScopeWhere(where, { clinica_id: '35' }, 144);
+  assert.equal(where[Op.and][0].clinica_id, 0, 'empty permission intersection never falls back to all');
+  const groupApi = await scoped.resolveLeadScopeFilter({ groupId: 48 }, 144);
+  assert.deepEqual([...groupApi.groupIds], [48], 'explicit group-level API scope remains available independently');
+});
