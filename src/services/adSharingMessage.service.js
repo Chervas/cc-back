@@ -16,7 +16,7 @@ function isAdSharingTemplate(template) {
 // marketing restrictions, limits, queue, retry and WhatsApp transport stay in
 // the native conversation command; no dispatch occurs in this module.
 async function resolveAdSharingMessage({ models, conversation, template, input, templateParams, userId,
-  load, hasAccess, buildBody }) {
+  load, hasAccess, buildBody, resolveLeadConversation, transaction = null }) {
   template = plain(template);
   const catalogId = Number(template?.catalog_template_id);
   let catalog;
@@ -37,13 +37,27 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
     || !PURPOSES.includes(input.purpose) || !positiveId(input.ad_id)
     || input.creative_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(input.creative_sha256)) fail('ad_sharing_selection_required', 400);
   if (conversation.channel !== 'whatsapp') fail('ad_sharing_whatsapp_required', 400);
-  if (input.purpose === 'lead_ad') {
-    if (!Number.isSafeInteger(Number(conversation.lead_id)) || Number(conversation.lead_id) <= 0) fail('ad_sharing_lead_required', 400);
-    if (input.lead_id !== undefined && (!Number.isSafeInteger(input.lead_id) || input.lead_id !== Number(conversation.lead_id))) fail('ad_sharing_lead_mismatch');
-  } else if (!Number.isSafeInteger(Number(conversation.patient_id)) || Number(conversation.patient_id) <= 0 || input.lead_id !== undefined) fail('ad_sharing_patient_required', 400);
   const clinicId = Number(conversation.clinic_id);
   const access = hasAccess || require('../lib/marketingScopeAccess').hasMarketingClinicScopeAccess;
   if (!await access({ userId: Number(userId), clinicIds: [clinicId], access: 'read' })) fail('ad_sharing_scope_forbidden', 403);
+  let requestedLeadId = null;
+  if (input.purpose === 'lead_ad') {
+    requestedLeadId = input.lead_id === undefined ? Number(conversation.lead_id) : input.lead_id;
+    if (!Number.isSafeInteger(requestedLeadId) || requestedLeadId <= 0) fail('ad_sharing_lead_required', 400);
+    if (requestedLeadId !== Number(conversation.lead_id)) {
+      // The canonical chat may retain a patient's earlier lead. Only the
+      // native patient-context and exact-contact resolver can prove that a new
+      // enquiry belongs to this same existing chat. Never repoint its link.
+      const lead = plain(await models.LeadIntake?.findOne({ where: { id: requestedLeadId, clinica_id: clinicId, archived_at: null },
+        attributes: ['id', 'clinica_id', 'grupo_clinica_id', 'created_at', 'telefono', 'email', 'nombre'],
+        raw: true, transaction, ...(transaction ? { lock: transaction.LOCK.SHARE } : {}) }));
+      if (!lead || Number(lead.id) !== requestedLeadId || Number(lead.clinica_id) !== clinicId
+        || typeof resolveLeadConversation !== 'function') fail('ad_sharing_lead_mismatch');
+      const canonical = await resolveLeadConversation({ lead, conversation, transaction });
+      if (!canonical || Number(canonical.id) !== Number(conversation.id)
+        || Number(canonical.clinic_id) !== clinicId || canonical.channel !== 'whatsapp') fail('ad_sharing_lead_mismatch');
+    }
+  } else if (!Number.isSafeInteger(Number(conversation.patient_id)) || Number(conversation.patient_id) <= 0 || input.lead_id !== undefined) fail('ad_sharing_patient_required', 400);
   catalog = await readCatalog();
   const format = catalog && Object.entries(FAMILIES[input.purpose]).find(([, family]) => family === catalog.family_key)?.[0];
   if (!format || catalog.category !== 'MARKETING' || !catalog.is_active
@@ -57,7 +71,7 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
   try {
     selection = await (load || require('./adSharing.service').loadAdSharing)({ models,
       scope: { clinicIds: [clinicId], groupId: null }, input: { purpose: input.purpose,
-        ...(input.purpose === 'lead_ad' ? { lead_id: String(conversation.lead_id) } : {}) }, selectedAdId: input.ad_id });
+        ...(input.purpose === 'lead_ad' ? { lead_id: String(requestedLeadId) } : {}) }, selectedAdId: input.ad_id });
   } catch (error) {
     if (String(error.code || '').startsWith('ad_sharing_')) throw error;
     fail(error.status === 403 ? 'ad_sharing_source_forbidden' : 'ad_sharing_source_unavailable', error.status === 403 ? 403 : 409);
@@ -80,9 +94,25 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
     templateParams: params,
     templateComponents: [{ type: 'header', parameters: [creative.mediaParameter] }, ...body],
     message: bodyText.replace(/{{\s*([123])\s*}}/g, (_token, key) => params[key]),
-    metadata: { purpose: input.purpose, reference: selected.reference, creative_sha256: creative.fingerprint,
+    metadata: { purpose: input.purpose, ...(requestedLeadId ? { lead_id: requestedLeadId } : {}), reference: selected.reference, creative_sha256: creative.fingerprint,
       source: creative.source, media_kind: creative.kind },
   };
 }
 
-module.exports = { isAdSharingTemplate, resolveAdSharingMessage };
+async function resolveExistingPatientLeadConversation({ lead, conversation, transaction = null,
+  getPatientContext, resolvePhone, findCanonical }) {
+  const context = await getPatientContext(lead, { transaction });
+  if (context?.relationship !== 'existing_patient' || context.same_clinic !== true
+    || Number(context.clinic_id) !== Number(conversation.clinic_id)
+    || !Number.isSafeInteger(Number(context.patient_id)) || Number(context.patient_id) <= 0
+    || Number(context.patient_id) !== Number(conversation.patient_id)) return null;
+  // lead is a raw row: the phone helper can read historical form fields but
+  // cannot persist a fallback as a side effect of this validation.
+  const phone = await resolvePhone(lead, { transaction });
+  if (!phone) return null;
+  return findCanonical({ clinicId: Number(conversation.clinic_id), contactId: phone,
+    patientId: Number(context.patient_id), leadId: null, preserveExistingLead: true,
+    createIfMissing: false, requireExactContact: true, readOnly: true, transaction });
+}
+
+module.exports = { isAdSharingTemplate, resolveAdSharingMessage, resolveExistingPatientLeadConversation };

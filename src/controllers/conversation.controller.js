@@ -2344,6 +2344,11 @@ exports.postMessage = async (req, res) => {
         canonicalAdSharing = await require('../services/adSharingMessage.service').resolveAdSharingMessage({
           models: db, conversation, template: templateJson, input: adSharing, templateParams, userId,
           buildBody: params => whatsappService.buildTemplateComponents({ templateParams: params }),
+          transaction,
+          resolveLeadConversation: context => require('../services/adSharingMessage.service').resolveExistingPatientLeadConversation({
+            ...context, getPatientContext: require('../services/leadPatientContext.service').get,
+            resolvePhone: resolveLeadWhatsappPhone, findCanonical: findCanonicalWhatsappConversation,
+          }),
         });
         if (canonicalAdSharing) {
           templateParams = canonicalAdSharing.templateParams;
@@ -2561,18 +2566,19 @@ exports.postMessage = async (req, res) => {
       }
     }
 
-    if (outboundWhatsappQueued && conversation.lead_id) {
+    const contactedLeadId = canonicalAdSharing?.metadata?.lead_id || conversation.lead_id;
+    if (outboundWhatsappQueued && contactedLeadId) {
       try {
         await registerLeadWhatsappContactAttempt({
           models: db,
-          leadId: conversation.lead_id,
+          leadId: contactedLeadId,
           userId,
           isTemplate,
           body: message,
         });
       } catch (leadContactErr) {
         console.warn('No se pudo registrar intento WhatsApp del lead', {
-          leadId: conversation.lead_id,
+          leadId: contactedLeadId,
           conversationId: conversation.id,
           error: leadContactErr?.message || leadContactErr,
         });
