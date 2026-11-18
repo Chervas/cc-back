@@ -1,5 +1,7 @@
 'use strict';
 
+const { DEFAULT_MESSAGE_TEXT, renderMessage } = require('../lib/google-review-reminder-copy');
+
 const FAMILY = 'review_google_publication_reminder_v1';
 const DELAY_MS = 20 * 60 * 60 * 1000;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -23,7 +25,7 @@ function definition(clinicId = null, master = null) {
       node('N2', 'delay/wait_until', { datetime_expression: '{{trigger.data.followup_due_at}}' }, { on_complete: 'N3' }, 0, 130),
       node('N3', 'condition/google_review_check', { list_id: '{{trigger.data.list_id}}', item_id: '{{trigger.data.item_id}}' },
         { on_found: 'N5', on_not_detected: 'N4', on_unknown: 'N5' }, 0, 260),
-      node('N4', 'action/remind_google_review', {}, { on_success: 'N5' }, 0, 410),
+      node('N4', 'action/remind_google_review', { message_text: DEFAULT_MESSAGE_TEXT }, { on_success: 'N5' }, 0, 410),
       node('N5', 'control/end', {}, {}, 0, 560),
     ],
     published_at: new Date(), published_by: master?.created_by || 1, created_by: master?.created_by || 1,
@@ -178,10 +180,16 @@ function createRuntime(deps) {
       waiting_meta: { reason: 'review_google_allowed_slot', expires_at: result.expires_at.toISOString() } };
     if (result.state !== 'ready') return done({ status: 'skipped', reason: result.reason });
     const p = result.event.payload;
+    let content;
+    try {
+      content = renderMessage(node.config?.message_text, bulk.resolvePatientFirstNameForTemplate(result.item, { fallback: '' }));
+    } catch (error) {
+      return done({ status: 'skipped', reason: error.code || 'review_reminder_message_invalid' });
+    }
     const { message, created } = await engine.findOrCreateAutomationWhatsappMessage({
       deliveryKey: `google-review-reminder:${execution.clinic_id}:${result.list.id}:${result.item.id}`, messageType: 'text',
       values: { conversation_id: result.conversation.id, sender_id: null, direction: 'outbound',
-        content: `¡Hola! ¿Pudiste publicar tu opinión en Google? Puedes hacerlo aquí: ${result.url}\n\nGracias.`,
+        content,
         message_type: 'text', status: 'pending', metadata: { source: 'automations_v2', execution_id: execution.id,
           node_id: node.id, kind: 'review_google_publication_reminder', google_review_link_event_id: result.event.id,
           communication_scope: 'marketing', recipient_patient_id: result.item.paciente_id || null,

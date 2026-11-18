@@ -1,6 +1,8 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
 const { createRuntime, allowedSlot, definition, DELAY_MS } = require('../../services/googleReviewReminder.service');
+const { DEFAULT_MESSAGE_TEXT, renderMessage, messageTemplate } = require('../../lib/google-review-reminder-copy');
+const { resolvePatientFirstNameForTemplate } = require('../../services/marketingBulkSends.service');
 const { loadSource } = require('./fixtures/business_profile_flow_runtime.fixture');
 const engine = loadSource('flowEngineV2.service', { '../../models': {}, './jobRequests.service': { getCurrentRuntimeNamespace: () => 'test' } }, {}, 10000);
 const now = new Date('2026-10-20T12:00:00Z');
@@ -12,7 +14,7 @@ function fixture() {
     clinic_id: 59, conversation_id: 3, sender_origin_id: 4, phoneNumberId: 'secondary', wabaId: 'waba',
     recipient: '34600000000', app_message_id: 8, provider_message_id: 'wamid.test' };
   const state = { event: { id: 9, event_type: 'review_rating_followup_sent', list_id: 1, item_id: 2, paciente_id: 7, payload: p },
-    list: { id: 1, clinica_id: 59, criteria: {} }, item: { id: 2, list_id: 1, clinica_id: 59, phone: '34600000000', paciente_id: 7 },
+    list: { id: 1, clinica_id: 59, criteria: {} }, item: { id: 2, list_id: 1, clinica_id: 59, name: 'Ana Prueba Apellido', phone: '34600000000', paciente_id: 7 },
     conversation: { id: 3, clinic_id: 59, patient_id: 7 }, source: { id: 8, conversation_id: 3, status: 'read', metadata: { wamid: 'wamid.test' } },
     sender: { originId: 4, phoneNumberId: 'secondary' }, window: { open: true, matchedBy: 'message_phone_number_id', lastInboundAt: '2026-10-19T15:55:00Z' },
     publication: { state: 'not_detected' }, templates: [], executions: [], jobs: [], messages: [], transport: [], reads: 0, optedOut: false };
@@ -26,6 +28,7 @@ function fixture() {
     FlowExecutionV2: { findOne: async ({ where }) => state.executions.find(e => e.idempotency_key === where.idempotency_key), findByPk: async () => state.executions[0] },
     sequelize: { where: () => ({}), json: () => ({}) } };
   const bulk = {
+    resolvePatientFirstNameForTemplate,
     assertReviewRequestCommunicationAllowed: async () => { if (state.optedOut) throw Error('opt_out'); },
     reviewReminderAllowedAt: async (_list, reference) => ({ at: state.clinicAt || reference }),
     getGoogleReviewPublicationState: async () => { state.reads++; if (state.readFailure) throw Error('read_failure'); return state.publication; },
@@ -46,6 +49,7 @@ test('native catalog is a readable five-node V2 flow, no model calls or paid-tem
   const d = definition(); assert.equal(d.trigger_type, 'review_google_link_sent'); assert.equal(d.nodes.length, 5);
   assert.deepEqual(d.nodes[2].outputs, { on_found: 'N5', on_not_detected: 'N4', on_unknown: 'N5' });
   assert.equal(d.nodes[1].config.datetime_expression, '{{trigger.data.followup_due_at}}'); assert.equal(DELAY_MS, 72000000);
+  assert.equal(d.nodes[3].config.message_text, DEFAULT_MESSAGE_TEXT);
   assert(!JSON.stringify(d).includes('ai_analysis'));
   assert.equal(d.is_system, true); assert.equal(definition(59, d).is_system, false);
   assert.equal(definition(59, d).clinic_id, 59);
@@ -59,6 +63,34 @@ test('the installed graph passes the actual administrator API validator without 
   }, { filename: file, timeout: 10000 });
   const result = await module.exports.validateFlowPayloadForInternalUse(definition());
   assert.equal(result.ok, true, JSON.stringify(result.errors));
+  for (const message_text of ['Hola {{nombre}}, gracias.', '', undefined]) {
+    const flow = definition(); flow.nodes[3].config = { message_text };
+    assert.equal((await module.exports.validateFlowPayloadForInternalUse(flow)).ok, true);
+  }
+  for (const message_text of [{ text: 'wrong type' }, 'x'.repeat(4001), 'Hola {{telefono}}', 'Hola {{nombre']) {
+    const flow = definition(); flow.nodes[3].config = { message_text };
+    const invalid = await module.exports.validateFlowPayloadForInternalUse(flow);
+    assert.equal(invalid.ok, false);assert(invalid.errors.some(e=>e.code==='review_reminder_message_invalid'));
+  }
+});
+
+test('personalized reminder uses the existing recipient-name rules and omits the repeated link', () => {
+  const names = [
+    [{ name: 'ANA PRUEBA APELLIDO' }, 'Ana'],
+    [{ name: 'Apellido, MARÍA JOSÉ' }, 'María'],
+    [{ name: 'Legacy Name', custom_fields: { nombre: 'Lucía' } }, 'Lucía'],
+    [{ name: 'ÉLÈNE MARTIN' }, 'Élène'],
+  ];
+  for (const [item, name] of names) {
+    const resolved=resolvePatientFirstNameForTemplate(item,{fallback:''});assert.equal(resolved,name);
+    assert.equal(renderMessage(undefined,resolved),`¡Hola ${name}! ¿Pudiste publicarla en Google? Si ya lo hiciste, ¡muchas gracias!`);
+  }
+  assert.equal(resolvePatientFirstNameForTemplate({}),'Paciente');
+  assert.equal(resolvePatientFirstNameForTemplate({},{fallback:''}),'');
+  assert.equal(renderMessage(undefined,''),'¡Hola! ¿Pudiste publicarla en Google? Si ya lo hiciste, ¡muchas gracias!');
+  assert.equal(renderMessage('Gracias, {{nombre}}.','Ana'),'Gracias, Ana.');
+  assert.equal(messageTemplate(''),DEFAULT_MESSAGE_TEXT);
+  assert.throws(()=>renderMessage('Hola {{nombre}}.',''),{code:'review_reminder_recipient_name_missing'});
 });
 test('activation applies to future confirmed real links only, with one native durable execution and normal-priority job', async () => {
   const f = fixture(); await f.runtime.schedule(f.state.event); await f.runtime.schedule(f.state.event);
@@ -133,9 +165,24 @@ test('native V2 action is idempotent and contains no real transport in simulatio
   assert.equal(first.output.status, 'queued'); assert.equal(duplicate.output.status, 'already_recorded');
   assert.equal(f.state.messages.length, 1); assert.equal(f.state.transport.length, 1);
   assert.equal(f.state.messages[0].message_type, 'text'); assert.equal(f.state.messages[0].metadata.phoneNumberId, 'secondary');
+  assert.equal(f.state.messages[0].content,'¡Hola Ana! ¿Pudiste publicarla en Google? Si ya lo hiciste, ¡muchas gracias!');
+  assert(!f.state.messages[0].content.includes('https://'));
   assert(!f.state.messages[0].content.includes('5 estrellas'));
   const simulated = await f.runtime.action({ ...args, context: { __simulation: true } }); assert.equal(simulated.output.no_send, true);
   assert.equal(f.state.transport.length, 1);
+});
+test('node copy is configurable; saved messages retain their content and invalid copy never reaches transport', async () => {
+  const f=fixture();await f.runtime.schedule(f.state.event);
+  const args={execution:f.state.executions[0],context:f.state.executions[0].context,
+    node:{id:'N4',config:{message_text:'Hola {{nombre}}, ¿pudiste publicarla? Gracias.'},outputs:{on_success:'N5'}}};
+  await f.runtime.action(args);assert.equal(f.state.messages[0].content,'Hola Ana, ¿pudiste publicarla? Gracias.');
+  args.node.config.message_text='Otro mensaje para {{nombre}}';await f.runtime.action(args);
+  assert.equal(f.state.messages.length,1);assert.equal(f.state.transport.length,1);
+  assert.equal(f.state.messages[0].content,'Hola Ana, ¿pudiste publicarla? Gracias.');
+  const g=fixture();await g.runtime.schedule(g.state.event);
+  const invalid=await g.runtime.action({execution:g.state.executions[0],context:g.state.executions[0].context,
+    node:{id:'N4',config:{message_text:'Hola {{telefono}}'},outputs:{on_success:'N5'}}});
+  assert.equal(invalid.output.reason,'review_reminder_message_invalid');assert.equal(g.state.messages.length,0);assert.equal(g.state.transport.length,0);
 });
 test('actual transport rechecks review, opt-out and original sender; a delayed job may only be omitted', async () => {
   const f = fixture(); await f.runtime.schedule(f.state.event);

@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { DEFAULT_MESSAGE_TEXT: GOOGLE_REVIEW_REMINDER_MESSAGE, messageTemplate: reviewReminderMessageTemplate } = require('../lib/google-review-reminder-copy');
 const { Op, literal } = require('sequelize');
 const db = require('../../models');
 
@@ -1513,7 +1514,9 @@ const NODE_TYPES_V2 = [
   {
     type: 'action/remind_google_review', category: 'action', label: 'Recordar publicación en Google',
     description: 'Un solo mensaje de texto, sin plantilla, si siguen permitiéndolo el horario, la ventana WhatsApp, las bajas y la comprobación local reciente.',
-    output_keys: ['on_success'], runtime_status: 'real', default_config: {}, config_schema: [],
+    output_keys: ['on_success'], runtime_status: 'real', default_config: { message_text: GOOGLE_REVIEW_REMINDER_MESSAGE },
+    config_schema: [{ key: 'message_text', label: 'Mensaje ({{nombre}} = nombre del paciente)', input_type: 'text', required: false,
+      placeholder: GOOGLE_REVIEW_REMINDER_MESSAGE }],
   },
   {
     type: 'condition/field_check',
@@ -3410,6 +3413,11 @@ function validateNodeConfig(node, nodeMap, templateLookup = {}) {
 
   if (!meta) {
     return errors;
+  }
+
+  if (nodeType === 'action/remind_google_review') {
+    try { reviewReminderMessageTemplate(config.message_text); }
+    catch (error) { errors.push(buildValidationError(error.code, `El nodo ${nodeId}: ${error.message}`)); }
   }
 
   if (nodeType === 'action/resolve_mobile_verification'

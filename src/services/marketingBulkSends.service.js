@@ -7479,7 +7479,7 @@ function firstTokenFromName(value) {
   return clean.split(' ')[0] || '';
 }
 
-function resolvePatientFirstNameForTemplate(item = {}) {
+function resolvePatientFirstNameForTemplate(item = {}, { fallback = 'Paciente' } = {}) {
   const custom = asPlainObject(item.custom_fields);
   return firstTokenFromName(
     custom.nombre
@@ -7490,7 +7490,7 @@ function resolvePatientFirstNameForTemplate(item = {}) {
     || item.firstname
     || item.name
     || ''
-  ) || 'Paciente';
+  ) || fallback;
 }
 
 function resolveVariableValue(variableName, item, list, clinic) {
@@ -11474,6 +11474,7 @@ async function removeCampaign(scope, campaignId, userId = null) {
 }
 
 module.exports = {
+  resolvePatientFirstNameForTemplate,
   buildGoogleRatingSummary,
   reviewReminderAllowedAt,
   assertReviewRequestCommunicationAllowed,

@@ -46,7 +46,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const engine = loadSource('flowEngineV2.service', { '../../models': models, './jobRequests.service': { getCurrentRuntimeNamespace: () => 'test' } }, {}, 10000);
   const sender = { originId: 4, phoneNumberId: 'secondary' }, queued = [];
   let runtime;
-  const bulk = { assertReviewRequestCommunicationAllowed: async () => {}, reviewReminderAllowedAt: async (_list, at) => ({ at }),
+  const bulk = { resolvePatientFirstNameForTemplate: () => 'Ana', assertReviewRequestCommunicationAllowed: async () => {}, reviewReminderAllowedAt: async (_list, at) => ({ at }),
     getGoogleReviewPublicationState: args => checkStoredPublication(models, { ...args, locationIds: [11], now }, matcher.scoreNameMatch) };
   runtime = createRuntime({ db: models, bulk, now: () => now,
     normalizePhone: v => String(v || '').replace(/\D/g, ''),
@@ -81,6 +81,10 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal(queued.length, 1);
   report.checks.push('current native V2 condition/action run against local SQL without provider calls; duplicate action sends once');
   const message = await models.Message.findByPk(a.output.message_id);
+  assert.equal(message.content,'¡Hola Ana! ¿Pudiste publicarla en Google? Si ya lo hiciste, ¡muchas gracias!');
+  assert.equal(message.metadata.phoneNumberId,'secondary');
+  assert(!message.content.includes('https://'));
+  report.checks.push('native reminder action persists the approved personalized text without repeating the URL, with the original sender and delivery key');
   assert.equal((await runtime.authorizeTransport({ message, to: '34600000000', sender, useTemplate: false, now })).allowed, true);
   await models.BusinessProfileReview.create({ id: 19, business_location_id: 11, reviewer_name: 'Ana Prueba Apellido',
     star_rating: 1, create_time: new Date(+now - 60000) });
