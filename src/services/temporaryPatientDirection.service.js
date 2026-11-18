@@ -14,6 +14,7 @@ const abandonedLead = lead => lead.archived_at || lead.status_lead === 'descarta
 
 function createTemporaryPatientDirectionService(db, {
   notify = () => {}, warn = () => {}, now = () => new Date(), patientContextService = null, patientAttentionService = null,
+  campaignResponsibility = null,
 } = {}) {
   async function safe(work) {
     try { return await work(); }
@@ -60,14 +61,18 @@ function createTemporaryPatientDirectionService(db, {
     return patientAttentionService;
   }
 
-  function requestFrom(lead, context, attention = {}, otherHuman = false) {
+  function campaigns() {
+    return campaignResponsibility || require('./leadCampaignResponsibility.service').createLeadCampaignResponsibilityService(db);
+  }
+
+  function requestFrom(lead, context, attention = {}, eligible = false) {
     context = context || { relationship: 'unknown', patient_id: null, clinic_id: null,
       clinic_name: null, same_clinic: null, captured_at: null, reason: 'context_unavailable', request_kind: 'commercial' };
     const decision = ['director', 'clinic'].includes(attention.decision) ? attention.decision : null;
     return { lead, context, decision, attention,
       review: ['existing_patient', 'possible_patient'].includes(context.relationship),
-      blocked: Boolean((lead.asignado_a && Number(lead.asignado_a) !== TEMPORARY_FOCUSED_ACCOUNT.userId)
-        || otherHuman || (decision === 'director' && Number(attention.director_user_id) !== TEMPORARY_FOCUSED_ACCOUNT.userId)),
+      blocked: Boolean(!eligible || (lead.asignado_a && Number(lead.asignado_a) !== TEMPORARY_FOCUSED_ACCOUNT.userId)
+        || (decision === 'director' && Number(attention.director_user_id) !== TEMPORARY_FOCUSED_ACCOUNT.userId)),
     };
   }
 
@@ -82,11 +87,8 @@ function createTemporaryPatientDirectionService(db, {
     } catch (error) {
       warn(error?.code || 'lead_patient_context_unavailable');
     }
-    const otherHuman = db.LeadContactAttempt && await db.LeadContactAttempt.findOne({
-      where: { lead_intake_id: lead.id, usuario_id: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: TEMPORARY_FOCUSED_ACCOUNT.userId }] } },
-      attributes: ['id'], transaction,
-    });
-    return requestFrom(lead, context, attention, otherHuman);
+    const eligible = (await campaigns().forLeads([lead], { transaction })).get(Number(lead.id)) === true;
+    return requestFrom(lead, context, attention, eligible);
   }
 
   async function requestContexts(rows) {
@@ -110,13 +112,9 @@ function createTemporaryPatientDirectionService(db, {
       } catch (error) { warn(error?.code || 'lead_patient_context_unavailable'); }
     }
     const decisions = await attentionService().decisions(ids, { transaction: null });
-    const contacts = db.LeadContactAttempt ? await db.LeadContactAttempt.findAll({ where: {
-      lead_intake_id: { [Op.in]: ids },
-      usuario_id: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: TEMPORARY_FOCUSED_ACCOUNT.userId }] },
-    }, attributes: ['lead_intake_id'], raw: true }) : [];
-    const otherHumans = new Set(contacts.map(row => Number(plain(row).lead_intake_id)));
+    const eligibility = await campaigns().forLeads(leads);
     return new Map(leads.map(lead => [Number(lead.id), requestFrom(lead,
-      byContext.get(Number(lead.id)), decisions.get(Number(lead.id)), otherHumans.has(Number(lead.id)))]));
+      byContext.get(Number(lead.id)), decisions.get(Number(lead.id)), eligibility.get(Number(lead.id)) === true)]));
   }
 
   function view(user, request, start = null, appointment = null) {
@@ -131,38 +129,17 @@ function createTemporaryPatientDirectionService(db, {
   }
 
   async function provenance(conversation, actorUserId, transaction) {
-    if (Number(actorUserId) === TEMPORARY_FOCUSED_ACCOUNT.userId) return { reason: 'human_contact', since: now() };
+    // A human reply or a patient created by Graci is not a campaign request.
+    // Only the already gated, exact lead can establish this temporary scope.
     if (conversation.lead_id && db.LeadIntake) {
       const lead = plain(await db.LeadIntake.findByPk(conversation.lead_id, { transaction }));
       if (Number(lead?.clinica_id) === Number(conversation.clinic_id)
           && !lead.archived_at && !['descartado', 'acudio_cita', 'convertido'].includes(lead.status_lead)
           && (!lead.asignado_a || Number(lead.asignado_a) === TEMPORARY_FOCUSED_ACCOUNT.userId)) {
-        const otherHuman = db.LeadContactAttempt && await db.LeadContactAttempt.findOne({
-          where: { lead_intake_id: lead.id, usuario_id: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: TEMPORARY_FOCUSED_ACCOUNT.userId }] } },
-          attributes: ['id'], transaction,
-        });
-        if (!otherHuman) return { reason: 'lead_received', since: lead.created_at || now() };
+        return { reason: 'lead_received', since: lead.created_at || now() };
       }
     }
-    if (conversation.patient_id) {
-      if (db.PatientOperationalEvent) {
-        const creation = plain(await db.PatientOperationalEvent.findOne({ where: {
-          clinic_id: conversation.clinic_id, patient_id: conversation.patient_id,
-          actor_user_id: TEMPORARY_FOCUSED_ACCOUNT.userId, event_type: 'patient.created',
-        }, order: [['occurred_at', 'ASC']], transaction }));
-        if (creation) return { reason: 'patient_created', since: creation.occurred_at };
-      }
-      const appointment = plain(await db.CitaPaciente.findOne({ where: {
-        clinica_id: conversation.clinic_id, paciente_id: conversation.patient_id,
-        created_by: TEMPORARY_FOCUSED_ACCOUNT.userId, source_system: null,
-      }, order: [['created_at', 'ASC'], ['id_cita', 'ASC']], transaction }));
-      if (appointment) return { reason: 'appointment_created', since: appointment.created_at || now() };
-    }
-    const message = plain(await db.Message.findOne({ where: {
-      conversation_id: conversation.id, sender_id: TEMPORARY_FOCUSED_ACCOUNT.userId,
-      direction: 'outbound', message_type: { [Op.ne]: 'event' }, automation_delivery_key: null,
-    }, order: [['id', 'ASC']], transaction }));
-    return message ? { reason: 'human_contact', since: message.sent_at || message.createdAt || now() } : null;
+    return null;
   }
 
   function firstAppointmentScope(conversation, since, request) {
@@ -220,10 +197,16 @@ function createTemporaryPatientDirectionService(db, {
       const request = await requestContext(conversation, { transaction, lead });
       let { start, handoff } = stateFrom((await db.Message.findAll({ where: eventWhere([conversation.id], lead ? [lead.id] : []),
         order: [['id', 'ASC']], transaction })).map(plain), conversation, lead);
-      if (handoff || request?.blocked || request?.decision === 'clinic'
+      if (!request || handoff || request.blocked || request.decision === 'clinic'
           || (request && (abandonedLead(request.lead) || !start && terminalLead(request.lead)))) return null;
-      if (request?.review && request.decision !== 'director') return view(user, request);
-      if (!start) {
+      const pending = request.review && request.decision !== 'director';
+      if (pending) {
+        const appointment = await firstAppointment(conversation, request.lead.created_at, transaction, request);
+        if (!appointment || !(require('../lib/status-catalog').hasAttendedAppointment(appointment) || careState(appointment).arrived_at)) {
+          return view(user, request);
+        }
+      }
+      if (!start && !pending) {
         const origin = request?.decision === 'director'
           ? { reason: 'lead_patient_decision', since: request.lead.created_at || now() }
           : await provenance(conversation, actorUserId, transaction);
@@ -246,7 +229,7 @@ function createTemporaryPatientDirectionService(db, {
         }, { transaction }));
         changed.push(start);
       }
-      const appointment = await firstAppointment(conversation, start.metadata.started_at, transaction, request);
+      const appointment = await firstAppointment(conversation, start?.metadata.started_at || request.lead.created_at, transaction, request);
       if (appointment && (require('../lib/status-catalog').hasAttendedAppointment(appointment) || careState(appointment).arrived_at)) {
         const event = await db.Message.create({ conversation_id: conversation.id, sender_id: null,
           direction: 'outbound', message_type: 'event', status: 'sent', sent_at: now(),
@@ -328,7 +311,7 @@ function createTemporaryPatientDirectionService(db, {
         if (positive(row.lead_id) && (!request || Number(request.lead.clinica_id) !== Number(row.clinic_id))) request = { blocked: true };
         const state = stateFrom(events, row, request?.lead);
         let direction = row.patient_direction || null;
-        if (state.handoff || request?.blocked || request?.decision === 'clinic'
+        if (!request || state.handoff || request.blocked || request.decision === 'clinic'
             || (row.assignee_id && Number(row.assignee_id) !== TEMPORARY_FOCUSED_ACCOUNT.userId)
             || (request && (abandonedLead(request.lead) || !state.start && terminalLead(request.lead)))) direction = null;
         else if (request?.review || request?.decision === 'director') direction = view(user, request, state.start);
@@ -344,9 +327,10 @@ function createTemporaryPatientDirectionService(db, {
   // mark may have been written before the conversation acquired lead_id.
   // Never infer ownership from a phone, name, patient existence or appointment
   // confirmation. This projection performs no ensure/create/handoff operation.
-  async function effectiveForLeads(leads, { transaction = null } = {}) {
+  async function effectiveForLeads(leads, { transaction = null, campaignEligibility = null } = {}) {
     if (!db.Conversation || !db.Message || !db.CitaPaciente) return new Map();
-    const candidates = leads.filter(lead => positive(lead.id)
+    const eligibility = campaignEligibility || await campaigns().forLeads(leads, { transaction });
+    const candidates = leads.filter(lead => positive(lead.id) && eligibility.get(Number(lead.id)) === true
       && TEMPORARY_DIRECTOR_CLINICS.includes(Number(lead.clinica_id)) && !terminalLead(lead));
     if (!candidates.length) return new Map();
     const result = await safe(async () => {
@@ -371,8 +355,7 @@ function createTemporaryPatientDirectionService(db, {
         const exactEvents = events.filter(row => Number(row.conversation_id) === Number(conversation.id)
           && positive(row.metadata?.patient_id) && Number(row.metadata.patient_id) === Number(conversation.patient_id));
         const state = stateFrom(exactEvents, conversation, lead);
-        if (!state.start) continue;
-        const started = +new Date(state.start.metadata.started_at || state.start.sent_at);
+        const started = +new Date(state.start?.metadata.started_at || state.start?.sent_at || lead.created_at);
         const entered = +new Date(lead.created_at);
         if (!Number.isFinite(started) || !Number.isFinite(entered) || started < entered) continue;
         if (state.handoff) {

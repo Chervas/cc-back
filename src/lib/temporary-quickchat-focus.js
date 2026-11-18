@@ -1,5 +1,7 @@
 'use strict';
 
+const { campaignResponsibilitySql } = require('../services/leadCampaignResponsibility.service');
+
 // Temporary presentation filter, NOT an access policy or a PatientDirection role.
 // Retire when the Director de pacientes workflow replaces this account workaround.
 const TEMPORARY_FOCUSED_ACCOUNT = Object.freeze({
@@ -44,31 +46,9 @@ function temporaryQuickChatEligibilitySql() {
         SELECT 1 FROM LeadIntakes AS qc_lead WHERE qc_lead.id = \`Conversation\`.\`lead_id\`
           AND qc_lead.clinica_id = \`Conversation\`.\`clinic_id\`
           AND (qc_lead.asignado_a IS NULL OR qc_lead.asignado_a = ${TEMPORARY_FOCUSED_ACCOUNT.userId})
-          AND qc_lead.archived_at IS NULL AND qc_lead.status_lead <> 'descartado'
-          AND (qc_lead.status_lead NOT IN ('acudio_cita','convertido')
-            OR ${event('temporary_patient_direction_started')})
-          AND NOT EXISTS (SELECT 1 FROM LeadContactAttempts AS qc_contact
-            WHERE qc_contact.lead_intake_id = qc_lead.id AND qc_contact.usuario_id IS NOT NULL
-              AND qc_contact.usuario_id <> ${TEMPORARY_FOCUSED_ACCOUNT.userId})
-      )) OR (\`Conversation\`.\`lead_id\` IS NULL AND (
-      \`Conversation\`.\`patient_id\` IS NULL
-      OR ${event('temporary_patient_direction_started')}
-      OR EXISTS (SELECT 1 FROM \`CitasPacientes\` AS \`qc_own_appointment\`
-        WHERE \`qc_own_appointment\`.\`created_by\` = ${TEMPORARY_FOCUSED_ACCOUNT.userId}
-          AND \`qc_own_appointment\`.\`clinica_id\` = \`Conversation\`.\`clinic_id\`
-          AND \`qc_own_appointment\`.\`paciente_id\` = \`Conversation\`.\`patient_id\`)
-      OR EXISTS (SELECT 1 FROM \`PatientOperationalEvents\` AS \`qc_creation\`
-        WHERE \`qc_creation\`.\`actor_user_id\` = ${TEMPORARY_FOCUSED_ACCOUNT.userId}
-          AND \`qc_creation\`.\`event_type\` = 'patient.created'
-          AND \`qc_creation\`.\`clinic_id\` = \`Conversation\`.\`clinic_id\`
-          AND \`qc_creation\`.\`patient_id\` = \`Conversation\`.\`patient_id\`)
-      OR EXISTS (SELECT 1 FROM \`Messages\` AS \`qc_human\`
-        WHERE \`qc_human\`.\`conversation_id\` = \`Conversation\`.\`id\`
-          AND \`qc_human\`.\`sender_id\` = ${TEMPORARY_FOCUSED_ACCOUNT.userId}
-          AND \`qc_human\`.\`direction\` = 'outbound'
-          AND \`qc_human\`.\`message_type\` <> 'event'
-          AND \`qc_human\`.\`automation_delivery_key\` IS NULL)
-    )))))`;
+          AND qc_lead.archived_at IS NULL AND qc_lead.status_lead NOT IN ('descartado','acudio_cita','convertido')
+          AND ${campaignResponsibilitySql('qc_lead')}
+      )))))`;
 }
 
 function isTemporaryQuickChatFocusUser(actor) {

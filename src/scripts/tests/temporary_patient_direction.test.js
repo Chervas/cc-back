@@ -77,7 +77,8 @@ function fixture({ clinicId = 72, patientId = null, leadId = 10, assigned = null
       return leads.map(lead => ({ ...lead, patient_context: context }));
     },
   };
-  const service = createTemporaryPatientDirectionService(db, { now: () => new Date('2026-10-07T08:00:00Z'), patientContextService,
+  const service = createTemporaryPatientDirectionService(db, {
+    campaignResponsibility: { forLeads: async rows => new Map(rows.map(row => [Number(row.id), row.campaign_eligible !== false])) }, now: () => new Date('2026-10-07T08:00:00Z'), patientContextService,
     notify: event => notifications.push(event), warn: code => warnings.push(code) });
   const decide = (decision, overrides = {}) => audits.push({ id: audits.length + 1, lead_intake_id: leadId,
     attribution_steps: { type: 'lead_patient_attention_v1', lead_patient_attention_v1: { version: 1, decision, request_kind: 'commercial', director_user_id: 44,
@@ -117,13 +118,12 @@ test('reading an unrelated patient does not claim the conversation', async () =>
   await f.service.observeConversation(f.conversations[0]); assert.equal(f.messages.length, 0);
 });
 
-test('a first manual reply claims only Graci conversations, not a read or another staff member reply', async () => {
+test('a manual reply alone never claims a patient without a linked campaign request', async () => {
   const f = fixture({ patientId: 100, leadId: null, origin: 'unrelated' });
   await f.service.observeConversation(f.conversations[0], { actorUserId: 99 });
   assert.equal(f.messages.length, 0);
   await f.service.observeConversation(f.conversations[0], { actorUserId: 44 });
-  assert.equal(f.messages.length, 1);
-  assert.equal(f.messages[0].metadata.start_reason, 'human_contact');
+  assert.equal(f.messages.length, 0, 'neither Graci nor another human invents a campaign request');
 });
 
 test('attendance of another patient with the same lead never hands off this conversation', async () => {
@@ -152,7 +152,7 @@ test('temporary attention never overrides the independent full Director assignme
 });
 
 test('does not take another staff member lead or a discarded/attended lead', async () => {
-  for (const status of ['descartado', 'acudio_cita', 'convertido', 'archived', 'other_human', 'assigned_elsewhere']) {
+  for (const status of ['descartado', 'acudio_cita', 'convertido', 'archived', 'assigned_elsewhere']) {
     const f = fixture();
     if (status === 'archived') f.leads[0].archived_at = new Date();
     else if (status === 'assigned_elsewhere') f.leads[0].asignado_a = 99;
@@ -274,10 +274,10 @@ test('enrich batches 100 requests, including repeated chats, without per-row SQL
   const rows = await f.service.enrich(f.conversations);
   assert.equal(rows.length, 101);
   assert.equal(rows[0].patient_direction, null, 'clinic decision');
-  assert.equal(rows[1].patient_direction, null, 'another human has contact');
+  assert.equal(rows[1].patient_direction.status, 'pending_review', 'a contact attempt alone is not a transfer');
   assert.equal(rows.at(-1).patient_direction, null, 'duplicate chats share the lead decision');
   assert(rows.slice(2, -1).every(row => row.patient_direction.status === 'pending_review'));
-  assert.deepEqual(calls, { Message: 1, LeadIntake: 1, LeadAttributionAudit: 1, LeadContactAttempt: 1 });
+  assert.deepEqual(calls, { Message: 1, LeadIntake: 1, LeadAttributionAudit: 1 });
   assert.equal(f.contextBatches.length, 1);
   assert.equal(f.contextBatches[0].leads.length, 100);
   assert.equal(f.warnings.length, 0);
@@ -396,7 +396,7 @@ test('legacy undated handoffs stay closed, while marks predating a new lead do n
   assert.equal((await f.service.ensure(1)).status, 'pending_review');
 });
 
-for (const conflict of ['lead_owner', 'chat_owner', 'human_contact', 'decision_director', 'lead_clinic']) {
+for (const conflict of ['lead_owner', 'chat_owner', 'decision_director', 'lead_clinic']) {
   test(`${conflict}: neither a decision nor a manual reply steals human responsibility`, async () => {
     const f = fixture({ patientId: 100, relationship: 'existing_patient' });
     f.decide('director');
@@ -426,7 +426,7 @@ for (const clinicId of [66, 72, 77]) for (const origin of ['lead', 'patient', 'm
       }
       await f.service.observeAppointment(f.appointments[0]);
       const handoffs = f.messages.filter(row => row.metadata?.kind === 'temporary_patient_direction_handoff');
-      assert.equal(handoffs.length, ['completada', 'arrival'].includes(state) ? 1 : 0);
+      assert.equal(handoffs.length, origin === 'lead' && ['completada', 'arrival'].includes(state) ? 1 : 0, 'only a campaign-linked request can hand off from Graci');
       assert.equal(f.appointments[0].estado, ['arrival', 'stale_arrival'].includes(state) ? 'info_confirmada' : state,
         'attention must not change clinical status');
       assert.equal(f.warnings.length, 0);

@@ -19,16 +19,16 @@ test('the temporary account filter does not become a role/admin-wide policy', ()
   }
 });
 
-test('habitual search/pagination matches creator AND patient AND clinic; explicit contact reads are exempt', () => {
+test('habitual search/pagination requires the exact campaign request; explicit contact reads are exempt', () => {
   const sql = temporaryQuickChatListSql(graci);
-  assert.match(sql, /`created_by` = 44/);
-  assert.match(sql, /`clinica_id` = `Conversation`\.`clinic_id`/);
-  assert.match(sql, /`paciente_id` = `Conversation`\.`patient_id`/);
-  assert.match(sql, /`patient_id` IS NULL/);
+  assert.match(sql, /qc_lead.clinica_id = `Conversation`\.`clinic_id`/);
+  assert.match(sql, /Campanas crc/);
+  assert.match(sql, /meta_leadgen/);
+  assert.match(sql, /<> 'organic'/);
   assert.match(sql, /`channel` = 'internal'/);
   assert.match(sql, /NOT IN \(66,72,77\)/);
   assert.match(sql, /temporary_patient_direction_handoff/);
-  assert.match(sql, /patient\.created/);
+  assert.doesNotMatch(sql, /patient\.created/);
   assert.doesNotMatch(sql, /ADMIN_USER_IDS/);
   assert.equal(temporaryQuickChatListSql(graci, { patientId: 123 }), null);
   assert.equal(temporaryQuickChatListSql(graci, { leadId: 456 }), null);
@@ -52,10 +52,9 @@ test('lead review list uses the latest versioned decision and scopes marks to ea
   assert.match(sql, /<> 'director' OR[\s\S]*= '44'/);
   assert.match(sql, /qc_lead.clinica_id = `Conversation`\.`clinic_id`/);
   assert.match(sql, /qc_lead.asignado_a IS NULL OR qc_lead.asignado_a = 44/);
-  assert.match(sql, /qc_lead.archived_at IS NULL AND qc_lead.status_lead <> 'descartado'\s+AND \(/,
+  assert.match(sql, /qc_lead.archived_at IS NULL AND qc_lead.status_lead NOT IN \('descartado','acudio_cita','convertido'\)/,
     'discard/archive gates apply even when a start marker exists');
-  assert.match(sql, /FROM LeadContactAttempts AS qc_contact/);
-  assert.match(sql, /qc_contact.usuario_id <> 44/);
+  assert.doesNotMatch(sql, /FROM LeadContactAttempts AS qc_contact/, 'a human contact is not a transfer');
   assert.match(sql, /'\$\.lead_intake_id'\)\) = `Conversation`\.`lead_id`/);
   assert.match(sql, /`sent_at` >= \(SELECT qc_request.created_at/);
   assert.doesNotMatch(sql, /`assignee_id`/, 'this column is absent from the current Conversation model');

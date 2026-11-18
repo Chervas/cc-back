@@ -61,6 +61,7 @@ function fixture() {
     PatientDirectionSetting: model('setting', []),
     Usuario: model('user', [{ id_usuario: 44, nombre: 'Synthetic director', email_usuario: 'maria.gonzalez@modmarketing.net' }], 'id_usuario') };
   const service = createLeadPatientAttentionService(db, { contexts: { get: async lead => lead.patient_context },
+    campaignResponsibility: { forLeads: async rows => new Map(rows.map(row => [Number(row.id), row.campaign_eligible !== false])) },
     authorize: async () => true, isAdmin: () => false });
   const view = async input => service.enrich(input || leads, { actorId: 44 });
   return { leads, conversations, messages, appointments, audits, contacts, assignments, reads, writes, db, view };
@@ -152,7 +153,7 @@ test('existing/possible patients retain pending review despite an old start even
   }
 });
 
-for (const mismatch of ['clinic', 'conversation', 'patient', 'director', 'request', 'older_request']) test(`temporal ${mismatch} mismatch cannot claim this patient`, async () => {
+for (const mismatch of ['clinic', 'conversation', 'patient', 'director', 'request', 'older_request']) test(`temporal ${mismatch} mismatch cannot override verified campaign responsibility`, async () => {
   const f = fixture();
   if (mismatch === 'clinic') f.messages[0].metadata.clinic_id = 66;
   if (mismatch === 'conversation') f.messages[0].conversation_id = 999;
@@ -160,26 +161,26 @@ for (const mismatch of ['clinic', 'conversation', 'patient', 'director', 'reques
   if (mismatch === 'director') f.messages[0].metadata.director_user_id = 99;
   if (mismatch === 'request') f.messages[0].metadata.lead_intake_id = 8438;
   if (mismatch === 'older_request') f.messages[0].metadata.started_at = '2026-11-16T10:00:00Z';
-  assert.equal((await f.view())[0].patient_attention.state, 'unassigned');
+  assert.equal((await f.view())[0].patient_attention.state, 'director');
 });
 
-test('a conversation from a different clinic and ambiguous conversations are not canonical ownership', async () => {
+test('another clinic or ambiguous conversations cannot invent attendance against campaign responsibility', async () => {
   const f = fixture(); f.conversations[0].clinic_id = 66;
-  assert.equal((await f.view())[0].patient_attention.state, 'unassigned');
+  assert.equal((await f.view())[0].patient_attention.state, 'director');
   const g = fixture(); g.conversations.push({ ...g.conversations[0], id: 999 });
-  assert.equal((await g.view())[0].patient_attention.state, 'unassigned');
+  assert.equal((await g.view())[0].patient_attention.state, 'director');
 });
 
-test('another human or explicit owner is never overridden by the temporal projection', async () => {
+test('a human contact does not transfer direction, while an explicit other owner still wins', async () => {
   const f = fixture(); f.contacts.push({ lead_intake_id: 8432, usuario_id: 99 });
-  assert.equal((await f.view())[0].patient_attention.state, 'clinic');
+  assert.equal((await f.view())[0].patient_attention.state, 'director');
   const g = fixture(); g.leads[0].asignado_a = 99;
   assert.equal((await g.view())[0].patient_attention.state, 'clinic');
 });
 
-test('query failure cannot promote an unassigned lead or mutate the underlying records', async () => {
+test('query failure does not invent attendance or mutate campaign responsibility', async () => {
   const f = fixture(); f.db.CitaPaciente.findAll = async () => { throw Error('query unavailable'); };
-  assert.equal((await f.view())[0].patient_attention.state, 'unassigned');
+  assert.equal((await f.view())[0].patient_attention.state, 'director');
   assert.deepEqual(f.writes, []);
 });
 
@@ -201,7 +202,7 @@ test('several requests share one scoped appointment read instead of one query pe
   assert.equal(reads.length,1);assert.equal(reads[0].query.limit,5001);assert.equal(reads[0].query.raw,true);
   assert.equal(reads[0].query.where[Op.or].length,2);assert(!reads[0].query.attributes.includes('nota'));
 });
-test('an incomplete appointment history cannot fabricate ownership or attendance', async () => {
+test('an incomplete appointment history cannot fabricate attendance', async () => {
   const f=fixture();f.db.CitaPaciente.findAll=async()=>Array.from({length:5001},()=>({...f.appointments[0]}));
-  assert.equal((await f.view())[0].patient_attention.state,'unassigned');assert.deepEqual(f.writes,[]);
+  assert.equal((await f.view())[0].patient_attention.state,'director');assert.deepEqual(f.writes,[]);
 });

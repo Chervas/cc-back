@@ -13,8 +13,9 @@ const { temporaryQuickChatEligibilitySql, attachTemporaryQuickChatEligibility } 
 test('temporary attention: actual models, SQL locks, commit/rollback and list projection without provider access', {
   skip: process.env.CAMPAIGN_OPTIMIZATION_MYSQL_TEST !== '1', timeout: 120000,
 }, async () => withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
-  sql.define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true } }, { tableName: 'Clinicas', timestamps: false });
+  sql.define('Clinica', { id_clinica: { type: D.INTEGER, primaryKey: true }, grupoClinicaId: D.INTEGER }, { tableName: 'Clinicas', timestamps: false });
   sql.define('Paciente', { id_paciente: { type: D.INTEGER, primaryKey: true } }, { tableName: 'Pacientes', timestamps: false });
+  db.Campana = sql.define('Campana', { id_campana: { type: D.INTEGER, primaryKey: true }, clinica_id: { type: D.INTEGER } }, { tableName: 'Campanas', timestamps: false });
   db.PatientDirectionSetting = sql.define('PatientDirectionSetting', {
     id: { type: D.INTEGER, primaryKey: true, autoIncrement: true },
     clinic_id: { type: D.INTEGER, allowNull: false, unique: true },
@@ -22,18 +23,20 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
     director_user_id: { type: D.INTEGER, allowNull: true },
     default_successor_user_id: { type: D.INTEGER, allowNull: true },
   }, { tableName: 'PatientDirectionSettings', timestamps: false });
-  for (const file of ['usuario', 'leadintake', 'leadattributionaudit', 'leadcontactattempt', 'citapaciente', 'conversation', 'message', 'patientoperationalevent']) {
+  for (const file of ['usuario', 'leadintake', 'leadattributionaudit', 'leadcontactattempt', 'citapaciente', 'conversation', 'message', 'patientoperationalevent',
+    'clinicgoogleadsaccount', 'externalcampaigninventory', 'externalcampaignassignment', 'googleadsadinventory']) {
     const model = require('../../../models/' + file)(sql, D); db[model.name] = model;
   }
   db.PatientOperationalEvent.options.indexes.forEach((index, i) => { index.name = 'temporary_attention_poe_' + i; });
   await sql.sync();
   await sql.models.Clinica.bulkCreate([66, 72, 77, 35].map(id_clinica => ({ id_clinica })));
+  await db.Campana.bulkCreate([66, 72, 77].map(id => ({ id_campana: id, clinica_id: id })));
   await sql.models.Paciente.bulkCreate([100, 101, 102].map(id_paciente => ({ id_paciente })));
   await db.Usuario.create({ id_usuario: 44, nombre: 'Graci', email_usuario: 'maria.gonzalez@modmarketing.net' });
   await db.PatientDirectionSetting.create({ clinic_id: 72, is_enabled: false, director_user_id: 44 });
   // This fixture seeds explicit snapshots below; intake classification is tested
   // by the context suite, not against these deliberately minimal patient tables.
-  const lead = await db.LeadIntake.create({ clinica_id: 72 }, { hooks: false });
+  const lead = await db.LeadIntake.create({ campana_id: 72, clinica_id: 72 }, { hooks: false });
   const conversation = await db.Conversation.create({ clinic_id: 72, channel: 'whatsapp', lead_id: lead.id });
   const notifications = [], warnings = [];
   const contexts = createLeadPatientContextService(db);
@@ -105,7 +108,7 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
   const existingContext = { relationship: 'existing_patient', patient_id: 100, clinic_id: 72,
     clinic_name: 'Synthetic clinic', same_clinic: true, captured_at: new Date().toISOString(),
     reason: 'synthetic_existing_patient', request_kind: 'commercial' };
-  const request = await db.LeadIntake.create({ clinica_id: 72 }, { hooks: false });
+  const request = await db.LeadIntake.create({ campana_id: 72, clinica_id: 72 }, { hooks: false });
   await snapshot(request.id, existingContext);
   await conversation.update({ lead_id: request.id });
   const oldCount = await db.Message.count();
@@ -150,7 +153,7 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
   } }), 1, 'completion is idempotent per request');
   report.checks.push('Real attention decide + temporal projection + paginated SQL: existing-patient request remains pending until decided; only the same lead, patient and clinic can hand off, never historical/imported/provisional attendance.');
 
-  const transferred = await db.LeadIntake.create({ clinica_id: 72 }, { hooks: false });
+  const transferred = await db.LeadIntake.create({ campana_id: 72, clinica_id: 72 }, { hooks: false });
   await snapshot(transferred.id, existingContext);
   await conversation.update({ lead_id: transferred.id });
   await attention.decide({ leadId: transferred.id, actorId: 44, decision: 'director' });
@@ -177,7 +180,7 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
     assert.equal((await attention.decisions([transferred.id])).get(transferred.id).decision, 'clinic');
     assert.equal(await eligible(), 0, 'SQL and decision service ignore the same invalid or unrelated audit rows');
   }
-  const pending = await db.LeadIntake.create({ clinica_id: 72 }, { hooks: false });
+  const pending = await db.LeadIntake.create({ campana_id: 72, clinica_id: 72 }, { hooks: false });
   await snapshot(pending.id, { ...existingContext, relationship: 'possible_patient' });
   await conversation.update({ lead_id: pending.id });
   assert.equal((await service.enrich([conversation]))[0].patient_direction.status, 'pending_review');
@@ -189,7 +192,7 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
   assert.equal((await pending.reload()).asignado_a, 99);
   report.checks.push('A versioned clinic decision excludes even marked chats; unrelated audits do not erase it, a new lead receives its own review, and human ownership is preserved.');
 
-  const discarded = await db.LeadIntake.create({ clinica_id: 72 }, { hooks: false });
+  const discarded = await db.LeadIntake.create({ campana_id: 72, clinica_id: 72 }, { hooks: false });
   await snapshot(discarded.id, existingContext);
   await conversation.update({ lead_id: discarded.id });
   await attention.decide({ leadId: discarded.id, actorId: 44, decision: 'director' });
@@ -202,7 +205,7 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
   assert.equal(await eligible(), 0, 'discard closes the active projection even though its start marker is retained');
   report.checks.push('A discarded lead loses the active marker in both the DTO and list SQL without deleting its request audit history.');
 
-  const arrivalLead = await db.LeadIntake.create({ clinica_id: 72, status_lead: 'citado' }, { hooks: false });
+  const arrivalLead = await db.LeadIntake.create({ campana_id: 72, clinica_id: 72, status_lead: 'citado' }, { hooks: false });
   await snapshot(arrivalLead.id, existingContext);
   await conversation.update({ lead_id: arrivalLead.id });
   const beforeFailedDecision = await db.Message.count();
@@ -275,7 +278,7 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
   assert.equal(await handoffCount(), 1, 'completion following arrival does not duplicate the handoff');
   report.checks.push('Stale arrival and rolled-back arrival cannot hand off an existing-patient request; committed arrival publishes exactly once after commit, and later completion remains idempotent.');
 
-  const racingLead = await db.LeadIntake.create({ clinica_id: 72 }, { hooks: false });
+  const racingLead = await db.LeadIntake.create({ campana_id: 72, clinica_id: 72 }, { hooks: false });
   await snapshot(racingLead.id, existingContext);
   await conversation.update({ lead_id: racingLead.id });
   await attention.decide({ leadId: racingLead.id, actorId: 44, decision: 'director' });
@@ -330,7 +333,7 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
 
   // T2 reproduces activation's setting -> lead writes while T1 runs real decide().
   // The setting stays disabled so the decision uses only the temporary domain.
-  const activationLead = await db.LeadIntake.create({ clinica_id: 72 }, { hooks: false });
+  const activationLead = await db.LeadIntake.create({ campana_id: 72, clinica_id: 72 }, { hooks: false });
   await snapshot(activationLead.id, existingContext);
   await conversation.update({ lead_id: activationLead.id });
   const t2 = await sql.transaction();
@@ -390,8 +393,8 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
 
   // The legacy patient-origin mark must not borrow attendance from another
   // explicit request, while unlinked legacy reservations remain usable.
-  const bulkA = await db.LeadIntake.create({ clinica_id: 72, status_lead: 'citado' }, { hooks: false });
-  const bulkB = await db.LeadIntake.create({ clinica_id: 72, status_lead: 'citado' }, { hooks: false });
+  const bulkA = await db.LeadIntake.create({ campana_id: 72, clinica_id: 72, status_lead: 'citado' }, { hooks: false });
+  const bulkB = await db.LeadIntake.create({ campana_id: 72, clinica_id: 72, status_lead: 'citado' }, { hooks: false });
   // The list consumes persisted DATETIME(0), not Sequelize's unrounded
   // in-memory created timestamp from the INSERT.
   await Promise.all([bulkA.reload(), bulkB.reload()]);
@@ -427,10 +430,10 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
   assert.equal((await service.effectiveForLeads(bulkRows)).get(bulkA.id).state, 'completed', 'own attendance wins while the foreign reservation is ignored');
   report.checks.push('Actual MySQL bulk effective direction: exact same-patient foreign lead attendance excluded; legacy NULL accepted; one appointment SELECT for both requests; no read mutations.');
 
-  await db.PatientOperationalEvent.drop();
+  await db.LeadAttributionAudit.drop();
   await sql.transaction(async transaction => {
     await appointment.update({ nota: 'Synthetic clinical operation committed' }, { transaction });
-    await service.observeConversation(unrelated, { transaction });
+    await service.observeConversation(bulkConversations[0], { transaction });
   });
   assert.equal((await appointment.reload()).nota, 'Synthetic clinical operation committed');
   assert.equal(warnings.at(-1), 'ER_NO_SUCH_TABLE');

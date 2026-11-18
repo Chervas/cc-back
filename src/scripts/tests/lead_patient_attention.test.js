@@ -37,6 +37,8 @@ function fixture({ relationship = 'existing_patient', status = 'nuevo', assigned
     request_kind: 'commercial', captured_at: '2026-10-29T19:35:00Z' };
   const service = createLeadPatientAttentionService(db, {
     contexts: { get: async () => context, capture: async () => context },
+    // Campaign proof itself is covered by the independent native SQL suite.
+    campaignResponsibility: { forLeads: async rows => new Map(rows.map(row => [Number(row.id), row.campaign_eligible !== false])) },
     now: () => new Date('2026-10-30T10:00:00Z'),
     authorize: async (actor, clinic) => allowed && [1, 44, 55].includes(actor) && clinic === 72,
     isAdmin: actor => actor === 1,
