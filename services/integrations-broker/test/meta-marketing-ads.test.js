@@ -197,7 +197,7 @@ test('the normal inventory opt-in returns real copy/image and batches only video
 });
 test('creative inventory rejects caller media references, foreign accounts and mismatched source identities',async t=>{
   const r=await ready(t),before=r.state.calls.length;
-  for(const extra of [{creativeVersion:2},{video_id:'901'},{source:VIDEO},{fields:'source'}])await assert.rejects(r.execute('ads',{...creativePayload,...extra}),{code:'invalid_request'});
+  for(const extra of [{creativeVersion:3},{video_id:'901'},{source:VIDEO},{fields:'source'}])await assert.rejects(r.execute('ads',{...creativePayload,...extra}),{code:'invalid_request'});
   assert.equal(r.state.calls.length,before);
   r.state.raw={data:[{...row('ads'),account_id:'999',creative:{id:'801',video_id:'901'}}]};
   await assert.rejects(r.execute('ads',creativePayload),{code:'provider_failed'});assert(!r.state.calls.some(c=>c.query.ids));
@@ -256,4 +256,67 @@ test('bounded creative projection respects110k per page and rejects unvalidated 
   const invalid=structuredClone(value);invalid.results[0].creative.sharing.url='https://untrusted.invalid';assert.throws(()=>A.validatePage(A.OPERATIONS.ads,invalid,creativePayload),{code:'provider_failed'});
   assert.throws(()=>A.projectPage('ads',{data:[...rows,rows[0]]},creativePayload),{code:'provider_failed'});
   assert.equal(C.project({body:'😀'.repeat(1100),image_url:IMAGE}).source_issue,'creative_copy_invalid');
+});
+
+test('v2 reads all100 admissible video choices in10-reference batches within the same authorized inventory operation',async t=>{
+  const r=await ready(t),input={pageToken:null,creativeVersion:2};
+  r.state.raw=url=>url.searchParams.has('ids')
+    ?Object.fromEntries(url.searchParams.get('ids').split(',').map(id=>[id,{id,source:`https://video.cdninstagram.com/${id}.mp4`}]))
+    :{data:Array.from({length:10},(_,i)=>({...row('ads',String(701+i)),account_id:'301',creative:{id:String(801+i),body:'Same source copy',
+      asset_feed_spec:{videos:Array.from({length:10},(_,j)=>({video_id:String(901+i*10+j),thumbnail_url:IMAGE}))}}}))};
+  const result=(await r.execute('ads',input)).data;A.validatePage(A.OPERATIONS.ads,result,input);
+  const calls=r.state.calls.filter(call=>call.query.ids);assert.equal(calls.length,10);
+  assert(calls.every(call=>call.query.ids.split(',').length===10&&call.query.fields==='id,source'));
+  assert.equal(new Set(calls.flatMap(call=>call.query.ids.split(','))).size,100);
+  assert(result.results.every(ad=>ad.creative.sharing.alternatives.length===10&&ad.creative.sharing.alternatives.every(a=>a.original_media_url&&a.source_issue===null)));
+  assert(result.results.every(ad=>ad.creative.sharing.has_variants&&ad.creative.sharing.source_issue==='creative_variants_require_selection'));
+});
+
+test('v2 resolves only observed image hashes on the bound account edge without caller URLs, fields or hash injection',async t=>{
+  const r=await ready(t),input={pageToken:null,creativeVersion:2},hashes=Array.from({length:12},(_,i)=>(i+1).toString(16).padStart(32,'0'));
+  r.state.raw=url=>url.pathname.endsWith('/adimages')
+    ?{data:JSON.parse(url.searchParams.get('hashes')).map(hash=>({hash,url:`https://scontent.fbcdn.net/${hash}.jpg`}))}
+    :{data:[0,1].map(i=>({...row('ads',String(701+i)),account_id:'301',creative:{id:String(801+i),body:'Common copy',
+      image_url:IMAGE,asset_feed_spec:{images:hashes.slice(i*6,i*6+6).map(hash=>({hash}))}}}))};
+  const result=(await r.execute('ads',input)).data;A.validatePage(A.OPERATIONS.ads,result,input);
+  const calls=r.state.calls.filter(call=>call.path.endsWith('/adimages'));assert.equal(calls.length,2);
+  assert(calls.every(call=>call.path==='/v24.0/act_301/adimages'&&call.query.fields==='hash,url'&&call.query.limit==='10'));
+  assert.deepEqual(calls.flatMap(call=>JSON.parse(call.query.hashes)),hashes);
+  assert(result.results.every(ad=>ad.creative.sharing.alternatives.every(a=>a.image_url!==IMAGE&&a.source_issue===null)));
+  const before=r.state.calls.length;
+  for(const extra of [{hashes},{video_ids:['901']},{variant_id:'a'.repeat(64)},{url:IMAGE}]){
+    await assert.rejects(r.execute('ads',{...input,...extra}),{code:'invalid_request'});
+  }
+  assert.equal(r.state.calls.length,before);
+  r.state.raw=url=>url.pathname.endsWith('/adimages')?{data:[{hash:hashes[0],url:IMAGE}]}
+    :{data:[{...row('ads'),account_id:'301',creative:{id:'801',body:'Direct original',image_hash:hashes[0]}}]};
+  const direct=(await r.execute('ads',input)).data.results[0].creative.sharing;
+  assert.equal(direct.alternatives[0].image_hash,hashes[0]);assert.equal(direct.alternatives[0].image_url,IMAGE);
+  assert(r.state.calls.some(call=>call.path.endsWith('/ads')&&call.query.fields.includes('image_hash')));
+});
+
+test('v2 rejects foreign hashes and reflections, preserves denied image material explicitly and stops on quota',async t=>{
+  const input={pageToken:null,creativeVersion:2},hash='a'.repeat(32);
+  for(const mode of ['foreign','denied','reflection','quota']){
+    const r=await ready(t);r.state.raw=url=>url.pathname.endsWith('/adimages')
+      ?mode==='foreign'?{data:[{hash:'b'.repeat(32),url:IMAGE}]}:mode==='denied'?{error:{code:200}}
+        :mode==='quota'?{error:{code:80004}}:{data:[{hash,url:`https://scontent.fbcdn.net/${encodeURIComponent(TOKEN)}.jpg`}]}
+      :{data:[{...row('ads'),account_id:'301',creative:{id:'801',body:'Common copy',asset_feed_spec:{images:[{hash}]}}}]};
+    if(mode==='denied'){
+      const result=(await r.execute('ads',input)).data.results[0].creative.sharing;
+      assert.equal(result.alternatives[0].source_issue,'image_source_permission_denied');assert.equal(result.alternatives[0].image_url,null);
+    }else await assert.rejects(r.execute('ads',input),{code:mode==='quota'?'rate_limited':'provider_failed'});
+  }
+});
+
+test('v1 and v2 creative cursors are isolated and a normalized v1 result cannot satisfy a v2 request',async t=>{
+  const r=await ready(t);r.state.raw=url=>({data:[{...row('ads'),account_id:'301',creative:{id:'801',body:'Copy',image_url:IMAGE}}],
+    paging:{cursors:{after:'CREATIVE_VERSION_CURSOR'},next:`https://graph.facebook.com${url.pathname}?after=CREATIVE_VERSION_CURSOR`}});
+  for(const version of [1,2]){
+    const response=(await r.execute('ads',{pageToken:null,creativeVersion:version})).data;
+    const before=r.state.calls.length;
+    await assert.rejects(r.execute('ads',{pageToken:response.nextPageToken,creativeVersion:version===1?2:1}),{code:'invalid_request'});
+    assert.equal(r.state.calls.length,before);
+    if(version===1)assert.throws(()=>A.validatePage(A.OPERATIONS.ads,response,{pageToken:null,creativeVersion:2}),{code:'provider_failed'});
+  }
 });

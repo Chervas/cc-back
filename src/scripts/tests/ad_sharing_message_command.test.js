@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const { Op } = require('sequelize');
 const { resolveAdSharingMessage, resolveExistingPatientLeadConversation } = require('../../services/adSharingMessage.service');
 
-function fixture({ unavailable = false, stale = false, omitSelection = false, repeatLead = false } = {}) {
+function fixture({ unavailable = false, stale = false, omitSelection = false, repeatLead = false, variant = false, blocked = false } = {}) {
   const calls = { rows: [], queued: [], contacts: [], committed: 0, rolledBack: 0 };
   const family = repeatLead ? 'clinicaclick_enviar_anuncio' : 'clinicaclick_compartir_promocion';
   const template = { id: 1, name: family, category: 'MARKETING', status: 'APPROVED', is_active: true,
@@ -21,6 +21,8 @@ function fixture({ unavailable = false, stale = false, omitSelection = false, re
     templateFamily: family, selection: { allowed: !unavailable }, creative: { available: !unavailable, source: 'social_posts',
       kind: 'IMAGE', shareText: 'Source advertising copy', fingerprint: 'a'.repeat(64),
       mediaParameter: { type: 'image', image: { link: 'https://scontent.fbcdn.net/original.jpg' } } } };
+  if (variant) Object.assign(canonical.creative, { variant_id: 'b'.repeat(64), snapshot_sha256: 'c'.repeat(64),
+    provenance: { source: 'asset_feed_spec', path: 'images[1]' } });
   const context = { exports: {}, console, Buffer, Op,
     db: { sequelize: { transaction: async () => transaction }, LeadIntake: { findOne: async () => ({ id: 10, clinica_id: 66, telefono: conversation.contact_id }) }, WhatsappTemplateCatalog: {
       findByPk: async () => ({ family_key: family, category: 'MARKETING', is_active: true }) } },
@@ -35,7 +37,9 @@ function fixture({ unavailable = false, stale = false, omitSelection = false, re
     patientDirectionService: { resolveOutboundPolicy: async () => ({ clinicConfig: { authorizedBroker: {}, phoneNumberId: '401', wabaId: '301' } }) },
     isWhatsappRoutingConfigAvailable: () => true, canUserSelectWhatsappTemplate: () => true, isReviewWorkflowWhatsappTemplate: () => false,
     extractWhatsappTemplateDisplayButtons: () => [],
-    whatsappService: { normalizePhoneNumber: v => v, assertRecipientCanReceive: async () => {}, checkOutboundLimit: async () => ({}), buildTemplateComponents: ({ templateParams }) => body(templateParams) },
+    whatsappService: { normalizePhoneNumber: v => v, assertRecipientCanReceive: async () => {
+      if (blocked) throw Object.assign(Error('Recipient blocked'), { status: 403, code: 'whatsapp_recipient_blocked' });
+    }, checkOutboundLimit: async () => ({}), buildTemplateComponents: ({ templateParams }) => body(templateParams) },
     queues: { outboundWhatsApp: { add: async (...args) => { calls.queued.push(args); } } },
     markBufferedResponseExecutionsForHumanReply: async () => {}, completeAutomationStateAfterHumanReplyForConversation: async () => ({}),
     resolveAutomationAttentionForConversation: async () => ({}), process: { env: {} },
@@ -45,7 +49,10 @@ function fixture({ unavailable = false, stale = false, omitSelection = false, re
       if (name === '../services/temporaryPatientDirection.service') return { observeConversation: async () => {} };
       if (name === '../services/leadPatientContext.service') return { get: async () => ({ relationship: 'existing_patient', patient_id: 5, clinic_id: 66, same_clinic: true }) };
       if (name === '../services/adSharingMessage.service') return { resolveAdSharingMessage: options => resolveAdSharingMessage({ ...options,
-        hasAccess: async () => true, load: async () => ({ items: [canonical] }) }), resolveExistingPatientLeadConversation };
+        hasAccess: async () => true, load: async options => {
+          assert.equal(options.selectedVariantId, variant ? 'b'.repeat(64) : null);
+          return { items: [canonical] };
+        } }), resolveExistingPatientLeadConversation };
       throw Error('Unexpected module: ' + name);
     },
   };
@@ -55,7 +62,8 @@ function fixture({ unavailable = false, stale = false, omitSelection = false, re
     useTemplate: true, templateId: 1, templateParams: { '1': 'Alex', '2': 'Clinic', '3': 'Untrusted invented conditions' },
     templateComponents: [{ type: 'header', parameters: [{ type: 'image', image: { link: 'https://attacker.invalid/not-the-ad.jpg' } }] }],
     ...(omitSelection ? {} : { adSharing: { purpose: repeatLead ? 'lead_ad' : 'patient_promotion', ad_id: '700',
-      ...(repeatLead ? { lead_id: 10 } : {}), creative_sha256: (stale ? 'b' : 'a').repeat(64) } }) } };
+      ...(repeatLead ? { lead_id: 10 } : {}), ...(variant ? { variant_id: 'b'.repeat(64) } : {}),
+      creative_sha256: (stale ? 'b' : 'a').repeat(64) } }) } };
   const res = { statusCode: 200, status(value) { this.statusCode = value; return this; }, json(value) { this.body = value; return this; } };
   return { calls, req, res, run: () => context.exports.postMessage(req, res) };
 }
@@ -83,4 +91,25 @@ test('a repeated patient enquiry uses the native command and records contact on 
   assert.equal(f.res.statusCode, 200); assert.equal(f.calls.rows.length, 1); assert.equal(f.calls.queued.length, 1);
   assert.equal(f.calls.rows[0].metadata.ad_sharing.lead_id, 10);
   assert.equal(f.calls.contacts.length, 1); assert.equal(f.calls.contacts[0].leadId, 10);
+});
+
+test('one selected v2 alternative uses the existing transactional command and native queue exactly once', async () => {
+  const f = fixture({ variant: true }); await f.run();
+  assert.equal(f.res.statusCode, 200); assert.equal(f.calls.committed, 1); assert.equal(f.calls.queued.length, 1);
+  assert.equal(f.calls.rows[0].metadata.ad_sharing.variant_id, 'b'.repeat(64));
+  assert.equal(f.calls.rows[0].metadata.ad_sharing.provenance.path, 'images[1]');
+  assert.equal(f.calls.queued[0][1].templateParams['3'], 'Source advertising copy');
+  assert.equal(f.calls.queued[0][1].templateComponents[0].parameters[0].image.link, 'https://scontent.fbcdn.net/original.jpg');
+});
+
+test('v2 double selection, stale source and existing recipient block never create or queue a message', async () => {
+  for (const mode of ['double', 'missing-fingerprint', 'stale', 'blocked']) {
+    const f = fixture({ variant: true, stale: mode === 'stale', blocked: mode === 'blocked' });
+    if (mode === 'double') f.req.body.adSharing.variant_id = ['a'.repeat(64), 'b'.repeat(64)];
+    if (mode === 'missing-fingerprint') delete f.req.body.adSharing.creative_sha256;
+    await f.run();
+    assert.ok(f.res.statusCode >= 400, mode);
+    assert.equal(f.calls.rows.length, 0, mode); assert.equal(f.calls.queued.length, 0, mode);
+    assert.equal(f.calls.rolledBack, 1, mode);
+  }
 });

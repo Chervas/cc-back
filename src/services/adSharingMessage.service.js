@@ -20,10 +20,11 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
   template = plain(template);
   const catalogId = Number(template?.catalog_template_id);
   let catalog;
-  const readCatalog = async () => {
-    if (catalog === undefined) catalog = Number.isSafeInteger(catalogId) && catalogId > 0
+  const readCatalog = async (fresh = false) => {
+    if (fresh || catalog === undefined) catalog = Number.isSafeInteger(catalogId) && catalogId > 0
       ? plain(await models.WhatsappTemplateCatalog.findByPk(catalogId, {
-        attributes: ['id', 'name', 'family_key', 'category', 'is_active'] })) : null;
+        attributes: ['id', 'name', 'family_key', 'category', 'is_active'],
+        ...(transaction ? { transaction, ...(transaction.LOCK?.SHARE ? { lock: transaction.LOCK.SHARE } : {}) } : {}) })) : null;
     return catalog;
   };
   if (input === undefined && !isAdSharingTemplate(template)) {
@@ -33,9 +34,11 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
     if (!Object.values(FAMILIES).some(formats => Object.values(formats).includes(linked?.family_key))) return null;
   }
   if (!input || typeof input !== 'object' || Array.isArray(input)
-    || Object.keys(input).some(key => !['purpose', 'ad_id', 'lead_id', 'creative_sha256'].includes(key))
+    || Object.keys(input).some(key => !['purpose', 'ad_id', 'lead_id', 'creative_sha256', 'variant_id'].includes(key))
     || !PURPOSES.includes(input.purpose) || !positiveId(input.ad_id)
-    || input.creative_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(input.creative_sha256)) fail('ad_sharing_selection_required', 400);
+    || input.creative_sha256 !== undefined && (typeof input.creative_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(input.creative_sha256))
+    || input.variant_id !== undefined && (typeof input.variant_id !== 'string' || !/^[a-f0-9]{64}$/.test(input.variant_id)
+      || input.creative_sha256 === undefined)) fail('ad_sharing_selection_required', 400);
   if (conversation.channel !== 'whatsapp') fail('ad_sharing_whatsapp_required', 400);
   const clinicId = Number(conversation.clinic_id);
   const access = hasAccess || require('../lib/marketingScopeAccess').hasMarketingClinicScopeAccess;
@@ -71,7 +74,8 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
   try {
     selection = await (load || require('./adSharing.service').loadAdSharing)({ models,
       scope: { clinicIds: [clinicId], groupId: null }, input: { purpose: input.purpose,
-        ...(input.purpose === 'lead_ad' ? { lead_id: String(requestedLeadId) } : {}) }, selectedAdId: input.ad_id });
+        ...(input.purpose === 'lead_ad' ? { lead_id: String(requestedLeadId) } : {}) }, selectedAdId: input.ad_id,
+      selectedVariantId: input.variant_id ?? null });
   } catch (error) {
     if (String(error.code || '').startsWith('ad_sharing_')) throw error;
     fail(error.status === 403 ? 'ad_sharing_source_forbidden' : 'ad_sharing_source_unavailable', error.status === 403 ? 403 : 409);
@@ -79,6 +83,7 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
   const selected = selection.items?.find(item => item.reference?.ad_id === input.ad_id);
   if (!selected?.creative?.available || !selected.selection?.allowed) fail('ad_sharing_media_unavailable');
   const creative = selected.creative;
+  if ((creative.variant_id ?? null) !== (input.variant_id ?? null)) fail('ad_sharing_variant_changed');
   if (selected.templateFamily !== FAMILIES[input.purpose][format] || creative.kind !== format
     || creative.mediaParameter?.type !== format.toLowerCase()) fail('ad_sharing_template_header_mismatch');
   if (input.creative_sha256 !== undefined && input.creative_sha256 !== creative.fingerprint) fail('ad_sharing_creative_changed');
@@ -89,13 +94,22 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
   const body = buildBody(params);
   const bodyText = components.find(c => String(c.type).toUpperCase() === 'BODY')?.text;
   if (typeof bodyText !== 'string' || !Array.isArray(body) || body.length !== 1 || body[0].type !== 'body') fail('ad_sharing_template_parameters_invalid', 400);
+  if (input.variant_id !== undefined) {
+    const currentCatalog = await readCatalog(true);
+    if (!currentCatalog?.is_active || currentCatalog.category !== 'MARKETING'
+      || currentCatalog.family_key !== FAMILIES[input.purpose][format]) fail('ad_sharing_template_mismatch');
+  }
   if (!await access({ userId: Number(userId), clinicIds: [clinicId], access: 'read' })) fail('ad_sharing_scope_forbidden', 403);
+  const link = creative.mediaParameter?.[format.toLowerCase()]?.link;
+  if (!require('./adSharing.service').mediaUrl(link, new Date())) fail('ad_sharing_media_unavailable');
   return {
     templateParams: params,
     templateComponents: [{ type: 'header', parameters: [creative.mediaParameter] }, ...body],
     message: bodyText.replace(/{{\s*([123])\s*}}/g, (_token, key) => params[key]),
     metadata: { purpose: input.purpose, ...(requestedLeadId ? { lead_id: requestedLeadId } : {}), reference: selected.reference, creative_sha256: creative.fingerprint,
-      source: creative.source, media_kind: creative.kind },
+      source: creative.source, media_kind: creative.kind,
+      ...(creative.variant_id ? { variant_id: creative.variant_id, snapshot_sha256: creative.snapshot_sha256,
+        copy_id: creative.copy_id, provenance: creative.provenance } : {}) },
   };
 }
 

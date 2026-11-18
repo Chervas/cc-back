@@ -2377,7 +2377,7 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
             }
 
             // 1.c) Ads con creatives para posible vínculo a posts (antes estaba como 1)
-            for await (const data of adsSource.pages('ads', { creativeVersion: 1 })) {
+            for await (const data of adsSource.pages('ads', { creativeVersion: 2 })) {
                 await adsSource.assert();
                 for (const ad of data) {
                     await adsSource.assert();
@@ -2393,7 +2393,7 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                         buying_type: null,
                         created_time: ad.created_time ? new Date(ad.created_time) : null,
                         updated_time: ad.updated_time ? new Date(ad.updated_time) : null,
-                        creative_payload: require('../lib/social-ad-creative-snapshot').socialAdCreativeSnapshot({ accountId, ad })
+                        creative_payload: require('../lib/social-ad-creative-snapshot').socialAdCreativeSnapshot({ accountId, ad, creativeVersion: 2 })
                     });
                     stats.entities++;
 

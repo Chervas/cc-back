@@ -120,10 +120,10 @@ function snapshotDigest(value) {
   } : parsed ?? null))).digest('hex');
 }
 
-function creativeFromSnapshot(value, reference, now) {
+function creativeFromSnapshot(value, reference, now, selectedVariantId = null) {
   if (value == null) return null;
   const payload = snapshotValue(value);
-  if (!payload || payload.version !== 1 || !validSharing(payload.creative)
+  if (!payload || ![1, 2].includes(payload.version) || payload.version !== payload.creative?.version || !validSharing(payload.creative)
     || !Number.isFinite(+new Date(payload.observedAt)) || +new Date(payload.observedAt) > +now + 300000
     || !payload.reference || Object.keys(reference).some(key => payload.reference[key] !== reference[key])) {
     return unavailable('creative_snapshot_invalid', { source: 'ad_sync' });
@@ -131,12 +131,51 @@ function creativeFromSnapshot(value, reference, now) {
   const sharing = payload.creative;
   const preview = { source: 'ad_sync', kind: sharing.kind, body: text(sharing.body), headline: text(sharing.title),
     thumbnailUrl: mediaUrl(sharing.thumbnail_url, now) };
+  if (sharing.source_issue === 'carousel_not_supported') return unavailable(sharing.source_issue, preview);
+  if (payload.version === 2 && sharing.source_issue && sharing.source_issue !== 'creative_variants_require_selection') {
+    return unavailable(sharing.source_issue, preview);
+  }
+  if (payload.version === 2 && sharing.alternatives.length) {
+    const copies = new Map(sharing.copies.map(copy => [copy.copy_id, copy]));
+    const sourceDigest = snapshotDigest(value);
+    const alternatives = sharing.alternatives.map(option => {
+      const copy = copies.get(option.copy_id);
+      const common = { source: 'ad_sync', variant_id: option.variant_id,
+        copy_id: option.copy_id, provenance: { ...option.provenance }, snapshot_sha256: sourceDigest };
+      if (option.source_issue) return unavailable(option.source_issue, { ...common, kind: option.kind,
+        body: text(copy.body), headline: text(copy.title), thumbnailUrl: mediaUrl(option.thumbnail_url, now) });
+      return { ...creativeFromPost({ media_type: option.kind, post_type: option.kind,
+        content: copy.body, title: copy.title,
+        media_url: option.kind === 'VIDEO' ? option.thumbnail_url : option.image_url,
+        original_media_url: option.kind === 'VIDEO' ? option.original_media_url : null }, now), ...common };
+    });
+    if (selectedVariantId !== null) {
+      const selected = alternatives.find(option => option.variant_id === selectedVariantId);
+      if (!selected) fail('ad_sharing_variant_changed');
+      return { ...selected, requiresSelection: false };
+    }
+    return unavailable('creative_variants_require_selection', { source: 'ad_sync', requiresSelection: true, alternatives });
+  }
+  if (selectedVariantId !== null) fail('ad_sharing_variant_changed');
   if (sharing.has_variants) return unavailable('creative_variants_require_selection', preview);
   if (sharing.source_issue) return unavailable(sharing.source_issue, preview);
   if (!sharing.kind) return unavailable('original_media_unavailable', preview);
   return { ...creativeFromPost({ media_type: sharing.kind, post_type: sharing.kind, content: sharing.body, title: sharing.title,
     media_url: sharing.kind === 'VIDEO' ? sharing.thumbnail_url : sharing.image_url,
     original_media_url: sharing.kind === 'VIDEO' ? sharing.original_media_url : null }, now), source: 'ad_sync' };
+}
+
+function finalizeCreative(creative, reference) {
+  if (creative.alternatives) creative.alternatives = creative.alternatives.map(option => finalizeCreative(option, reference));
+  creative.shareText = creative.body || creative.headline || 'Puedes consultar los detalles en el anuncio adjunto.';
+  if (creative.shareText.length > 1024) {
+    creative.reason = 'ad_copy_too_long_for_template';
+    creative.available = false;
+  }
+  const identity = [reference, creative.source, creative.kind, creative.imageUrl, creative.videoUrl, creative.shareText];
+  if (creative.variant_id) identity.push(creative.variant_id, creative.snapshot_sha256);
+  creative.fingerprint = crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex');
+  return creative;
 }
 
 async function leadReference({ models, clinicId, leadId, attachIdentities = attachLeadAdvertisingIdentities }) {
@@ -156,10 +195,12 @@ async function leadReference({ models, clinicId, leadId, attachIdentities = atta
 
 async function loadAdSharing({ models, scope, input, now = new Date(), loadInventory = loadWorkspaceInventory,
   loadCreative = loadWorkspaceAdCreative, authorizeCreative = null, attachIdentities = attachLeadAdvertisingIdentities,
-  selectedAdId = null }) {
+  selectedAdId = null, selectedVariantId = null }) {
   const request = sharingInput(input, scope);
   const authorize = authorizeCreative || createAdSharingAuthority({ models });
   if (selectedAdId !== null && !numericId(selectedAdId)) fail('invalid_ad_sharing_request', 400);
+  if (selectedVariantId !== null && (typeof selectedVariantId !== 'string' || !/^[a-f0-9]{64}$/.test(selectedVariantId)
+    || selectedAdId === null)) fail('invalid_ad_sharing_request', 400);
   const reference = request.purpose === 'lead_ad' ? await leadReference({ models, ...request, attachIdentities }) : null;
   const result = { success: true, purpose: request.purpose, clinicId: request.clinicId,
     templateFamily: FAMILIES[request.purpose].IMAGE, templateFamilies: FAMILIES[request.purpose],
@@ -212,7 +253,8 @@ async function loadAdSharing({ models, scope, input, now = new Date(), loadInven
   include: [{ model: models.SocialPosts, as: 'post', required: true, where: { clinica_id: request.clinicId },
     attributes: ['id', 'clinica_id', 'post_type', 'media_type', 'title', 'content', 'media_url', 'original_media_url', 'permalink_url'] }] }) : [];
   result.items = await Promise.all(entries.map(async entry => {
-    const snapshot = creativeFromSnapshot(entry.ad.creative_payload, entry.reference, now);
+    const snapshot = creativeFromSnapshot(entry.ad.creative_payload, entry.reference, now, selectedVariantId);
+    if (!snapshot && selectedVariantId !== null) fail('ad_sharing_variant_changed');
     const posts = promotions.map(plain).filter(p => accountId(p.ad_account_id) === entry.reference.account_id
       && p.campaign_id === entry.reference.campaign_id && p.adset_id === entry.reference.group_id && p.ad_id === entry.reference.ad_id)
       .map(p => plain(p.post)).filter(p => p && Number(p.clinica_id) === request.clinicId);
@@ -234,10 +276,7 @@ async function loadAdSharing({ models, scope, input, now = new Date(), loadInven
         creative = creativeFromCache(cached.preview, now);
       }
     }
-    creative.shareText = creative.body || creative.headline || 'Puedes consultar los detalles en el anuncio adjunto.';
-    if (creative.shareText.length > 1024) creative.reason = 'ad_copy_too_long_for_template';
-    creative.fingerprint = crypto.createHash('sha256').update(JSON.stringify([entry.reference, creative.source, creative.kind,
-      creative.imageUrl, creative.videoUrl, creative.shareText])).digest('hex');
+    finalizeCreative(creative, entry.reference);
     return { reference: entry.reference, title: text(entry.ad.name), campaignName: text(entry.campaign.name),
       status: String(entry.ad.effective_status || entry.ad.status || 'UNKNOWN'), creative,
       templateFamily: FAMILIES[request.purpose][creative.kind || 'IMAGE'],

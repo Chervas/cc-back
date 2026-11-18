@@ -22,10 +22,10 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
     const codecScope={principalId:context?.principalId,tenantRef:context?.tenantRef,binding,assetRef:asset.assetRef,operation,policyVersion:context?.policyVersion};
     if(typeof codecScope.principalId!=='string'||!codecScope.principalId||typeof codecScope.tenantRef!=='string'||!codecScope.tenantRef||typeof codecScope.policyVersion!=='string'||!codecScope.policyVersion)fail('invalid_request');
     const diagnostic=R.create({operation,assetRef:asset.assetRef});
-    const withCreative=name==='ads'&&payload.creativeVersion===1;
+    const withCreative=name==='ads'&&[1,2].includes(payload.creativeVersion);
     let after=null,pages=0;
     if(payload.pageToken!==null){let v;try{v=JSON.parse(cursor.open(payload.pageToken,codecScope));}catch{fail('invalid_request');}
-      if(!v||Object.keys(v).sort().join(',')!==(withCreative?'after,creativeVersion,endDate,pages,startDate':'after,endDate,pages,startDate')||withCreative&&v.creativeVersion!==1||typeof v.after!=='string'||!/^[\x21-\x7e]{1,1024}$/.test(v.after)
+      if(!v||Object.keys(v).sort().join(',')!==(withCreative?'after,creativeVersion,endDate,pages,startDate':'after,endDate,pages,startDate')||withCreative&&v.creativeVersion!==payload.creativeVersion||typeof v.after!=='string'||!/^[\x21-\x7e]{1,1024}$/.test(v.after)
         ||v.startDate!==(payload.startDate??null)||v.endDate!==(payload.endDate??null)||!Number.isInteger(v.pages)||v.pages<1||v.pages>=2000)fail('invalid_request');after=v.after;pages=v.pages;}
     const ownToken=Buffer.from(token),ownApp=Buffer.from(appSecret),appToken=Buffer.concat([Buffer.from(metadata.appId+'|'),ownApp]);
     const wipe=()=>{ownToken.fill(0);ownApp.fill(0);appToken.fill(0);};signal.addEventListener('abort',wipe,{once:true});
@@ -72,23 +72,48 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
       if(withCreative){
         // Sources are read only for video IDs observed in this exact authorized
         // account page. Callers cannot supply a video ID, URL or field list.
-        const ids=[...new Set(results.map(ad=>ad.creative?.sharing).filter(c=>c?.kind==='VIDEO'&&!c.has_variants&&c.video_id&&c.source_issue==='video_source_unavailable').map(c=>c.video_id))];
-        if(ids.length){
-          if(ids.length>10)fail('provider_failed');
-          const sourceQuery=new URLSearchParams({ids:ids.join(','),fields:'id,source',appsecret_proof:proof});
-          let sources,permissionDenied=false;
-          try{sources=await fetchGraph(`/${graphVersion}/?${sourceQuery}`,ownToken);}
-          catch(error){if(!['provider_failed','provider_unauthorized'].includes(error.code))throw error;permissionDenied=error.code==='provider_unauthorized';sources={};}
-          if(!sources||typeof sources!=='object'||Array.isArray(sources)||Object.keys(sources).some(id=>!ids.includes(id)))fail('provider_failed');
-          for(const value of Object.values(sources)){
+        const projections=results.map(ad=>ad.creative?.sharing).filter(Boolean);
+        const ids=[...new Set(projections.flatMap(value=>creative.videoIds(value)))];
+        const hashes=[...new Set(projections.flatMap(value=>creative.imageHashes(value)))];
+        // At most ten admissible choices per each of ten ads. Keep the original
+        // ten-reference batch cap and the same overall deadline/pacing policy.
+        if(ids.length>100||hashes.length>100)fail('provider_failed');
+        const sources={},images={};
+        for(let offset=0;offset<ids.length;offset+=10){
+          const batch=ids.slice(offset,offset+10);
+          const sourceQuery=new URLSearchParams({ids:batch.join(','),fields:'id,source',appsecret_proof:proof});
+          let response;
+          try{response=await fetchGraph(`/${graphVersion}/?${sourceQuery}`,ownToken);}
+          catch(error){if(!['provider_failed','provider_unauthorized'].includes(error.code))throw error;
+            response=error.code==='provider_unauthorized'?Object.fromEntries(batch.map(id=>[id,{error:{code:200}}])):{};}
+          if(!response||typeof response!=='object'||Array.isArray(response)||Object.keys(response).some(id=>!batch.includes(id)))fail('provider_failed');
+          for(const [id,value]of Object.entries(response)){
             if([190,102].includes(value?.error?.code))fail('credential_revoked');
             if([4,17,32,613,80004].includes(value?.error?.code)){
               pacer.observe(scope,100);const error=new BrokerError('rate_limited');
               error.retryAfterMs=Math.max(1,pacer.usage(scope,100).pauseUntil-now());throw error;
             }
+            sources[id]=value;
           }
-          for(const ad of results)if(ad.creative?.sharing)ad.creative.sharing=creative.videoSource(ad.creative.sharing,
-            permissionDenied?{error:{code:200}}:sources[ad.creative.sharing.video_id]);
+        }
+        for(let offset=0;offset<hashes.length;offset+=10){
+          const batch=hashes.slice(offset,offset+10);
+          const imageQuery=new URLSearchParams({hashes:JSON.stringify(batch),fields:'hash,url',limit:'10',appsecret_proof:proof});
+          let response;
+          try{response=await fetchGraph(`/${graphVersion}/act_${asset.id}/adimages?${imageQuery}`,ownToken);}
+          catch(error){if(!['provider_failed','provider_unauthorized'].includes(error.code))throw error;
+            if(error.code==='provider_unauthorized')for(const hash of batch)images[hash]={error:{code:200}};
+            continue;}
+          if(!Array.isArray(response.data)||response.data.length>10||response.paging?.next)fail('provider_failed');
+          const seen=new Set();
+          for(const image of response.data){
+            if(!image||typeof image!=='object'||Array.isArray(image)||!batch.includes(image.hash)||seen.has(image.hash))fail('provider_failed');
+            seen.add(image.hash);images[image.hash]={hash:image.hash,url:image.url};
+          }
+        }
+        for(const ad of results)if(ad.creative?.sharing){
+          ad.creative.sharing=creative.videoSources(ad.creative.sharing,sources);
+          ad.creative.sharing=creative.imageSources(ad.creative.sharing,images);
         }
       }
       diagnostic.phase('pagination');
@@ -117,7 +142,7 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
           cursorUrlMismatch:next.searchParams.get('after')!==cursorAfter,cursorRepeated:cursorAfter===after,emptyPage:!results.length,pageLimitReached:pages>=1999,
           credentialReflection:typeof cursorAfter==='string'&&(cursorAfter.includes(ownToken.toString('utf8'))||cursorAfter.includes(ownApp.toString('ascii')))};
         diagnostic.pagination(pagination);if(Object.values(pagination).some(Boolean))fail('provider_failed');
-        nextPageToken=cursor.seal(JSON.stringify({after:cursorAfter,startDate:payload.startDate??null,endDate:payload.endDate??null,pages:pages+1,...(withCreative?{creativeVersion:1}:{})}),codecScope);
+        nextPageToken=cursor.seal(JSON.stringify({after:cursorAfter,startDate:payload.startDate??null,endDate:payload.endDate??null,pages:pages+1,...(withCreative?{creativeVersion:payload.creativeVersion}:{})}),codecScope);
       }
       diagnostic.phase('reflection');let serialized=JSON.stringify(results);
       // Also reject URL-encoded reflections in an otherwise permitted label or

@@ -71,7 +71,7 @@ function createMetaMarketingAdsReader({ scope, client, enabled = () => process.e
         // Creative pages carry at most ten ads instead of fifty. Preserve the
         // existing maximum inventory coverage of 10,000 ads without changing
         // the cap for any other request family or legacy caller.
-        const maxPages = family === 'ads' && range.creativeVersion === 1 ? 1000 : 200;
+        const maxPages = family === 'ads' && [1, 2].includes(range.creativeVersion) ? 1000 : 200;
         for (let pageCount = 0; pageCount < maxPages; pageCount++) {
           const page = await read(context, family, { ...range, pageToken }); usage = page.usage;
           // The check runs again immediately before the caller's persistence.

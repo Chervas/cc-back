@@ -10,9 +10,9 @@ const FIELDS = Object.freeze({
   ads:'id,name,adset_id,campaign_id,status,effective_status,created_time,updated_time,creative{id,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url}',
   insights:'ad_id,impressions,reach,clicks,inline_link_clicks,spend,cpc,cpm,ctr,frequency', actions:'ad_id,actions',
 });
-const CREATIVE_FIELDS = 'id,account_id,name,adset_id,campaign_id,status,effective_status,created_time,updated_time,creative{id,title,body,image_url,thumbnail_url,video_id,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url,object_story_spec,asset_feed_spec,platform_customizations}';
+const CREATIVE_FIELDS = 'id,account_id,name,adset_id,campaign_id,status,effective_status,created_time,updated_time,creative{id,title,body,image_url,image_hash,thumbnail_url,video_id,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url,object_story_spec,asset_feed_spec,platform_customizations}';
 const entity = schema({pageToken:{type:['string','null'],minLength:40,maxLength:4096}});
-const creativeEntity = schema({pageToken:{type:['string','null'],minLength:40,maxLength:4096},creativeVersion:{const:1}});
+const creativeEntity = schema({pageToken:{type:['string','null'],minLength:40,maxLength:4096},creativeVersion:{enum:[1,2]}});
 const metrics = schema({pageToken:{type:['string','null'],minLength:40,maxLength:4096},startDate:{type:'string',pattern:'^\\d{4}-\\d{2}-\\d{2}$'},endDate:{type:'string',pattern:'^\\d{4}-\\d{2}-\\d{2}$'}});
 function family(operation){const name=Object.keys(OPERATIONS).find(k=>OPERATIONS[k]===operation);if(!name)fail('operation_denied');return name;}
 const date = value => typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;
@@ -47,7 +47,7 @@ function projectRow(name,row,payload,normalized=false){
         // unnecessary, and can reflect provider credentials; never return it.
         out.creative.instagram_permalink_url=text(url.origin+url.pathname,2048);
       }
-      if(payload.creativeVersion===1)out.creative.sharing=normalized?creative.validate(c.sharing):creative.project(c);
+      if([1,2].includes(payload.creativeVersion))out.creative.sharing=normalized?creative.validate(c.sharing,payload.creativeVersion):creative.project(c,payload.creativeVersion);
     }
     return out;
   }
@@ -72,7 +72,7 @@ function projectRow(name,row,payload,normalized=false){
 }
 function projectPage(name,raw,payload,normalized=false){
   if(!raw||raw.error||!Array.isArray(raw.data)||raw.data.length>50)fail('provider_failed');
-  if(name==='ads'&&payload.creativeVersion===1&&raw.data.length>10)fail('provider_failed');
+  if(name==='ads'&&[1,2].includes(payload.creativeVersion)&&raw.data.length>10)fail('provider_failed');
   const results=raw.data.map(row=>projectRow(name,row,payload,normalized)),seen=new Set();
   for(const row of results){const key=row.id||JSON.stringify([row.ad_id,row.date_start,row.publisher_platform,row.platform_position]);if(seen.has(key))fail('provider_failed');seen.add(key);}
   if(Buffer.byteLength(JSON.stringify(results))>110000)fail('provider_failed');return results;

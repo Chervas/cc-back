@@ -291,3 +291,129 @@ test('migration adds only one nullable source column and never deletes recovered
   await migration.up(q, { TEXT: 'TEXT' }); await migration.up(q, { TEXT: 'TEXT' }); assert.equal(added, 1);
   await assert.rejects(migration.down(), /preserved_rollback_code_only/);
 });
+
+function bindAlternativeCopies(payload) {
+  const bindings = new Map();
+  for (const copy of payload.creative.copies) {
+    const id = require('node:crypto').createHash('sha256').update(JSON.stringify([copy.body, copy.title])).digest('hex');
+    bindings.set(copy.copy_id, id); copy.copy_id = id;
+  }
+  for (const option of payload.creative.alternatives) option.copy_id = bindings.get(option.copy_id) || option.copy_id;
+  return payload;
+}
+
+function synchronizedAlternatives() {
+  const payload = synchronizedCreative();
+  payload.version = 2;
+  payload.creative = { ...payload.creative, version: 2, body: '', title: '', kind: null,
+    image_url: null, thumbnail_url: null, source_issue: 'creative_variants_require_selection', has_variants: true,
+    copies: [{ copy_id: 'c'.repeat(64), body: 'Exact image conditions', title: 'Image title' },
+      { copy_id: 'd'.repeat(64), body: 'Exact video conditions', title: 'Video title' }],
+    alternatives: [{ variant_id: 'a'.repeat(64), copy_id: 'c'.repeat(64), kind: 'IMAGE', image_url: image, image_hash: null,
+      thumbnail_url: null, video_id: null, original_media_url: null, source_issue: null,
+      provenance: { source: 'asset_feed_spec', path: 'images[0]' } },
+    { variant_id: 'b'.repeat(64), copy_id: 'd'.repeat(64), kind: 'VIDEO', image_url: null, image_hash: null,
+      thumbnail_url: image, video_id: '900', original_media_url: video, source_issue: null,
+      provenance: { source: 'asset_feed_spec', path: 'videos[0]' } }] };
+  return bindAlternativeCopies(payload);
+}
+
+test('v2 exposes complete alternatives and exact provenance without choosing or mixing copies', async () => {
+  const f = fixture(); f.ad.creative_payload = synchronizedAlternatives();
+  f.args.loadCreative = () => assert.fail('variants never call a provider/cache');
+  const item = (await loadAdSharing(f.args)).items[0];
+  assert.equal(item.selection.allowed, false); assert.equal(item.creative.requiresSelection, true);
+  assert.equal(item.creative.reason, 'creative_variants_require_selection');
+  assert.deepEqual(item.creative.alternatives.map(option => [option.kind, option.shareText]),
+    [['IMAGE', 'Exact image conditions'], ['VIDEO', 'Exact video conditions']]);
+  for (const option of item.creative.alternatives) {
+    assert.equal(option.available, true); assert.match(option.fingerprint, /^[a-f0-9]{64}$/);
+    assert.equal(option.provenance.source, 'asset_feed_spec');
+  }
+  f.ad.creative_payload.creative.alternatives.pop(); f.ad.creative_payload.creative.copies.pop();
+  assert.equal((await loadAdSharing(f.args)).items[0].selection.allowed, false, 'one option still requires explicit selection');
+});
+
+test('v2 a proven empty copy uses the existing neutral text and still requires explicit option selection', async () => {
+  const f = fixture(); f.ad.creative_payload = synchronizedAlternatives();
+  f.ad.creative_payload.creative.copies = [{ copy_id: 'e'.repeat(64), body: '', title: '' }];
+  for (const option of f.ad.creative_payload.creative.alternatives) option.copy_id = 'e'.repeat(64);
+  bindAlternativeCopies(f.ad.creative_payload);
+  const item = (await loadAdSharing(f.args)).items[0];
+  assert.equal(item.selection.allowed, false); assert.equal(item.creative.requiresSelection, true);
+  for (const option of item.creative.alternatives) {
+    assert.equal(option.available, true);
+    assert.equal(option.shareText, 'Puedes consultar los detalles en el anuncio adjunto.');
+  }
+});
+
+test('v2 command reselects one exact image/video alternative and builds native canonical header/body', async () => {
+  for (const [index, format] of ['IMAGE', 'VIDEO'].entries()) {
+    const f = fixture(); f.ad.creative_payload = synchronizedAlternatives();
+    const option = (await loadAdSharing(f.args)).items[0].creative.alternatives[index];
+    const message = messageFixture(format);
+    message.input.variant_id = option.variant_id; message.input.creative_sha256 = option.fingerprint;
+    message.load = opts => loadAdSharing({ ...f.args, selectedAdId: opts.selectedAdId, selectedVariantId: opts.selectedVariantId });
+    const result = await resolveAdSharingMessage(message);
+    assert.equal(result.templateParams['3'], option.shareText);
+    assert.equal(result.templateComponents[0].parameters[0].type, format.toLowerCase());
+    assert.equal(result.metadata.variant_id, option.variant_id);
+    assert.equal(result.metadata.provenance.path, index ? 'videos[0]' : 'images[0]');
+    assert.match(result.metadata.snapshot_sha256, /^[a-f0-9]{64}$/);
+  }
+});
+
+test('v2 source changes anywhere invalidate a stale selected fingerprint; missing or injected selections fail', async () => {
+  const f = fixture(); f.ad.creative_payload = synchronizedAlternatives();
+  const option = (await loadAdSharing(f.args)).items[0].creative.alternatives[0];
+  const message = messageFixture(); message.input.variant_id = option.variant_id; message.input.creative_sha256 = option.fingerprint;
+  message.load = opts => loadAdSharing({ ...f.args, selectedAdId: opts.selectedAdId, selectedVariantId: opts.selectedVariantId });
+  f.ad.creative_payload.creative.copies[1].body = 'Changed other option in same snapshot';
+  bindAlternativeCopies(f.ad.creative_payload);
+  await assert.rejects(resolveAdSharingMessage(message), { code: 'ad_sharing_creative_changed' });
+  for (const patch of [{ variant_id: ['a'.repeat(64), 'b'.repeat(64)] }, { variant_id: 'x' },
+    { variant_id: option.variant_id, creative_sha256: undefined }, { variants: [option.variant_id] },
+    { image_url: image }, { body: 'Invented' }, { creative_sha256: ['a'.repeat(64)] }]) {
+    const input = { ...message.input, ...patch };
+    await assert.rejects(resolveAdSharingMessage({ ...message, input }), { code: 'ad_sharing_selection_required' });
+  }
+  await assert.rejects(loadAdSharing({ ...f.args, selectedAdId: '700', selectedVariantId: 'e'.repeat(64) }),
+    { code: 'ad_sharing_variant_changed' });
+});
+
+test('v2 expired media, missing video original, long copy, carousel and invalid associations never become selectable', async () => {
+  for (const change of [p => { p.creative.alternatives[0].image_url += '?expires=1'; },
+    p => { p.creative.copies[0].body = 'x'.repeat(1025); }]) {
+    const f = fixture(); f.ad.creative_payload = synchronizedAlternatives(); change(f.ad.creative_payload);
+    bindAlternativeCopies(f.ad.creative_payload);
+    assert.equal((await loadAdSharing(f.args)).items[0].creative.alternatives[0].available, false);
+  }
+  const f = fixture(); f.ad.creative_payload = synchronizedAlternatives();
+  f.ad.creative_payload.creative.alternatives[1].original_media_url = null;
+  f.ad.creative_payload.creative.alternatives[1].source_issue = 'video_source_unavailable';
+  const missingVideo = (await loadAdSharing(f.args)).items[0].creative.alternatives[1];
+  assert.equal(missingVideo.available, false); assert.equal(missingVideo.reason, 'video_source_unavailable');
+  const carousel = synchronizedAlternatives(); carousel.creative.alternatives = []; carousel.creative.copies = [];
+  carousel.creative.source_issue = 'carousel_not_supported';
+  assert.equal(creativeFromSnapshot(carousel, ref, now).reason, 'carousel_not_supported');
+  for (const reason of ['creative_relationship_ambiguous', 'creative_alternatives_limit_exceeded']) {
+    carousel.creative.source_issue = reason;
+    const unsupported = creativeFromSnapshot(carousel, ref, now);
+    assert.equal(unsupported.reason, reason); assert.equal(unsupported.alternatives, undefined);
+  }
+  const invalid = synchronizedAlternatives(); invalid.creative.alternatives[0].copy_id = 'e'.repeat(64);
+  assert.equal(creativeFromSnapshot(invalid, ref, now).reason, 'creative_snapshot_invalid');
+});
+
+test('v2 source/grant changes during both phases reject and revoked catalog cannot send', async () => {
+  const f = fixture(); f.ad.creative_payload = synchronizedAlternatives();
+  let checks = 0; f.args.authorizeCreative = async () => ({ fingerprint: ++checks === 1 ? 'old' : 'new' });
+  await assert.rejects(loadAdSharing(f.args), { code: 'ad_sharing_inventory_changed' });
+  const g = fixture(); g.ad.creative_payload = synchronizedAlternatives();
+  const option = (await loadAdSharing(g.args)).items[0].creative.alternatives[0];
+  const message = messageFixture(); message.input.variant_id = option.variant_id; message.input.creative_sha256 = option.fingerprint;
+  message.load = opts => loadAdSharing({ ...g.args, selectedAdId: opts.selectedAdId, selectedVariantId: opts.selectedVariantId });
+  let reads = 0; message.models.WhatsappTemplateCatalog.findByPk = async () => ({
+    family_key: FAMILIES.patient_promotion.IMAGE, category: 'MARKETING', is_active: ++reads === 1 });
+  await assert.rejects(resolveAdSharingMessage(message), { code: 'ad_sharing_template_mismatch' });
+});
