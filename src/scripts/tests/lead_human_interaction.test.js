@@ -104,3 +104,17 @@ test('first and last selectors reject missing actors, automatic activity, other 
   assert.equal(selectFirstInteraction({...lead,privacy_redacted:true},[candidate()],now),null);
   assert.equal(selectLatestInteraction({...lead,privacy_redacted:true},[candidate()],now),null);
 });
+
+test('a canonical chat retaining request A never attributes the explicit ad-sharing request B to A', async () => {
+  const requestB={...lead,id:8};
+  const f=fixture({attempts:[candidate({lead_id:8,user_id:12,kind:'contact_attempt',reason:'whatsapp_template_sent'})],
+    users:[{id_usuario:12,nombre:'Synthetic B actor'}]});
+  const [a,b]=await enrichHumanInteraction({models:f.models,leads:[lead,requestB],now});
+  assert.equal(a.first_human_interaction,null);assert.equal(a.last_human_interaction,null);
+  assert.equal(b.first_human_interaction.user_id,12);assert.equal(b.first_human_interaction.kind,'contact_attempt');
+  assert.equal(b.last_human_interaction.kind,'contact_attempt','B is supported by its own persisted attempt, never a contact join');
+  const sql=f.calls.find(call=>call.sql?.includes('JOIN Conversations c')).sql;
+  assert.match(sql,/JSON_EXTRACT\(m\.metadata, '\$\.ad_sharing\.lead_id'\)/);
+  assert.match(sql,/c\.lead_id = l\.id AND c\.clinic_id = l\.clinica_id/);
+  assert(!/JOIN[^\n]*(?:telefono|phone)/i.test(sql));
+});

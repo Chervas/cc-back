@@ -20,7 +20,7 @@ test('actual MySQL8 ranks scoped human work and keeps legacy, automation, privac
   await sql.query('CREATE TABLE LeadAttributionAudits(id INT PRIMARY KEY,lead_intake_id INT,raw_payload JSON,attribution_steps JSON,created_at DATETIME)');
   await models.Usuario.bulkCreate([{id_usuario:44,nombre:'Directora',apellidos:'Ficticia'},{id_usuario:12,nombre:'Equipo',apellidos:'Prueba'},{id_usuario:13,nombre:'Legacy'}]);
   await models.Clinica.bulkCreate([{id_clinica:66,configuracion:{timezone:'Europe/Madrid'}},{id_clinica:72,configuracion:{timezone:'Europe/Madrid'}}]);
-  const leads=Array.from({length:21},(_,i)=>({id:i+7,clinica_id:66,created_at:'2026-11-17T00:00:00Z'}));
+  const leads=Array.from({length:23},(_,i)=>({id:i+7,clinica_id:66,created_at:'2026-11-17T00:00:00Z'}));
   for(const lead of leads)await sql.query('INSERT INTO LeadIntakes VALUES(:id,:clinic,:created)',{replacements:{id:lead.id,clinic:lead.clinica_id,created:'2026-11-17 00:00:00'}});
   await sql.query(`INSERT INTO LeadContactAttempts VALUES
    (1,7,44,'2026-11-18 10:00:00','llamada','no_contesta'),(2,7,44,'2026-11-18 11:59:00','whatsapp','lead_auto_reply:42'),
@@ -71,6 +71,10 @@ test('actual MySQL8 ranks scoped human work and keeps legacy, automation, privac
   await message({conversation:9,sender:44,at:'2026-11-18 08:00:00'});
   await message({conversation:9,sender:12,at:'2026-11-18 11:00:00'});
   await message({conversation:8,sender:44,at:'2026-11-18 11:57:00',metadata:{source:'automations_v2'},key:'auto:appointment-confirmation'});
+  await sql.query("INSERT INTO Conversations VALUES(10,28,66,'whatsapp')");
+  await message({conversation:10,sender:44,at:'2026-11-18 08:00:00'});
+  await message({conversation:10,sender:12,at:'2026-11-18 11:00:00',metadata:{ad_sharing:{purpose:'lead_ad',lead_id:29}}});
+  await sql.query("INSERT INTO LeadContactAttempts VALUES(100,29,12,'2026-11-18 11:00:00','whatsapp','whatsapp_template_sent')");
   const result=await enrichHumanInteraction({models,leads,now:new Date('2026-11-18T12:00:00Z')});
   await t.test('first Graci remains distinct from the later Lidia message despite newer automatic or failed messages',()=>{assert.equal(result[0].first_human_interaction.user_id,44);assert.equal(result[0].first_human_interaction.outcome,'no_answer');assert.equal(result[0].last_human_interaction.user_id,12);assert.equal(result[0].last_human_interaction.outcome,'sent');assert.equal(result[0].last_human_interaction.occurred_at,'2026-11-18T11:00:00.000Z');});
   await t.test('missed-call actor gets honest attempt status and director marker',()=>{assert.equal(result[1].last_human_interaction.outcome,'no_answer');assert.equal(result[1].last_human_interaction.is_patient_director,true);});
@@ -90,6 +94,13 @@ test('actual MySQL8 ranks scoped human work and keeps legacy, automation, privac
   });
   await t.test('both ends of messages, bookings and action audits are fetched even when no other source exists',()=>{
    for(const id of[25,26,27]){const row=result.find(r=>r.id===id);assert.equal(row.first_human_interaction.user_id,44);assert.equal(row.last_human_interaction.user_id,12);assert.equal(row.first_human_interaction.occurred_at,'2026-11-18T08:00:00.000Z');assert.equal(row.last_human_interaction.occurred_at,'2026-11-18T11:00:00.000Z');}
+  });
+  await t.test('a shared canonical chat keeps A intact while B gets only its own recorded human attempt',()=>{
+   const a=result.find(r=>r.id===28),b=result.find(r=>r.id===29);
+   assert.equal(a.first_human_interaction.user_id,44);assert.equal(a.last_human_interaction.user_id,44);
+   assert.equal(a.last_human_interaction.occurred_at,'2026-11-18T08:00:00.000Z');
+   assert.equal(b.first_human_interaction.user_id,12);assert.equal(b.last_human_interaction.user_id,12);
+   assert.equal(b.first_human_interaction.kind,'contact_attempt');assert.equal(b.last_human_interaction.kind,'contact_attempt');
   });
   await models.PatientDirectionSetting.create({id:1,clinic_id:66,is_enabled:true,director_user_id:12});
   const changed=await enrichHumanInteraction({models,leads,now:new Date('2026-11-18T12:00:00Z')});

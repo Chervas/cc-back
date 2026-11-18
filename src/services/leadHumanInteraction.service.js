@@ -69,6 +69,7 @@ async function loadHumanInteraction({ models, leads, now = new Date() }) {
       AND ${metadata('raw_type')} NOT REGEXP 'auto_reply|away|greeting'
       AND ${metadata('lead_intake_id')} IN ('','null',CAST(l.id AS CHAR))
       AND ${metadata('lead_id')} IN ('','null',CAST(l.id AS CHAR))
+      AND ${metadata('ad_sharing.lead_id')} IN ('','null',CAST(l.id AS CHAR))
       AND ${['ai_generated','generated_by_ai','is_automated','is_automation'].map(key => `${metadata(key)} NOT IN ('true','1')`).join(' AND ')}
       AND ${['execution_id','node_id','flow_execution_id','automation_flow_id','automation_delivery_key',
         'bulk_send_job_id','marketing_bulk_job_id','campaign_id'].map(key => `${metadata(key)} IN ('','null')`).join(' AND ')}
