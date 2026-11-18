@@ -50,7 +50,7 @@ test('actual TLS runtime connects a managed backend location to fixed fictitious
   const location = { id: 51, clinica_id: 123, google_connection_id: 81, location_id: 'locations/456', is_active: true,
     broker_read_connection_ref: 'connection:test', broker_read_asset_ref: 'gbp:123:456' };
   const consumer = createBusinessProfileBroker({ client: transport, enabled: () => true, loadLocation: async () => location,
-    loadManagedBinding: async () => ({ external_location_id: '456', connection_ref: 'connection:test', asset_ref: 'gbp:123:456', clinica_id: 123, google_connection_id: 81 }) });
+    loadManagedBinding: async () => ({ state: 'active', external_location_id: '456', connection_ref: 'connection:test', asset_ref: 'gbp:123:456', clinica_id: 123, google_connection_id: 81 }) });
   const context = await consumer.prepare(location, () => { throw Error('TOKEN_LOADER_FORBIDDEN'); }, new Map());
   assert.deepEqual((await consumer.read(location, context, 'details', {})).data, { name: 'locations/456', title: 'FICTITIOUS_BUSINESS_TITLE' });
   await consumer.read(location, context, 'details', {}); assert.equal(refreshes, 1); assert.equal(reads, 2);
