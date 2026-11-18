@@ -165,7 +165,7 @@ function createTemporaryPatientDirectionService(db, {
     return message ? { reason: 'human_contact', since: message.sent_at || message.createdAt || now() } : null;
   }
 
-  async function firstAppointment(conversation, since, transaction, request) {
+  function firstAppointmentScope(conversation, since, request) {
     let identity = positive(conversation.patient_id) ? { paciente_id: conversation.patient_id }
       : positive(conversation.lead_id) ? { lead_intake_id: conversation.lead_id } : null;
     if (request?.review) {
@@ -176,13 +176,32 @@ function createTemporaryPatientDirectionService(db, {
       if (new Date(request.lead.created_at) > new Date(since)) since = request.lead.created_at;
     }
     if (!identity) return null;
-    return plain(await db.CitaPaciente.findOne({ where: {
-      clinica_id: conversation.clinic_id, ...identity,
+    const leadId = positive(request?.lead?.id) ? Number(request.lead.id) : null;
+    const where = { clinica_id: conversation.clinic_id, ...identity,
       source_system: null, [Op.and]: [{ [Op.or]: [{ es_provisional: false }, { es_provisional: null }] },
-        ...(request?.review ? [{ [Op.or]: [{ care_legacy_attendance: false }, { care_legacy_attendance: null }] }] : [])],
-      estado: { [Op.notIn]: ['cancelada', 'no_asistio'] },
-      inicio: { [Op.gte]: new Date(since) },
-    }, order: [['inicio', 'ASC'], ['id_cita', 'ASC']], transaction }));
+        ...(request?.review ? [{ [Op.or]: [{ care_legacy_attendance: false }, { care_legacy_attendance: null }] }] : []),
+        ...(!request?.review && leadId ? [{ [Op.or]: [{ lead_intake_id: leadId }, { lead_intake_id: null }] }] : [])],
+      estado: { [Op.notIn]: ['cancelada', 'no_asistio'] }, inicio: { [Op.gte]: new Date(since) } };
+    return { where, clinicId: Number(conversation.clinic_id), patientId: positive(identity.paciente_id) ? Number(identity.paciente_id) : null,
+      exactLeadId: positive(identity.lead_intake_id) ? Number(identity.lead_intake_id) : null,
+      leadId, review: !!request?.review, since: +new Date(since) };
+  }
+
+  async function firstAppointment(conversation, since, transaction, request) {
+    const scope = firstAppointmentScope(conversation, since, request);
+    if (!scope) return null;
+    return plain(await db.CitaPaciente.findOne({ where: scope.where,
+      order: [['inicio', 'ASC'], ['id_cita', 'ASC']], transaction }));
+  }
+
+  function appointmentMatchesScope(row, scope) {
+    return Number(row.clinica_id) === scope.clinicId
+      && (!scope.patientId || Number(row.paciente_id) === scope.patientId)
+      && (!scope.exactLeadId || Number(row.lead_intake_id) === scope.exactLeadId)
+      && (scope.review || !scope.leadId || row.lead_intake_id == null || Number(row.lead_intake_id) === scope.leadId)
+      && row.source_system == null && !row.es_provisional
+      && (!scope.review || !row.care_legacy_attendance)
+      && !['cancelada', 'no_asistio'].includes(row.estado) && +new Date(row.inicio) >= scope.since;
   }
 
   async function ensure(conversationId, actorUserId = null) {
@@ -342,7 +361,7 @@ function createTemporaryPatientDirectionService(db, {
         where: { conversation_id: { [Op.in]: ids } }, attributes: ['conversation_id', 'clinic_id', 'patient_id',
           'lead_intake_id', 'status', 'end_reason', 'ended_at'], raw: true, transaction,
       })).map(plain) : [];
-      const effective = new Map();
+      const effective = new Map(), awaitingAppointments = [];
       for (const lead of candidates) {
         const matching = conversations.filter(row => scoped(row)
           && Number(row.lead_id) === Number(lead.id) && Number(row.clinic_id) === Number(lead.clinica_id));
@@ -372,11 +391,26 @@ function createTemporaryPatientDirectionService(db, {
             || ended.status === 'ended_service_disabled' ? 'clinic' : 'completed' });
           continue;
         }
-        const appointment = await firstAppointment(conversation, new Date(started), transaction,
+        const scope = firstAppointmentScope(conversation, new Date(started),
           { lead, context: lead.patient_context, review: ['existing_patient', 'possible_patient'].includes(lead.patient_context?.relationship) });
-        if (appointment && (require('../lib/status-catalog').hasAttendedAppointment(appointment) || careState(appointment).arrived_at)) {
-          effective.set(Number(lead.id), { state: 'completed' });
-        } else effective.set(Number(lead.id), { state: 'director', director_user_id: TEMPORARY_FOCUSED_ACCOUNT.userId });
+        if (scope) awaitingAppointments.push({ leadId: Number(lead.id), scope });
+      }
+      // One bounded read per batch, rather than one findOne per lead. Retain
+      // the same first-by-start/id selection and fail closed on an incomplete
+      // history; never invent attendance to compensate for a read limit.
+      for (let offset = 0; offset < awaitingAppointments.length; offset += 100) {
+        const batch = awaitingAppointments.slice(offset, offset + 100);
+        const appointments = (await db.CitaPaciente.findAll({ where: { [Op.or]: batch.map(item => item.scope.where) },
+          attributes: ['id_cita', 'clinica_id', 'paciente_id', 'lead_intake_id', 'source_system', 'es_provisional',
+            'care_legacy_attendance', 'estado', 'inicio', 'arrived_at', 'care_started_at', 'care_completed_at', 'care_schedule_start'],
+          order: [['inicio', 'ASC'], ['id_cita', 'ASC']], limit: 5001, raw: true, transaction })).map(plain);
+        if (appointments.length > 5000) throw Object.assign(Error('temporary_direction_history_limit'), { code: 'temporary_direction_history_limit' });
+        for (const item of batch) {
+          const appointment = appointments.find(row => appointmentMatchesScope(row, item.scope));
+          if (appointment && (require('../lib/status-catalog').hasAttendedAppointment(appointment) || careState(appointment).arrived_at)) {
+            effective.set(item.leadId, { state: 'completed' });
+          } else effective.set(item.leadId, { state: 'director', director_user_id: TEMPORARY_FOCUSED_ACCOUNT.userId });
+        }
       }
       return effective;
     });

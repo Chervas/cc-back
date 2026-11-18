@@ -388,6 +388,45 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
     db.PatientDirectionSetting.removeHook('beforeFind', 'observeActivationSettingWait');
   }
 
+  // The legacy patient-origin mark must not borrow attendance from another
+  // explicit request, while unlinked legacy reservations remain usable.
+  const bulkA = await db.LeadIntake.create({ clinica_id: 72, status_lead: 'citado' }, { hooks: false });
+  const bulkB = await db.LeadIntake.create({ clinica_id: 72, status_lead: 'citado' }, { hooks: false });
+  // The list consumes persisted DATETIME(0), not Sequelize's unrounded
+  // in-memory created timestamp from the INSERT.
+  await Promise.all([bulkA.reload(), bulkB.reload()]);
+  for (const row of [bulkA, bulkB]) await snapshot(row.id, { ...existingContext, relationship: 'new_contact', patient_id: null });
+  const bulkConversations = await Promise.all([[bulkA, 102], [bulkB, 101]].map(([row, patient]) => db.Conversation.create({
+    clinic_id: 72, channel: 'whatsapp', lead_id: row.id, patient_id: patient,
+  })));
+  const bulkStarted = new Date();
+  for (const row of bulkConversations) await db.Message.create({ conversation_id: row.id, direction: 'outbound',
+    message_type: 'event', status: 'sent', sent_at: bulkStarted,
+    automation_delivery_key: `temporary-patient-direction:start:${row.id}`,
+    metadata: { source: 'temporary_patient_direction', kind: 'temporary_patient_direction_started',
+      clinic_id: 72, patient_id: row.patient_id, lead_intake_id: null, director_user_id: 44,
+      started_at: bulkStarted.toISOString(), start_reason: 'appointment_created' } });
+  await db.CitaPaciente.create({ clinica_id: 72, paciente_id: 102, lead_intake_id: lead.id,
+    inicio: tomorrow, fin: new Date(+tomorrow + 600000), estado: 'completada' });
+  const bulkOwn = await db.CitaPaciente.create({ clinica_id: 72, paciente_id: 102, lead_intake_id: bulkA.id,
+    inicio: new Date(+tomorrow + 3600000), fin: new Date(+tomorrow + 4200000), estado: 'info_confirmada' });
+  await db.CitaPaciente.create({ clinica_id: 72, paciente_id: 101, lead_intake_id: null,
+    inicio: tomorrow, fin: new Date(+tomorrow + 600000), estado: 'completada' });
+  const bulkRows = [bulkA, bulkB].map(row => ({ ...row.toJSON(), patient_context: { relationship: 'new_contact' } }));
+  let bulkAppointmentReads = 0;
+  db.CitaPaciente.addHook('beforeFind', 'countEffectiveDirectionBulk', () => { bulkAppointmentReads++; });
+  const bulkEventCount = await db.Message.count();
+  let directions;
+  try { directions = await service.effectiveForLeads(bulkRows); }
+  finally { db.CitaPaciente.removeHook('beforeFind', 'countEffectiveDirectionBulk'); }
+  assert.equal(directions.get(bulkA.id).state, 'director', 'another request of the exact same patient is not this request attendance');
+  assert.equal(directions.get(bulkB.id).state, 'completed', 'a legacy NULL lead reservation remains valid for the exact patient/clinic');
+  assert.equal(bulkAppointmentReads, 1, 'the list uses one scoped appointment SELECT for both leads');
+  assert.equal(await db.Message.count(), bulkEventCount, 'the effective read emits no handoff or message');
+  await bulkOwn.update({ estado: 'completada' });
+  assert.equal((await service.effectiveForLeads(bulkRows)).get(bulkA.id).state, 'completed', 'own attendance wins while the foreign reservation is ignored');
+  report.checks.push('Actual MySQL bulk effective direction: exact same-patient foreign lead attendance excluded; legacy NULL accepted; one appointment SELECT for both requests; no read mutations.');
+
   await db.PatientOperationalEvent.drop();
   await sql.transaction(async transaction => {
     await appointment.update({ nota: 'Synthetic clinical operation committed' }, { transaction });

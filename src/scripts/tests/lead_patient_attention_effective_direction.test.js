@@ -178,7 +178,30 @@ test('another human or explicit owner is never overridden by the temporal projec
 });
 
 test('query failure cannot promote an unassigned lead or mutate the underlying records', async () => {
-  const f = fixture(); f.db.CitaPaciente.findOne = async () => { throw Error('query unavailable'); };
+  const f = fixture(); f.db.CitaPaciente.findAll = async () => { throw Error('query unavailable'); };
   assert.equal((await f.view())[0].patient_attention.state, 'unassigned');
   assert.deepEqual(f.writes, []);
+});
+
+
+test('a completed appointment explicitly linked to another lead of the same patient cannot end this direction', async () => {
+  const f=fixture();f.appointments[0].lead_intake_id=999;f.appointments[0].estado='completada';
+  const [lead]=await f.view();assert.equal(lead.patient_attention.state,'director');assert.deepEqual(f.writes,[]);
+});
+test('a legacy appointment without lead_id remains valid attendance evidence for the exact patient and clinic', async () => {
+  const f=fixture();f.appointments[0].lead_intake_id=null;f.appointments[0].estado='completada';
+  assert.equal((await f.view())[0].patient_attention.state,'completed');assert.deepEqual(f.writes,[]);
+});
+test('first appointment ordering is retained when another lead has an earlier attended appointment', async () => {
+  const f=fixture();f.appointments.push({...f.appointments[0],id_cita:90000,lead_intake_id:999,estado:'completada',inicio:'2026-11-20T10:15:00Z'});
+  assert.equal((await f.view())[0].patient_attention.state,'director');
+});
+test('several requests share one scoped appointment read instead of one query per request', async () => {
+  const f=fixture();await f.view();const reads=f.reads.filter(row=>row.name==='appointment');
+  assert.equal(reads.length,1);assert.equal(reads[0].query.limit,5001);assert.equal(reads[0].query.raw,true);
+  assert.equal(reads[0].query.where[Op.or].length,2);assert(!reads[0].query.attributes.includes('nota'));
+});
+test('an incomplete appointment history cannot fabricate ownership or attendance', async () => {
+  const f=fixture();f.db.CitaPaciente.findAll=async()=>Array.from({length:5001},()=>({...f.appointments[0]}));
+  assert.equal((await f.view())[0].patient_attention.state,'unassigned');assert.deepEqual(f.writes,[]);
 });
