@@ -41,8 +41,51 @@ const ZERO_OPERATOR_UPGRADE = Object.freeze({
   'src/lib/rdsSchemaMigration.js': 'f71a6ea95fef211cdcdbc3e50e2c6a3f48ea20d638ca8e81ba4736f4c2e3c4b3',
   'src/lib/rdsSchemaMigrationTransport.js': '7bb67ff3d0dd5594c1cac24022d3ffb960555f6e682d87bd35417269674a7729',
 });
+// One fully acknowledged migration followed by a local policy refusal before
+// the next dispatch. This fourth case never reconciles uncertain SQL or turns
+// an old request into an ACK. The completed migration is omitted by buildPlan.
+const BS_ACKED = Object.freeze({
+  kind: 'bs-follow-up-acknowledged-migration-prefix/1',
+  originalOperationNonce: '9036f8b0-a878-4d3d-a8e4-31365cb293c4',
+  snapshotId: 'cc-schema-9036f8b0a8784d3da8e431365cb293c4',
+  originalPlanSha256: '5d30fd6fcbf4ab8c3311809fe146406d6d12bf7145f93136bf79fa8361fe421b',
+  sourceRevision: 'e1b80d5db97a0aae5ec33432dc72659ece92f2ca',
+  contractDigest: '67778a6bf9ce7286b8bf9e3b98b3f9654603392d0242d8a5618bffc95fd9bd1f',
+  effectiveContractDigest: '023d7d1752bd587cf3b9b5ff8f19efd3a18ed229ec4fa379deba1d157bb491ec',
+  migration: '20261118073000-patient-follow-up-target-month.js',
+  table: 'PatientFollowUps',
+  sqlSha256: '280c3b8201ef4217665c7ef7d6c71f587814278734db8c2b407ac58333bda317',
+  metaSqlSha256: 'edae678bf7edd49682af14de4bc45bc4480dd32ffe0e8ac75728e3b8949a1cfc',
+  selected: Object.freeze([
+    Object.freeze({ name: '20261118073000-patient-follow-up-target-month.js', sha256: 'd49a3a3b53f3d135ea565ecbc02555adec0a8a3bf8cbb25369b61be7cddd3d08' }),
+    Object.freeze({ name: '20261118113000-add-social-post-original-media-url.js', sha256: '1c81d87e1e2fb23cdf0c6fcd858999033e45d5dd45bd7c336027ef679c79502f' }),
+    Object.freeze({ name: '20261118123000-add-social-ad-creative-payload.js', sha256: '349b4191959d0f7808ae7df5018a41ed512506db131842b88aa9d030c8474d9f' }),
+  ]),
+});
+const BS_ACKED_OPERATOR_UPGRADE = Object.freeze({
+  'src/lib/rdsSchemaMigrationPolicy.js': '200a07bf294685ba37d6984b83634106044c326ae6150deeb229280dcaa6b375',
+  'src/lib/rdsSchemaFirstCreateReconciliation.js': '839e0d2bfb6bdd6664480833d985ebac3b25a9ad1807c0150d004bbf1a6bca23',
+  'src/lib/rdsSchemaMigration.js': 'f7336931e29dc33b2d4ca2f220ae02d22cc49819789e50fb80f48a6e1bf39c99',
+});
 const isGbp = plan => plan.selected?.length === 1 && plan.selected[0].name === GBP.migration;
+const isBsAcknowledged = plan => Array.isArray(plan?.selected) && plan.selected.length === BS_ACKED.selected.length
+  && plan.selected.every((row, i) => row.name === BS_ACKED.selected[i].name);
 function assertOriginalRequirements(plan, info, selected, originalPlanSha256) {
+  if (isBsAcknowledged(plan)) {
+    P.need(originalPlanSha256 === BS_ACKED.originalPlanSha256 && plan.sourceRevision === BS_ACKED.sourceRevision
+      && plan.contractDigest === BS_ACKED.contractDigest && plan.effectiveContractDigest === BS_ACKED.effectiveContractDigest
+      && !plan.continuation, 'rds_schema_reconciliation_original_run_changed');
+    const old = plan.operatorFiles, current = info.operatorFiles || [];
+    P.need(Array.isArray(old) && old.length === current.length && new Set(old.map(row => row.path)).size === old.length,
+      'rds_schema_operator_source_changed');
+    for (let i = 0; i < old.length; i++) {
+      const a = old[i], b = current[i];
+      P.need(a.path === b.path && /^[a-f0-9]{64}$/.test(b.sha256 || '')
+        && (Object.hasOwn(BS_ACKED_OPERATOR_UPGRADE, a.path) ? a.sha256 === BS_ACKED_OPERATOR_UPGRADE[a.path] : a.sha256 === b.sha256),
+      'rds_schema_operator_source_changed');
+    }
+    return P.assertRequirements({ ...plan, operatorFiles: current }, info, selected);
+  }
   if (!isGbp(plan)) return P.assertRequirements(plan, info, selected);
   const zero = plan.continuation && originalPlanSha256 === ZERO.planSha256;
   const upgrade = zero ? ZERO_OPERATOR_UPGRADE : GBP_OPERATOR_UPGRADE;
@@ -60,6 +103,74 @@ function assertOriginalRequirements(plan, info, selected, originalPlanSha256) {
   // Only explicitly named recovery/diagnostic modules may differ. Every current byte is then
   // pinned into the newly reviewed continuation plan by the ordinary operator.
   return P.assertRequirements({ ...plan, operatorFiles: current }, info, selected);
+}
+
+async function acknowledgedMonthDefinition(source, plan) {
+  const names = BS_ACKED.selected.map(row => row.name), pins = P.migrationFiles(source, names);
+  P.need(isBsAcknowledged(plan) && digest(plan.selected) === digest(BS_ACKED.selected.map(row => ({ ...row, alreadyApplied: false })))
+    && digest(plan.toApply) === digest(names) && digest(pins) === digest(plan.moduleFiles)
+    && pins.length === names.length && pins.every(row => BS_ACKED.selected.some(item => row.path === 'migrations/' + item.name && row.sha256 === item.sha256)),
+  'rds_schema_reconciliation_source_changed');
+  const S = require('sequelize'), sequelize = new S({ dialect: 'mysql', logging: false }), statements = [];
+  sequelize.connectionManager.getConnection = async () => { throw Error('rds_schema_reconciliation_network_forbidden'); };
+  sequelize.query = async sql => { P.need(typeof sql === 'string', 'rds_schema_reconciliation_sql_changed'); statements.push(sql); return []; };
+  const q = Object.fromEntries(P.METHODS.map(name => [name, async () => { throw Error('rds_schema_reconciliation_prefix_changed'); }]));
+  q.describeTable = async table => {
+    P.need(table === BS_ACKED.table, 'rds_schema_reconciliation_prefix_changed');
+    return Object.fromEntries(plan.before.columns.filter(row => row.TABLE_NAME === table).map(row => [row.COLUMN_NAME, {}]));
+  };
+  q.addColumn = async (table, name, attr) => {
+    P.need(table === BS_ACKED.table && name === 'clinical_target_month' && !statements.length,
+      'rds_schema_reconciliation_prefix_changed');
+    return sequelize.getQueryInterface().addColumn(table, name, attr);
+  };
+  const loaded = P.loadMigration(source, BS_ACKED.migration, pins, S);
+  await loaded.migration.up(Object.freeze(q), loaded.facade);
+  P.need(statements.length === 1 && P.sha(statements[0]) === BS_ACKED.sqlSha256, 'rds_schema_reconciliation_sql_changed');
+  return { TABLE_NAME: BS_ACKED.table, COLUMN_NAME: 'clinical_target_month', COLUMN_TYPE: 'varchar(7)', IS_NULLABLE: 'YES',
+    COLUMN_DEFAULT: null, EXTRA: '', CHARACTER_SET_NAME: 'utf8mb4', COLLATION_NAME: 'utf8mb4_0900_ai_ci', GENERATION_EXPRESSION: '' };
+}
+
+async function validateAcknowledgedMonth({ source, originalPlan: plan, observed, identity, result, journal }) {
+  P.need(isBsAcknowledged(plan) && plan.sourceRevision === BS_ACKED.sourceRevision && plan.contractDigest === BS_ACKED.contractDigest
+    && plan.effectiveContractDigest === BS_ACKED.effectiveContractDigest && !plan.continuation
+    && result.operationNonce === BS_ACKED.originalOperationNonce && result.planRef?.sha256 === BS_ACKED.originalPlanSha256
+    && identity.engineVersion === '8.4.11', 'rds_schema_reconciliation_original_run_changed');
+  P.need(result.status === 'rds_schema_failed_preserve_partial' && result.reason === 'rds_schema_sql_scope'
+    && result.writesDispatched === 2 && result.automaticReplayAllowed === false && result.transportOpened === true
+    && result.closure?.physicalCloseObserved === true && result.closure.physicalStreamDestroyed === true,
+  'rds_schema_reconciliation_unsupported_outcome');
+  P.need(digest(plan.before) === plan.beforeDigest && digest(identity) === digest(plan.identity),
+    'rds_schema_reconciliation_identity_or_baseline_changed');
+  const sequence = ['backup_request', 'backup_create_ack', 'backup_available', 'statement_request', 'statement_ack', 'statement_request', 'statement_ack', 'terminal'];
+  P.need(digest(journal.map(row => row.event)) === digest(sequence), 'rds_schema_reconciliation_prefix_changed');
+  const backup = result.backup;
+  P.need(backup?.status === 'available' && backup.snapshotId === BS_ACKED.snapshotId && backup.physicalDbId === identity.physicalDbId
+    && Number.isFinite(Date.parse(backup.createdAt)) && Date.parse(backup.createdAt) >= plan.createdAtEpochMs
+    && Date.parse(backup.createdAt) <= journal[2].atEpochMs
+    && Object.keys(backup).every(key => journal[2][key] === backup[key])
+    && journal.slice(0, 2).every(row => row.snapshotId === backup.snapshotId), 'rds_schema_reconciliation_backup_binding');
+  P.need(journal.every((row, i) => Number.isSafeInteger(row.atEpochMs) && row.atEpochMs >= plan.createdAtEpochMs
+    && (!i || row.atEpochMs >= journal[i - 1].atEpochMs)), 'rds_schema_reconciliation_prefix_changed');
+  for (const [index, kind, sqlSha256] of [[3, 'ddl', BS_ACKED.sqlSha256], [5, 'sequelize_meta', BS_ACKED.metaSqlSha256]]) {
+    const request = journal[index], ack = journal[index + 1];
+    P.need([request, ack].every(row => row.migration === BS_ACKED.migration && row.kind === kind && row.sqlSha256 === sqlSha256)
+      && ack.warnings === 0 && (kind !== 'sequelize_meta' || ack.affectedRows === 1), 'rds_schema_reconciliation_prefix_changed');
+  }
+  P.need(journal[7].accepted === false && journal[7].status === result.status && journal[7].writesDispatched === 2,
+    'rds_schema_reconciliation_prefix_changed');
+  const added = await acknowledgedMonthDefinition(source, plan), expected = structuredClone(plan.before);
+  P.need(expected.defaults.DEFAULT_CHARACTER_SET_NAME === 'utf8mb4' && expected.defaults.DEFAULT_COLLATION_NAME === 'utf8mb4_0900_ai_ci'
+    && expected.tables.some(row => row.TABLE_NAME === BS_ACKED.table && row.ENGINE === 'InnoDB' && row.TABLE_COLLATION === 'utf8mb4_0900_ai_ci')
+    && !expected.columns.some(row => row.TABLE_NAME === BS_ACKED.table && row.COLUMN_NAME === added.COLUMN_NAME)
+    && !expected.migrations.includes(BS_ACKED.migration), 'rds_schema_reconciliation_metadata_drift');
+  expected.columns.splice(expected.columns.findLastIndex(row => row.TABLE_NAME === BS_ACKED.table) + 1, 0, added);
+  expected.migrations.push(BS_ACKED.migration); expected.migrations.sort();
+  P.need(digest(expected) === digest(observed), 'rds_schema_reconciliation_metadata_drift');
+  return { kind: BS_ACKED.kind, completedMigrations: [BS_ACKED.migration], replayedStatements: 0,
+    originalBeforeDigest: plan.beforeDigest, observedDigest: digest(observed), definitionDigest: digest(added),
+    originalAcknowledgements: [4, 6].map(journalIndex => ({ journalIndex, journalRowDigest: digest(journal[journalIndex]), warnings: 0 })),
+    originalDiagnostics: { count: 0, retainedAcknowledgements: true } };
 }
 function validateZeroWrite({ originalPlan: plan, result, journal, observed, identity, planSha256 }) {
   P.need(isGbp(plan) && plan.continuation && planSha256 === ZERO.planSha256 && plan.sourceRevision === ZERO.sourceRevision
@@ -201,6 +312,7 @@ async function definition(source, plan) {
   return { table, columns, indexes, foreignKeys };
 }
 async function validate({ source, originalPlan, observed, identity, result, journal }) {
+  if (isBsAcknowledged(originalPlan)) return validateAcknowledgedMonth({ source, originalPlan, observed, identity, result, journal });
   if (isGbp(originalPlan)) return validateGbp({ source, originalPlan, observed, identity, result, journal });
   const selected = supported(originalPlan), delegated = selected === DELEGATED;
   P.need(result.status === 'rds_schema_failed_preserve_partial' && result.reason === 'rds_schema_statement_warnings_require_reconciliation'
@@ -245,4 +357,6 @@ async function validate({ source, originalPlan, observed, identity, result, jour
     originalWarning: delegated ? 'retained_by_original_operator_hashed_diagnostics' : 'not_retained_by_original_operator_unknown',
     ...(delegated ? { originalDiagnostics } : {}) };
 }
-module.exports = { SUPPORTED, DELEGATED, GBP, ZERO, GBP_OPERATOR_UPGRADE, ZERO_OPERATOR_UPGRADE, isGbp, validateZeroWrite, assertOriginalRequirements, gbpDefinition, definition, validate };
+module.exports = { SUPPORTED, DELEGATED, GBP, ZERO, GBP_OPERATOR_UPGRADE, ZERO_OPERATOR_UPGRADE,
+  BS_ACKED, BS_ACKED_OPERATOR_UPGRADE, isBsAcknowledged, acknowledgedMonthDefinition, validateAcknowledgedMonth,
+  isGbp, validateZeroWrite, assertOriginalRequirements, gbpDefinition, definition, validate };

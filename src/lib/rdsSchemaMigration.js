@@ -320,7 +320,9 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         P.need(digest(continuation.descriptor) === digest(plan.continuation)
           && digest(continuation.selected) === digest(plan.selected.map(row => row.name)), 'rds_schema_reconciliation_plan_binding');
       }
-      const resumed = continuation ? { pending: true, proof: continuation.descriptor.proof, resultRef: continuation.pending.result.reference } : null;
+      const acknowledgedPrefix = continuation?.descriptor.proof.kind === R.BS_ACKED.kind;
+      const resumed = continuation && !acknowledgedPrefix
+        ? { pending: true, proof: continuation.descriptor.proof, resultRef: continuation.pending.result.reference } : null;
       const run = store.start(planRef, continuation?.pending); let admin; let backup; let result; let error; let closure;
       try {
         const aws = awsFactory({ profile: plan.awsProfile }); await aws.inspect();
@@ -334,6 +336,8 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         if (continuation) {
           if (continuation.zeroValidation) R.validateZeroWrite({ ...continuation.zeroValidation, observed: before, identity: admin.identity });
           await R.validate({ source, ...continuation.validation, observed: before, identity: admin.identity });
+          if (acknowledgedPrefix) run.journal({ event: 'completed_migration_prefix_reconciled',
+            originalResultRef: continuation.pending.result.reference, proof: continuation.descriptor.proof });
         }
         P.need(backup.status === 'available' && backup.physicalDbId === admin.identity.physicalDbId
           && Date.parse(backup.createdAt) >= plan.createdAtEpochMs, 'rds_schema_backup_not_bound_to_plan');
@@ -372,12 +376,15 @@ function createRunner({ sourceInfo, awsFactory = T.createAws, connect = T.connec
         const after = await schemaSnapshot(admin), afterInfo = fence(source, selected, plan);
         const compatibility = compare(after, afterInfo.effectiveContract);
         P.need(compatibility.compatible && plan.toApply.every(name => after.migrations.includes(name)), 'rds_schema_postcheck_incompatible');
+        const requiredMigrations = acknowledgedPrefix ? selected : completed;
+        P.need(requiredMigrations.every(name => after.migrations.includes(name)), 'rds_schema_postcheck_incompatible');
         result = { status: 'rds_schema_applied_and_verified', sourceRevision: info.revision, planRef, completed,
           effectiveContractDigest: plan.effectiveContractDigest, effectiveContractScope: plan.effectiveContractScope, operatorFiles: plan.operatorFiles,
           afterDigest: digest(after), after, compatibility, identity: admin.identity, backup,
-          ...(continuation ? { continuation: plan.continuation, reconciledStatements: resumed.cursor || 1 } : {}),
-          releaseGate: { revision: info.revision, requiredMigrations: completed, stagingPromotion: 'fast-forward-only',
-            applicationCrudPreflightStillRequired: true, preflightArgs: completed.flatMap(name => ['--require-migration', name]),
+          ...(continuation ? { continuation: plan.continuation, reconciledStatements: acknowledgedPrefix ? 0 : resumed.cursor || 1,
+            ...(acknowledgedPrefix ? { reconciledCompletedMigrations: continuation.descriptor.proof.completedMigrations } : {}) } : {}),
+          releaseGate: { revision: info.revision, requiredMigrations, stagingPromotion: 'fast-forward-only',
+            applicationCrudPreflightStillRequired: true, preflightArgs: requiredMigrations.flatMap(name => ['--require-migration', name]),
             gitOrServicesChangedByTool: false } };
       } catch (caught) { error = caught; }
       finally {

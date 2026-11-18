@@ -127,9 +127,35 @@ function validatePlan(plan, { info, before, identity, moduleFiles, at }) {
 
 function statementKind(input, values = [], database = 'clinicaclick') {
   const sql = String(input).trim().replace(/;$/, '');
-  need(sql.length > 0 && sql.length <= 1024 * 1024 && !/;|\/\*|--|#/.test(sql), 'rds_schema_sql_scope');
-  // Remove SQL string literals before checking keywords/qualified identifiers.
-  const tokens = sql.replace(/'(?:''|\\.|[^'\\])*'/g, "''");
+  need(sql.length > 0 && sql.length <= 1024 * 1024, 'rds_schema_sql_scope');
+  // The owned MySQL session pins sql_mode without NO_BACKSLASH_ESCAPES.
+  // Mask only closed string literals, retaining identifier boundaries. A
+  // semicolon in COMMENT '...' is data; a second statement remains forbidden.
+  let tokens = '';
+  for (let i = 0; i < sql.length; i++) {
+    if (sql[i] === '`') {
+      let identifier = '`', closed = false;
+      for (i++; i < sql.length; i++) {
+        identifier += sql[i];
+        if (sql[i] === '`') {
+          if (sql[i + 1] === '`') { identifier += sql[++i]; continue; }
+          closed = true; break;
+        }
+      }
+      need(closed, 'rds_schema_sql_scope'); tokens += identifier;
+    } else if (sql[i] === "'") {
+      let closed = false;
+      for (i++; i < sql.length; i++) {
+        if (sql[i] === '\\') { i++; continue; }
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") { i++; continue; }
+          closed = true; break;
+        }
+      }
+      need(closed, 'rds_schema_sql_scope'); tokens += "''";
+    } else tokens += sql[i];
+  }
+  need(!/;|\/\*|--|#/.test(tokens), 'rds_schema_sql_scope');
   need(!/\b(?:GRANT|REVOKE|TRUNCATE|RENAME|DROP|REPLACE|LOAD|OUTFILE|DUMPFILE|CALL|PREPARE|EXECUTE|DISABLE|FOREIGN_KEY_CHECKS|SLEEP|BENCHMARK|LOAD_FILE)\b/i.test(tokens), 'rds_schema_sql_scope');
   if (/^ALTER\s+TABLE\s+.+?\s+CHANGE\s+/i.test(tokens)) {
     const target = enumExtension.statement(sql); // Live metadata is validated before dispatch.
