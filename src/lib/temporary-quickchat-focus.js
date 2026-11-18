@@ -1,6 +1,6 @@
 'use strict';
 
-const { campaignResponsibilitySql } = require('../services/leadCampaignResponsibility.service');
+const { directionEligibilitySql } = require('../services/leadManualDirectionEligibility.service');
 
 // Temporary presentation filter, NOT an access policy or a PatientDirection role.
 // Retire when the Director de pacientes workflow replaces this account workaround.
@@ -47,7 +47,7 @@ function temporaryQuickChatEligibilitySql() {
           AND qc_lead.clinica_id = \`Conversation\`.\`clinic_id\`
           AND (qc_lead.asignado_a IS NULL OR qc_lead.asignado_a = ${TEMPORARY_FOCUSED_ACCOUNT.userId})
           AND qc_lead.archived_at IS NULL AND qc_lead.status_lead NOT IN ('descartado','acudio_cita','convertido')
-          AND ${campaignResponsibilitySql('qc_lead')}
+          AND ${directionEligibilitySql('qc_lead')}
       )))))`;
 }
 

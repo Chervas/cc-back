@@ -78,6 +78,7 @@ function fixture({ clinicId = 72, patientId = null, leadId = 10, assigned = null
     },
   };
   const service = createTemporaryPatientDirectionService(db, {
+    manualDirectionEligibility: { forLeads: async rows => new Map(rows.map(row => [Number(row.id), row.manual_direction_eligible === true])) },
     campaignResponsibility: { forLeads: async rows => new Map(rows.map(row => [Number(row.id), row.campaign_eligible !== false])) }, now: () => new Date('2026-10-07T08:00:00Z'), patientContextService,
     notify: event => notifications.push(event), warn: code => warnings.push(code) });
   const decide = (decision, overrides = {}) => audits.push({ id: audits.length + 1, lead_intake_id: leadId,
@@ -86,6 +87,25 @@ function fixture({ clinicId = 72, patientId = null, leadId = 10, assigned = null
   return { db, service, conversations, leads, messages, appointments, events, attempts, notifications, warnings,
     audits, context, contextCalls, contextBatches, patientContextService, decide };
 }
+
+test('audited manual portfolio reuses ensure/enrich while an organic automatic owner alone is never claimed', async () => {
+  const f = fixture({ clinicId: 77, patientId: 100, assigned: 44 });
+  f.leads[0].campaign_eligible = false;
+  await f.service.observeConversation(f.conversations[0]);
+  assert.equal(f.messages.length, 0);
+  assert.equal((await f.service.enrich(f.conversations))[0].patient_direction, null);
+  f.leads[0].manual_direction_eligible = true;
+  await f.service.observeConversation(f.conversations[0]);
+  assert.equal(f.messages.length, 1);
+  assert.equal((await f.service.enrich(f.conversations))[0].patient_direction.director_user_id, 44);
+  f.appointments[0].estado = 'ha_acudido';
+  await f.service.observeConversation(f.conversations[0]);
+  assert.equal(f.messages.length, 2);
+  assert.equal(f.messages[1].metadata.kind, 'temporary_patient_direction_handoff');
+  assert.equal((await f.service.enrich(f.conversations))[0].patient_direction, null);
+  await f.service.observeConversation(f.conversations[0]);
+  assert.equal(f.messages.length, 2, 'no resurrection or duplicate handoff');
+});
 
 for (const clinicId of [66, 72, 77]) {
   test(`clinic ${clinicId}: lead responsibility exists before the first outbound and survives conversion`, async () => {

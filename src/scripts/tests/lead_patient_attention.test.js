@@ -39,6 +39,7 @@ function fixture({ relationship = 'existing_patient', status = 'nuevo', assigned
     contexts: { get: async () => context, capture: async () => context },
     // Campaign proof itself is covered by the independent native SQL suite.
     campaignResponsibility: { forLeads: async rows => new Map(rows.map(row => [Number(row.id), row.campaign_eligible !== false])) },
+    manualDirectionEligibility: { forLeads: async rows => new Map(rows.map(row => [Number(row.id), row.manual_direction_eligible === true])) },
     now: () => new Date('2026-10-30T10:00:00Z'),
     authorize: async (actor, clinic) => allowed && [1, 44, 55].includes(actor) && clinic === 72,
     isAdmin: actor => actor === 1,
@@ -170,4 +171,39 @@ test('attended handoff closes only the same request and clinic even before lead 
   const view = (await f.service.enrich([f.lead], { actorId: 44 }))[0];
   assert.equal(view.patient_attention.state, 'completed'); assert.equal(view.patient_attention.can_decide, false);
   await assert.rejects(f.service.decide({ leadId: 10, actorId: 44, decision: 'clinic' }), { status: 409 });
+});
+
+test('explicit manual portfolio, not automatic assigned_a, keeps the canonical director and pending review', async () => {
+  for (const relationship of ['new_contact', 'existing_patient']) {
+    const f = fixture({ relationship });
+    f.lead.campaign_eligible = false;
+    let view = (await f.service.enrich([f.lead], { actorId: 44 }))[0];
+    assert.equal(view.patient_attention.responsibility, 'clinic', 'an automatic stored owner is insufficient');
+    f.lead.manual_direction_eligible = true;
+    view = (await f.service.enrich([f.lead], { actorId: 44 }))[0];
+    assert.equal(view.patient_attention.responsibility, 'director');
+    assert.equal(view.patient_attention.state, relationship === 'existing_patient' ? 'pending_review' : 'director');
+    assert.equal(view.patient_attention.decided_at, null, 'the portfolio does not forge a patient review decision');
+    assert.equal(f.audits.length, 0);
+  }
+});
+
+test('manual eligibility permits the existing reception decision and never overrides transfer, another owner or attendance', async () => {
+  const f = fixture();
+  f.lead.campaign_eligible = false; f.lead.manual_direction_eligible = true;
+  await f.service.decide({ leadId: 10, actorId: 44, decision: 'director' });
+  assert.equal(f.audits.length, 1);
+  assert.equal((await f.service.enrich([f.lead], { actorId: 44 }))[0].patient_attention.responsibility, 'director');
+  await f.service.decide({ leadId: 10, actorId: 44, decision: 'clinic' });
+  f.lead.asignado_a = 44; // A later import must not undo the durable clinical decision.
+  assert.equal((await f.service.enrich([f.lead], { actorId: 44 }))[0].patient_attention.responsibility, 'clinic');
+  await assert.rejects(f.service.decide({ leadId: 10, actorId: 44, decision: 'director' }), { status: 409 });
+  const other = fixture(); other.lead.campaign_eligible = false; other.lead.manual_direction_eligible = true;
+  other.lead.asignado_a = 99;
+  assert.equal((await other.service.enrich([other.lead], { actorId: 44 }))[0].patient_attention.responsibility, 'clinic');
+  const attended = fixture(); attended.lead.campaign_eligible = false; attended.lead.manual_direction_eligible = true;
+  attended.messages.push({ id: 10, message_type: 'event', metadata: { source: 'temporary_patient_direction',
+    kind: 'temporary_patient_direction_handoff', clinic_id: 72, lead_intake_id: 10 } });
+  assert.equal((await attended.service.enrich([attended.lead], { actorId: 44 }))[0].patient_attention.state, 'completed');
+  await assert.rejects(attended.service.decide({ leadId: 10, actorId: 44, decision: 'director' }), { status: 409 });
 });

@@ -14,7 +14,7 @@ const abandonedLead = lead => lead.archived_at || lead.status_lead === 'descarta
 
 function createTemporaryPatientDirectionService(db, {
   notify = () => {}, warn = () => {}, now = () => new Date(), patientContextService = null, patientAttentionService = null,
-  campaignResponsibility = null,
+  campaignResponsibility = null, manualDirectionEligibility = null, directionEligibility = null,
 } = {}) {
   async function safe(work) {
     try { return await work(); }
@@ -62,7 +62,9 @@ function createTemporaryPatientDirectionService(db, {
   }
 
   function campaigns() {
-    return campaignResponsibility || require('./leadCampaignResponsibility.service').createLeadCampaignResponsibilityService(db);
+    return directionEligibility || require('./leadManualDirectionEligibility.service').createLeadDirectionEligibilityService(db, {
+      campaignResponsibility, manualDirectionEligibility,
+    });
   }
 
   function requestFrom(lead, context, attention = {}, eligible = false) {
@@ -129,8 +131,8 @@ function createTemporaryPatientDirectionService(db, {
   }
 
   async function provenance(conversation, actorUserId, transaction) {
-    // A human reply or a patient created by Graci is not a campaign request.
-    // Only the already gated, exact lead can establish this temporary scope.
+    // A human reply or a patient created by Graci is not an assignment proof.
+    // Only the already gated, exact campaign/manual request establishes scope.
     if (conversation.lead_id && db.LeadIntake) {
       const lead = plain(await db.LeadIntake.findByPk(conversation.lead_id, { transaction }));
       if (Number(lead?.clinica_id) === Number(conversation.clinic_id)
@@ -327,9 +329,9 @@ function createTemporaryPatientDirectionService(db, {
   // mark may have been written before the conversation acquired lead_id.
   // Never infer ownership from a phone, name, patient existence or appointment
   // confirmation. This projection performs no ensure/create/handoff operation.
-  async function effectiveForLeads(leads, { transaction = null, campaignEligibility = null } = {}) {
+  async function effectiveForLeads(leads, { transaction = null, campaignEligibility = null, directionEligibility = null } = {}) {
     if (!db.Conversation || !db.Message || !db.CitaPaciente) return new Map();
-    const eligibility = campaignEligibility || await campaigns().forLeads(leads, { transaction });
+    const eligibility = directionEligibility || campaignEligibility || await campaigns().forLeads(leads, { transaction });
     const candidates = leads.filter(lead => positive(lead.id) && eligibility.get(Number(lead.id)) === true
       && TEMPORARY_DIRECTOR_CLINICS.includes(Number(lead.clinica_id)) && !terminalLead(lead));
     if (!candidates.length) return new Map();

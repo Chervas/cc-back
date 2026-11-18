@@ -11,8 +11,10 @@ const reviewable = context => ['existing_patient', 'possible_patient'].includes(
 
 function createLeadPatientAttentionService(db, dependencies = {}) {
   const contexts = () => dependencies.contexts || require('./leadPatientContext.service').createLeadPatientContextService(db);
-  const campaigns = () => dependencies.campaignResponsibility
-    || require('./leadCampaignResponsibility.service').createLeadCampaignResponsibilityService(db);
+  const eligibility = () => dependencies.directionEligibility
+    || require('./leadManualDirectionEligibility.service').createLeadDirectionEligibilityService(db, {
+      campaignResponsibility: dependencies.campaignResponsibility, manualDirectionEligibility: dependencies.manualDirectionEligibility,
+    });
   const now = dependencies.now || (() => new Date());
   const authorize = dependencies.authorize || (async (actorId, clinicId) => {
     const { canUserAccessFeature } = require('../lib/access-policy');
@@ -91,7 +93,7 @@ function createLeadPatientAttentionService(db, dependencies = {}) {
     const rows = leads.map(plain);
     const chosen = await decisions(rows.map(row => Number(row.id)).filter(positive), { transaction });
     const completed = await completedRequests(rows, transaction);
-    const campaignEligibility = await campaigns().forLeads(rows.filter(lead => TEMPORARY_DIRECTOR_CLINICS.includes(Number(lead.clinica_id))), { transaction });
+    const directionEligibility = await eligibility().forLeads(rows.filter(lead => TEMPORARY_DIRECTOR_CLINICS.includes(Number(lead.clinica_id))), { transaction });
     const contacts = db.LeadContactAttempt ? await db.LeadContactAttempt.findAll({
       where: { lead_intake_id: { [Op.in]: rows.map(row => Number(row.id)) } },
       attributes: ['lead_intake_id', 'usuario_id'], raw: true, transaction,
@@ -104,7 +106,7 @@ function createLeadPatientAttentionService(db, dependencies = {}) {
       if (!directors.has(clinicId)) directors.set(clinicId, await directorFor(lead, { transaction }));
       const configuredDirector = directors.get(clinicId);
       const campaignRule = configuredDirector?.id === TEMPORARY_FOCUSED_ACCOUNT.userId && TEMPORARY_DIRECTOR_CLINICS.includes(clinicId);
-      const eligible = !campaignRule || campaignEligibility.get(Number(lead.id)) === true;
+      const eligible = !campaignRule || directionEligibility.get(Number(lead.id)) === true;
       const director = eligible ? configuredDirector : null, decision = chosen.get(Number(lead.id));
       const finished = closed(lead) || completed.has(Number(lead.id));
       let state = finished ? 'completed' : !eligible ? 'clinic' : decision?.decision || (reviewable(context) && director ? 'pending_review'
@@ -129,7 +131,7 @@ function createLeadPatientAttentionService(db, dependencies = {}) {
       && ['unassigned', 'director', 'pending_review'].includes(lead.patient_attention.state));
     const effective = unresolved.length ? await (dependencies.temporaryDirection
       || require('./temporaryPatientDirection.service').createTemporaryPatientDirectionService(db))
-      .effectiveForLeads(unresolved, { transaction, campaignEligibility }) : new Map();
+      .effectiveForLeads(unresolved, { transaction, directionEligibility }) : new Map();
     return result.map(lead => {
       const direction = effective.get(Number(lead.id));
       if (!direction || direction.state === 'director'
@@ -163,7 +165,7 @@ function createLeadPatientAttentionService(db, dependencies = {}) {
       const director = await directorFor(lead, { transaction });
       if (!director || !(Number(actorId) === director.id || isAdmin(actorId))) throw failure(403, 'patient_attention_director_required');
       if (director.id === TEMPORARY_FOCUSED_ACCOUNT.userId && TEMPORARY_DIRECTOR_CLINICS.includes(Number(lead.clinica_id))
-        && !(await campaigns().forLeads([lead], { transaction })).get(Number(leadId))) throw failure(409, 'patient_attention_campaign_required');
+        && !(await eligibility().forLeads([lead], { transaction })).get(Number(leadId))) throw failure(409, 'patient_attention_campaign_required');
       const previous = (await decisions([Number(leadId)], { transaction })).get(Number(leadId));
       if (previous?.decision === decision && previous.request_kind === requestKind) return { changed: false, clinicId: lead.clinica_id, conversations };
       if (previous?.decision === 'clinic' || closed(lead)
