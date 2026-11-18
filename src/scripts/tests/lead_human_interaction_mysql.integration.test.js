@@ -20,7 +20,7 @@ test('actual MySQL8 ranks scoped human work and keeps legacy, automation, privac
   await sql.query('CREATE TABLE LeadAttributionAudits(id INT PRIMARY KEY,lead_intake_id INT,raw_payload JSON,attribution_steps JSON,created_at DATETIME)');
   await models.Usuario.bulkCreate([{id_usuario:44,nombre:'Directora',apellidos:'Ficticia'},{id_usuario:12,nombre:'Equipo',apellidos:'Prueba'},{id_usuario:13,nombre:'Legacy'}]);
   await models.Clinica.bulkCreate([{id_clinica:66,configuracion:{timezone:'Europe/Madrid'}},{id_clinica:72,configuracion:{timezone:'Europe/Madrid'}}]);
-  const leads=Array.from({length:23},(_,i)=>({id:i+7,clinica_id:66,created_at:'2026-11-17T00:00:00Z'}));
+  const leads=Array.from({length:40},(_,i)=>({id:i+7,clinica_id:66,created_at:'2026-11-17T00:00:00Z'}));
   for(const lead of leads)await sql.query('INSERT INTO LeadIntakes VALUES(:id,:clinic,:created)',{replacements:{id:lead.id,clinic:lead.clinica_id,created:'2026-11-17 00:00:00'}});
   await sql.query(`INSERT INTO LeadContactAttempts VALUES
    (1,7,44,'2026-11-18 10:00:00','llamada','no_contesta'),(2,7,44,'2026-11-18 11:59:00','whatsapp','lead_auto_reply:42'),
@@ -75,6 +75,32 @@ test('actual MySQL8 ranks scoped human work and keeps legacy, automation, privac
   await message({conversation:10,sender:44,at:'2026-11-18 08:00:00'});
   await message({conversation:10,sender:12,at:'2026-11-18 11:00:00',metadata:{ad_sharing:{purpose:'lead_ad',lead_id:29}}});
   await sql.query("INSERT INTO LeadContactAttempts VALUES(100,29,12,'2026-11-18 11:00:00','whatsapp','whatsapp_template_sent')");
+  // Exact authenticated saveCallOutcome receipt: there need not be any
+  // LeadContactAttempt, message or booking for this manual resolution.
+  const call=async(id,lead,outcome,userId=44,steps={},at='2026-11-18 10:00:00')=>audit(id,lead,
+    {outcome,appointment_id:null,notes:'Synthetic private notes never selected'},
+    {action:'call_outcome',userId,appointment_linked:false,qualified_lead_event_id:null,
+      qualified_lead_conversion:null,schedule_conversion:null,...steps},at);
+  await call(10200,30,'citado',44,{clinic_id:66});
+  await call(10201,31,'informacion',12);
+  await call(10202,32,'no_contactado',12);
+  await call(10203,33,'no_contactado',null);
+  await call(10204,34,'no_contactado',44,{action:'call_initiated'});
+  await call(10205,35,'invalid');
+  await call(10206,36,'no_contactado',0);
+  await call(10207,37,'no_contactado',44,{},'2026-11-19 10:00:00');
+  await call(10208,38,'no_contactado',44,{},'2026-11-16 10:00:00');
+  await call(10209,39,'no_contactado',44,{source:'automations_v2'});
+  await call(10210,40,'no_contactado',44,{is_automated:true});
+  await call(10211,41,'no_contactado',44,{flow_execution_id:99});
+  await sql.query('UPDATE LeadIntakes SET clinica_id=72 WHERE id=42');
+  await call(10212,42,'no_contactado');
+  await call(10213,43,'informacion',44,{},'2026-11-18 08:00:00');
+  await call(10214,43,'no_contactado',12,{},'2026-11-18 11:00:00');
+  await appointment({id:11,lead:44,actor:44,at:'2026-11-18 08:00:00'});
+  await call(10215,44,'no_contactado',12,{},'2026-11-18 11:00:00');
+  await call(10216,45,'no_contactado',98763);
+  await call(10217,46,'no_contactado',44,{clinic_id:72});
   const result=await enrichHumanInteraction({models,leads,now:new Date('2026-11-18T12:00:00Z')});
   await t.test('first Graci remains distinct from the later Lidia message despite newer automatic or failed messages',()=>{assert.equal(result[0].first_human_interaction.user_id,44);assert.equal(result[0].first_human_interaction.outcome,'no_answer');assert.equal(result[0].last_human_interaction.user_id,12);assert.equal(result[0].last_human_interaction.outcome,'sent');assert.equal(result[0].last_human_interaction.occurred_at,'2026-11-18T11:00:00.000Z');});
   await t.test('missed-call actor gets honest attempt status and director marker',()=>{assert.equal(result[1].last_human_interaction.outcome,'no_answer');assert.equal(result[1].last_human_interaction.is_patient_director,true);});
@@ -102,9 +128,26 @@ test('actual MySQL8 ranks scoped human work and keeps legacy, automation, privac
    assert.equal(b.first_human_interaction.user_id,12);assert.equal(b.last_human_interaction.user_id,12);
    assert.equal(b.first_human_interaction.kind,'contact_attempt');assert.equal(b.last_human_interaction.kind,'contact_attempt');
   });
+  await t.test('manual phone outcomes without a contact ledger retain the authenticated actor and honest meaning',()=>{
+   for(const [id,actor,outcome]of[[30,44,'registered'],[31,12,'registered'],[32,12,'no_answer']]){
+    const row=result.find(r=>r.id===id);assert.equal(row.first_human_interaction.user_id,actor);
+    assert.equal(row.first_human_interaction.kind,'contact_attempt');assert.equal(row.first_human_interaction.channel,'llamada');
+    assert.equal(row.first_human_interaction.outcome,outcome);assert.deepEqual(row.first_human_interaction,row.last_human_interaction);
+   }
+  });
+  await t.test('missing actors, call initiation, invalid results, other clinic, dates outside the request and automation cannot claim phone work',()=>{
+   for(const id of[33,34,35,36,37,38,39,40,41,42,45,46]){
+    const row=result.find(r=>r.id===id);assert.equal(row.first_human_interaction,null,`lead${id}`);assert.equal(row.last_human_interaction,null,`lead${id}`);
+   }
+  });
+  await t.test('phone-audit endpoints and native booking keep the first actor independent of the last phone outcome',()=>{
+   for(const id of[43,44]){const row=result.find(r=>r.id===id);assert.equal(row.first_human_interaction.user_id,44);
+    assert.equal(row.last_human_interaction.user_id,12);assert.equal(row.last_human_interaction.kind,'contact_attempt');assert.equal(row.last_human_interaction.outcome,'no_answer');}
+   assert.equal(result.find(r=>r.id===44).first_human_interaction.kind,'appointment');
+  });
   await models.PatientDirectionSetting.create({id:1,clinic_id:66,is_enabled:true,director_user_id:12});
   const changed=await enrichHumanInteraction({models,leads,now:new Date('2026-11-18T12:00:00Z')});
   await t.test('configured clinic director uses the actual actor, not the temporary default',()=>{assert.equal(changed[0].last_human_interaction.is_patient_director,true);assert.equal(changed[1].last_human_interaction.is_patient_director,false);});
-  report.checks.push('lead-human-interaction: actual SQL first+last ranking/JSON/clinic isolation/legacy/director/privacy/authenticated discard+take/native booking/automatic confirmations excluded');
+  report.checks.push('lead-human-interaction: actual SQL first+last ranking/JSON/clinic isolation/legacy/director/privacy/authenticated discard+take/native booking/manual phone outcomes without ledger/automatic and call-initiation exclusions');
  });
 });

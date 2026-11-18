@@ -118,3 +118,28 @@ test('a canonical chat retaining request A never attributes the explicit ad-shar
   assert.match(sql,/c\.lead_id = l\.id AND c\.clinic_id = l\.clinica_id/);
   assert(!/JOIN[^\n]*(?:telefono|phone)/i.test(sql));
 });
+
+for (const [callOutcome,outcome] of [['citado','registered'],['informacion','registered'],['no_contactado','no_answer']]) {
+  test(`an authenticated ${callOutcome} audit is a phone attempt even without an attempt ledger`, async () => {
+    const f=fixture({actions:[candidate({kind:'contact_attempt',channel:'llamada',reason:'',outcome})]});
+    const [row]=await enrichHumanInteraction({models:f.models,leads:[lead],now});
+    assert.equal(row.first_human_interaction.user_id,44);
+    assert.equal(row.first_human_interaction.kind,'contact_attempt');
+    assert.equal(row.first_human_interaction.channel,'llamada');
+    assert.equal(row.first_human_interaction.outcome,outcome);
+    assert.deepEqual(row.first_human_interaction,row.last_human_interaction);
+    const sql=f.calls.find(call=>call.sql?.includes('FROM LeadAttributionAudits a')).sql;
+    assert.match(sql,/call_outcome/);assert.match(sql,/\$\.outcome/);
+    assert.doesNotMatch(sql,/call_initiated/);
+  });
+}
+
+test('a later manual phone resolution preserves the first manager and changes only the last interaction', async () => {
+  const f=fixture({appointments:[candidate({kind:'appointment',channel:'agenda',reason:'',outcome:'scheduled',occurred_at:'2026-11-18T08:00:00Z'})],
+    actions:[candidate({user_id:12,kind:'contact_attempt',channel:'llamada',reason:'',outcome:'no_answer',occurred_at:'2026-11-18T11:00:00Z'})],
+    users:[{id_usuario:44,nombre:'Graci'},{id_usuario:12,nombre:'Equipo'}]});
+  const [row]=await enrichHumanInteraction({models:f.models,leads:[lead],now});
+  assert.equal(row.first_human_interaction.user_id,44);assert.equal(row.first_human_interaction.kind,'appointment');
+  assert.equal(row.last_human_interaction.user_id,12);assert.equal(row.last_human_interaction.kind,'contact_attempt');
+  assert.equal(row.last_human_interaction.outcome,'no_answer');
+});

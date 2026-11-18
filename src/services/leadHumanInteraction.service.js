@@ -97,19 +97,26 @@ async function loadHumanInteraction({ models, leads, now = new Date() }) {
       AND ${attention('version')} = '1' AND ${attention('decision')} IN ('director','clinic')
       AND ${attention('request_kind')} IN ('commercial','patient_care')
       AND ${attention('actor_user_id')} REGEXP '^[1-9][0-9]*$' AND ${attention('clinic_id')} = CAST(l.clinica_id AS CHAR)`;
+  const callOutcome = jsonValue('a.raw_payload', 'outcome');
+  const manualCall = `${action} = 'call_outcome' AND ${jsonValue('a.attribution_steps', 'userId')} REGEXP '^[1-9][0-9]*$'
+      AND ${callOutcome} IN ('citado','informacion','no_contactado')
+      AND ${jsonValue('a.attribution_steps', 'clinic_id')} IN ('','null',CAST(l.clinica_id AS CHAR))`;
   // These audit shapes are written by the authenticated manual endpoints.
   // Assignment-only changes and automatic lifecycle updates do not qualify.
   const actionsSql = endpointsSql(`SELECT l.id AS lead_id,
-      CAST(CASE WHEN ${action} = 'status_update' THEN ${jsonValue('a.attribution_steps', 'userId')}
+      CAST(CASE WHEN ${action} IN ('status_update','call_outcome') THEN ${jsonValue('a.attribution_steps', 'userId')}
         ELSE ${attention('actor_user_id')} END AS UNSIGNED) AS user_id,
-      a.created_at AS occurred_at, 'gestion' AS channel, a.id AS source_id, 'lead_action' AS kind, '' AS reason,
-      CASE WHEN ${action} = 'status_update' AND ${status} = 'descartado' THEN 'discarded'
+      a.created_at AS occurred_at, CASE WHEN ${action} = 'call_outcome' THEN 'llamada' ELSE 'gestion' END AS channel,
+      a.id AS source_id, CASE WHEN ${action} = 'call_outcome' THEN 'contact_attempt' ELSE 'lead_action' END AS kind, '' AS reason,
+      CASE WHEN ${action} = 'call_outcome' AND ${callOutcome} = 'no_contactado' THEN 'no_answer'
+        WHEN ${action} = 'call_outcome' THEN 'registered'
+        WHEN ${action} = 'status_update' AND ${status} = 'descartado' THEN 'discarded'
         WHEN ${jsonValue('a.attribution_steps', 'type')} = 'lead_patient_attention_v1' AND ${attention('decision')} = 'director' THEN 'claimed'
         ELSE 'updated' END AS outcome
     FROM LeadAttributionAudits a JOIN LeadIntakes l ON l.id = a.lead_intake_id
     WHERE l.id IN (:leadIds) AND l.clinica_id IN (:clinicIds)
       AND a.created_at >= l.created_at AND a.created_at <= :now
-      AND ((${manualStatus}) OR (${manualDecision}))
+      AND ((${manualStatus}) OR (${manualDecision}) OR (${manualCall}))
       AND ${['source','origin','kind','source_event'].map(key => `${jsonValue('a.attribution_steps', key)} NOT REGEXP 'automation|auto_reply|^system|^ai(_|$)'`).join(' AND ')}
       AND ${['is_automated','is_automation','ai_generated','generated_by_ai'].map(key => `${jsonValue('a.attribution_steps', key)} NOT IN ('true','1')`).join(' AND ')}
       AND ${['execution_id','flow_execution_id','automation_flow_id','node_id'].map(key => `${jsonValue('a.attribution_steps', key)} IN ('','null')`).join(' AND ')}`);
