@@ -4,6 +4,7 @@ const authMiddleware = require('./auth.middleware');
 const chatFlowTemplatesController = require('../controllers/chatFlowTemplates.controller');
 const campaignOnboardingController = require('../controllers/campaignOnboarding.controller');
 const campaignWorkspaceController = require('../controllers/campaignWorkspace.controller');
+const adSharingController = require('../controllers/adSharing.controller');
 const marketingReportsController = require('../controllers/marketingReports.controller');
 const marketingCompetitionController = require('../controllers/marketingCompetition.controller');
 const marketingAiVisibilityController = require('../controllers/marketingAiVisibility.controller');
@@ -255,6 +256,7 @@ router.post('/chat-flow-templates/:id/duplicate', chatFlowTemplatesController.du
 router.get('/campaign-onboarding/bootstrap', campaignOnboardingController.getCampaignOnboardingBootstrap);
 router.get('/campaign-workspace', campaignWorkspaceController.getWorkspace);
 router.get('/campaign-workspace/ad-creative', campaignWorkspaceController.getAdCreative);
+router.get('/ad-sharing', adSharingController.getAdSharing);
 router.get('/campaign-workspace/configuration', campaignWorkspaceController.getConfiguration);
 router.put('/campaign-workspace/configuration', campaignWorkspaceController.saveAccounts);
 router.get('/campaign-workspace/preparation', campaignWorkspaceController.getPreparation);

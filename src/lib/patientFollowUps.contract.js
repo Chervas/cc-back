@@ -40,6 +40,14 @@ function dateOnly(value, field) {
   return value;
 }
 
+function monthOnly(value, field = 'clinical_target_month') {
+  if (value == null || value === '') return null;
+  if (typeof value !== 'string' || !/^(?:19|[2-9]\d)\d{2}-(?:0[1-9]|1[0-2])$/.test(value)) {
+    throw domainError(400, 'follow_up_invalid_month', `${field} requiere un mes AAAA-MM.`);
+  }
+  return value;
+}
+
 function madridToday(now = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -77,9 +85,19 @@ function normalizeValues(payload, { creating = false, imported = false } = {}) {
   for (const key of ['clinical_target_date', 'contact_due_date']) {
     if (creating || Object.hasOwn(payload, key)) values[key] = dateOnly(payload[key], key);
   }
+  if (creating || Object.hasOwn(payload, 'clinical_target_month')) values.clinical_target_month = monthOnly(payload.clinical_target_month);
+  if (values.clinical_target_date && values.clinical_target_month) {
+    throw domainError(400, 'follow_up_ambiguous_target', 'Elige una fecha exacta o un mes previsto, no ambos.');
+  }
+  if (values.clinical_target_month) values.clinical_target_date = null;
+  if (values.clinical_target_date) values.clinical_target_month = null;
+  if (values.clinical_target_month && values.contact_due_date && values.contact_due_date.slice(0, 7) > values.clinical_target_month) {
+    throw domainError(400, 'follow_up_contact_after_month', 'La fecha de contacto no puede ser posterior al mes previsto.');
+  }
   if (Object.hasOwn(payload, 'reminder_advance_days')) {
     const advance = payload.reminder_advance_days;
     if (advance !== null && ![1, 7, 15, 30].includes(advance)) throw domainError(400, 'follow_up_invalid_advance', 'La antelación debe ser 1, 7, 15 o 30 días.');
+    if (advance !== null && values.clinical_target_month) throw domainError(400, 'follow_up_month_advance', 'Un mes previsto no permite calcular un aviso relativo a un día exacto. Indica la fecha de contacto.');
     values.reminder_advance_days = advance;
     if (advance !== null && payload.clinical_target_date) values.contact_due_date = addDays(dateOnly(payload.clinical_target_date, 'clinical_target_date'), -advance);
   }
@@ -147,6 +165,6 @@ function makeCursor(id, scope, date = null) {
 
 module.exports = {
   STATUSES, ACTIVE_STATUSES, SOURCE_DATE_SEMANTICS, domainError, positiveInteger,
-  boundedText, dateOnly, madridToday, addDays, previousMonth, normalizeValues,
+  boundedText, dateOnly, monthOnly, madridToday, addDays, previousMonth, normalizeValues,
   sourceKey, normalizeFilters, makeCursor,
 };

@@ -81,6 +81,9 @@ function createPatientFollowUpService({ db, now = () => new Date(), noticeServic
       clinical_notes: includeClinical ? data.clinical_notes || null : null,
       clinical_notes_redacted: !includeClinical,
       clinical_target_date: data.clinical_target_date || null,
+      clinical_target_month: data.clinical_target_month || null,
+      clinical_target_precision: data.clinical_target_date ? 'day' : data.clinical_target_month ? 'month' : null,
+      clinical_target_review_reason: !data.clinical_target_date && !data.clinical_target_month ? related.targetReviewReason || null : null,
       contact_due_date: data.contact_due_date || null,
       reminder_advance_days: data.reminder_advance_days ?? null,
       recipient_mode: data.recipient_mode || 'creator', recipient_role_ids: data.recipient_role_ids || [],
@@ -110,7 +113,13 @@ function createPatientFollowUpService({ db, now = () => new Date(), noticeServic
     const treatmentIds = ids('treatment_id');
     const appointmentIds = ids('linked_appointment_id');
     const reportIds = includeClinical ? ids('source_report_id') : [];
-    const [patients, treatments, appointments, reports, clinic] = await Promise.all([
+    const reviewCandidateIds = rows.filter(row => ACTIVE_STATUSES.includes(row.status)
+      && !row.clinical_target_date && !row.clinical_target_month && row.source_kind === 'cliniccloud_alert'
+      && row.source_namespace === 'cliniccloud-5880').map(row => Number(row.id));
+    // All paths below are server constants. Sequelize's fn string escaping
+    // doubles '$' on this version, producing an invalid MySQL JSON path.
+    const revisionJson = (path, alias) => [literal(`JSON_UNQUOTE(JSON_EXTRACT(\`snapshot\`, '${path}'))`), alias];
+    const [patients, treatments, appointments, reports, clinic, importedRevisions] = await Promise.all([
       Paciente.findAll({ where: { id_paciente: { [Op.in]: ids('patient_id') } }, attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos'], transaction }),
       treatmentIds.length ? Tratamiento.findAll({ where: { id_tratamiento: { [Op.in]: treatmentIds } }, attributes: ['id_tratamiento', 'nombre'], transaction }) : [],
       appointmentIds.length ? CitaPaciente.findAll({ where: { id_cita: { [Op.in]: appointmentIds }, clinica_id: rows[0].clinic_id }, attributes: ['id_cita', 'clinica_id', 'paciente_id', 'inicio', 'estado'], transaction }) : [],
@@ -120,30 +129,47 @@ function createPatientFollowUpService({ db, now = () => new Date(), noticeServic
       }) : [],
       appointmentIds.length ? db.Clinica.findOne({ where: { id_clinica: rows[0].clinic_id },
         attributes: ['id_clinica', 'configuracion'], transaction }) : null,
+      reviewCandidateIds.length ? PatientFollowUpRevision.findAll({ where: { follow_up_id: { [Op.in]: reviewCandidateIds },
+        change_type: { [Op.in]: ['imported','import_reconciled'] } }, attributes: ['follow_up_id','version_number',
+        revisionJson('$.patient_id','patient_id'), revisionJson('$.clinic_id','clinic_id'), revisionJson('$.source_key','source_key'),
+        revisionJson('$.import_reconciliation.source_key','audit_source_key'),
+        revisionJson('$.import_reconciliation.clinical_target_review_reason','target_review_reason')],
+        order: [['version_number','DESC']], transaction, raw: true }) : [],
     ]);
     const patientMap = new Map(patients.map((row) => [Number(row.id_paciente), row]));
     const treatmentMap = new Map(treatments.map((row) => [Number(row.id_tratamiento), row]));
     const appointmentMap = new Map(appointments.map((row) => [Number(row.id_cita), row]));
     const reportMap = new Map(reports.map(row => [Number(row.id), row]));
+    const importMap = new Map();
+    for (const revision of importedRevisions) if (!importMap.has(Number(revision.follow_up_id))) importMap.set(Number(revision.follow_up_id), plain(revision));
     const items = rows.map((row) => {
       const appointment = appointmentMap.get(Number(row.linked_appointment_id));
       const report = reportMap.get(Number(row.source_report_id));
+      const snapshot = importMap.get(Number(row.id)), reviewReason = snapshot?.target_review_reason;
+      const targetReviewReason = Number(snapshot?.patient_id) === Number(row.patient_id)
+        && Number(snapshot?.clinic_id) === Number(row.clinic_id) && snapshot?.source_key === row.source_key
+        && snapshot?.audit_source_key === row.source_key && ['TARGET_MONTH_BEFORE_CONTACT','TARGET_YEAR_AMBIGUOUS','MULTIPLE_TARGET_MONTHS'].includes(reviewReason)
+        ? reviewReason : null;
       return serialize(row, { includeClinical, related: {
         patient: patientMap.get(Number(row.patient_id)), treatment: treatmentMap.get(Number(row.treatment_id)),
         appointment: Number(appointment?.paciente_id) === Number(row.patient_id)
           && Number(appointment?.clinica_id) === Number(row.clinic_id) ? appointment : null,
         clinic: Number(clinic?.id_clinica) === Number(row.clinic_id) ? clinic : null,
         report: Number(report?.patient_id) === Number(row.patient_id) && Number(report?.clinic_id) === Number(row.clinic_id) ? report : null,
+        targetReviewReason,
       } });
     });
     return notices.decorate(rows,items,actorId);
   }
 
-  async function writeRevision(row, actorId, changeType, transaction) {
+  async function writeRevision(row, actorId, changeType, transaction, importMetadata = null) {
+    // SQL DATE timestamps may have a lower precision than the JS instance.
+    // The operator receipt must describe the committed physical postimage.
+    if (importMetadata) await row.reload({ transaction });
     const value = plain(row);
     await PatientFollowUpRevision.create({
       follow_up_id: row.id, version_number: row.version_number, actor_id: actorId,
-      change_type: changeType, snapshot: value, created_at: now(),
+      change_type: changeType, snapshot: importMetadata ? { ...value, import_reconciliation: importMetadata } : value, created_at: now(),
     }, { transaction });
   }
 
@@ -179,7 +205,7 @@ function createPatientFollowUpService({ db, now = () => new Date(), noticeServic
       return { source_kind: 'clinical_report', source_namespace: 'clinicaclick', source_reference: `episode:${report.public_id}`,
         source_key: sourceKey('clinical_report', 'clinicaclick', `episode:${report.public_id}`),
         source_report_id: report.id, source_appointment_id: payload.source_appointment_id ? Number(payload.source_appointment_id) : report.appointment_id || null,
-        source_date_semantics: payload.clinical_target_date ? 'clinical_target' : 'unknown' };
+        source_date_semantics: payload.clinical_target_date || payload.clinical_target_month ? 'clinical_target' : 'unknown' };
     }
     if (payload.source_appointment_id != null) {
       const appointment = await appointmentInContext(payload.source_appointment_id, clinicId, patientId, transaction);
@@ -195,16 +221,16 @@ function createPatientFollowUpService({ db, now = () => new Date(), noticeServic
         source_kind: 'clinical_report', source_namespace: 'clinicaclick', source_reference: reference,
         source_key: sourceKey('clinical_report', 'clinicaclick', reference),
         source_appointment_id: appointment.id_cita, source_report_id: report?.id || null,
-        source_date_semantics: payload.clinical_target_date ? 'clinical_target' : 'unknown',
+        source_date_semantics: payload.clinical_target_date || payload.clinical_target_month ? 'clinical_target' : 'unknown',
       };
     }
     if (payload.source_kind === 'clinical_report') throw domainError(400, 'follow_up_source_required', 'Indica la cita origen del seguimiento.');
     const requestKey = boundedText(payload.idempotency_key, 'idempotency_key', 120);
-    return { source_kind: 'manual', source_date_semantics: payload.clinical_target_date ? 'clinical_target' : 'unknown',
+    return { source_kind: 'manual', source_date_semantics: payload.clinical_target_date || payload.clinical_target_month ? 'clinical_target' : 'unknown',
       source_key: requestKey ? sourceKey('manual', `clinic:${clinicId}:patient:${patientId}`, requestKey) : null };
   }
 
-  async function create({ clinicId, patientIdentifier, actorId, payload, includeClinical = false, importedSource = null, transaction = null }) {
+  async function create({ clinicId, patientIdentifier, actorId, payload, includeClinical = false, importedSource = null, transaction = null, importRevisionMetadata = null }) {
     clinicId = positiveInteger(clinicId, 'clinic_id');
     if (!includeClinical && Object.hasOwn(payload, 'clinical_notes')) throw domainError(403, 'follow_up_clinical_forbidden', 'No tienes permisos para modificar notas clínicas.');
     const values = normalizeValues(payload, { creating: true, imported: !!importedSource });
@@ -247,7 +273,7 @@ function createPatientFollowUpService({ db, now = () => new Date(), noticeServic
         ...values, ...source, public_id: crypto.randomUUID(), clinic_id: clinicId,
         patient_id: patient.id_paciente, version_number: 1, created_by: actorId, updated_by: actorId,
       }, { transaction: tx });
-      await writeRevision(row, actorId, importedSource ? 'imported' : 'created', tx);
+      await writeRevision(row, actorId, importedSource ? 'imported' : 'created', tx, importedSource ? importRevisionMetadata : null);
       refreshNotices(row,tx);
       return { item: (await hydrate([row], { includeClinical, transaction: tx, actorId }))[0], created: true };
     };
@@ -279,6 +305,10 @@ function createPatientFollowUpService({ db, now = () => new Date(), noticeServic
       if(notices.supported && recipientChanged) await notices.validateRecipients({...plain(row),...patch},clinicId);
       const advance = Object.hasOwn(patch,'reminder_advance_days') ? patch.reminder_advance_days : row.reminder_advance_days;
       const target = Object.hasOwn(patch,'clinical_target_date') ? patch.clinical_target_date : row.clinical_target_date;
+      const targetMonth = Object.hasOwn(patch,'clinical_target_month') ? patch.clinical_target_month : row.clinical_target_month;
+      if (targetMonth && advance != null) throw domainError(400, 'follow_up_month_advance', 'Indica una fecha de contacto para el mes previsto, sin antelación relativa a un día exacto.');
+      const contact = Object.hasOwn(patch,'contact_due_date') ? patch.contact_due_date : row.contact_due_date;
+      if (targetMonth && contact && contact.slice(0,7) > targetMonth) throw domainError(400, 'follow_up_contact_after_month', 'La fecha de contacto no puede ser posterior al mes previsto.');
       if(advance != null && (Object.hasOwn(patch,'clinical_target_date') || Object.hasOwn(patch,'reminder_advance_days'))) patch.contact_due_date = target ? addDays(target,-advance) : null;
       else if(Object.hasOwn(patch,'contact_due_date') && !Object.hasOwn(patch,'reminder_advance_days')) patch.reminder_advance_days = null;
       const nextStatus = patch.status || row.status;
@@ -317,7 +347,7 @@ function createPatientFollowUpService({ db, now = () => new Date(), noticeServic
     if(!Number.isInteger(page)||page<0||page>10000||!Number.isInteger(size)||size<1||size>100)throw domainError(400,'follow_up_invalid_page','Paginación no válida.');
     const patient=patientIdentifier?await patientInClinic(patientIdentifier,clinicId):null;
     const filters=normalizeFilters({...query,sort:'newest',limit:size,cursor:null},clinicId,patient?.id_paciente||null);
-    const sorts={contact_due:'f.contact_due_date',created_at:'f.created_at',patient_name:'CONCAT(p.nombre,\' \',p.apellidos)',reason:'f.operational_reason',clinical_target_date:'f.clinical_target_date',status:'f.status',next_notice_at:'n.next_notice_at'};
+    const sorts={contact_due:'f.contact_due_date',created_at:'f.created_at',patient_name:'CONCAT(p.nombre,\' \',p.apellidos)',reason:'f.operational_reason',clinical_target_date:"COALESCE(f.clinical_target_date,CONCAT(f.clinical_target_month,'-01'))",status:'f.status',next_notice_at:'n.next_notice_at'};
     const sort=sorts[query.sort||'next_notice_at'];
     const direction=String(query.direction||'asc').toUpperCase();
     if(!sort||!['ASC','DESC'].includes(direction))throw domainError(400,'follow_up_invalid_sort','Orden no válido.');

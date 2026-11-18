@@ -62,6 +62,65 @@ test('header upload pins public DNS and never passes Graph credentials to the im
   assert(calls.slice(1).every(c=>c.url.searchParams.get('appsecret_proof')==='a'.repeat(64)));
 });
 
+test('header VIDEO format stays in the existing operation and rejects all other formats or credential injection',()=>{
+  assert.equal(M.validate(M.HEADER,{...payload,source:'https://media.example.invalid/video.mp4',format:'VIDEO'}).format,'VIDEO');
+  M.validate(M.HEADER,{...payload,source:'https://media.example.invalid/image.png'});
+  for(const extra of [{format:'DOCUMENT'},{format:'video'},{format:'VIDEO',max:99999999},{format:'VIDEO',token:'forbidden'}]){
+    assert.throws(()=>M.validate(M.HEADER,{...payload,source:'https://media.example.invalid/video.mp4',...extra}),{code:'invalid_request'});
+  }
+});
+
+test('VIDEO sample uploads an actual MP4 with the same pinned source, OAuth session, proof and revocation checks',async()=>{
+  const {EventEmitter}=require('node:events');const calls=[];let checks=0,uploaded;
+  const original=require('./fixtures/template-video-mp4.cjs')();
+  assert.equal(media.isMp4(original),true);
+  const request=(url,options,callback)=>{
+    calls.push({url:new URL(url),options});const req=new EventEmitter();req.setTimeout=()=>{};req.destroy=()=>{};
+    req.end=body=>{if(body)uploaded=Buffer.from(body);queueMicrotask(()=>{const res=new EventEmitter();res.statusCode=200;res.destroy=()=>{};callback(res);
+      const data=calls.length===1?Buffer.from(original):Buffer.from(JSON.stringify(calls.length===2?{id:'upload:synthetic?sig=qa'}:{h:'synthetic-video-handle'}));
+      res.emit('data',data);res.emit('end');});};return req;
+  };
+  const upload=media.createTemplateMedia({request,lookup:async()=>[{address:'8.8.8.8',family:4}]});
+  const result=await upload({source:'https://media.example.invalid/video.mp4',format:'VIDEO',appId:'123',token:Buffer.from('SYNTHETIC_TOKEN'),proof:'a'.repeat(64),assertActive:()=>{checks++;}});
+  assert.equal(result.handle,'synthetic-video-handle');assert.equal(calls.length,3);assert.equal(checks,3);
+  assert.equal(calls[1].url.searchParams.get('file_type'),'video/mp4');assert.equal(calls[1].url.searchParams.get('file_name'),'template-header.mp4');
+  assert.equal(calls[2].options.headers['content-type'],'video/mp4');assert.deepEqual(uploaded,original);
+  assert.deepEqual(calls[0].options.headers,{'user-agent':'Clinicaclick-Template-Media/1.0'});
+  assert(calls.slice(1).every(c=>c.options.headers.authorization==='OAuth SYNTHETIC_TOKEN'&&c.url.searchParams.get('appsecret_proof')==='a'.repeat(64)));
+});
+
+test('VIDEO never accepts a thumbnail, truncated/fake MP4 or bytes above16MB; IMAGE remains capped at5MB',async()=>{
+  const {EventEmitter}=require('node:events');const valid=require('./fixtures/template-video-mp4.cjs')();
+  const cases=[['VIDEO',Buffer.from([137,80,78,71,13,10,26,10])],['VIDEO',valid.subarray(0,valid.length-1)],
+    ['VIDEO',Buffer.from('....ftypisom....')],['VIDEO',Buffer.alloc(media.VIDEO_MAX+1)],['IMAGE',Buffer.alloc(media.MAX+1)],['IMAGE',valid]];
+  for(const [format,data]of cases){let calls=0;
+    const request=(_url,_options,callback)=>{calls++;const req=new EventEmitter();req.setTimeout=()=>{};req.destroy=()=>{};req.end=()=>queueMicrotask(()=>{
+      const res=new EventEmitter();res.statusCode=200;res.destroy=()=>{};callback(res);res.emit('data',data);res.emit('end');});return req;};
+    await assert.rejects(media.createTemplateMedia({request,lookup:async()=>[{address:'8.8.8.8',family:4}]})({source:'https://media.example.invalid/a.mp4',format,assertActive:()=>{}}),{code:'invalid_request'});
+    assert.equal(calls,1,'invalid bytes must never start a Graph upload');
+  }
+});
+
+test('a valid VIDEO container can reach16MB while its bytes are wiped after the resumable upload',async()=>{
+  const {EventEmitter}=require('node:events');const tiny=require('./fixtures/template-video-mp4.cjs')();
+  const padding=Buffer.alloc(media.VIDEO_MAX-tiny.length);padding.writeUInt32BE(padding.length);padding.write('free',4,'ascii');
+  const original=Buffer.concat([tiny,padding]);let calls=0,uploaded;
+  const request=(_url,_options,callback)=>{calls++;const req=new EventEmitter();req.setTimeout=()=>{};req.destroy=()=>{};req.end=body=>{
+    if(body)uploaded=body;queueMicrotask(()=>{const res=new EventEmitter();res.statusCode=200;res.destroy=()=>{};callback(res);
+      res.emit('data',calls===1?original:Buffer.from(JSON.stringify(calls===2?{id:'upload:synthetic'}:{h:'synthetic-video-handle'})));res.emit('end');});};return req;};
+  const upload=media.createTemplateMedia({request,lookup:async()=>[{address:'8.8.8.8',family:4}]});
+  await upload({source:'https://media.example.invalid/a.mp4',format:'VIDEO',appId:'123',token:Buffer.from('SYNTHETIC'),proof:'a'.repeat(64),assertActive:()=>{}});
+  assert.equal(calls,3);assert.equal(uploaded.length,media.VIDEO_MAX);assert.equal(uploaded.some(v=>v!==0),false);
+});
+
+test('VIDEO revocation after download prevents either Graph upload request',async()=>{
+  const {EventEmitter}=require('node:events');let calls=0,checks=0;
+  const request=(_url,_options,callback)=>{calls++;const req=new EventEmitter();req.setTimeout=()=>{};req.destroy=()=>{};req.end=()=>queueMicrotask(()=>{
+    const res=new EventEmitter();res.statusCode=200;res.destroy=()=>{};callback(res);res.emit('data',require('./fixtures/template-video-mp4.cjs')());res.emit('end');});return req;};
+  await assert.rejects(media.createTemplateMedia({request,lookup:async()=>[{address:'8.8.8.8',family:4}]})({source:'https://media.example.invalid/a.mp4',format:'VIDEO',assertActive:()=>{if(++checks===2)throw Object.assign(Error('revoked'),{code:'revoked'});}}),{code:'revoked'});
+  assert.equal(calls,1);
+});
+
 test('signed template mutation requires an explicit clinic grant and deduplicates retries',async t=>{
   const a=await fixture(t);const {Broker}=require('../src/broker');const {BrokerStore}=require('../src/store');const {signRequest}=require('../src/auth');
   const store=new BrokerStore(require('node:path').join(a.f.dir,'template-operations.sqlite'));t.after(()=>store.close());

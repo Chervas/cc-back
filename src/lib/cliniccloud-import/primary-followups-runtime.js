@@ -33,10 +33,10 @@ async function captureLive(patientIds) {
   } finally { await connection.end(); }
 }
 
-function createIsolatedModels() {
+function createIsolatedModels({ target = null } = {}) {
   // Load only passive model definitions, never models/index, associations,
   // Express, jobs, notifications or model-global initialization hooks.
-  const config = settings();
+  const config = target ? require('./operator-database').databaseOptions(target) : settings();
   const Sequelize = require('sequelize');
   const sequelize = new Sequelize(config.database, config.user, config.password, { dialect: 'mysql', host: config.host, port: config.port, timezone: '+00:00', logging: false, pool: { max: 2, min: 0, idle: 1000 },
     dialectOptions: config.ssl ? { ssl: config.ssl } : {} });
@@ -97,8 +97,8 @@ function openJournal(filename, preparedHash) {
   } catch (error) { if (fd !== undefined) fs.closeSync(fd); fs.closeSync(lockFd); fs.unlinkSync(lockPath); throw error; }
 }
 
-async function withAccountLock(callback) {
-  const connection = await connect(); let acquired = false;
+async function withAccountLock(callback, { target = null } = {}) {
+  const connection = target ? await require('./operator-database').connectOperatorDatabase(target) : await connect(); let acquired = false;
   try {
     const [rows] = await connection.query("SELECT GET_LOCK('cliniccloud-5880-primary-followups-import',0) AS acquired");
     if (Number(rows[0].acquired) !== 1) fail('ANOTHER_PRIMARY_FOLLOWUP_IMPORT_RUNNING');

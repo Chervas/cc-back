@@ -12,11 +12,12 @@ const OPERATIONS = [LIST, CREATE, REMOVE, HEADER];
 const text = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
 function validate(operation, payload) {
   const extra = operation === LIST ? [] : operation === CREATE ? ['template'] : operation === HEADER ? ['source'] : ['name','templateId'];
-  if (!OPERATIONS.includes(operation) || !C.keys(payload, ['authorizationId','phoneId','wabaId',...extra], operation === LIST ? ['after'] : [])
+  if (!OPERATIONS.includes(operation) || !C.keys(payload, ['authorizationId','phoneId','wabaId',...extra], operation === LIST ? ['after'] : operation === HEADER ? ['format'] : [])
     || !E.uuid(payload.authorizationId) || !E.id(payload.phoneId) || !E.id(payload.wabaId)) fail('invalid_request');
   if (operation === LIST && payload.after !== undefined && !/^[A-Za-z0-9_+=/-]{1,2048}$/.test(payload.after)) fail('invalid_request');
   if (operation === REMOVE && (!E.id(payload.templateId) || !/^[a-z0-9_]{1,512}$/.test(payload.name))) fail('invalid_request');
   if (operation === HEADER) {
+    if (payload.format !== undefined && !['IMAGE','VIDEO'].includes(payload.format)) fail('invalid_request');
     require('./whatsapp-template-media').sourceUrl(payload.source);
   }
   if (operation === CREATE) {

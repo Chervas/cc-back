@@ -2114,18 +2114,23 @@ exports.postMessage = async (req, res) => {
     const userId = req.userData?.userId;
     const conversationId = req.params.id;
     const {
-      message,
+      message: requestedMessage,
       message_type = 'text',
       useTemplate = false,
       templateId,
       templateName,
       templateLanguage,
-      templateParams,
-      templateComponents,
+      templateParams: requestedTemplateParams,
+      templateComponents: requestedTemplateComponents,
+      adSharing,
       previewUrl = false,
       metadata = {},
       patientDirectionTakeConfirmed = false,
     } = req.body;
+    let message = requestedMessage;
+    let templateParams = requestedTemplateParams;
+    let templateComponents = requestedTemplateComponents;
+    let canonicalAdSharing = null;
     let outboundJobPayload = null;
 
     let conversation = await Conversation.findByPk(conversationId, { transaction });
@@ -2182,6 +2187,9 @@ exports.postMessage = async (req, res) => {
       }
     }
     const isTemplate = useTemplate || message_type === 'template';
+    if (adSharing !== undefined && (conversation.channel !== 'whatsapp' || !isTemplate)) {
+      await transaction.rollback(); return res.status(400).json({ error: 'ad_sharing_template_required' });
+    }
 
     const io = getIO();
     let clinicConfig = null;
@@ -2333,6 +2341,15 @@ exports.postMessage = async (req, res) => {
         }
         canonicalTemplateName = String(templateJson.name || '').trim();
         canonicalTemplateLanguage = String(templateJson.language || '').trim() || 'es';
+        canonicalAdSharing = await require('../services/adSharingMessage.service').resolveAdSharingMessage({
+          models: db, conversation, template: templateJson, input: adSharing, templateParams, userId,
+          buildBody: params => whatsappService.buildTemplateComponents({ templateParams: params }),
+        });
+        if (canonicalAdSharing) {
+          templateParams = canonicalAdSharing.templateParams;
+          templateComponents = canonicalAdSharing.templateComponents;
+          message = canonicalAdSharing.message;
+        }
       }
       limitStatus = await whatsappService.checkOutboundLimit({
         clinicConfig,
@@ -2344,6 +2361,7 @@ exports.postMessage = async (req, res) => {
       ...(attachment ? require('../lib/quickchat-image').metadata(attachment) : (metadata || {})),
       ...(templateParams ? { templateParams } : {}),
       ...(templateComponents ? { templateComponents } : {}),
+      ...(canonicalAdSharing ? { ad_sharing: canonicalAdSharing.metadata } : {}),
       ...(resolvedTemplate?.id ? { template_id: Number(resolvedTemplate.id) } : {}),
       ...(resolvedTemplate ? {
         template_buttons: extractWhatsappTemplateDisplayButtons(resolvedTemplate),
@@ -2606,6 +2624,7 @@ exports.postMessage = async (req, res) => {
   } catch (err) {
     if (!transaction.finished) await transaction.rollback();
     if (String(err.code || '').startsWith('quickchat_image_')) return res.status(err.status || 400).json({ error: err.code });
+    if (String(err.code || '').startsWith('ad_sharing_')) return res.status(err.status || 409).json({ error: err.code });
     if (['WHATSAPP_CHANNEL_REFUSED', 'WHATSAPP_RECIPIENT_NUMBER_RESTRICTED'].includes(err.code)) return res.status(409).json({ code: err.code, error: err.code, message: err.message });
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error postMessage', err);

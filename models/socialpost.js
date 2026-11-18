@@ -51,6 +51,11 @@ module.exports = (sequelize, DataTypes) => {
             allowNull: true,
             comment: 'URL de la imagen o video principal'
         },
+        original_media_url: {
+            type: DataTypes.TEXT,
+            allowNull: true,
+            comment: 'Archivo original de la respuesta de sincronización; media_url conserva la miniatura de las vistas existentes'
+        },
         permalink_url: {
             type: DataTypes.STRING(512),
             allowNull: true,

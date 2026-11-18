@@ -13,6 +13,7 @@ module.exports = (sequelize, DataTypes) => {
     buying_type: { type: DataTypes.STRING(64) },
     created_time: { type: DataTypes.DATE },
     updated_time: { type: DataTypes.DATE }
+    ,creative_payload: { type: DataTypes.JSON, allowNull: true }
     ,delivery_reason_text: { type: DataTypes.TEXT, allowNull: true }
     ,delivery_status: { type: DataTypes.STRING(64), allowNull: true }
     ,delivery_checked_at: { type: DataTypes.DATE, allowNull: true }

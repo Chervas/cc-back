@@ -97,7 +97,7 @@ async function metaCreativeContext({ models, scope, reference, inventory, campai
   if (connections.length !== 1) fail('workspace_meta_connection_ambiguous');
   const connection = await models.MetaConnection.findByPk(connections[0], { raw: true });
   if (!connection?.accessToken || connection.expiresAt && (!Number.isFinite(+new Date(connection.expiresAt)) || +new Date(connection.expiresAt) <= +now)) fail('workspace_meta_permissions_required');
-  return { connection, fingerprint: hash([reference, campaign.clinicId, scope.clinicIds.slice().sort((a, b) => a - b),
+  return { connection, entity, group, fingerprint: hash([reference, campaign.clinicId, scope.clinicIds.slice().sort((a, b) => a - b),
     eligible.map(row => [row.id, scopeKey(row), row.metaConnectionId]).sort(), grants.map(row => [row.id, row.status, row.connectedAt]).sort(),
     connection.id, hash(connection.accessToken), entity.updated_time || null]) };
 }
@@ -137,8 +137,24 @@ async function cachedCreative(key, load, { store = cacheClient(), now = new Date
   try { return await pending; } finally { inflight.delete(key); }
 }
 
+// Personalization may inspect already synchronized content, but opening a
+// selector must never refresh Graph, populate Redis or schedule provider work.
+async function readCachedCreative(key, { store = cacheClient(), now = new Date() } = {}) {
+  if (store.status === 'wait' && !connecting.has(store)) connecting.set(store, store.connect());
+  const connection = connecting.get(store);
+  if (connection) {
+    try { await connection; } finally { if (connecting.get(store) === connection) connecting.delete(store); }
+  }
+  const stored = await store.get(key);
+  if (!stored) return null;
+  try {
+    const entry = JSON.parse(stored);
+    return entry.version === 1 && entry.expires > +now && entry.expires <= +now + TTL * 1000 ? entry.value : null;
+  } catch { return null; }
+}
+
 async function loadWorkspaceAdCreative({ models, scope, input, now = new Date(), loadInventory = loadWorkspaceInventory,
-  read, cache = cachedCreative }) {
+  read, cache = cachedCreative, cacheOnly = false, readCache = readCachedCreative }) {
   const reference = creativeReference(input);
   const context = await inventoryContext({ models, scope, reference, loadInventory });
   if (reference.provider === 'google_ads') {
@@ -156,7 +172,8 @@ async function loadWorkspaceAdCreative({ models, scope, input, now = new Date(),
   const key = `${process.env.RUNTIME_NAMESPACE || process.env.JOB_RUNTIME_NAMESPACE || 'dev'}:campaign-ad-creative:v1:${auth.fingerprint}`;
   let result;
   try {
-    result = await cache(key, async () => {
+    if (cacheOnly) result = await readCache(key, { now }) || { preview: null, error: 'workspace_creative_not_cached' };
+    else result = await cache(key, async () => {
       try {
         const response = await (read || require('../lib/metaClient').metaGet)(reference.ad_id, {
           accessToken: auth.connection.accessToken, params: { fields: 'id,account_id,campaign_id,adset_id,creative{id,title,body,image_url,thumbnail_url,video_id,link_url,instagram_permalink_url,effective_object_story_id,object_story_spec,asset_feed_spec}' },
@@ -183,4 +200,4 @@ async function loadWorkspaceAdCreative({ models, scope, input, now = new Date(),
   return { success: true, reference, ...result };
 }
 
-module.exports = { creativeReference, publicUrl, normalizeCreative, cachedCreative, loadWorkspaceAdCreative, metaCreativeContext };
+module.exports = { creativeReference, publicUrl, normalizeCreative, cachedCreative, readCachedCreative, loadWorkspaceAdCreative, metaCreativeContext, inventoryContext };

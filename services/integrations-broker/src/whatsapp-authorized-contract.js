@@ -27,7 +27,7 @@ function definitionComponents(raw) {
         else if (b.type === 'PHONE_NUMBER') requireValue(keys(b, ['type','text','phone_number']) && /^\+?[1-9][0-9]{6,14}$/.test(b.phone_number));
         else fail('invalid_request');
       }
-    } else if (c.type === 'HEADER' && c.format === 'IMAGE') requireValue(keys(c, ['type','format'], ['example']));
+    } else if (c.type === 'HEADER' && ['IMAGE','VIDEO'].includes(c.format)) requireValue(keys(c, ['type','format'], ['example']));
     else requireValue(['BODY','HEADER','FOOTER'].includes(c.type) && keys(c, ['type','text'], c.type === 'HEADER' ? ['format','example'] : ['example'])
       && text(c.text) && (c.type !== 'HEADER' || c.format === 'TEXT') && (c.type !== 'FOOTER' || !/{{|}}/.test(c.text)));
   }
@@ -66,7 +66,7 @@ function validateMessage(message, { provider = false } = {}) {
         if (button) requireValue(['quick_reply','url'].includes(c.sub_type) && /^[0-9]$/.test(c.index) && c.parameters.length === 1);
         if (c.type === 'header') requireValue(c.parameters.length === 1);
         for (const p of c.parameters) {
-          if (c.type === 'header' && p?.type === 'image') requireValue(keys(p, ['type','image']) && keys(p.image, ['link']) && httpsUrl(p.image.link));
+          if (c.type === 'header' && ['image','video'].includes(p?.type)) requireValue(keys(p, ['type',p.type]) && keys(p[p.type], ['link']) && httpsUrl(p[p.type].link));
           else if (button && c.sub_type === 'quick_reply') requireValue(keys(p, ['type','payload']) && p.type === 'payload' && text(p.payload, 128));
           else requireValue(keys(p, ['type','text']) && p.type === 'text' && text(p.text, 1024));
         }
@@ -90,8 +90,9 @@ function verifyTemplate(raw, pin, message) {
   const components = definitionComponents(raw); const supplied = message.template.components || [];
   for (const kind of ['BODY','HEADER']) {
     const definition = components.find(c => c.type === kind); const c = supplied.find(c => c.type === kind.toLowerCase());
-    const count = definition?.format === 'IMAGE' ? 1 : definition?.text ? parameterCount(definition.text) : 0;
-    if ((c?.parameters.length || 0) !== count || c && c.parameters.some(p => p.type !== (definition?.format === 'IMAGE' ? 'image' : 'text'))) fail('operation_denied');
+    const media = ['IMAGE','VIDEO'].includes(definition?.format) ? definition.format.toLowerCase() : null;
+    const count = media ? 1 : definition?.text ? parameterCount(definition.text) : 0;
+    if ((c?.parameters.length || 0) !== count || c && c.parameters.some(p => p.type !== (media || 'text'))) fail('operation_denied');
   }
   const buttons = components.find(c => c.type === 'BUTTONS')?.buttons || [];
   for (const c of supplied.filter(c => c.type === 'button')) {

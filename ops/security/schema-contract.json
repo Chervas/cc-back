@@ -2,6 +2,9 @@
   "version": 1,
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
   "featureGroups": {
+    "ad_sharing_creative_payload": {"required":true,"tables":["SocialAdsEntities"],"migrations":["20261118123000-add-social-ad-creative-payload.js"]},
+    "ad_sharing_media": {"required":true,"tables":["SocialPosts"],"migrations":["20261118113000-add-social-post-original-media-url.js"]},
+    "patient_follow_up_target_month": {"required":true,"tables":["PatientFollowUps"],"migrations":["20261118073000-patient-follow-up-target-month.js"]},
     "google_business_profile_associations": {"required":true,"tables":["BusinessProfileAssociationScopes","BusinessProfileAssociationRequests"],"migrations":["20261111150000-business-profile-managed-associations.js"]},
     "whatsapp_contact_identities": {"enabledWhenAll":{"WHATSAPP_CONTACT_IDENTITIES_ENABLED":"true"},"tables":["WhatsappContactIdentityLocks","WhatsappConversationLinks","WhatsappContactIdentities"],"migrations":["20261110210000-whatsapp-contact-identities.js"]},
     "meta_marketing_credentials": {"required":true,"enabledWhenAny":{"DB_TLS_REQUIRED":"true","META_MARKETING_BROKER_ENABLED":"true","META_MARKETING_CREDENTIAL_RENEWAL_ENABLED":"true"},"tables":["MetaMarketingCredentialRenewals","MetaMarketingEffectiveCredentials","MetaMarketingBusinessHandovers","MetaMarketingCredentialMaintenances","MetaMarketingBusinessDrains"],"migrations":["20261107203000-create-meta-marketing-credential-renewals.js","20261107223000-create-meta-marketing-business-continuity.js"]},
@@ -82,6 +85,45 @@
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
+    "SocialAdsEntities": {
+      "columns": [
+        {
+          "COLUMN_NAME": "creative_payload",
+          "COLUMN_TYPE": "json",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": []
+    },
+    "SocialPosts": {
+      "columns": [
+        {
+          "COLUMN_NAME": "original_media_url",
+          "COLUMN_TYPE": "text",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": []
+    },
+    "PatientFollowUps": {
+      "columns": [
+        {
+          "COLUMN_NAME": "clinical_target_month",
+          "COLUMN_TYPE": "varchar(7)",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": []
+    },
     "BusinessProfileAssociationScopes": {
       "ENGINE": "InnoDB",
       "TABLE_COLLATION": "utf8mb4_0900_ai_ci",
@@ -7158,6 +7200,9 @@
       "name": "20261111150000-business-profile-managed-associations.js",
       "sha256": "5d74be56109cf2c93def72651731b3f447270e640c031124459c61de8cd00c79"
     },
-    {"name": "20261113160000-business-profile-binding-generations.js", "sha256": "4110f2325abea16ba8aa7756a7cc6aff3cf7bc1eb28bb09f6e168375b2f62103"}
+    {"name": "20261113160000-business-profile-binding-generations.js", "sha256": "4110f2325abea16ba8aa7756a7cc6aff3cf7bc1eb28bb09f6e168375b2f62103"},
+    {"name": "20261118073000-patient-follow-up-target-month.js", "sha256": "d49a3a3b53f3d135ea565ecbc02555adec0a8a3bf8cbb25369b61be7cddd3d08"},
+    {"name": "20261118113000-add-social-post-original-media-url.js", "sha256": "1c81d87e1e2fb23cdf0c6fcd858999033e45d5dd45bd7c336027ef679c79502f"},
+    {"name": "20261118123000-add-social-ad-creative-payload.js", "sha256": "349b4191959d0f7808ae7df5018a41ed512506db131842b88aa9d030c8474d9f"}
   ]
 }

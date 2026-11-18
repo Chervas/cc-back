@@ -13,6 +13,8 @@ module.exports = (sequelize, DataTypes) => {
     operational_reason: { type: DataTypes.STRING(500), allowNull: false },
     clinical_notes: DataTypes.TEXT,
     clinical_target_date: DataTypes.DATEONLY,
+    // A month is a window, never a fabricated appointment on its first day.
+    clinical_target_month: DataTypes.STRING(7),
     contact_due_date: DataTypes.DATEONLY,
     reminder_advance_days: DataTypes.INTEGER,
     recipient_mode: { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'creator' },

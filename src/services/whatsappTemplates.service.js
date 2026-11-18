@@ -107,16 +107,21 @@ function normalizeTemplateComponentsForMeta(value) {
   });
 }
 
+// Keep the existing helper names/call sites compatible; preparation now
+// handles both supported media-header formats through the same broker action.
 function findImageHeaderComponent(components) {
   const parsed = Array.isArray(components) ? components : normalizeTemplateComponentsForMeta(components);
   return parsed.find((component) => {
     const type = String(component?.type || '').trim().toUpperCase();
     const format = String(component?.format || '').trim().toUpperCase();
-    return type === 'HEADER' && format === 'IMAGE';
+    return type === 'HEADER' && ['IMAGE', 'VIDEO'].includes(format);
   }) || null;
 }
 
-function resolveConfiguredTemplateImageHeaderHandle() {
+function resolveConfiguredTemplateImageHeaderHandle(format = 'IMAGE') {
+  // An IMAGE handle must never be reused for a VIDEO header. A source URL in
+  // the catalog is sufficient; no new environment setting is required.
+  if (format === 'VIDEO') return cleanString(process.env.WHATSAPP_TEMPLATE_VIDEO_HEADER_HANDLE || '');
   return cleanString(
     process.env.WHATSAPP_REVIEW_TEMPLATE_HEADER_HANDLE ||
     process.env.WHATSAPP_TEMPLATE_IMAGE_HEADER_HANDLE ||
@@ -137,12 +142,18 @@ function getImageHeaderSampleIssue(template) {
   if (!imageHeader) return null;
 
   const sample = extractImageHeaderSample({ components });
-  if (!sample) return 'missing_image_header_sample';
-  if (/^https?:\/\//i.test(sample)) return 'image_header_sample_must_be_meta_handle';
+  const kind = String(imageHeader.format).trim().toLowerCase();
+  if (!sample) return `missing_${kind}_header_sample`;
+  if (/^https?:\/\//i.test(sample)) return `${kind}_header_sample_must_be_meta_handle`;
   return null;
 }
 
 function buildImageHeaderSamplePendingReason(issue) {
+  if (String(issue).includes('video')) {
+    if (issue === 'video_header_sample_upload_failed') return 'No se pudo preparar el ejemplo MP4 de la cabecera de vídeo. Revisa que la URL pública contenga el vídeo original válido de hasta 16 MB y que la cuenta tenga autorización vigente antes de reenviar a revisión.';
+    if (issue === 'video_header_sample_must_be_meta_handle') return 'La cabecera de vídeo requiere un media handle de Meta. El backend lo preparará desde la URL pública del MP4 original de hasta 16 MB usando la cuenta autorizada.';
+    return 'Falta un ejemplo real de vídeo para la cabecera. Añade la URL pública del MP4 original de hasta 16 MB en example.header_handle antes de enviarla a revisión.';
+  }
   if (issue === 'image_header_sample_upload_failed') {
     return 'No se pudo preparar el media handle de ejemplo requerido por Meta para la cabecera de imagen. Revisa la URL publica de ejemplo, el token de WhatsApp y META_APP_ID antes de reenviar a revision.';
   }
@@ -789,15 +800,16 @@ async function downloadTemplateHeaderImage(sampleUrl) {
   };
 }
 
-async function uploadTemplateHeaderImageHandleToMeta({ accessToken, wabaId, sampleUrl, logger = console }) {
+async function uploadTemplateHeaderImageHandleToMeta({ accessToken, wabaId, sampleUrl, format = 'IMAGE', logger = console }) {
   if (await brokerTemplateBinding(wabaId)) {
-    // AWS downloads the public image without credentials and uploads it to Meta.
+    // AWS downloads the public media without credentials and uploads it to Meta.
     // The CRM neither reads a token nor makes a legacy Meta request.
     const result = await require('../lib/whatsappAuthorizedBrokerClient').templates(wabaId,
       require('../../services/integrations-broker/src/whatsapp-template-management').HEADER,
-      { source: sampleUrl });
+      { source: sampleUrl, ...(format === 'VIDEO' ? { format } : {}) });
     return result.handle;
   }
+  if (format === 'VIDEO') throw new Error('whatsapp_template_video_header_authorized_broker_required');
   const safeAccessToken = cleanString(accessToken);
   if (!safeAccessToken) throw new Error('whatsapp_template_header_upload_missing_access_token');
   if (!META_APP_ID) throw new Error('whatsapp_template_header_upload_missing_meta_app_id');
@@ -856,7 +868,7 @@ function replaceImageHeaderHandleInComponents(components, mediaHandle) {
   return normalizeTemplateComponentsForMeta(components).map((component) => {
     const type = String(component?.type || '').trim().toUpperCase();
     const format = String(component?.format || '').trim().toUpperCase();
-    if (type !== 'HEADER' || format !== 'IMAGE') {
+    if (type !== 'HEADER' || !['IMAGE', 'VIDEO'].includes(format)) {
       return component;
     }
     return {
@@ -871,16 +883,19 @@ function replaceImageHeaderHandleInComponents(components, mediaHandle) {
 
 async function prepareTemplateImageHeaderForMeta({ template, accessToken, wabaId, logger = console }) {
   const components = normalizeTemplateComponentsForMeta(template?.components);
-  if (!findImageHeaderComponent(components)) {
+  const header = findImageHeaderComponent(components);
+  if (!header) {
     return { template: { ...template, components }, issue: null };
   }
+  const format = String(header.format).trim().toUpperCase();
+  const kind = format.toLowerCase();
 
   const currentSample = extractImageHeaderSample({ components });
   if (currentSample && !/^https?:\/\//i.test(currentSample)) {
     return { template: { ...template, components }, issue: null };
   }
 
-  const configuredHandle = resolveConfiguredTemplateImageHeaderHandle();
+  const configuredHandle = resolveConfiguredTemplateImageHeaderHandle(format);
   if (configuredHandle) {
     return {
       template: {
@@ -893,13 +908,14 @@ async function prepareTemplateImageHeaderForMeta({ template, accessToken, wabaId
   }
 
   if (!currentSample) {
-    return { template: { ...template, components }, issue: 'missing_image_header_sample' };
+    return { template: { ...template, components }, issue: `missing_${kind}_header_sample` };
   }
 
   try {
     const mediaHandle = await uploadTemplateHeaderImageHandleToMeta({
       accessToken, wabaId,
       sampleUrl: currentSample,
+      format,
       logger,
     });
     return {
@@ -914,7 +930,7 @@ async function prepareTemplateImageHeaderForMeta({ template, accessToken, wabaId
     logger.warn?.('[whatsapp-templates] No se pudo generar media handle para cabecera de plantilla', {
       reason: err?.response?.data || err?.message || err,
     });
-    return { template: { ...template, components }, issue: 'image_header_sample_upload_failed', error: err };
+    return { template: { ...template, components }, issue: `${kind}_header_sample_upload_failed`, error: err };
   }
 }
 
@@ -2691,7 +2707,7 @@ async function createTemplatesFromCatalogWithLease({
         });
         result.localPending += 1;
       }
-      console.warn('Plantilla WhatsApp con cabecera de imagen no enviada a Meta por falta de media handle de ejemplo', {
+      console.warn('Plantilla WhatsApp con cabecera multimedia no enviada a Meta por falta de media handle de ejemplo', {
         wabaId,
         name: technicalName,
         reason: imageHeaderSampleIssue,
@@ -2969,7 +2985,7 @@ async function propagateCatalogTemplateToAllClinics({
           if (result.action === 'updated') summary.placeholders_updated += 1;
           if (result?.row?.id) affectedTemplateInstances.set(Number(result.row.id), result.row);
           summary.waba_templates_updated += 1;
-          logger.warn?.('Plantilla WhatsApp con cabecera de imagen no enviada a Meta por falta de media handle de ejemplo', {
+          logger.warn?.('Plantilla WhatsApp con cabecera multimedia no enviada a Meta por falta de media handle de ejemplo', {
             clinicId,
             wabaId,
             templateCatalogId,
@@ -3799,6 +3815,9 @@ module.exports = {
   enqueueSyncForAllWabas,
   upsertClinicOverrideTemplateForClinic,
   _test: {
+    prepareTemplateImageHeaderForMeta,
+    getImageHeaderSampleIssue,
+    buildImageHeaderSamplePendingReason,
     buildVariableContractFromBody,
     reconcileCustomReplacement,
     replaceTemplateInEditableBulkSends,

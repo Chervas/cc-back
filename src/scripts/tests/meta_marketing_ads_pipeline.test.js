@@ -74,7 +74,10 @@ function persistenceFixture() {
   const dataset = {
     campaigns: [{ id: '401', name: '**Clínica Uno** Campaña', status: 'ACTIVE' }],
     adsets: [{ id: '402', name: 'Conjunto', campaign_id: '401', status: 'ACTIVE' }],
-    ads: [{ id: '403', name: 'Anuncio', adset_id: '402', campaign_id: '401', status: 'ACTIVE', creative: { id: '404', effective_instagram_media_id: '405' } }],
+    ads: [{ id: '403', name: 'Anuncio', adset_id: '402', campaign_id: '401', status: 'ACTIVE', creative: { id: '404', effective_instagram_media_id: '405',
+      sharing: { version: 1, body: 'Synthetic persistent conditions', title: 'Synthetic original', kind: 'IMAGE',
+        image_url: 'https://scontent.fbcdn.net/original.jpg', thumbnail_url: null, video_id: null,
+        original_media_url: null, source_issue: null, has_variants: false } } }],
     insights: [
       { ad_id: '403', date_start: '2026-11-01', publisher_platform: 'facebook', platform_position: 'feed', impressions: '100', reach: '50', clicks: '4', inline_link_clicks: '3', spend: '12.50' },
       { ad_id: '403', date_start: '2026-11-01', publisher_platform: 'instagram', platform_position: 'story', impressions: '40', reach: '30', clicks: '2', inline_link_clicks: '1', spend: '3.50' },
@@ -149,6 +152,7 @@ function persistenceFixture() {
       if (name === '../../models') return models;
       if (name === 'sequelize') return { Op, fn, col };
       if (name === '../lib/clinicAttribution') return { buildClinicMatcher };
+      if (name === '../lib/social-ad-creative-snapshot') return require('../../lib/social-ad-creative-snapshot');
       if (name === '../lib/metaQuarantineHttp') return { create: () => ({ get: () => { state.legacy++; throw Error('legacy_forbidden'); } }) };
       if (name === '../lib/metaClient') return { metaGet: () => { state.legacy++; throw Error('legacy_forbidden'); } };
       throw Error('unexpected_controller_import:' + name);
@@ -166,6 +170,11 @@ test('actual Ads pipeline preserves dimensions, attribution, post linkage and id
   assert.deepEqual([...f.state.insights.values()].map(row => [row.clinica_id, row.publisher_platform, row.platform_position]), [[11, 'facebook', 'feed'], [11, 'instagram', 'story']]);
   const stats = [...f.state.stats.values()][0]; assert.equal(stats.spend_facebook, 12.5); assert.equal(stats.spend_instagram, 3.5);
   assert.equal(f.state.promotions[0].effective_instagram_media_id, '405'); assert.equal(f.state.legacy, 0);
+  assert.equal(f.state.requests.find(row => row.family === 'ads').range.creativeVersion, 1);
+  assert.equal(f.state.entities.get('403').creative_payload.creative.body, 'Synthetic persistent conditions');
+  assert.deepEqual(f.state.entities.get('403').creative_payload.reference, {
+    provider: 'meta_ads', account_id: '301', campaign_id: '401', group_id: '402', ad_id: '403',
+  });
   await f.run(); assert.equal(f.state.insights.size, 2); assert.equal(f.state.actions.length, 1);
 });
 

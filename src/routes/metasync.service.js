@@ -454,6 +454,7 @@ const MetaSyncService = {
                     title: post.message ? post.message.substring(0, 255) : null,
                     content: post.message,
                     media_url: post.full_picture,
+                    ...require('../lib/social-post-original-media').originalMediaFields(post.media_url),
                     permalink_url: post.permalink_url,
                     published_at: new Date(post.created_time)
                 };
@@ -614,6 +615,7 @@ const MetaSyncService = {
                     title: post.caption ? post.caption.substring(0, 255) : null,
                     content: post.caption,
                     media_url: post.media_url || post.thumbnail_url,
+                    ...require('../lib/social-post-original-media').originalMediaFields(post.media_url),
                     permalink_url: post.permalink,
                     published_at: new Date(post.timestamp)
                 };

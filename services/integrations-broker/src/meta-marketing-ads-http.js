@@ -3,6 +3,7 @@ const K=require('./meta-marketing-credential-shape'),R=require('./meta-marketing
 const https=require('node:https'),{createHmac}=require('node:crypto');
 const {BrokerError,fail}=require('./errors'),{tokenText}=require('./whatsapp-secrets');
 const A=require('./meta-marketing-ads-contract'),M=require('./meta-marketing-contract'),D=require('./meta-marketing-discovery-contract'),C=require('./meta-marketing-oauth-contract'),E=require('./meta-marketing-enrollment-contract');
+const creative=require('./meta-marketing-ads-creative');
 function usage(headers){
   let max=0;
   const scan=(v,depth=0)=>{if(depth>6)return;if(Array.isArray(v)){for(const item of v)scan(item,depth+1);return;}if(!v||typeof v!=='object')return;
@@ -21,9 +22,10 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
     const codecScope={principalId:context?.principalId,tenantRef:context?.tenantRef,binding,assetRef:asset.assetRef,operation,policyVersion:context?.policyVersion};
     if(typeof codecScope.principalId!=='string'||!codecScope.principalId||typeof codecScope.tenantRef!=='string'||!codecScope.tenantRef||typeof codecScope.policyVersion!=='string'||!codecScope.policyVersion)fail('invalid_request');
     const diagnostic=R.create({operation,assetRef:asset.assetRef});
+    const withCreative=name==='ads'&&payload.creativeVersion===1;
     let after=null,pages=0;
     if(payload.pageToken!==null){let v;try{v=JSON.parse(cursor.open(payload.pageToken,codecScope));}catch{fail('invalid_request');}
-      if(!v||Object.keys(v).sort().join(',')!=='after,endDate,pages,startDate'||typeof v.after!=='string'||!/^[\x21-\x7e]{1,1024}$/.test(v.after)
+      if(!v||Object.keys(v).sort().join(',')!==(withCreative?'after,creativeVersion,endDate,pages,startDate':'after,endDate,pages,startDate')||withCreative&&v.creativeVersion!==1||typeof v.after!=='string'||!/^[\x21-\x7e]{1,1024}$/.test(v.after)
         ||v.startDate!==(payload.startDate??null)||v.endDate!==(payload.endDate??null)||!Number.isInteger(v.pages)||v.pages<1||v.pages>=2000)fail('invalid_request');after=v.after;pages=v.pages;}
     const ownToken=Buffer.from(token),ownApp=Buffer.from(appSecret),appToken=Buffer.concat([Buffer.from(metadata.appId+'|'),ownApp]);
     const wipe=()=>{ownToken.fill(0);ownApp.fill(0);appToken.fill(0);};signal.addEventListener('abort',wipe,{once:true});
@@ -46,7 +48,7 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
           res.on('data',chunk=>{diagnostic.stage('body');bytes+=chunk.length;if(bytes>131072){chunk.fill(0);finish(new BrokerError('provider_failed'));res.destroy();req?.destroy();}else if(!settled)chunks.push(chunk);});
           res.on('aborted',()=>{diagnostic.stage('aborted');finish(new BrokerError('provider_failed'));});res.on('error',()=>{diagnostic.stage('transport');finish(new BrokerError('provider_failed'));});
           res.on('end',()=>{if(settled)return;let buffer;try{buffer=Buffer.concat(chunks);diagnostic.stage('json');const value=JSON.parse(buffer.toString('utf8'));diagnostic.meta(value?.error);diagnostic.stage('http');
-            if(res.statusCode===429||[4,17,32,613].includes(value?.error?.code))fail('rate_limited');
+            if(res.statusCode===429||[4,17,32,613,80004].includes(value?.error?.code))fail('rate_limited');
             // debug_token authenticates the application separately from the
             // inspected credential. Its HTTP rejection cannot revoke the latter.
             if([190,102].includes(value?.error?.code))fail(bearer===appToken?'secret_unavailable':'credential_revoked');if([401,403].includes(res.statusCode)||[10,200].includes(value?.error?.code))fail('provider_unauthorized');
@@ -59,11 +61,36 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
       const verify=async(afterRead=false)=>{diagnostic.phase(afterRead?'after_credential_http':'before_credential_http');const raw=await fetchGraph(`/${metadata.graphVersion||M.GRAPH_VERSION}/debug_token?${new URLSearchParams({input_token:ownToken.toString('utf8')})}`,appToken);
         diagnostic.scopes(raw?.data?.scopes);diagnostic.phase(afterRead?'after_credential_validation':'before_credential_validation');diagnostic.credential('primary');const fresh=D.fresh(raw,binding,metadata,now());M.assertAssetCredential(fresh,asset);return fresh;};
       await verify();const proof=createHmac('sha256',ownApp).update(ownToken).digest('hex');
-      const query=new URLSearchParams({fields:A.FIELDS[name],limit:'50',appsecret_proof:proof});
+      const query=new URLSearchParams({fields:withCreative?A.CREATIVE_FIELDS:A.FIELDS[name],limit:withCreative?'10':'50',appsecret_proof:proof});
       if(after)query.set('after',after);
       if(['insights','actions'].includes(name)){query.set('level','ad');query.set('time_increment','1');query.set('time_range',JSON.stringify({since:payload.startDate,until:payload.endDate}));query.set('breakdowns','publisher_platform,platform_position');}
       diagnostic.phase('data_http');const raw=await fetchGraph(path+'?'+query,ownToken);
-      diagnostic.phase('data_projection');let results;try{results=A.projectPage(name,raw,payload);}catch(error){diagnostic.adsProjection(name,raw,payload);throw error;}let nextPageToken=null;
+      diagnostic.phase('data_projection');let results;try{
+        if(withCreative&&(!Array.isArray(raw.data)||raw.data.some(ad=>ad.account_id!==asset.id)))fail('provider_failed');
+        results=A.projectPage(name,raw,payload);
+      }catch(error){diagnostic.adsProjection(name,raw,payload);throw error;}let nextPageToken=null;
+      if(withCreative){
+        // Sources are read only for video IDs observed in this exact authorized
+        // account page. Callers cannot supply a video ID, URL or field list.
+        const ids=[...new Set(results.map(ad=>ad.creative?.sharing).filter(c=>c?.kind==='VIDEO'&&!c.has_variants&&c.video_id&&c.source_issue==='video_source_unavailable').map(c=>c.video_id))];
+        if(ids.length){
+          if(ids.length>10)fail('provider_failed');
+          const sourceQuery=new URLSearchParams({ids:ids.join(','),fields:'id,source',appsecret_proof:proof});
+          let sources,permissionDenied=false;
+          try{sources=await fetchGraph(`/${graphVersion}/?${sourceQuery}`,ownToken);}
+          catch(error){if(!['provider_failed','provider_unauthorized'].includes(error.code))throw error;permissionDenied=error.code==='provider_unauthorized';sources={};}
+          if(!sources||typeof sources!=='object'||Array.isArray(sources)||Object.keys(sources).some(id=>!ids.includes(id)))fail('provider_failed');
+          for(const value of Object.values(sources)){
+            if([190,102].includes(value?.error?.code))fail('credential_revoked');
+            if([4,17,32,613,80004].includes(value?.error?.code)){
+              pacer.observe(scope,100);const error=new BrokerError('rate_limited');
+              error.retryAfterMs=Math.max(1,pacer.usage(scope,100).pauseUntil-now());throw error;
+            }
+          }
+          for(const ad of results)if(ad.creative?.sharing)ad.creative.sharing=creative.videoSource(ad.creative.sharing,
+            permissionDenied?{error:{code:200}}:sources[ad.creative.sharing.video_id]);
+        }
+      }
       diagnostic.phase('pagination');
       if(raw.paging?.next){let next;try{next=new URL(raw.paging.next);}catch{diagnostic.pagination({urlInvalid:true});diagnostic.paginationPathVariant('other');fail('provider_failed');}
         // Classify only exact, closed equivalents for diagnosis. This is not an
@@ -90,7 +117,7 @@ function createMetaMarketingAdsHttp({request=https.request,pacer,cursor,timeoutM
           cursorUrlMismatch:next.searchParams.get('after')!==cursorAfter,cursorRepeated:cursorAfter===after,emptyPage:!results.length,pageLimitReached:pages>=1999,
           credentialReflection:typeof cursorAfter==='string'&&(cursorAfter.includes(ownToken.toString('utf8'))||cursorAfter.includes(ownApp.toString('ascii')))};
         diagnostic.pagination(pagination);if(Object.values(pagination).some(Boolean))fail('provider_failed');
-        nextPageToken=cursor.seal(JSON.stringify({after:cursorAfter,startDate:payload.startDate??null,endDate:payload.endDate??null,pages:pages+1}),codecScope);
+        nextPageToken=cursor.seal(JSON.stringify({after:cursorAfter,startDate:payload.startDate??null,endDate:payload.endDate??null,pages:pages+1,...(withCreative?{creativeVersion:1}:{})}),codecScope);
       }
       diagnostic.phase('reflection');let serialized=JSON.stringify(results);
       // Also reject URL-encoded reflections in an otherwise permitted label or

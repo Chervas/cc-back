@@ -1330,6 +1330,7 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
                 title: post.message ? post.message.substring(0, 255) : null,
                 content: post.message,
                 media_url: mediaUrl,
+                ...require('../lib/social-post-original-media').originalMediaFields(post.media_url),
                 permalink_url: post.permalink_url,
                 published_at: new Date(post.created_time)
             };
@@ -1428,6 +1429,7 @@ async function syncFacebookPosts(asset, accessToken, startDate, endDate) {
                     if (ptLower && postModel.media_type !== ptLower) payload.media_type = ptLower;
                     // Actualizar thumbnail si cambia o si no existe
                     if (mediaThumb && postModel.media_url !== mediaThumb) payload.media_url = mediaThumb;
+                    Object.assign(payload, require('../lib/social-post-original-media').facebookOriginalMedia(post, att));
                     if (Object.keys(payload).length) await postModel.update(payload);
                 }
             }
@@ -1721,10 +1723,9 @@ async function syncInstagramPosts(asset, accessToken, startDate, endDate) {
         // Guardar/actualizar publicaciones (lifetime en SocialPosts)
         const postIdToDbId = new Map();
         for (const post of posts) {
-            // Elegir thumbnail para VIDEO/REEL y media_url para imagen
-            const mt = String(post.media_type || '').toUpperCase();
-            const isVideo = (mt === 'VIDEO' || mt === 'REEL');
-            const preferredMediaUrl = isVideo ? (post.thumbnail_url || post.media_url) : (post.media_url || post.thumbnail_url);
+            // Keep existing social thumbnails while preserving the original
+            // URL already returned by this same normal synchronization call.
+            const postMedia = require('../lib/social-post-original-media').instagramPostMedia(post);
             const postData = {
                 clinica_id: asset.clinicaId,
                 asset_id: asset.id,
@@ -1733,7 +1734,7 @@ async function syncInstagramPosts(asset, accessToken, startDate, endDate) {
                 post_type: post.media_type.toLowerCase(),
                 title: post.caption ? post.caption.substring(0, 255) : null,
                 content: post.caption,
-                media_url: preferredMediaUrl,
+                ...postMedia,
                 permalink_url: post.permalink,
                 published_at: new Date(post.timestamp)
             };
@@ -2376,7 +2377,7 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
             }
 
             // 1.c) Ads con creatives para posible vínculo a posts (antes estaba como 1)
-            for await (const data of adsSource.pages('ads')) {
+            for await (const data of adsSource.pages('ads', { creativeVersion: 1 })) {
                 await adsSource.assert();
                 for (const ad of data) {
                     await adsSource.assert();
@@ -2391,7 +2392,8 @@ async function syncAdAccountMetrics(asset, accessToken, startDate, endDate, opti
                         objective: null,
                         buying_type: null,
                         created_time: ad.created_time ? new Date(ad.created_time) : null,
-                        updated_time: ad.updated_time ? new Date(ad.updated_time) : null
+                        updated_time: ad.updated_time ? new Date(ad.updated_time) : null,
+                        creative_payload: require('../lib/social-ad-creative-snapshot').socialAdCreativeSnapshot({ accountId, ad })
                     });
                     stats.entities++;
 

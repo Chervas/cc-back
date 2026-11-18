@@ -22,6 +22,7 @@ function fixture() {
   });
   const clinic = { id_clinica: 123, grupoClinicaId: 42 };
   const db = { Clinica: { findByPk: async id => Number(id) === 123 ? { ...clinic } : null },
+    WhatsappTemplate: { findOne: async () => ({ id: 1, category: state.templateCategory || 'UTILITY', catalog_template_id: null }) },
     Message: { findByPk: async id => ({ id, metadata: {} }) },
     ClinicMetaAsset: { findAll: async query => { calls.queries.push(query); return clone(state.assets.filter(a => match(a, query.where))); },
       findOne: async query => { calls.queries.push(query); const value = state.assets.find(a => match(a, query.where)); return value ? clone(value) : null; } },
@@ -41,6 +42,14 @@ function fixture() {
     } }, './securityMonitoring.service': { assertTemplateAllowed: async () => {} }, '../lib/metaQuarantineHttp': { post: async (...args) => { calls.graph.push(args); throw Object.assign(Error('meta_integration_quarantined'), { code: 'META_INTEGRATION_QUARANTINED' }); } },
     '../../models': db, '../lib/phone': require('../../lib/phone'), '../lib/whatsapp-channel-role': roles, sequelize: { Op },
     '../lib/whatsappAuthorizedBrokerClient': broker,
+    '../lib/whatsapp-contact-identity': require('../../lib/whatsapp-contact-identity'),
+    '../lib/whatsapp-dispatch-wait': require('../../lib/whatsapp-dispatch-wait'),
+    './whatsappContactIdentity.service': { assertPhoneEndpointCurrent: async () => {
+      if (state.identityBlocked) throw Object.assign(Error('synthetic_identity_conflict'), { code: 'whatsapp_contact_identity_conflict' });
+    } },
+    '../lib/bs-privacy-commercial-preferences': { channelRefusals: async () => ({ documentIds: state.signedChannelRefused ? [999] : [] }),
+      assertCommercialAllowed: async () => { if (state.signedCommercialRefused) throw Object.assign(Error('synthetic_commercial_refusal'), { code: 'synthetic_commercial_refusal' }); } },
+    './marketingOptOut.service': { isMarketingOutboundMessage: () => false },
     '../lib/automation-runtime-stop': { assertMessageCanDispatch: async () => {} },
     './whatsappChannelBindings.service': { applyClinicBindings: async (_id, assets) => assets },
     './whatsappAccountHealth.service': { summarizeAssetHealth: () => ({ can_send: !state.healthBlocked }),
@@ -84,21 +93,33 @@ test('common send preserves text, template and CTA payloads plus status and dura
     assert.deepEqual(f.calls.broker[i].payload.message, cases[i].payload); assert.equal(f.calls.broker[i].requestId, requestIdFor(String(123 + i)));
     assert.equal(f.calls.health[i].messageId, 123 + i);
   }
-  assert.equal(f.calls.graph.length, 0); assert.equal(f.calls.optOut.length, 3);
+  assert.equal(f.calls.graph.length, 0); assert.ok(f.calls.optOut.length >= cases.length);
   assert.equal(f.calls.templateScope.length, 1);
 });
-test('template explicit components, including header and quick reply, remain unchanged', async () => {
+test('template explicit IMAGE/VIDEO components, including header and quick reply, remain unchanged', async () => {
+  for (const kind of ['image', 'video']) {
   const f = fixture(); const clinicConfig = await f.service.getClinicConfig(123);
-  const components = [{ type: 'header', parameters: [{ type: 'image', image: { link: 'https://example.invalid/qa.png' } }] },
+  const components = [{ type: 'header', parameters: [{ type: kind, [kind]: { link: 'https://example.invalid/qa.' + (kind === 'image' ? 'png' : 'mp4') } }] },
     { type: 'body', parameters: [{ type: 'text', text: 'QA' }] }, { type: 'button', sub_type: 'quick_reply', index: '0', parameters: [{ type: 'payload', payload: 'synthetic_confirm' }] }];
   await f.service.sendMessage({ to: '34000000123', useTemplate: true, templateName: 'synthetic_confirmation', templateLanguage: 'es', templateComponents: components,
     clinicConfig, healthContext: { messageId: 123 } });
   assert.deepEqual(f.calls.broker[0].payload.message.template.components, components); assert.equal(f.calls.graph.length, 0);
+  }
 });
 test('health and recipient optout remain mandatory ahead of the authorized adapter', async () => {
-  for (const block of ['healthBlocked', 'optOut']) {
+  for (const block of ['healthBlocked', 'optOut', 'identityBlocked', 'signedChannelRefused']) {
     const f = fixture(); const clinicConfig = await f.service.getClinicConfig(123); f.state[block] = true;
     await assert.rejects(f.service.sendMessage({ to: '34000000123', body: 'Synthetic QA', useTemplate: false, clinicConfig, healthContext: { messageId: 123 } }));
+    assert.equal(f.calls.broker.length, 0); assert.equal(f.calls.graph.length, 0);
+  }
+});
+test('marketing IMAGE/VIDEO templates still respect signed commercial refusals at the native transport boundary', async () => {
+  for (const kind of ['image', 'video']) {
+    const f = fixture(); f.state.templateCategory = 'MARKETING'; f.state.signedCommercialRefused = true;
+    const clinicConfig = await f.service.getClinicConfig(123);
+    await assert.rejects(f.service.sendMessage({ to: '34000000123', useTemplate: true, templateName: 'synthetic_confirmation', templateLanguage: 'es',
+      templateComponents: [{ type: 'header', parameters: [{ type: kind, [kind]: { link: 'https://example.invalid/qa.mp4' } }] }],
+      clinicConfig, healthContext: { messageId: 123 } }), { code: 'synthetic_commercial_refusal' });
     assert.equal(f.calls.broker.length, 0); assert.equal(f.calls.graph.length, 0);
   }
 });

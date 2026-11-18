@@ -1,6 +1,7 @@
 'use strict';
 const { schema } = require('./contracts'), { fail } = require('./errors');
 const M = require('./meta-marketing-contract');
+const creative = require('./meta-marketing-ads-creative');
 const COHORT = 'meta-marketing-ads-read-v1';
 const OPERATIONS = Object.freeze(Object.fromEntries(['campaigns','adsets','ads','insights','actions'].map(k=>[k,`meta.marketing.ads.${k}.read.v1`])));
 const FIELDS = Object.freeze({
@@ -9,11 +10,13 @@ const FIELDS = Object.freeze({
   ads:'id,name,adset_id,campaign_id,status,effective_status,created_time,updated_time,creative{id,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url}',
   insights:'ad_id,impressions,reach,clicks,inline_link_clicks,spend,cpc,cpm,ctr,frequency', actions:'ad_id,actions',
 });
+const CREATIVE_FIELDS = 'id,account_id,name,adset_id,campaign_id,status,effective_status,created_time,updated_time,creative{id,title,body,image_url,thumbnail_url,video_id,effective_instagram_media_id,effective_object_story_id,instagram_permalink_url,object_story_spec,asset_feed_spec,platform_customizations}';
 const entity = schema({pageToken:{type:['string','null'],minLength:40,maxLength:4096}});
+const creativeEntity = schema({pageToken:{type:['string','null'],minLength:40,maxLength:4096},creativeVersion:{const:1}});
 const metrics = schema({pageToken:{type:['string','null'],minLength:40,maxLength:4096},startDate:{type:'string',pattern:'^\\d{4}-\\d{2}-\\d{2}$'},endDate:{type:'string',pattern:'^\\d{4}-\\d{2}-\\d{2}$'}});
 function family(operation){const name=Object.keys(OPERATIONS).find(k=>OPERATIONS[k]===operation);if(!name)fail('operation_denied');return name;}
 const date = value => typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;
-function validate(operation,payload){const name=family(operation);(['insights','actions'].includes(name)?metrics:entity)(payload);
+function validate(operation,payload){const name=family(operation);(['insights','actions'].includes(name)?metrics:name==='ads'&&Object.hasOwn(payload||{},'creativeVersion')?creativeEntity:entity)(payload);
   if(['insights','actions'].includes(name)&&(!date(payload.startDate)||!date(payload.endDate)||payload.endDate<payload.startDate||Date.parse(payload.endDate)-Date.parse(payload.startDate)>2*86400000))fail('invalid_request');return name;}
 function config(value){
   if(!value||Object.getPrototypeOf(value)!==Object.prototype||Object.keys(value).sort().join(',')!=='assetRefs,cohort,enabled'||value.enabled!==true||value.cohort!==COHORT
@@ -26,7 +29,7 @@ const number=(value,{integer=false}={})=>{
   if(!['number','string'].includes(typeof value)||!/^\d+(?:\.\d+)?$/.test(String(value))||!Number.isFinite(Number(value))||Number(value)>Number.MAX_SAFE_INTEGER||integer&&!Number.isSafeInteger(Number(value)))fail('provider_failed');
   return value;
 };
-function projectRow(name,row,payload){
+function projectRow(name,row,payload,normalized=false){
   if(!row||typeof row!=='object'||Array.isArray(row))fail('provider_failed');
   const out={};
   if(!['insights','actions'].includes(name)){
@@ -44,6 +47,7 @@ function projectRow(name,row,payload){
         // unnecessary, and can reflect provider credentials; never return it.
         out.creative.instagram_permalink_url=text(url.origin+url.pathname,2048);
       }
+      if(payload.creativeVersion===1)out.creative.sharing=normalized?creative.validate(c.sharing):creative.project(c);
     }
     return out;
   }
@@ -66,9 +70,10 @@ function projectRow(name,row,payload){
   }
   return out;
 }
-function projectPage(name,raw,payload){
+function projectPage(name,raw,payload,normalized=false){
   if(!raw||raw.error||!Array.isArray(raw.data)||raw.data.length>50)fail('provider_failed');
-  const results=raw.data.map(row=>projectRow(name,row,payload)),seen=new Set();
+  if(name==='ads'&&payload.creativeVersion===1&&raw.data.length>10)fail('provider_failed');
+  const results=raw.data.map(row=>projectRow(name,row,payload,normalized)),seen=new Set();
   for(const row of results){const key=row.id||JSON.stringify([row.ad_id,row.date_start,row.publisher_platform,row.platform_position]);if(seen.has(key))fail('provider_failed');seen.add(key);}
   if(Buffer.byteLength(JSON.stringify(results))>110000)fail('provider_failed');return results;
 }
@@ -78,7 +83,7 @@ function validatePage(operation,response,payload){
     ||!Number.isFinite(response.usage.usagePct)||response.usage.usagePct<0||response.usage.usagePct>100
     ||['nextAllowedAt','pauseUntil'].some(k=>!Number.isSafeInteger(response.usage[k])||response.usage[k]<0)
     ||response.nextPageToken!==null&&(typeof response.nextPageToken!=='string'||!/^[A-Za-z0-9_-]{40,4096}$/.test(response.nextPageToken)))fail('provider_failed');
-  const projected=projectPage(name,{data:response.results},payload);
+  const projected=projectPage(name,{data:response.results},payload,true);
   if(JSON.stringify(projected)!==JSON.stringify(response.results))fail('provider_failed');return structuredClone(response);
 }
-module.exports={COHORT,OPERATIONS,FIELDS,family,validate,config,date,projectRow,projectPage,validatePage};
+module.exports={COHORT,OPERATIONS,FIELDS,CREATIVE_FIELDS,family,validate,config,date,projectRow,projectPage,validatePage};
