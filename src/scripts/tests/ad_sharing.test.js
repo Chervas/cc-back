@@ -204,13 +204,17 @@ test('a twenty-ad page makes two inventory censuses and two fresh grant reads, n
     : [{ ...f.group, level: 'adset' }, ...ads.map(ad => ({ ...ad, level: 'ad' }))];
   f.models.PostPromotions.findAll = async () => ads.map(ad => ({ ...f.promotions[0], ad_id: ad.entity_id }));
   f.models.ClinicMetaAsset = { findAll: async () => { counters.mappings++; return [{ id: 1, assignmentScope: 'clinic', clinicaId: 66, metaConnectionId: 10 }]; } };
+  f.models.MetaMarketingBrokerBinding = { findAll: async () => [] };
+  f.models.MetaMarketingBrokerRevocation = { findAll: async () => [] };
+  f.models.MetaMarketingEnrollmentClaim = { findAll: async () => [] };
   f.models.MetaConnectionAssignment = { findAll: async () => { counters.grants++; return [{ id: 1, status: 'active', scopeKey: 'clinic:66', metaConnectionId: 10 }]; } };
-  f.models.MetaConnection = { findByPk: async () => { counters.connections++; return { id: 10, accessToken: 'synthetic', expiresAt: '2030-01-01' }; } };
+  f.models.MetaConnection = { findAll: async () => [{ id: 10, credentials_external: 0, broker_app_id: null }],
+    findByPk: async () => { counters.connections++; return { id: 10, accessToken: 'synthetic', expiresAt: '2030-01-01' }; } };
   delete f.args.authorizeCreative;
   f.args.loadInventory = async () => { counters.inventory++; return f.inventory; };
   const result = await loadAdSharing(f.args);
   assert.equal(result.items.length, 20);
-  assert.deepEqual(counters, { inventory: 2, mappings: 2, grants: 2, connections: 2 });
+  assert.deepEqual(counters, { inventory: 2, mappings: 4, grants: 2, connections: 2 });
 });
 
 test('cache-only creative misses never call Graph or the populating cache loader', async () => {

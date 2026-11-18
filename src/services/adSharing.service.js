@@ -4,7 +4,8 @@ const crypto = require('node:crypto');
 const { Op } = require('sequelize');
 const { loadWorkspaceInventory, selectedByWorkspace } = require('./campaignWorkspace.service');
 const { accountId, accountAliases } = require('./campaignWorkspaceReport.service');
-const { loadWorkspaceAdCreative, metaCreativeContext, publicUrl } = require('./campaignAdCreative.service');
+const { loadWorkspaceAdCreative, publicUrl } = require('./campaignAdCreative.service');
+const { createAdSharingAuthority } = require('./adSharingAuthority.service');
 const { attachLeadAdvertisingIdentities, canonicalLeadAdvertisingIdentity, resolveNativeMetaLeadIdentity } = require('./leadAdvertisingIdentity.service');
 const { PURPOSES, FAMILIES } = require('../lib/ad-sharing-templates');
 const { validSharing } = require('../lib/social-ad-creative-snapshot');
@@ -154,9 +155,10 @@ async function leadReference({ models, clinicId, leadId, attachIdentities = atta
 }
 
 async function loadAdSharing({ models, scope, input, now = new Date(), loadInventory = loadWorkspaceInventory,
-  loadCreative = loadWorkspaceAdCreative, authorizeCreative = metaCreativeContext, attachIdentities = attachLeadAdvertisingIdentities,
+  loadCreative = loadWorkspaceAdCreative, authorizeCreative = null, attachIdentities = attachLeadAdvertisingIdentities,
   selectedAdId = null }) {
   const request = sharingInput(input, scope);
+  const authorize = authorizeCreative || createAdSharingAuthority({ models });
   if (selectedAdId !== null && !numericId(selectedAdId)) fail('invalid_ad_sharing_request', 400);
   const reference = request.purpose === 'lead_ad' ? await leadReference({ models, ...request, attachIdentities }) : null;
   const result = { success: true, purpose: request.purpose, clinicId: request.clinicId,
@@ -197,7 +199,7 @@ async function loadAdSharing({ models, scope, input, now = new Date(), loadInven
   const beforeModels = authorizationModels(models, entries.map(e => e.ad), groups, settings);
   const beforeAuth = new Map();
   await Promise.all(entries.map(async entry => {
-    const auth = await authorizeCreative({ models: beforeModels, scope, reference: entry.reference, inventory, campaign: entry.campaign, now });
+    const auth = await authorize({ models: beforeModels, scope, reference: entry.reference, inventory, campaign: entry.campaign, now });
     if (request.purpose === 'patient_promotion' && (!active(entry.ad) || !active(groupMap.get(`${entry.reference.account_id}:${entry.reference.group_id}`)))) fail('ad_sharing_inventory_changed');
     beforeAuth.set(entry.reference.ad_id, auth);
   }));
@@ -222,9 +224,15 @@ async function loadAdSharing({ models, scope, input, now = new Date(), loadInven
     if (!snapshot && uniquePosts.length > 1) creative = unavailable('creative_variants_require_selection');
     else if (!snapshot && uniquePosts.length === 1) creative = creativeFromPost(uniquePosts[0], now);
     if (!snapshot && (!creative || creative.reason === 'original_media_unavailable')) {
-      const cached = await loadCreative({ models: beforeModels, scope, input: entry.reference, now,
-        loadInventory: async () => inventory, cacheOnly: true });
-      creative = creativeFromCache(cached.preview, now);
+      if (beforeAuth.get(entry.reference.ad_id).authority === 'broker') {
+        // The historical Redis key is tied to a legacy token fingerprint. A
+        // broker account without a synchronized original waits for normal sync.
+        creative = creative || unavailable('creative_not_synchronized');
+      } else {
+        const cached = await loadCreative({ models: beforeModels, scope, input: entry.reference, now,
+          loadInventory: async () => inventory, cacheOnly: true });
+        creative = creativeFromCache(cached.preview, now);
+      }
     }
     creative.shareText = creative.body || creative.headline || 'Puedes consultar los detalles en el anuncio adjunto.';
     if (creative.shareText.length > 1024) creative.reason = 'ad_copy_too_long_for_template';
@@ -257,7 +265,7 @@ async function loadAdSharing({ models, scope, input, now = new Date(), loadInven
         && row.parent_id === entry.reference.campaign_id && accountId(row.ad_account_id) === entry.reference.account_id);
       if (!currentAd || !currentGroup || snapshotDigest(currentAd.creative_payload) !== snapshotDigest(entry.ad.creative_payload)
         || request.purpose === 'patient_promotion' && (!active(currentAd) || !active(currentGroup))) fail('ad_sharing_inventory_changed');
-      const next = await authorizeCreative({ models: afterModels, scope, reference: entry.reference, inventory: current, campaign, now: new Date() });
+      const next = await authorize({ models: afterModels, scope, reference: entry.reference, inventory: current, campaign, now: new Date() });
       if (next.fingerprint !== beforeAuth.get(entry.reference.ad_id).fingerprint || request.purpose === 'patient_promotion'
         && (next.entity && !active(next.entity) || next.group && !active(next.group))) fail('ad_sharing_inventory_changed');
     }));
