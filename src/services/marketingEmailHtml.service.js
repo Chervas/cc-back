@@ -34,7 +34,7 @@ function httpsUrl(value, { allowVariables = false } = {}) {
 const RESPONSIVE_CSS = 'table{max-width:100%}img{max-width:100%}'
   + '@media screen and (max-width:640px){'
   + '.cc-e-fluid{width:100% !important;max-width:100% !important;box-sizing:border-box !important}'
-  + 'img{max-width:100% !important;height:auto !important}}';
+  + 'img{max-width:100%;height:auto !important}}';
 
 function walk(root, visit) {
   const stack = [root]; let count = 0;

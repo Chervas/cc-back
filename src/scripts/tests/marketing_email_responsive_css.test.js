@@ -12,8 +12,8 @@ body{margin:0;background:#f3f4f6}table{border-collapse:collapse}.container{width
 @media only screen and (max-width:600px){.column{display:block !important;width:100% !important}.title{font-size:22px !important}}
 @media screen and (min-width:601px){.title{font-size:30px}}
 </style></head><body><table class="container" width="640" style="width:640px"><tr>
-<td class="column" width="300"><h1 class="title">Primera columna</h1><p>Contenido de la primera columna.</p>
-<table width="180" class="button"><tr><td><img src="https://cdn.example.test/logo.png" width="35" height="35" alt="Logo"><a href="https://example.test">Botón</a></td></tr></table></td>
+<td class="column" width="300"><img class="brand" src="https://cdn.example.test/brand.png" width="150" style="display:block;width:100%;max-width:150px;height:auto" alt="Marca"><h1 class="title">Primera columna</h1><p>Contenido de la primera columna.</p>
+<table width="180" class="button"><tr><td><img class="icon" src="https://cdn.example.test/logo.png" width="35" height="35" alt="Logo"><a href="https://example.test">Botón</a></td></tr></table></td>
 <td class="column" width="300"><h1 class="title">Segunda columna</h1><p>Contenido de la segunda columna.</p></td>
 </tr></table></body></html>`;
 
@@ -27,6 +27,8 @@ test('compiled email keeps safe media rules/classes and constrains every selecto
   assert.match(clean, /class="cc-e-column" width="300"/);
   assert.match(clean, /<table width="180" class="cc-e-button">/);
   assert.match(clean, /width="35" height="35"/);
+  assert.match(clean, /width="150" style="display:block;width:100%;max-width:150px;height:auto"/);
+  assert.doesNotMatch(clean, /\.cc-email-imported img\{max-width:100% !important/);
   assert.doesNotMatch(clean, /@media[^}]*\{\.cc-email-imported table\{width:100%/);
   const source = html.validateHtmlSourceCode(TWO_COLUMNS);
   assert.equal(source, TWO_COLUMNS);
@@ -99,7 +101,8 @@ test('two-column fixture reflows at real 360px and authored CSS cannot hide comp
         const footer = document.querySelector('[data-email-footer]');
         return { viewport:innerWidth,scrollWidth:document.documentElement.scrollWidth,cells,
           buttonWidth:document.querySelector('.cc-e-button').getBoundingClientRect().width,
-          logoWidth:document.querySelector('img').getBoundingClientRect().width,
+          logoWidth:document.querySelector('.cc-e-icon').getBoundingClientRect().width,
+          brandWidth:document.querySelector('.cc-e-brand').getBoundingClientRect().width,
           footerVisible:footer.getBoundingClientRect().height>0&&getComputedStyle(footer).display!=='none' };
       });
       assert.equal(measured.scrollWidth, width);
@@ -107,6 +110,7 @@ test('two-column fixture reflows at real 360px and authored CSS cannot hide comp
       assert.equal(measured.cells.length, 2);
       assert.equal(measured.buttonWidth, 180);
       assert.equal(measured.logoWidth, 35);
+      assert.equal(measured.brandWidth, 150);
       assert.ok(measured.cells.every(c=>c.right<=width+1));
       if (width===360) { assert.ok(measured.cells[1].y>measured.cells[0].y);assert.ok(measured.cells.every(c=>c.width>=350)); }
       else { assert.equal(measured.cells[0].y, measured.cells[1].y);assert.ok(measured.cells[1].x>measured.cells[0].x); }
