@@ -430,6 +430,56 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
   assert.equal((await service.effectiveForLeads(bulkRows)).get(bulkA.id).state, 'completed', 'own attendance wins while the foreign reservation is ignored');
   report.checks.push('Actual MySQL bulk effective direction: exact same-patient foreign lead attendance excluded; legacy NULL accepted; one appointment SELECT for both requests; no read mutations.');
 
+  // This is an administrative list exception, not a director assignment or a reopening.
+  const navaeClosed = await db.LeadIntake.create({ clinica_id: 77, asignado_a: 99,
+    status_lead: 'descartado', archived_at: new Date() }, { hooks: false });
+  const navaeHandedOff = await db.LeadIntake.create({ campana_id: 77, clinica_id: 77,
+    asignado_a: 44 }, { hooks: false });
+  await snapshot(navaeHandedOff.id, { relationship: 'new_contact', patient_id: null, clinic_id: 77,
+    clinic_name: 'Synthetic Navae', same_clinic: true, captured_at: new Date().toISOString(),
+    reason: 'synthetic_snapshot', request_kind: 'commercial' });
+  const navaeRows = await db.Conversation.bulkCreate(Array.from({ length: 168 }, (_, index) => ({
+    clinic_id: 77, channel: 'whatsapp', patient_id: index % 2 ? 100 : null,
+    lead_id: index === 0 ? navaeClosed.id : index === 1 ? navaeHandedOff.id : null,
+    contact_id: `synthetic-navae-visibility-${index}`, unread_count: index % 3,
+  })));
+  await db.Message.create({ conversation_id: navaeRows[1].id, direction: 'outbound', message_type: 'event',
+    status: 'sent', sent_at: new Date(),
+    automation_delivery_key: `temporary-patient-direction:handoff:lead:77:${navaeHandedOff.id}`,
+    metadata: { source: 'temporary_patient_direction', kind: 'temporary_patient_direction_handoff',
+      clinic_id: 77, lead_intake_id: navaeHandedOff.id, director_user_id: 44 } });
+  const excludedRows = await db.Conversation.bulkCreate([
+    { clinic_id: 66, channel: 'whatsapp', patient_id: 100 },
+    { clinic_id: 72, channel: 'whatsapp', patient_id: 100 },
+    { clinic_id: 77, channel: 'instagram', patient_id: 100 },
+  ]);
+  const visibilityIds = [...navaeRows, ...excludedRows].map(row => row.id);
+  const tracked = [db.LeadIntake, db.Conversation, db.Message, db.LeadAttributionAudit, db.CitaPaciente];
+  const beforeVisibility = await Promise.all(tracked.map(model => model.findAll({ order: [['id' in model.rawAttributes ? 'id' : 'id_cita', 'ASC']], raw: true })));
+  const [[visibilityCount]] = await sql.query(`SELECT COUNT(*) AS total FROM Conversations AS Conversation
+    WHERE Conversation.id IN (:ids) AND ${predicate}`, { replacements: { ids: visibilityIds } });
+  assert.equal(Number(visibilityCount.total), 168, 'only Navae WhatsApp is added; BS and Instagram retain their old filter');
+  const visiblePages = [];
+  for (const offset of [0, 50, 100, 150]) {
+    const [page] = await sql.query(`SELECT Conversation.* FROM Conversations AS Conversation
+      WHERE Conversation.id IN (:ids) AND ${predicate} ORDER BY Conversation.id LIMIT 50 OFFSET :offset`,
+    { replacements: { ids: visibilityIds, offset } });
+    const annotated = await attachTemporaryQuickChatEligibility(page,
+      { userId: 44, email: 'maria.gonzalez@modmarketing.net' }, db.CitaPaciente);
+    assert(annotated.every(row => row.quickchat_list_eligible === true));
+    visiblePages.push(...annotated.map(row => row.id));
+  }
+  assert.deepEqual(visiblePages, navaeRows.map(row => row.id), 'COUNT, paginated WHERE and DTO expose exactly the same 168 chats');
+  const [restrictedScope] = await sql.query(`SELECT Conversation.id FROM Conversations AS Conversation
+    WHERE Conversation.id IN (:ids) AND Conversation.clinic_id IN (66,72) AND ${predicate}`,
+  { replacements: { ids: visibilityIds } });
+  assert.deepEqual(restrictedScope, [], 'the visibility exception cannot bypass an existing clinic/category WHERE');
+  const navaeDirections = await service.enrich(navaeRows.slice(0, 2).map(row => row.toJSON()));
+  assert(navaeDirections.every(row => row.patient_direction == null), 'closed and handed-off requests remain outside director responsibility');
+  const afterVisibility = await Promise.all(tracked.map(model => model.findAll({ order: [['id' in model.rawAttributes ? 'id' : 'id_cita', 'ASC']], raw: true })));
+  assert.deepEqual(afterVisibility, beforeVisibility, 'list, DTO and responsibility reads change no lead, conversation, audit, message or appointment');
+  report.checks.push('Navae WhatsApp visibility only: real COUNT=168, four ordered pages and batched DTO agree; BS66/72 and Navae Instagram excluded, normal scope remains restrictive, closed/handoff responsibility and all stored rows unchanged.');
+
   await db.LeadAttributionAudit.drop();
   await sql.transaction(async transaction => {
     await appointment.update({ nota: 'Synthetic clinical operation committed' }, { transaction });

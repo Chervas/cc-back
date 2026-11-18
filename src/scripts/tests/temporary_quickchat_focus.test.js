@@ -19,6 +19,15 @@ test('the temporary account filter does not become a role/admin-wide policy', ()
   }
 });
 
+test('Navae full visibility is confined to WhatsApp without changing the direction clinics', () => {
+  const sql = temporaryQuickChatListSql(graci);
+  assert.match(sql, /OR \(`Conversation`\.`clinic_id` = 77 AND `Conversation`\.`channel` = 'whatsapp'\)/);
+  assert.doesNotMatch(sql, /OR \(`Conversation`\.`clinic_id` = (66|72) AND/);
+  assert.deepEqual(require('../../lib/temporary-quickchat-focus').TEMPORARY_DIRECTOR_CLINICS, [66, 72, 77]);
+  assert.equal(temporaryQuickChatListSql({ userId: 1, email: graci.email }), null);
+  assert.equal(temporaryQuickChatListSql({ userId: 44, email: 'another@example.invalid' }), null);
+});
+
 test('habitual search/pagination requires the exact campaign request; explicit contact reads are exempt', () => {
   const sql = temporaryQuickChatListSql(graci);
   assert.match(sql, /qc_lead.clinica_id = `Conversation`\.`clinic_id`/);
@@ -68,17 +77,21 @@ test('contextual chats are annotated in one batched lookup without restricting t
     { id: 4, clinic_id: 72, patient_id: null, lead_id: 20, channel: 'whatsapp' },
     { id: 5, clinic_id: 72, patient_id: 12, channel: 'internal' },
     { id: 6, clinic_id: 72, patient_id: 10, channel: 'instagram' },
+    { id: 7, clinic_id: 77, patient_id: 12, channel: 'whatsapp' },
+    { id: 8, clinic_id: 77, patient_id: null, channel: 'instagram' },
   ];
   let calls = 0;
   const model = { sequelize: { async query(query, options) {
     calls++;
     assert.match(query, /temporary_patient_direction_handoff/);
-    assert.deepEqual(options.replacements.ids, [1, 3, 4, 6]);
-    return [[{ id: 1, eligible: 1 }, { id: 3, eligible: 0 }, { id: 4, eligible: 1 }, { id: 6, eligible: 1 }]];
+    assert.match(query, /`clinic_id` = 77 AND `Conversation`\.`channel` = 'whatsapp'/);
+    assert.deepEqual(options.replacements.ids, [1, 3, 4, 6, 7, 8]);
+    return [[{ id: 1, eligible: 1 }, { id: 3, eligible: 0 }, { id: 4, eligible: 1 }, { id: 6, eligible: 1 },
+      { id: 7, eligible: 1 }, { id: 8, eligible: 0 }]];
   } } };
   const payload = await attachTemporaryQuickChatEligibility(conversations, graci, model);
   assert.equal(calls, 1);
-  assert.deepEqual(payload.map(c => c.quickchat_list_eligible), [true, true, false, true, true, true]);
+  assert.deepEqual(payload.map(c => c.quickchat_list_eligible), [true, true, false, true, true, true, true, false]);
   assert.equal(payload.length, conversations.length, 'contextual access must not be filtered out');
   assert.equal(conversations[0].quickchat_list_eligible, undefined, 'do not mutate shared/socket payloads');
   assert.strictEqual(await attachTemporaryQuickChatEligibility(conversations, { userId: 1 }, model), conversations);

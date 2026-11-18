@@ -37,8 +37,10 @@ function temporaryQuickChatEligibilitySql() {
             OR \`qc_attention\`.\`sent_at\` >= (SELECT qc_request.created_at FROM LeadIntakes AS qc_request
               WHERE qc_request.id = \`Conversation\`.\`lead_id\`))))
   )`;
+  // Navae WhatsApp visibility only; responsibility and clinic/category ACLs remain separate.
   return `(\`Conversation\`.\`clinic_id\` NOT IN (${clinicIds})
     OR \`Conversation\`.\`channel\` = 'internal'
+    OR (\`Conversation\`.\`clinic_id\` = 77 AND \`Conversation\`.\`channel\` = 'whatsapp')
     OR (NOT ${event('temporary_patient_direction_handoff')}
       AND ${decision} <> 'clinic'
       AND (${decision} <> 'director' OR ${director} = '${TEMPORARY_FOCUSED_ACCOUNT.userId}')
