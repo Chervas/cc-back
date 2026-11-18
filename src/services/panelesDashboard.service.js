@@ -20,6 +20,7 @@ const {
 const personalPresenceService = require('./personalPresence.service');
 const { projectDoctorClinicas } = require('./personalScheduleSharing.service');
 const whatsappPaymentStatusService = require('./whatsappPaymentStatus.service');
+const { countLeadCallStates } = require('./leadCallState.service');
 
 const {
   AccountingCashSession,
@@ -658,22 +659,13 @@ function reviewSourceIds(sources, clinicIds) {
 
 async function countTasks({ clinicIds, clinicMap, todayDate, reviewSources = null }) {
   if (!clinicIds.length) {
-    return { leadsPending: 0, pendingConsents: 0, pendingReviews: 0 };
+    return { leadsPending: 0, leadsNeverCalled: 0, leadsNoAnswer: 0, pendingConsents: 0, pendingReviews: 0 };
   }
 
   const sources = reviewSources || await resolveDashboardReviewSources(clinicIds);
   const reviewLocationIds = reviewSourceIds(sources, clinicIds);
-  const [leadsPending, pendingConsents, pendingReviews] = await Promise.all([
-    LeadIntake
-      ? LeadIntake.count({
-          where: {
-            archived_at: null,
-            ...scopedWhere('clinica_id', clinicIds),
-            status_lead: { [Op.in]: ['nuevo', 'esperando_info', 'info_recibida'] },
-            num_contactos: 0,
-          },
-        })
-      : 0,
+  const [callCounts, pendingConsents, pendingReviews] = await Promise.all([
+    countLeadCallStates({ LeadIntake, where: scopedWhere('clinica_id', clinicIds) }),
     PatientConsentDocument
       ? PatientConsentDocument.count({
           where: {
@@ -704,7 +696,8 @@ async function countTasks({ clinicIds, clinicMap, todayDate, reviewSources = nul
     : 0;
 
   if (!reviewSources) await sources.validate();
-  return { leadsPending, pendingConsents, pendingReviews, unconfirmedToday };
+  return { leadsPending: callCounts.never_called, leadsNeverCalled: callCounts.never_called,
+    leadsNoAnswer: callCounts.no_answer, pendingConsents, pendingReviews, unconfirmedToday };
 }
 
 function taskItems(counts, todayDate, clinicIds, pendingAttendanceCount = 0) {
@@ -721,11 +714,18 @@ function taskItems(counts, todayDate, clinicIds, pendingAttendanceCount = 0) {
         }]
       : []),
     {
-      id: 'leads_pending',
-      label: 'Leads sin contactar',
-      count: counts.leadsPending || 0,
+      id: 'leads_never_called',
+      label: 'Leads sin llamar',
+      count: counts.leadsNeverCalled || 0,
       link: '/marketing/leads',
-      queryParams: { status: 'nuevo', contactado: '0' },
+      queryParams: { call_state: 'never_called', clinica_id: singleClinicId },
+    },
+    {
+      id: 'leads_no_answer',
+      label: 'Leads sin respuesta',
+      count: counts.leadsNoAnswer || 0,
+      link: '/marketing/leads',
+      queryParams: { call_state: 'no_answer', clinica_id: singleClinicId },
     },
     {
       id: 'unconfirmed_today',

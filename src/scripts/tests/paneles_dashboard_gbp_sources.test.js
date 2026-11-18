@@ -75,6 +75,7 @@ function fixture() {
     '../../models': models, '../lib/personal-schedule-recurring': { normalizeDateOnly: value => value },
     '../lib/role-helpers': { isGlobalAdmin: () => false }, '../lib/access-policy': {}, './clinicOpeningHours.service': time,
     './personalPresence.service': {}, './personalScheduleSharing.service': {}, './whatsappPaymentStatus.service': {},
+    './leadCallState.service': { countLeadCallStates: async () => ({ never_called: 6, no_answer: 0 }) },
     './effectiveMarketingAssets.service': canonical,
   }).__testing;
   return { state, calls, models, canonical, dashboard,

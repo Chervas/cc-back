@@ -38,6 +38,7 @@ const { sendCampaignMetaWebEvent: sendMetaEvent, resolveMetaWebAdvertisingIdenti
 const { extractMetaWebAttribution, WEB_LEAD_SOURCES } = require('../lib/meta-web-attribution');
 const { resolveWorkspaceWebAdIdentity } = require('../services/campaignWorkspaceWebAdAttribution.service');
 const { resolveMetaWebLeadIdentity } = require('../services/leadAdvertisingIdentity.service');
+const { normalizeCallState, leadCallStateWhere, countLeadCallStates, enrichLeadCallState } = require('../services/leadCallState.service');
 const {
   normalizeGoogleConsent,
 } = require('../services/googleAdsConversionUpload.service');
@@ -2554,7 +2555,8 @@ const enrichLeadsForUi = async (leadRows = []) => {
   const withConversations = await enrichLeadsWithConversationState(withAppointments);
   const withPatientContext = await require('../services/leadPatientContext.service').enrich(withConversations);
   const withContacts = await require('../services/leadContactSummary.service').enrichContactSummary({ models: db, leads: withPatientContext });
-  return require('../services/leadHumanInteraction.service').enrichHumanInteraction({ models: db, leads: withContacts });
+  const withCalls = await enrichLeadCallState({ models: db, leads: withContacts });
+  return require('../services/leadHumanInteraction.service').enrichHumanInteraction({ models: db, leads: withCalls });
 };
 
 const resolveClinicIdsForSocket = async ({ clinicId, groupId }) => {
@@ -6605,6 +6607,8 @@ const buildLeadListPayload = async (query = {}, context = {}) => {
     if (originWhere) where[Op.and] = [...(where[Op.and] || []), originWhere];
   }
   if (status && STATUSES.has(status)) where.status_lead = status;
+  const callState = normalizeCallState(query.call_state);
+  if (callState) appendAndWhere(where, leadCallStateWhere(callState));
 
   if (startDate || endDate) {
     where.created_at = {};
@@ -7182,6 +7186,9 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
     clinicIdRaw,
     groupIdRaw,
   });
+  const callState = normalizeCallState(req.query?.call_state);
+  if (callState) appendAndWhere(where, leadCallStateWhere(callState));
+  const callStateCounts = await countLeadCallStates({ LeadIntake, where });
 
   const { loadReportingPatientContexts, patientContextBreakdown, PATIENT_CONTEXT_EXPLANATION } = require('../services/campaignWorkspace.service');
   const segmentRows = await LeadIntake.findAll({ where, attributes: ['id', 'clinica_id'], raw: true });
@@ -7224,6 +7231,7 @@ exports.getLeadStats = asyncHandler(async (req, res) => {
     tasa_conversion,
     patient_context_breakdown: patientContext,
     patient_context_explanation: PATIENT_CONTEXT_EXPLANATION,
+    call_state_counts: callStateCounts,
     competition
   });
 });
@@ -7298,7 +7306,7 @@ exports.updateLeadStatus = asyncHandler(async (req, res) => {
     console.warn('⚠️ No se pudo registrar auditoría de cambio de estado:', auditErr.message || auditErr);
   }
 
-  res.status(200).json(lead);
+  res.status(200).json((await enrichLeadCallState({ models: db, leads: [lead] }))[0]);
 });
 
 exports.registrarContacto = asyncHandler(async (req, res) => {
@@ -7435,7 +7443,7 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
     console.warn('⚠️ No se pudo registrar auditoría de contacto:', auditErr.message || auditErr);
   }
 
-  res.status(200).json(lead);
+  res.status(200).json((await enrichLeadCallState({ models: db, leads: [lead] }))[0]);
 });
 
 exports.resolveLeadNotice = asyncHandler(async (req, res) => {
@@ -7632,7 +7640,7 @@ exports.resolveLeadNotice = asyncHandler(async (req, res) => {
     }
   }
 
-  return res.status(200).json({ lead });
+  return res.status(200).json({ lead: (await enrichLeadCallState({ models: db, leads: [lead] }))[0] });
 });
 
 exports.getCandidateAppointments = asyncHandler(async (req, res) => {
@@ -7828,7 +7836,7 @@ exports.saveCallOutcome = asyncHandler(async (req, res) => {
     console.warn('⚠️ No se pudo emitir lead:call_outcome:', emitErr.message || emitErr);
   }
 
-  return res.status(200).json({ lead });
+  return res.status(200).json({ lead: (await enrichLeadCallState({ models: db, leads: [lead] }))[0] });
 });
 
 exports.deleteLead = asyncHandler(async (req, res) => {
