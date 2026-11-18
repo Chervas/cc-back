@@ -185,10 +185,24 @@ async function queueEmail(input = {}, options = {}) {
     ].join(':'));
 
   const run = async (transaction) => {
+    // Internal callers may bind per-message capabilities and freeze the final
+    // content only once the public UUID is known. A deduplicated message keeps
+    // its original content and capability links.
+    if (options.prepareTemplateContext) {
+      const existing = await db.EmailMessage.findOne({ where: { dedupe_key: dedupeKey }, transaction });
+      if (existing) return { emailMessage: existing, created: false, job: null };
+    }
     const providerConfig = emailProvider.getConfig();
     const rowPublicId = publicId();
     const envelope = encryptEmailValue(recipientEmail, `message:${rowPublicId}:${recipientHash}`);
-    const storedTemplateContext = sealSensitiveTemplateContext(input.templateContext || {}, {
+    const preparedContext = typeof options.prepareTemplateContext === 'function'
+      ? await options.prepareTemplateContext({ publicId: rowPublicId, recipientHash, transaction, templateContext: input.templateContext || {} })
+      : (input.templateContext || {});
+    if (!preparedContext || typeof preparedContext !== 'object' || Array.isArray(preparedContext)
+      || (stream === 'marketing' && !cleanString(preparedContext.unsubscribe_url))) {
+      throw Object.assign(new Error('email_template_context_invalid'), { code: 'email_template_context_invalid' });
+    }
+    const storedTemplateContext = sealSensitiveTemplateContext(preparedContext, {
       publicId: rowPublicId,
       recipientHash,
       templateKey,

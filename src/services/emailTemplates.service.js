@@ -2,6 +2,7 @@
 
 const MAX_SUBJECT_LENGTH = 160;
 const marketingHtml = require('./marketingEmailHtml.service');
+const publicLinks = require('../lib/marketingEmailPublicLinks');
 
 function cleanString(value) {
   const normalized = String(value || '').trim();
@@ -226,7 +227,7 @@ function renderAutomationGeneric(context = {}) {
   };
 }
 
-function renderMarketingCampaign(context = {}) {
+function renderLegacyMarketingCampaign(context = {}) {
   const subject = assertSafeSubject(cleanString(context.subject) || 'Novedades de tu clínica');
   const bodyHtml = marketingHtml.sanitizeEmailHtml(cleanString(context.body_html));
   const bodyText = cleanString(context.body_text) || marketingHtml.textFromHtml(bodyHtml);
@@ -259,6 +260,46 @@ function renderMarketingCampaign(context = {}) {
     subject,
     html,
     text: `${bodyText}\n\nDejar de recibir estas comunicaciones: ${unsubscribeUrl}${showBranding ? '\nEnviado con Clinicaclick' : ''}`,
+  };
+  marketingHtml.assertContentBudget(rendered);
+  return rendered;
+}
+
+function renderMarketingCampaign(context = {}) {
+  if (context.marketing_email_snapshot) {
+    const rendered = publicLinks.readSnapshot(context.marketing_email_snapshot).rendered;
+    marketingHtml.assertContentBudget(rendered);
+    return { ...rendered };
+  }
+  // Existing outbox contexts retain their original renderer. New messages are
+  // composed before the outbox row/job is persisted and carry a signed snapshot.
+  if (context.composer_version !== 2) return renderLegacyMarketingCampaign(context);
+  const subject = assertSafeSubject(cleanString(context.subject) || 'Novedades de tu clínica');
+  const bodyHtml = marketingHtml.sanitizeEmailHtml(cleanString(context.body_html));
+  const bodyText = cleanString(context.body_text) || marketingHtml.textFromHtml(bodyHtml);
+  const links = Object.fromEntries(['unsubscribe_url', 'browser_view_url', 'preferences_url'].map(key => [key, marketingHtml.httpsUrl(context[key])]));
+  if ((!bodyHtml && !bodyText) || Object.values(links).some(value => !value)) {
+    throw Object.assign(new Error('marketing_email_body_or_unsubscribe_invalid'), { code: 'marketing_email_body_or_unsubscribe_invalid' });
+  }
+  const present = key => marketingHtml.hasVisibleSystemLink(bodyHtml, links[key]);
+  const header = present('browser_view_url') ? '' : `<table data-email-browser-view="true" role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center" style="padding:7px;background:#fff8e4;font:11px Arial,sans-serif;color:#20382b">Si no ves bien este email, haz clic <a href="${escapeHtml(links.browser_view_url)}" style="color:#20382b">aquí</a>.</td></tr></table>`;
+  const footerLinks = [];
+  if (!present('unsubscribe_url')) footerLinks.push(`<a href="${escapeHtml(links.unsubscribe_url)}" style="color:#475569;text-decoration:underline">Dejar de recibir estas comunicaciones</a>`);
+  if (!present('preferences_url')) footerLinks.push(`<a href="${escapeHtml(links.preferences_url)}" style="color:#475569;text-decoration:underline">Preferencias de email</a>`);
+  const showBranding = context.show_clinicaclick_branding !== false;
+  const branding = showBranding ? '<div style="margin-top:10px"><img src="https://crm.clinicaclick.com/assets/images/logo/isotipo-email.png" alt="Clinicaclick" width="18" height="18" style="display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:middle;border:0"><span style="vertical-align:middle">Enviado con Clinicaclick</span></div>' : '';
+  const footer = footerLinks.length || branding ? `<table data-email-footer="unsubscribe" role="presentation" width="100%" cellspacing="0" cellpadding="0" style="display:table;background:#ffffff;color:#64748b"><tr><td style="padding:20px 24px;text-align:center;font:12px/1.5 Arial,sans-serif;color:#64748b">${footerLinks.join(' · ')}${branding}</td></tr></table>` : '';
+  const preheader = cleanString(context.preheader);
+  const preheaderHtml = preheader ? `<div data-email-preheader="true" style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">${escapeHtml(preheader)}</div>` : '';
+  const textLinks = [
+    ['browser_view_url', 'Si no ves bien este email, abre'],
+    ['unsubscribe_url', 'Dejar de recibir estas comunicaciones'],
+    ['preferences_url', 'Preferencias de email'],
+  ].filter(([key]) => !bodyText.includes(links[key])).map(([key, label]) => `${label}: ${links[key]}`);
+  const rendered = {
+    subject,
+    html: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(subject)}</title></head><body style="margin:0;background:#ffffff">${preheaderHtml}${header}${bodyHtml || `<p>${escapeHtml(bodyText)}</p>`}${footer}</body></html>`,
+    text: [bodyText, ...textLinks, ...(showBranding ? ['Enviado con Clinicaclick'] : [])].join('\n\n'),
   };
   marketingHtml.assertContentBudget(rendered);
   return rendered;

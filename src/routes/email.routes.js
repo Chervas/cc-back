@@ -15,10 +15,17 @@ const limitUnsubscribe = publicRateLimit({
   windowMs: 60 * 60 * 1000,
   identity: () => 'email-unsubscribe',
 });
+const limitPublicEmail = publicRateLimit({
+  operation: 'marketing_email_public_link', limit: 120, globalIpLimit: 600,
+  windowMs: 60 * 60 * 1000, identity: () => 'email-public-link',
+});
 
 router.get('/events/provider/health', controller.providerHealth);
 router.post('/events/provider', controller.receiveProviderEvent);
 router.post('/unsubscribe', limitUnsubscribe, marketingEmailController.unsubscribe);
+router.get('/browser-view', limitPublicEmail, marketingEmailController.browserView);
+router.get('/preferences', limitPublicEmail, marketingEmailController.preferences);
+router.post('/preferences', limitUnsubscribe, marketingEmailController.updatePreferences);
 
 router.use('/admin', authMiddleware);
 router.get('/admin/overview', controller.overview);

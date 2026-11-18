@@ -156,3 +156,27 @@ exports.unsubscribe = async (req, res) => {
   try { return res.json(await service.unsubscribe(req.body?.token || req.query?.token)); }
   catch (error) { return handle(res, error, 'No se pudo registrar la baja.'); }
 };
+
+function publicEmailHeaders(res) {
+  res.set('Cache-Control', 'no-store, private');
+  res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Content-Type-Options', 'nosniff');
+}
+
+exports.browserView = async (req, res) => {
+  publicEmailHeaders(res);
+  res.set('Content-Security-Policy', "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src https:; font-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; sandbox allow-popups allow-popups-to-escape-sandbox");
+  try { return res.type('html').send(await service.browserView(req.query?.token)); }
+  catch (error) { return res.status(Number(error.status) || 404).type('text').send('El enlace de email no es válido o ha caducado.'); }
+};
+exports.preferences = async (req, res) => {
+  publicEmailHeaders(res);
+  try { return res.json(await service.preferenceStatus(req.query?.token)); }
+  catch (error) { return handle(res, error, 'No se pudieron consultar las preferencias de email.'); }
+};
+exports.updatePreferences = async (req, res) => {
+  publicEmailHeaders(res);
+  try { return res.json(await service.updatePreferences(req.body?.token, req.body?.action)); }
+  catch (error) { return handle(res, error, 'No se pudo registrar la preferencia de email.'); }
+};

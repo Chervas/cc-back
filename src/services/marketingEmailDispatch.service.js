@@ -9,6 +9,8 @@ const emailProvider = require('./emailProvider.service');
 const marketingEmail = require('./marketingEmail.service');
 const jobRequests = require('./jobRequests.service');
 const { resolveLastAttendedAppointmentDate } = require('../lib/marketing-template-variables');
+const publicLinks = require('../lib/marketingEmailPublicLinks');
+const channelSchedules = require('../lib/marketing-channel-schedules');
 
 const JOB_TYPE = 'marketing_bulk_email_dispatch';
 const DEFAULT_BATCH_SIZE = Math.max(1, Number.parseInt(process.env.MARKETING_EMAIL_BATCH_SIZE || '100', 10) || 100);
@@ -110,7 +112,7 @@ async function assetsForList(list) {
     fail('marketing_email_sender_not_ready', 409, 'El remitente de email o su firma DKIM todavía no están verificados.');
   }
   if (!template) fail('marketing_email_template_not_ready', 409, 'Selecciona una plantilla de email válida.');
-  return { sender, template, scopeKey };
+  return { sender, template: marketingEmail.compileStoredTemplate(template), scopeKey };
 }
 
 async function assertReady(list, { validateRecipients = false } = {}) {
@@ -135,7 +137,7 @@ async function assertReady(list, { validateRecipients = false } = {}) {
       }
       const clinicId = Number(item.clinica_id || list.clinica_id || 0);
       if (!clinics.has(clinicId)) clinics.set(clinicId, clinicId ? await db.Clinica.findByPk(clinicId) : null);
-      const context = templateContext({ list, item, clinic: clinics.get(clinicId) });
+      const context = { ...templateContext({ list, item, clinic: clinics.get(clinicId) }), ...publicLinks.systemVariables() };
       const missing = emailTemplates.missingTemplateVariables(
         context,
         campaignSubject(list, assets.template),
@@ -237,13 +239,17 @@ async function resumeDispatch(list, { userId = null } = {}) {
     job_id: null,
   });
   await list.reload();
-  return enqueueDispatch(list, { userId });
+  return enqueueDispatch(list, { userId, resume: true });
 }
 
-async function enqueueDispatch(list, { userId = null, scheduledAt = null } = {}) {
+async function enqueueDispatch(list, { userId = null, scheduledAt = undefined, resume = false } = {}) {
   const current = list.email_dispatch || {};
   if (['queued', 'sending', 'waiting_next_batch', 'scheduled'].includes(String(current.status || ''))) {
     return current;
+  }
+  if (scheduledAt === undefined) {
+    const channels = Array.isArray(list.criteria?.channels) ? list.criteria.channels : ['email'];
+    scheduledAt = channelSchedules.scheduledAtFor(channelSchedules.resolveSchedules(list.criteria || {}, {}, channels), 'email', { resume });
   }
   const nextRunAt = scheduledAt && new Date(scheduledAt).getTime() > Date.now() ? new Date(scheduledAt) : null;
   const job = await jobRequests.enqueueJobRequest({
@@ -318,7 +324,7 @@ function campaignPreheader(list, template) {
 
 function assertTemplateVariables(template, variables, list) {
   const missing = emailTemplates.missingTemplateVariables(
-    variables,
+    { ...variables, ...publicLinks.systemVariables() },
     campaignSubject(list, template),
     campaignPreheader(list, template),
     template.rendered_html,
@@ -330,6 +336,38 @@ function assertTemplateVariables(template, variables, list) {
   error.status = 409;
   error.details = { missing_variables: missing.map(variable => ({ variable, count: 1 })) };
   throw error;
+}
+
+function composeCampaignContext({ list, item, clinic, template, links = publicLinks.PREVIEW_LINKS }) {
+  const variables = { ...templateContext({ list, item, clinic }), ...publicLinks.systemVariables(links) };
+  assertTemplateVariables(template, variables, list);
+  return {
+    composer_version: 2,
+    subject: emailTemplates.assertSafeSubject(emailTemplates.replaceVars(campaignSubject(list, template), variables)),
+    preheader: emailTemplates.replaceVars(campaignPreheader(list, template), variables),
+    body_html: emailTemplates.replaceVars(template.rendered_html, variables, { html: true }),
+    body_text: emailTemplates.replaceVars(template.rendered_text, variables),
+    ...links,
+    show_clinicaclick_branding: template.design?.show_clinicaclick_branding !== false,
+  };
+}
+
+function prepareMessageContext({ list, item, clinic, template, scopeKey, unsubscribeUrl }) {
+  return async ({ publicId, recipientHash, transaction }) => {
+    const links = publicLinks.messageLinks({ publicId, recipientHash, scopeKey, unsubscribeUrl });
+    const context = composeCampaignContext({ list, item, clinic, template, links });
+    const rendered = emailTemplates.renderMarketingCampaign(context);
+    const group = scopeKey.startsWith('group:')
+      ? await db.GrupoClinica.findByPk(Number(scopeKey.slice(6)), { transaction, attributes: ['nombre_grupo'] }) : null;
+    const scopeLabel = group ? `Grupo ${group.nombre_grupo}` : (scopeKey.startsWith('group:') ? 'el grupo de clínicas' : clinicName(clinic));
+    return {
+      composer_version: 2,
+      unsubscribe_url: links.unsubscribe_url,
+      browser_view_url: links.browser_view_url,
+      preferences_url: links.preferences_url,
+      marketing_email_snapshot: publicLinks.sealSnapshot({ publicId, recipientHash, scopeKey, scopeLabel, expiresAt: links.expires_at, rendered }),
+    };
+  };
 }
 
 async function queueItem({ list, item, sender, template, scopeKey }) {
@@ -349,9 +387,6 @@ async function queueItem({ list, item, sender, template, scopeKey }) {
   const clinic = item.clinica_id ? await db.Clinica.findByPk(item.clinica_id) : (list.clinica_id ? await db.Clinica.findByPk(list.clinica_id) : null);
   const variables = templateContext({ list, item, clinic });
   assertTemplateVariables(template, variables, list);
-  const subject = emailTemplates.assertSafeSubject(emailTemplates.replaceVars(campaignSubject(list, template), variables));
-  const bodyHtml = emailTemplates.replaceVars(template.rendered_html, variables, { html: true });
-  const bodyText = emailTemplates.replaceVars(template.rendered_text, variables);
   const result = await emailDelivery.queueEmail({
     stream: 'marketing',
     templateKey: 'marketing.campaign',
@@ -370,14 +405,7 @@ async function queueItem({ list, item, sender, template, scopeKey }) {
     replyTo: sender.reply_to || sender.email,
     groupId: list.grupo_clinica_id || null,
     marketingConsent: true,
-    templateContext: {
-      subject,
-      preheader: emailTemplates.replaceVars(campaignPreheader(list, template), variables),
-      body_html: bodyHtml,
-      body_text: bodyText,
-      unsubscribe_url: unsubscribeUrl,
-      show_clinicaclick_branding: template.design?.show_clinicaclick_branding !== false,
-    },
+    templateContext: composeCampaignContext({ list, item, clinic, template, links: { ...publicLinks.PREVIEW_LINKS, unsubscribe_url: unsubscribeUrl } }),
     metadata: {
       ...(reviewScope.review ? { communication_purpose: 'review_request' } : {}),
       list_id: list.id,
@@ -387,7 +415,7 @@ async function queueItem({ list, item, sender, template, scopeKey }) {
       sender_identity_id: sender.id,
       contains_clinical_data: false,
     },
-  });
+  }, { prepareTemplateContext: prepareMessageContext({ list, item, clinic, template, scopeKey, unsubscribeUrl }) });
   await item.update({
     email_message_id: result.emailMessage.id,
     channel_status: mergeEmailStatus(item, { status: 'queued', email_message_id: result.emailMessage.id, queued_at: new Date().toISOString() }),
@@ -409,14 +437,19 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   });
   const batch = rows.filter(emailPending).slice(0, Math.max(1, Number(dispatch.batch_size || DEFAULT_BATCH_SIZE)));
   if (!batch.length) {
+    await list.reload();
+    const latestDispatch = list.email_dispatch || {};
+    if (latestDispatch.cancel_requested === true || ['paused', 'cancelled'].includes(String(latestDispatch.status || ''))) {
+      return { status: 'completed', result: { list_id: list.id, interrupted: latestDispatch.status } };
+    }
     const channels = Array.isArray(list.criteria?.channels) ? list.criteria.channels : [];
     const awaitingDelivery = rows.some(emailDeliveryPending);
     const completedAt = new Date();
     await list.update({
-      ...(channels.length === 1 && channels[0] === 'email' ? { status: awaitingDelivery ? 'sending' : 'completed' } : {}),
+      status: channelSchedules.campaignStatus(list, { email: awaitingDelivery ? 'awaiting_delivery' : 'completed' }, channels.length === 1 && channels[0] === 'email' ? (awaitingDelivery ? 'sending' : 'completed') : list.status),
       ...(!awaitingDelivery ? { last_sent_at: completedAt } : {}),
       email_dispatch: {
-        ...dispatch,
+        ...latestDispatch,
         status: awaitingDelivery ? 'awaiting_delivery' : 'completed',
         ...(!awaitingDelivery ? { completed_at: completedAt.toISOString() } : {}),
         next_allowed_at: null,
@@ -461,10 +494,10 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     const awaitingDelivery = remainingRows.some(emailDeliveryPending);
     const completedAt = new Date();
     await list.update({
-      ...(channels.length === 1 && channels[0] === 'email' ? { status: awaitingDelivery ? 'sending' : 'completed' } : {}),
+      status: channelSchedules.campaignStatus(list, { email: awaitingDelivery ? 'awaiting_delivery' : 'completed' }, channels.length === 1 && channels[0] === 'email' ? (awaitingDelivery ? 'sending' : 'completed') : list.status),
       ...(!awaitingDelivery ? { last_sent_at: completedAt } : {}),
       email_dispatch: {
-        ...dispatch,
+        ...liveDispatch,
         status: awaitingDelivery ? 'awaiting_delivery' : 'completed',
         ...(!awaitingDelivery ? { completed_at: completedAt.toISOString() } : {}),
         next_allowed_at: null,
@@ -528,14 +561,7 @@ async function sendTest(list, body = {}) {
     origin: 'marketing_bulk_email_test', fromEmail: `${sender.display_name} <${sender.email}>`, replyTo: sender.reply_to || sender.email,
     groupId: list.grupo_clinica_id || null,
     marketingConsent: true,
-    templateContext: {
-      subject: emailTemplates.assertSafeSubject(emailTemplates.replaceVars(campaignSubject(list, template), variables)),
-      preheader: emailTemplates.replaceVars(campaignPreheader(list, template), variables),
-      body_html: emailTemplates.replaceVars(template.rendered_html, variables, { html: true }),
-      body_text: emailTemplates.replaceVars(template.rendered_text, variables),
-      unsubscribe_url: unsubscribeUrl,
-      show_clinicaclick_branding: template.design?.show_clinicaclick_branding !== false,
-    },
+    templateContext: composeCampaignContext({ list, item, clinic, template, links: { ...publicLinks.PREVIEW_LINKS, unsubscribe_url: unsubscribeUrl } }),
     metadata: {
       ...(reviewScope.review ? { communication_purpose: 'review_request' } : {}),
       list_id: list.id,
@@ -544,7 +570,7 @@ async function sendTest(list, body = {}) {
       test: true,
       contains_clinical_data: false,
     },
-  });
+  }, { prepareTemplateContext: prepareMessageContext({ list, item, clinic, template, scopeKey, unsubscribeUrl }) });
   return { success: true, channel: 'email', to: recipientEmail, email_message_id: result.emailMessage.public_id, status: result.emailMessage.status };
 }
 
@@ -603,7 +629,7 @@ async function reconcileEmailDispatchCompletion(listId, { transaction = null } =
   const completedAt = new Date();
   const channels = Array.isArray(list.criteria?.channels) ? list.criteria.channels : [];
   await list.update({
-    ...(channels.length === 1 && channels[0] === 'email' ? { status: 'completed' } : {}),
+    status: channelSchedules.campaignStatus(list, { email: 'completed' }, channels.length === 1 && channels[0] === 'email' ? 'completed' : list.status),
     last_sent_at: completedAt,
     email_dispatch: {
       ...(list.email_dispatch || {}),

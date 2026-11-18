@@ -47,6 +47,7 @@ const {
 const publicMediaPersonalizationService = require('./publicMediaPersonalization.service');
 const marketingEmailService = require('./marketingEmail.service');
 const marketingEmailDispatchService = require('./marketingEmailDispatch.service');
+const channelSchedules = require('../lib/marketing-channel-schedules');
 
 const {
   Clinica,
@@ -630,6 +631,29 @@ function normalizeChannels(rawChannels) {
   const raw = Array.isArray(rawChannels) ? rawChannels : [rawChannels || 'whatsapp'];
   const channels = raw.map((value) => String(value || '').trim()).filter((value) => CHANNELS.has(value));
   return Array.from(new Set(channels.length ? channels : ['whatsapp']));
+}
+
+function campaignScheduleCriteria(criteria, body, channels, list = null) {
+  if (channels.some(channel => channel === 'whatsapp' || channel === 'email')) {
+    return channelSchedules.persistScheduleCriteria(criteria, body, channels, { list });
+  }
+  // Managed calls retain their existing mock/legacy scheduling contract.
+  return {
+    ...(body.schedule_mode !== undefined ? { schedule_mode: normalizeText(body.schedule_mode) || 'now' } : {}),
+    ...(body.scheduled_at !== undefined ? { scheduled_at: body.scheduled_at || null } : {}),
+  };
+}
+
+async function completedWhatsappCampaignStatus(list) {
+  // Email may have advanced while a WhatsApp batch/provider callback was in
+  // flight. Its persisted state, including a future job, owns the other channel.
+  if (list.criteria?.channel_schedules && typeof list.reload === 'function') await list.reload();
+  return channelSchedules.campaignStatus(list, { whatsapp: 'completed' }, 'completed');
+}
+
+async function refreshResumedCampaignStatus(list, overrides = {}, fallback = list.status) {
+  await list.reload();
+  await list.update({ status: channelSchedules.campaignStatus(list, overrides, fallback) });
 }
 
 function normalizeMassSendRecordKind(value, fallback = 'campaign') {
@@ -2042,6 +2066,7 @@ async function preserveRecipientListOnArchive(list, userId = null, transaction =
     sender_origin_id: _senderOriginId,
     schedule_mode: _scheduleMode,
     scheduled_at: _scheduledAt,
+    channel_schedules: _channelSchedules,
     auto_send_when_template_approved: _autoSend,
     source_list_id: _sourceListId,
     ...recipientCriteria
@@ -6659,6 +6684,7 @@ async function listCampaigns(scope, options = {}) {
 async function createCampaign(scope, body = {}, userId = null) {
   const rows = Array.isArray(body.import_rows) ? body.import_rows.filter((row) => row && typeof row === 'object') : [];
   const channels = normalizeChannels(body.channels || body.destinations || body.channel);
+  const scheduleCriteria = campaignScheduleCriteria({}, body, channels);
   const listSource = normalizeText(body.list_source || body.source || 'import');
   const sourceListId = Number(body.source_list_id || body.sourceListId || 0) || null;
   const recordKind = normalizeMassSendRecordKind(body.record_kind || body.recordKind, 'campaign');
@@ -6776,6 +6802,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         campaign_name: campaignName,
         list_name: listName,
         channels,
+        ...scheduleCriteria,
         template_usage: templateUsage,
         template_commercial: templateCommercial,
         sender_name: campaignSenderName || null,
@@ -7186,8 +7213,8 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   }
   if (body.opt_out_text !== undefined) nextCriteria.opt_out_text = normalizeText(body.opt_out_text) || null;
   if (body.consent_acknowledged !== undefined) nextCriteria.consent_acknowledged = body.consent_acknowledged === true;
-  if (body.schedule_mode !== undefined) nextCriteria.schedule_mode = normalizeText(body.schedule_mode) || 'now';
-  if (body.scheduled_at !== undefined) nextCriteria.scheduled_at = body.scheduled_at || null;
+  Object.assign(nextCriteria, campaignScheduleCriteria(list.criteria || {}, body,
+    channels || normalizeChannels(nextCriteria.channels || list.action_mode || list.channel), list));
   if (
     body.link_tracking !== undefined ||
     body.link_tracking_enabled !== undefined ||
@@ -8329,6 +8356,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     || body.destinations
     || (Array.isArray(list.criteria?.channels) ? list.criteria.channels : (list.action_mode || list.channel))
   );
+  const scheduleCriteria = campaignScheduleCriteria(list.criteria || {}, body, channels, list);
   const needsWhatsappTemplate = channels.includes('whatsapp');
   const needsEmailTemplate = channels.includes('email');
   const emailTemplateId = Number(body.email_template_id || list.email_template_id || list.criteria?.email_template_id || 0) || null;
@@ -8617,8 +8645,9 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
         : null,
       review_automation_enabled: false,
       link_tracking: buildLinkTrackingCriteria(body, list.criteria || {}),
-      schedule_mode: body.schedule_mode || 'now',
-      scheduled_at: body.scheduled_at || null,
+      schedule_mode: list.criteria?.schedule_mode || 'now',
+      scheduled_at: list.criteria?.scheduled_at || null,
+      ...scheduleCriteria,
       dispatch_config: dispatchConfig,
       dispatch: {
         ...dispatchConfig,
@@ -9534,6 +9563,9 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   const channels = Array.isArray(list.criteria?.channels)
     ? list.criteria.channels
     : normalizeChannels(list.action_mode || list.channel);
+  const scheduleBundle = channels.some(channel => channel === 'email' || channel === 'whatsapp')
+    ? channelSchedules.resolveSchedules(list.criteria || {}, body, channels, { requireFuture: true }) : null;
+  const scheduleCriteria = campaignScheduleCriteria(list.criteria || {}, body, channels, list);
   if (isReviewRequestList(list)) {
     requireReviewSenderName(list.criteria?.review_sender_name || list.criteria?.reviewSenderName);
   }
@@ -9554,9 +9586,10 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
       err.status = 409;
       throw err;
     }
+    if (Object.keys(scheduleCriteria).length) await list.update({ criteria: mergeCriteria(list, scheduleCriteria) });
     const emailDispatch = await marketingEmailDispatchService.enqueueDispatch(list, {
       userId,
-      scheduledAt: body.scheduled_at || list.criteria?.scheduled_at || null,
+      scheduledAt: channelSchedules.scheduledAtFor(scheduleBundle, 'email'),
     });
     await list.update({ status: emailDispatch.status === 'scheduled' ? 'scheduled' : 'sending' });
     return {
@@ -9617,7 +9650,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   }
 
   const accountQuality = await getWhatsappAccountQualityForList(list, scope);
-  const scheduledAt = parseDate(body.scheduled_at || list.criteria?.scheduled_at);
+  const scheduledAt = parseDate(channelSchedules.scheduledAtFor(scheduleBundle, 'whatsapp'));
   const reference = scheduledAt && scheduledAt.getTime() > Date.now() ? scheduledAt : new Date();
   const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(list, scope, dispatch);
   const businessAllowedAt = getNextBusinessAllowedAt(reference, dispatchBusinessHours);
@@ -9647,7 +9680,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   };
   await list.update({
     status: nextRunAt ? 'scheduled' : 'sending',
-    criteria: mergeCriteria(list, { dispatch_config: { ...dispatch, business_hours: dispatchBusinessHours }, dispatch: baseDispatch }),
+    criteria: mergeCriteria(list, { ...scheduleCriteria, dispatch_config: { ...dispatch, business_hours: dispatchBusinessHours }, dispatch: baseDispatch }),
   });
   const primedList = await MarketingPatientList.findByPk(list.id);
   const job = await enqueueDispatchJob({ list: primedList || list, scope, nextRunAt, userId, context, filter });
@@ -9662,8 +9695,12 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
   if (channels.includes('email')) {
     emailDispatch = await marketingEmailDispatchService.enqueueDispatch(primedList || list, {
       userId,
-      scheduledAt: body.scheduled_at || list.criteria?.scheduled_at || null,
+      scheduledAt: channelSchedules.scheduledAtFor(scheduleBundle, 'email'),
     });
+  }
+  if ((primedList || list).criteria?.channel_schedules) {
+    await (primedList || list).reload();
+    await (primedList || list).update({ status: channelSchedules.campaignStatus(primedList || list) });
   }
   await MarketingPatientContactEvent.create({
     list_id: list.id,
@@ -9854,7 +9891,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     : normalizeChannels(list.action_mode || list.channel);
   if (!channels.includes('whatsapp')) {
     const emailDispatch = await marketingEmailDispatchService.resumeDispatch(list, { userId });
-    await list.update({ status: emailDispatch.status === 'scheduled' ? 'scheduled' : 'sending' });
+    await refreshResumedCampaignStatus(list, { email: emailDispatch.status }, emailDispatch.status === 'scheduled' ? 'scheduled' : 'sending');
     return {
       success: true,
       campaign: serializeCampaign(await list.reload()),
@@ -9870,7 +9907,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
       err.status = 409;
       throw err;
     }
-    await list.update({ status: emailDispatch.status === 'scheduled' ? 'scheduled' : 'sending' });
+    await refreshResumedCampaignStatus(list, { email: emailDispatch.status }, emailDispatch.status === 'scheduled' ? 'scheduled' : 'sending');
     return {
       success: true,
       campaign: serializeCampaign(await list.reload()),
@@ -9892,6 +9929,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     if (channels.includes('email') && ['paused', 'cancelled', 'failed'].includes(String(emailDispatch?.status || ''))) {
       emailDispatch = await marketingEmailDispatchService.resumeDispatch(list, { userId });
     }
+    if (list.criteria?.channel_schedules) await refreshResumedCampaignStatus(list);
     const counters = await getDispatchScopedCounters(list, filter);
     return {
       success: true,
@@ -9981,7 +10019,9 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     throw err;
   }
   const dispatchBusinessHours = await resolveDispatchBusinessHoursForList(list, scope, dispatch);
-  const nextAllowed = getNextBusinessAllowedAt(new Date(), dispatchBusinessHours);
+  const resumeSchedules = channelSchedules.resolveSchedules(list.criteria || {}, {}, channels);
+  const originalDueAt = parseDate(channelSchedules.scheduledAtFor(resumeSchedules, 'whatsapp', { resume: true }));
+  const nextAllowed = getNextBusinessAllowedAt(originalDueAt || new Date(), dispatchBusinessHours);
   const nextRunAt = nextAllowed.getTime() > Date.now() + 1000 ? nextAllowed : null;
   const baseDispatch = {
     ...dispatch,
@@ -10008,7 +10048,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
       throw Object.assign(new Error('La cola ha cambiado durante la comprobación. Actualiza su estado antes de continuar.'), { status: 409 });
     }
     const job = await enqueueDispatchJob({ list: fresh, scope, nextRunAt, userId, context, filter, transaction });
-    await fresh.update({ status: nextRunAt ? 'scheduled' : 'sending',
+    await fresh.update({ status: channelSchedules.campaignStatus(fresh, { whatsapp: baseDispatch.status }, nextRunAt ? 'scheduled' : 'sending'),
       criteria: mergeCriteria(fresh, { dispatch: { ...baseDispatch, job_id: job.id } }),
     }, { transaction });
     await MarketingPatientContactEvent.create({ list_id: list.id, event_type: 'mass_campaign_dispatch_resumed',
@@ -10018,6 +10058,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   });
   const primedList = committed.list;
   if (committed.alreadyRunning) {
+    if (primedList.criteria?.channel_schedules) await refreshResumedCampaignStatus(primedList);
     const counters = await getDispatchScopedCounters(primedList, filter);
     return { success: true, already_running: true, campaign: serializeCampaign(primedList),
       dispatch: getDispatchProgress(primedList, counters, await getWhatsappAccountQualityForList(primedList, scope)) };
@@ -10027,6 +10068,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   if (channels.includes('email') && ['paused', 'cancelled', 'failed'].includes(String(emailDispatch?.status || ''))) {
     emailDispatch = await marketingEmailDispatchService.resumeDispatch(primedList || list, { userId });
   }
+  if ((primedList || list).criteria?.channel_schedules) await refreshResumedCampaignStatus(primedList || list);
   await triggerDispatchJobIfReady(job, nextRunAt);
   const counters = await refreshListCounters(list.id);
   const reloaded = await MarketingPatientList.findByPk(list.id);
@@ -10631,7 +10673,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
       ? await getReviewDispatchFollowUpCounters(list, filter)
       : null;
     await list.update({
-      status: 'completed',
+      status: await completedWhatsappCampaignStatus(list),
       last_sent_at: completedAt,
       criteria: mergeCriteria(list, {
         dispatch: buildDispatchCompletedPatch(dispatch, followUpCounters, completedAt),
@@ -10834,7 +10876,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
       ? await getReviewDispatchFollowUpCounters(list, filter)
       : null;
     await list.update({
-      status: 'completed',
+      status: await completedWhatsappCampaignStatus(list),
       last_sent_at: completedAt,
       criteria: mergeCriteria(list, {
         dispatch: buildDispatchCompletedPatch({
@@ -10955,7 +10997,7 @@ async function materializeMessageStatusFromWebhook({ message, status, mappedStat
           ? await getReviewDispatchFollowUpCounters(list, dispatch.filter || null)
           : null;
         await list.update({
-          status: 'completed',
+          status: await completedWhatsappCampaignStatus(list),
           last_sent_at: completedAt,
           criteria: mergeCriteria(list, {
             dispatch: buildDispatchCompletedPatch(dispatch, followUpCounters, completedAt),

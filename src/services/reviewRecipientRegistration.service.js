@@ -12,6 +12,14 @@ function projection(snapshot) {
     review: plan.operations.filter(op => op.action === 'review').slice(0, 50).map(op => ({ itemId: op.itemId, name: names.get(op.itemId), reason: op.reason })),
     reviewTotal: plan.operations.filter(op => op.action === 'review').length };
 }
+function historicalSourcePlan(list) {
+  if (list?.objective_id !== 'reactivate_patients' || list.source !== 'imported_file' || list.status === 'archived') return null;
+  // Historical imports already use the patient/date eligibility path. They are
+  // not raw mass-send recipient lists and must not enter its registration writer.
+  return { success: true, clinicId: Number(list.clinica_id), listId: Number(list.id),
+    source_kind: 'historical_patients', needsRegistration: false,
+    counts: {}, total: 0, review: [], reviewTotal: 0, sha256: null };
+}
 async function run({ db, clinicId, listId, actorId, expectedSha256, sourceSystem, apply = false }) {
   if (![clinicId,listId,actorId].every(n => Number.isSafeInteger(n) && n > 0)) throw fail('Clínica o listado inválidos', 400);
   if (apply && (!/^[a-f0-9]{64}$/.test(expectedSha256 || '') || !['gesden','cliniccloud','other','unknown'].includes(sourceSystem))) throw fail('Revisa la previsualización y el origen del listado', 400);
@@ -24,12 +32,18 @@ async function run({ db, clinicId, listId, actorId, expectedSha256, sourceSystem
   try {
     if (!apply) {
       await connection.beginTransaction();
-      try { return projection(await captureRecipientRegistration(connection, { clinicId,listId })); }
+      try {
+        const [owned] = await connection.query('SELECT * FROM MarketingPatientLists WHERE id=? AND clinica_id=?', [listId,clinicId]);
+        if (!owned.length) throw fail('Listado no encontrado',404);
+        const historical = historicalSourcePlan(owned[0]);
+        return historical || projection(await captureRecipientRegistration(connection, { clinicId,listId }));
+      }
       finally { await connection.rollback(); }
     }
     // Read ownership before looking up any receipt, including a repeated POST.
-    const [owned] = await connection.query('SELECT id FROM MarketingPatientLists WHERE id=? AND clinica_id=?', [listId,clinicId]);
+    const [owned] = await connection.query('SELECT * FROM MarketingPatientLists WHERE id=? AND clinica_id=?', [listId,clinicId]);
     if (!owned.length) throw fail('Listado no encontrado',404);
+    if (historicalSourcePlan(owned[0])) throw fail('Este listado histórico ya se comprueba mediante las fichas de pacientes y sus fechas de atención. Vuelve a comprobar los destinatarios.');
     const previous = await receipt();
     if (previous) return { success:true,...previous,replayed:true };
     try {

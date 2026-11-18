@@ -3,34 +3,14 @@
 // Email HTML is untrusted, including catalog HTML. Keep the policy in one place
 // so saving, draft previews and the final transport render use the same parser.
 const sanitizeHtml = require('sanitize-html');
+const { parseDocument, DomUtils } = require('htmlparser2');
+const css = require('../lib/marketing-email-css');
 const { MAX_REQUEST_BYTES } = require('../../services/integrations-broker/src/email-limits');
 const MAX_SOURCE_BYTES = 96 * 1024;
 const CONTENT_BUDGET_BYTES = MAX_REQUEST_BYTES - 16 * 1024;
 const VARIABLE = /\{\{\s*[a-zA-Z0-9_.-]+\s*\}\}/g;
 const EXACT_VARIABLE = /^\{\{\s*[a-zA-Z0-9_.-]+\s*\}\}$/;
-const COLOR = /^(?:#[a-f\d]{3,8}|[a-z]+|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\))$/i;
-const SIZE = /^(?:0|\d+(?:\.\d+)?(?:px|em|rem|%|pt)|auto)$/;
-const SIZES = /^(?:0|\d+(?:\.\d+)?(?:px|em|rem|%|pt)|auto)(?:\s+(?:0|\d+(?:\.\d+)?(?:px|em|rem|%|pt)|auto)){0,3}$/;
-const STYLES = {
-  color: [COLOR], 'background-color': [COLOR], background: [COLOR],
-  width: [SIZE], height: [SIZE], 'max-width': [SIZE], 'min-width': [SIZE], 'max-height': [SIZE],
-  margin: [SIZES], padding: [SIZES],
-  'font-family': [/^[a-zA-Z0-9 ,"'-]+$/], 'font-size': [SIZE],
-  'font-weight': [/^(?:normal|bold|[1-9]00)$/], 'font-style': [/^(?:normal|italic)$/],
-  font: [/^(?:(?:normal|italic|bold|[1-9]00)\s+)*\d+(?:\.\d+)?(?:px|pt|em|rem)(?:\/(?:\d+(?:\.\d+)?(?:px|pt|em|rem|%)?))?\s+[a-zA-Z0-9 ,"'-]+$/],
-  'line-height': [/^(?:normal|\d+(?:\.\d+)?(?:px|pt|em|rem|%)?)$/],
-  'letter-spacing': [SIZE], 'text-align': [/^(?:left|right|center|justify)$/],
-  'text-decoration': [/^(?:none|underline|line-through)$/], 'vertical-align': [/^(?:top|middle|bottom|baseline)$/],
-  'white-space': [/^(?:normal|pre-line|pre-wrap|nowrap)$/],
-  display: [/^(?:block|inline|inline-block|table|table-row|table-cell|none)$/],
-  'border-collapse': [/^(?:collapse|separate)$/], 'border-spacing': [SIZES],
-  'border-radius': [SIZES], border: [/^(?:0|none|\d+(?:px|pt)\s+(?:solid|dashed|dotted)\s+(?:#[a-f\d]{3,8}|[a-z]+))$/i],
-};
-for (const side of ['top', 'right', 'bottom', 'left']) {
-  STYLES[`padding-${side}`] = [SIZE];
-  STYLES[`margin-${side}`] = [SIZE];
-  STYLES[`border-${side}`] = STYLES.border;
-}
+const STYLES = css.STYLES;
 const NON_TEXT = ['script', 'style', 'textarea', 'option', 'noscript', 'iframe', 'object', 'embed', 'svg', 'math', 'head', 'title'];
 
 function invalid(code, message) {
@@ -51,11 +31,75 @@ function httpsUrl(value, { allowVariables = false } = {}) {
   } catch { return null; }
 }
 
+const RESPONSIVE_CSS = 'table{max-width:100%}img{max-width:100%}'
+  + '@media screen and (max-width:640px){'
+  + '.cc-e-fluid{width:100% !important;max-width:100% !important;box-sizing:border-box !important}'
+  + 'img{max-width:100% !important;height:auto !important}}';
+
+function walk(root, visit) {
+  const stack = [root]; let count = 0;
+  while (stack.length) {
+    const node = stack.pop();
+    if (++count > 20000) invalid('email_template_html_too_large', 'El HTML contiene demasiados elementos.');
+    visit(node);
+    if (node.children) stack.push(...node.children);
+  }
+}
+
+function authoredDocument(value) {
+  const doc = parseDocument(value, { decodeEntities: true });
+  const styles = []; let responsive = false;
+  walk(doc, node => {
+    if (node.name === 'style') {
+      styles.push((node.children || []).filter(x => x.type === 'text').map(x => x.data).join(''));
+      DomUtils.removeElement(node); return;
+    }
+    if (!node.attribs) return;
+    if (['table', 'img'].includes(node.name)) responsive = true;
+    const values = css.inlineDeclarations(node.attribs.style || '');
+    const width = values.findLast(x => x.prop === 'width');
+    const widthPx = width && /^(\d+(?:\.\d+)?)px$/.exec(width.value);
+    const attrWidth = /^(\d+(?:\.\d+)?)$/.exec(node.attribs.width || '');
+    const fixed = Number(widthPx?.[1] || attrWidth?.[1] || 0);
+    const singleCell = ['td', 'th'].includes(node.name) && (node.parent?.children || [])
+      .filter(child => ['td', 'th'].includes(child.name)).length === 1;
+    const container = ['table', 'div', 'center', 'img'].includes(node.name) || singleCell;
+    if (fixed >= 480 && fixed <= 2560 && container) {
+      responsive = true;
+      if (['table', 'td', 'th'].includes(node.name)) node.attribs.width = '100%';
+      if (width) width.value = '100%'; else values.push({ prop: 'width', value: '100%', important: false });
+      if (!values.some(x => x.prop === 'max-width')) values.push({ prop: 'max-width', value: `${fixed}px`, important: false });
+      node.attribs.class = `${node.attribs.class || ''} cc-e-fluid`.trim();
+    }
+    if (node.attribs.style !== undefined || values.length) node.attribs.style = css.declarationText(values);
+  });
+  // Unwrap only our attribute-free compiled wrapper. Every call creates a new
+  // author boundary, so an input marker never grants access to system chrome.
+  function unwrap(parent) {
+    if (!parent.children) return;
+    const children = [];
+    for (const child of parent.children) {
+      unwrap(child);
+      if (child.name === 'div' && child.attribs?.class === css.SCOPE_CLASS && Object.keys(child.attribs).length === 1) {
+        for (const nested of child.children || []) { nested.parent = parent; children.push(nested); }
+      } else children.push(child);
+    }
+    parent.children = children;
+    for (let i = 0; i < children.length; i++) { children[i].prev = children[i - 1] || null; children[i].next = children[i + 1] || null; }
+  }
+  unwrap(doc);
+  if (responsive) styles.push(RESPONSIVE_CSS);
+  return { html: DomUtils.getOuterHTML(doc), css: css.stylesheets(styles).css };
+}
+
 function sanitizeEmailHtml(value, { allowVariables = false } = {}) {
-  return sanitizeHtml(String(value || ''), {
+  const raw = String(value || '');
+  if (Buffer.byteLength(raw) > 1024 * 1024) invalid('email_template_content_too_large', 'El HTML completo supera el tamaño permitido.');
+  const source = authoredDocument(raw);
+  const clean = sanitizeHtml(source.html, {
     allowedTags: ['div', 'span', 'p', 'br', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'em', 'i', 'u', 's', 'small', 'blockquote', 'ul', 'ol', 'li', 'a', 'img', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'caption', 'colgroup', 'col', 'center'],
     allowedAttributes: {
-      '*': ['style', 'title', 'lang', 'dir', 'align'],
+      '*': ['class', 'style', 'title', 'lang', 'dir', 'align'],
       a: ['href', 'target', 'rel'], img: ['src', 'alt', 'width', 'height'],
       table: ['role', 'width', 'height', 'cellpadding', 'cellspacing', 'border', 'bgcolor'],
       td: ['width', 'height', 'colspan', 'rowspan', 'valign', 'bgcolor'],
@@ -72,6 +116,10 @@ function sanitizeEmailHtml(value, { allowVariables = false } = {}) {
       body: (tagName, attribs) => ({ tagName: 'div', attribs }),
       '*': (tagName, attribs) => {
         const next = { ...attribs };
+        if (next.class !== undefined) {
+          const classes = [...new Set(next.class.split(/\s+/).slice(0, 32).map(css.classToken).filter(Boolean))];
+          if (classes.length) next.class = classes.join(' '); else delete next.class;
+        }
         for (const key of Object.keys(next)) {
           if (key !== 'style' && key !== 'href' && key !== 'src'
             && !['alt', 'title'].includes(key) && /\{\{|\}\}/.test(next[key])) delete next[key];
@@ -93,6 +141,54 @@ function sanitizeEmailHtml(value, { allowVariables = false } = {}) {
     exclusiveFilter: frame => /(?:^|;)\s*display\s*:\s*none(?:\s*!important)?\s*(?:;|$)/i.test(frame.attribs.style || '')
       || (frame.tag === 'img' && !frame.attribs.src),
   });
+  if (!clean.trim()) return '';
+  // Styles are generated from the bounded AST allowlist, never raw <style>.
+  // The wrapper closes before the compositor adds mandatory service links.
+  return `<div class="${css.SCOPE_CLASS}">${source.css ? `<style>${source.css}</style>` : ''}${clean}</div>`;
+}
+
+function hasVisibleSystemLink(value, url) {
+  if (!httpsUrl(url)) return false;
+  const raw = String(value || '');
+  if (Buffer.byteLength(raw) > 1024 * 1024) return false;
+  try {
+    const doc = parseDocument(raw, { decodeEntities: true });
+    const styles = [], anchors = [];
+    walk(doc, node => {
+      if (node.name === 'style') styles.push((node.children || []).filter(x => x.type === 'text').map(x => x.data).join(''));
+      if (node.name === 'a' && node.attribs?.href === url) anchors.push(node);
+    });
+    const { rules } = css.stylesheets(styles);
+    return anchors.some(anchor => {
+      const labels = [];
+      walk(anchor, node => {
+        if (node.type === 'text' && node.data.replace(/[\s\u200B-\u200D\u2060\uFEFF]/g, '')) labels.push(node);
+      });
+      return labels.some(label => {
+      const path = [];
+      for (let node = label.parent; node && node.type !== 'root'; node = node.parent) path.unshift(node);
+      let colors = new Set(['000000']), backgrounds = new Set(['ffffff']);
+      for (const node of path) {
+        if (!node.attribs) continue;
+        const declarations = rules.filter(rule => rule.selectors.some(selected => css.matchesSelector(node, selected)))
+          .flatMap(rule => rule.declarations).concat(css.inlineDeclarations(node.attribs.style || ''));
+        if (Object.hasOwn(node.attribs, 'hidden') || node.attribs['aria-hidden'] === 'true'
+          || css.hiddenDeclarations(declarations)) return false;
+        // Any width-media state that can hide the authored link requires the
+        // protected footer. This intentionally errs towards adding that footer.
+        const foreground = declarations.filter(d => d.prop === 'color').map(d => css.opaqueColor(d.value)).filter(Boolean);
+        const background = declarations.filter(d => ['background', 'background-color'].includes(d.prop))
+          .map(d => css.opaqueColor(d.value)).filter(Boolean);
+        const legacyBackground = css.opaqueColor(node.attribs.bgcolor || '');
+        if (foreground.length) colors = new Set(foreground);
+        if (legacyBackground) background.push(legacyBackground);
+        if (background.length) backgrounds = new Set(background);
+        if (node === label.parent && [...colors].some(color => backgrounds.has(color))) return false;
+      }
+      return true;
+      });
+    });
+  } catch { return false; }
 }
 
 function textFromHtml(value) {
@@ -143,4 +239,4 @@ function assertContentBudget(content) {
   }
 }
 
-module.exports = { sanitizeEmailHtml, validateHtmlSourceCode, compileHtmlSource, textFromHtml, httpsUrl, assertContentBudget, MAX_SOURCE_BYTES };
+module.exports = { sanitizeEmailHtml, validateHtmlSourceCode, compileHtmlSource, textFromHtml, httpsUrl, hasVisibleSystemLink, assertContentBudget, MAX_SOURCE_BYTES };

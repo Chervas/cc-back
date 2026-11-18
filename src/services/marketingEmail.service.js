@@ -5,6 +5,7 @@ const dns = require('dns').promises;
 const { Op } = require('sequelize');
 const db = require('../../models');
 const emailDelivery = require('./emailDelivery.service');
+const publicLinks = require('../lib/marketingEmailPublicLinks');
 const emailTemplates = require('./emailTemplates.service');
 const emailHtml = require('./marketingEmailHtml.service');
 const { formatMarketingDate } = require('../lib/marketing-template-variables');
@@ -284,18 +285,19 @@ function previewTemplate(body = {}) {
     }
   }
   const content = normalizeTemplateContent({ ...body, design, name: clean(body.name) || 'Vista previa', subject: clean(body.subject) || 'Novedades de tu clínica' });
-  const variables = previewVariableContext(body.variables);
+  const variables = { ...previewVariableContext(body.variables), ...publicLinks.systemVariables() };
   const missing = emailTemplates.missingTemplateVariables(variables, content.subject, content.preheader, content.rendered_html, content.rendered_text);
   if (content.design.content_mode === 'html' && emailHtml.compileHtmlSource(content.design.html_source) !== content.design.html_source.trim()) {
     warnings.push('Se ha normalizado el HTML y eliminado el contenido, los estilos o las URL no permitidos.');
   }
   if (missing.length) warnings.push('Faltan valores para algunas variables de la plantilla.');
   const rendered = emailTemplates.renderMarketingCampaign({
+    composer_version: 2,
     subject: emailTemplates.replaceVars(content.subject, variables),
     preheader: emailTemplates.replaceVars(content.preheader, variables),
     body_html: emailTemplates.replaceVars(content.rendered_html, variables, { html: true }),
     body_text: emailTemplates.replaceVars(content.rendered_text, variables),
-    unsubscribe_url: 'https://example.test/email/baja',
+    ...publicLinks.PREVIEW_LINKS,
     show_clinicaclick_branding: content.design.show_clinicaclick_branding !== false,
   });
   return { html: rendered.html, text: rendered.text, warnings: [...new Set(warnings)], missing_variables: missing };
@@ -769,7 +771,62 @@ async function propagateCatalogTemplate(id, userId) {
 }
 
 function unsubscribeBaseUrl() {
-  return String(process.env.EMAIL_PUBLIC_APP_URL || process.env.FRONTEND_PUBLIC_URL || 'https://crm.clinicaclick.com').replace(/\/+$/, '');
+  return publicLinks.publicBaseUrl();
+}
+
+// Compile from the authoring document for NEW messages, never mutate templates
+// or previously queued message snapshots while upgrading the HTML compiler.
+function compileStoredTemplate(template) {
+  const value = template?.get ? template.get({ plain: true }) : template;
+  if (!value?.design || typeof value.design !== 'object') return value;
+  if (value.design.content_mode !== 'html' && !Array.isArray(value.design.blocks)) return value;
+  return { ...value, ...normalizeTemplateContent({ ...value, name: value.name || 'Plantilla de email' }) };
+}
+
+async function publicMessage(token, purpose) {
+  const claims = publicLinks.readCapability(token, purpose);
+  const row = await db.EmailMessage.findOne({ where: { public_id: claims.m, stream: 'marketing', template_key: 'marketing.campaign' } });
+  if (!row || row.recipient_hash !== claims.r) fail('marketing_email_link_invalid', 404, 'El enlace de email no es válido o ha caducado.');
+  const snapshot = publicLinks.readSnapshot(row.template_context?.marketing_email_snapshot);
+  if (snapshot.public_id !== claims.m || snapshot.recipient_hash !== claims.r || snapshot.scope_key !== claims.s || snapshot.expires_at !== claims.e) {
+    fail('marketing_email_link_invalid', 404, 'El enlace de email no es válido o ha caducado.');
+  }
+  return { row, snapshot, claims };
+}
+
+async function browserView(token) {
+  const { snapshot } = await publicMessage(token, 'browser');
+  return snapshot.rendered.html;
+}
+
+async function preferenceStatus(token) {
+  const { row, snapshot, claims } = await publicMessage(token, 'preferences');
+  const { optout } = await unsubscribeForPublicMessage(row, claims);
+  const suppression = await emailDelivery.findActiveSuppression({
+    emailHash: claims.r,
+    stream: 'marketing',
+    clinicaId: row.clinica_id,
+    groupId: row.metadata?.grupo_clinica_id,
+  });
+  const status = optout.status === 'unsubscribed' || suppression?.reason === 'unsubscribe'
+    ? 'unsubscribed' : (suppression ? 'suppressed' : 'enabled');
+  return { success: true, scope_label: snapshot.scope_label, status, can_unsubscribe: status !== 'unsubscribed' };
+}
+
+async function unsubscribeForPublicMessage(row, claims) {
+  let raw;
+  try { raw = new URL(row.template_context.unsubscribe_url).searchParams.get('token'); } catch { /* invalid below */ }
+  const optout = raw && await db.MarketingEmailUnsubscribe.findOne({ where: { token_hash: emailDelivery.sha256(raw) } });
+  if (!optout || optout.email_hash !== claims.r || optout.scope_key !== claims.s) fail('marketing_email_link_invalid', 404, 'El enlace de email no es válido o ha caducado.');
+  return { raw, optout };
+}
+
+async function updatePreferences(token, action) {
+  if (action !== 'unsubscribe') fail('marketing_email_preference_action_invalid', 400, 'Sólo se puede solicitar la baja de los emails comerciales.');
+  const { row, claims } = await publicMessage(token, 'preferences');
+  const { raw } = await unsubscribeForPublicMessage(row, claims);
+  await unsubscribe(raw);
+  return preferenceStatus(token);
 }
 
 async function issueUnsubscribe({ scopeKey, clinicaId, groupId, listId, itemId, recipientEmail }, options = {}) {
@@ -888,6 +945,10 @@ module.exports = {
   setCatalogTemplateActive,
   propagateCatalogTemplate,
   issueUnsubscribe,
+  compileStoredTemplate,
+  browserView,
+  preferenceStatus,
+  updatePreferences,
   unsubscribe,
   providerCostEstimate,
   whatsappProviderCostEstimate,
