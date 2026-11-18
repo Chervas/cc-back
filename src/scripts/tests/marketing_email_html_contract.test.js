@@ -164,7 +164,8 @@ test('saving and reopening both content modes preserves original Unicode HTML co
   assert.equal(first.design.header_color, '#112233');
   assert.equal(first.design.footer_color, '#445566');
   assert.equal(first.design.logo_url, 'https://cdn.example.test/logo.png');
-  assert.doesNotMatch(first.rendered_html, /<script|<style|bad\(\)|Borrador de bloques|Código á/);
+  assert.doesNotMatch(first.rendered_html, /<script|bad\(\)|Borrador de bloques|Código á/);
+  assert.match(first.rendered_html, /\.cc-email-imported \.cc-e-test\{color:red\}/);
   const htmlPreview = marketing.previewTemplate({ subject: 'Hola', design: first.design });
   assert.deepEqual(htmlPreview.missing_variables, ['html_only']);
   assert.ok(htmlPreview.warnings.length);
@@ -228,7 +229,8 @@ test('inactive HTML code may be empty or unsafe editor data but never enters blo
 test('email HTML retains tables, safe inline CSS, accented text and remote HTTPS images without fetching them', () => {
   const source = '<!doctype html><html><head><title>Oculto</title></head><body style="background-color:#fafafa"><table role="presentation" width="600" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#ffffff"><tr><td width="600" style="padding:20px 24px;font:700 14px/1.5 Arial,sans-serif;color:#123456"><img src="https://cdn.example.test/banner.png?x=1&amp;y=2" alt="Clínica &amp; equipo" width="600" style="display:block;width:100%;height:auto;border:0">Novedades &amp; atención</td></tr></table></body></html>';
   const sourceHtml = html.compileHtmlSource(source);
-  assert.match(sourceHtml, /<table role="presentation" width="600" cellpadding="0" cellspacing="0"/);
+  assert.match(sourceHtml, /<table role="presentation" width="100%" cellpadding="0" cellspacing="0"/);
+  assert.match(sourceHtml, /max-width:600px/);
   assert.match(sourceHtml, /border-collapse:collapse;background:#ffffff/);
   assert.match(sourceHtml, /padding:20px 24px;font:700 14px\/1.5 Arial,sans-serif;color:#123456/);
   assert.match(sourceHtml, /src="https:\/\/cdn\.example\.test\/banner\.png\?x=1&amp;y=2"/);
@@ -242,7 +244,8 @@ test('email HTML retains tables, safe inline CSS, accented text and remote HTTPS
 test('parser sanitizer rejects executable markup, unsafe URL schemes, CSS URLs and style variables', () => {
   const source = '<script>alert(1)</script><style>body{display:none}</style><iframe src="https://evil.test">x</iframe><svg><a href="javascript:bad()">x</a></svg><form action="https://evil.test"><input name="secret"></form><p id="x" onclick="bad()" style="color:#123456;background-image:url(https://evil.test);background:url(javascript:bad());width:expression(bad());position:fixed;--secret:red;color:var(--secret);font-size:{{size}}">Visible</p><a href="jav&#0000097;script:alert(1)">Bad</a><a href="//evil.test">Relative</a><a href="https://user:pass@evil.test">Credentials</a><img src="data:image/svg+xml,evil" onerror="bad()"><img src="http://example.test/a.png"><a href="https://safe.example.test/path">Safe</a>';
   const clean = html.compileHtmlSource(source);
-  assert.doesNotMatch(clean, /<(?:script|style|iframe|svg|form|input)|\sonclick=|\sonerror=|\sid=|javascript:|data:|http:|href="\/\/|user:pass|url\(|expression\(|position:|--secret|var\(|\{\{size\}\}/i);
+  assert.doesNotMatch(clean, /<(?:script|iframe|svg|form|input)|\sonclick=|\sonerror=|\sid=|javascript:|data:|http:|href="\/\/|user:pass|url\(|expression\(|position:|--secret|var\(|\{\{size\}\}/i);
+  assert.match(clean, /<style>\.cc-email-imported\{display:none\}/);
   assert.match(clean, /href="https:\/\/safe\.example\.test\/path"/);
   assert.match(clean, /Visible/);
 });
