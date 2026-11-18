@@ -321,7 +321,69 @@ function createTemporaryPatientDirectionService(db, {
     return result || rows;
   }
 
-  return { ensure: (...args) => safe(() => ensure(...args)), observeConversation, observePatient, observeAppointment, enrich };
+  // Read the already effective direction for a request whose patient-origin
+  // mark may have been written before the conversation acquired lead_id.
+  // Never infer ownership from a phone, name, patient existence or appointment
+  // confirmation. This projection performs no ensure/create/handoff operation.
+  async function effectiveForLeads(leads, { transaction = null } = {}) {
+    if (!db.Conversation || !db.Message || !db.CitaPaciente) return new Map();
+    const candidates = leads.filter(lead => positive(lead.id)
+      && TEMPORARY_DIRECTOR_CLINICS.includes(Number(lead.clinica_id)) && !terminalLead(lead));
+    if (!candidates.length) return new Map();
+    const result = await safe(async () => {
+      const conversations = (await db.Conversation.findAll({ where: { channel: 'whatsapp',
+        [Op.or]: candidates.map(lead => ({ clinic_id: Number(lead.clinica_id), lead_id: Number(lead.id) })),
+      }, attributes: ['id', 'clinic_id', 'channel', 'patient_id', 'lead_id'], raw: true, transaction })).map(plain);
+      const ids = conversations.map(row => Number(row.id)).filter(positive);
+      if (!ids.length) return new Map();
+      const events = (await db.Message.findAll({ where: eventWhere(ids),
+        attributes: ['id', 'conversation_id', 'metadata', 'sent_at'], order: [['id', 'ASC']], raw: true, transaction })).map(plain);
+      const assignments = db.PatientDirectionAssignment ? (await db.PatientDirectionAssignment.findAll({
+        where: { conversation_id: { [Op.in]: ids } }, attributes: ['conversation_id', 'clinic_id', 'patient_id',
+          'lead_intake_id', 'status', 'end_reason', 'ended_at'], raw: true, transaction,
+      })).map(plain) : [];
+      const effective = new Map();
+      for (const lead of candidates) {
+        const matching = conversations.filter(row => scoped(row)
+          && Number(row.lead_id) === Number(lead.id) && Number(row.clinic_id) === Number(lead.clinica_id));
+        // An ambiguous conversation identity is not an ownership proof.
+        if (matching.length !== 1 || !positive(matching[0].patient_id)) continue;
+        const conversation = matching[0];
+        const exactEvents = events.filter(row => Number(row.conversation_id) === Number(conversation.id)
+          && positive(row.metadata?.patient_id) && Number(row.metadata.patient_id) === Number(conversation.patient_id));
+        const state = stateFrom(exactEvents, conversation, lead);
+        if (!state.start) continue;
+        const started = +new Date(state.start.metadata.started_at || state.start.sent_at);
+        const entered = +new Date(lead.created_at);
+        if (!Number.isFinite(started) || !Number.isFinite(entered) || started < entered) continue;
+        if (state.handoff) {
+          effective.set(Number(lead.id), { state: 'completed' });
+          continue;
+        }
+        const threshold = Math.max(started, +new Date(lead.patient_attention?.decided_at) || started);
+        const ended = assignments.find(row => Number(row.conversation_id) === Number(conversation.id)
+          && Number(row.clinic_id) === Number(conversation.clinic_id)
+          && Number(row.patient_id) === Number(conversation.patient_id)
+          && (!positive(row.lead_intake_id) || Number(row.lead_intake_id) === Number(lead.id))
+          && ['handoff_pending', 'handed_off', 'ended_attended', 'ended_discarded', 'ended_service_disabled'].includes(row.status)
+          && (!row.ended_at || +new Date(row.ended_at) >= threshold));
+        if (ended) {
+          effective.set(Number(lead.id), { state: ended.end_reason === 'service_disabled'
+            || ended.status === 'ended_service_disabled' ? 'clinic' : 'completed' });
+          continue;
+        }
+        const appointment = await firstAppointment(conversation, new Date(started), transaction,
+          { lead, context: lead.patient_context, review: ['existing_patient', 'possible_patient'].includes(lead.patient_context?.relationship) });
+        if (appointment && (require('../lib/status-catalog').hasAttendedAppointment(appointment) || careState(appointment).arrived_at)) {
+          effective.set(Number(lead.id), { state: 'completed' });
+        } else effective.set(Number(lead.id), { state: 'director', director_user_id: TEMPORARY_FOCUSED_ACCOUNT.userId });
+      }
+      return effective;
+    });
+    return result || new Map();
+  }
+
+  return { ensure: (...args) => safe(() => ensure(...args)), observeConversation, observePatient, observeAppointment, enrich, effectiveForLeads };
 }
 
 let runtime;
@@ -339,4 +401,5 @@ module.exports = { createTemporaryPatientDirectionService,
   observePatient: (...args) => service().observePatient(...args),
   observeAppointment: (...args) => service().observeAppointment(...args),
   enrich: (...args) => service().enrich(...args),
+  effectiveForLeads: (...args) => service().effectiveForLeads(...args),
 };

@@ -117,7 +117,17 @@ function createLeadPatientAttentionService(db, dependencies = {}) {
         decided_at: decision?.decided_at || null,
       } });
     }
-    return result;
+    const unresolved = result.filter(lead => ['unassigned', 'director'].includes(lead.patient_attention.state));
+    const effective = unresolved.length ? await (dependencies.temporaryDirection
+      || require('./temporaryPatientDirection.service').createTemporaryPatientDirectionService(db))
+      .effectiveForLeads(unresolved, { transaction }) : new Map();
+    return result.map(lead => {
+      const direction = effective.get(Number(lead.id));
+      if (!direction || direction.state === 'director'
+        && Number(direction.director_user_id) !== Number(lead.patient_attention.director_user_id)) return lead;
+      return { ...lead, patient_attention: { ...lead.patient_attention, state: direction.state,
+        can_decide: direction.state === 'director' ? lead.patient_attention.can_decide : false } };
+    });
   }
 
   async function decide({ leadId, actorId, decision, requestKind = 'commercial' }) {
