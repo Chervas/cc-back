@@ -1,6 +1,6 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const { selectLatestInteraction, enrichHumanInteraction } = require('../../services/leadHumanInteraction.service');
+const { selectFirstInteraction, selectLatestInteraction, enrichHumanInteraction } = require('../../services/leadHumanInteraction.service');
 const lead = { id: 7, clinica_id: 66, created_at: '2026-11-17T00:00:00Z' };
 const now = new Date('2026-11-18T12:00:00Z');
 const candidate = patch => ({ lead_id: 7, user_id: 44, occurred_at: '2026-11-18T10:00:00Z', kind: 'contact_attempt',
@@ -14,10 +14,10 @@ for (const [name, patch] of Object.entries({ no_actor: { user_id: null }, other_
   auto_reply: { reason: 'lead_auto_reply:welcome' }, automation: { reason: 'automation_flow' },
   invalid_date: { occurred_at: 'invalid' } })) test(`rejects ${name}`, () => assert.equal(selectLatestInteraction(lead, [candidate(patch)], now), null));
 
-function fixture({ attempts = [], messages = [], users = [{ id_usuario: 44, nombre: 'Directora', apellidos: 'Ficticia' }], settings = [] } = {}) {
+function fixture({ attempts = [], messages = [], appointments = [], actions = [], users = [{ id_usuario: 44, nombre: 'Directora', apellidos: 'Ficticia' }], settings = [] } = {}) {
   const calls = [];
   return { calls, models: {
-    sequelize: { query: async (sql, options) => { calls.push({sql,options});return sql.includes('LeadContactAttempts a') ? attempts : messages; } },
+    sequelize: { query: async (sql, options) => { calls.push({sql,options});return sql.includes('LeadContactAttempts a') ? attempts : sql.includes('CitasPacientes a') ? appointments : sql.includes('LeadAttributionAudits a') ? actions : messages; } },
     Usuario: { findAll: async options => { calls.push({users:options});return users; } },
     PatientDirectionSetting: { findAll: async () => settings },
     Clinica: { findAll: async () => [{id_clinica:66,configuracion:{timezone:'Europe/Madrid'}}] },
@@ -30,8 +30,8 @@ test('one bulk summary per page exposes name/time/meaning, with a rocket only fo
   assert.equal(result[0].last_human_interaction.outcome,'no_answer');
   assert.equal(result[0].last_human_interaction.is_patient_director,true);
   assert.equal(result[0].last_human_interaction.time_zone,'Europe/Madrid');
-  assert.equal(result[1].last_human_interaction,null);
-  assert.equal(f.calls.filter(call=>call.sql).length,2);
+  assert.equal(result[1].last_human_interaction,null);assert.equal(result[1].first_human_interaction,null);
+  assert.equal(f.calls.filter(call=>call.sql).length,4);
   assert.equal(f.calls.filter(call=>call.users).length,1);
   assert(!Object.hasOwn(lead,'last_human_interaction'));
 });
@@ -55,12 +55,52 @@ test('ranking queries bind request and clinic, exclude automation/failures and n
 test('redacted-only or empty pages perform no activity queries', async () => {
   const f=fixture();assert.deepEqual(await enrichHumanInteraction({models:f.models,leads:[],now}),[]);
   const [result]=await enrichHumanInteraction({models:f.models,leads:[{...lead,privacy_redacted:true}],now});
-  assert.equal(result.last_human_interaction,null);assert.equal(f.calls.length,0);
+  assert.equal(result.last_human_interaction,null);assert.equal(result.first_human_interaction,null);assert.equal(f.calls.length,0);
 });
 
 test('accessory summary failures stay visibly unknown without discarding principal lead data or logging patient content', async () => {
   const f=fixture(), logs=[];f.models.sequelize.query=async()=>{throw Object.assign(Error('secret patient details'),{code:'ER_NO_SUCH_TABLE'});};
   const [result]=await enrichHumanInteraction({models:f.models,leads:[lead],now,logger:{warn:(...args)=>logs.push(args)}});
-  assert.equal(result.id,lead.id);assert.equal(result.human_interaction_status,'unavailable');assert.equal(result.last_human_interaction,null);
+  assert.equal(result.id,lead.id);assert.equal(result.human_interaction_status,'unavailable');assert.equal(result.last_human_interaction,null);assert.equal(result.first_human_interaction,null);
   assert(!JSON.stringify(logs).includes('secret'));assert.equal(logs[0][1].code,'ER_NO_SUCH_TABLE');
+});
+
+
+test('the first actor remains the manager who started the request while the last actor can change', async () => {
+  const f=fixture({attempts:[candidate()],messages:[candidate({user_id:12,kind:'message',channel:'whatsapp',reason:'',outcome:'sent',occurred_at:'2026-11-18T11:00:00Z'})],
+    users:[{id_usuario:44,nombre:'Graci'},{id_usuario:12,nombre:'Lidia'}]});
+  const [row]=await enrichHumanInteraction({models:f.models,leads:[lead],now});
+  assert.equal(row.first_human_interaction.user_name,'Graci');assert.equal(row.first_human_interaction.outcome,'no_answer');
+  assert.equal(row.last_human_interaction.user_name,'Lidia');assert.equal(row.last_human_interaction.outcome,'sent');
+  assert.equal(row.first_human_interaction.is_patient_director,true);assert.equal(row.last_human_interaction.is_patient_director,false);
+});
+test('a manually booked appointment counts at creation, not its later automated confirmation', async () => {
+  const f=fixture({appointments:[candidate({kind:'appointment',channel:'agenda',reason:'',outcome:'scheduled',occurred_at:'2026-11-18T09:28:33Z'})]});
+  const [row]=await enrichHumanInteraction({models:f.models,leads:[lead],now});
+  assert.equal(row.first_human_interaction.kind,'appointment');assert.equal(row.first_human_interaction.outcome,'scheduled');
+  assert.equal(row.last_human_interaction.occurred_at,'2026-11-18T09:28:33.000Z');
+  const sql=f.calls.find(x=>x.sql?.includes('FROM CitasPacientes a')).sql;
+  assert.match(sql,/a\.created_by AS user_id/);assert.match(sql,/a\.created_at AS occurred_at/);assert(!/updated_by|updated_at/.test(sql));
+  for(const value of ['source_system','import_metadata','is_automated','flow_execution_id','cliniccloud'])assert(sql.includes(value));
+});
+test('authenticated discard and take decisions are human management, not automatic assignment', async () => {
+  const f=fixture({actions:[candidate({kind:'lead_action',channel:'gestion',reason:'',outcome:'claimed',occurred_at:'2026-11-18T09:00:00Z'}),
+    candidate({kind:'lead_action',channel:'gestion',reason:'',outcome:'discarded',occurred_at:'2026-11-18T10:00:00Z'})]});
+  const [row]=await enrichHumanInteraction({models:f.models,leads:[{...lead,asignado_a:99}],now});
+  assert.equal(row.first_human_interaction.outcome,'claimed');assert.equal(row.last_human_interaction.outcome,'discarded');
+  const sql=f.calls.find(x=>x.sql?.includes('FROM LeadAttributionAudits a')).sql;
+  for(const value of ['status_update','raw_payload','previous_status','actor_user_id','clinic_id','lead_patient_attention_v1'])assert(sql.includes(value));
+  assert(!/asignado_a|updated_by/.test(sql));
+});
+test('every source returns both chronological ends and page size does not add queries', async () => {
+  const f=fixture();await enrichHumanInteraction({models:f.models,leads:Array.from({length:50},(_,i)=>({...lead,id:i+1})),now});
+  const queries=f.calls.filter(x=>x.sql);assert.equal(queries.length,4);
+  for(const {sql}of queries){assert.match(sql,/ORDER BY occurred_at ASC, source_id ASC/);assert.match(sql,/ORDER BY occurred_at DESC, source_id DESC/);assert.match(sql,/first_position = 1 OR last_position = 1/);}
+});
+test('first and last selectors reject missing actors, automatic activity, other requests and dates outside the request',()=>{
+  for(const row of[candidate({user_id:null}),candidate({lead_id:8}),candidate({reason:'automation_v2'}),candidate({occurred_at:'2026-11-16T00:00:00Z'}),candidate({occurred_at:'2026-11-19T00:00:00Z'})]){
+    assert.equal(selectFirstInteraction(lead,[row],now),null);assert.equal(selectLatestInteraction(lead,[row],now),null);
+  }
+  assert.equal(selectFirstInteraction({...lead,privacy_redacted:true},[candidate()],now),null);
+  assert.equal(selectLatestInteraction({...lead,privacy_redacted:true},[candidate()],now),null);
 });
