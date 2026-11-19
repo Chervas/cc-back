@@ -8,7 +8,7 @@ const engine = loadSource('flowEngineV2.service', { '../../models': {}, './jobRe
 const now = new Date('2026-10-20T12:00:00Z');
 const quiet = engine.computeQuietHoursDelayMs;
 
-function fixture() {
+function fixture({ nativeWiring = false } = {}) {
   const p = { status: 'sent', kind: 'review_google_link_followup', google_publication_reminder_enabled: true,
     test_send: false, google_link_sent_at: '2026-10-19T16:00:00Z', google_review_url: 'https://search.google.com/local/writereview?placeid=fake',
     clinic_id: 59, conversation_id: 3, sender_origin_id: 4, phoneNumberId: 'secondary', wabaId: 'waba',
@@ -17,7 +17,7 @@ function fixture() {
     list: { id: 1, clinica_id: 59, criteria: {} }, item: { id: 2, list_id: 1, clinica_id: 59, name: 'Ana Prueba Apellido', phone: '34600000000', paciente_id: 7 },
     conversation: { id: 3, clinic_id: 59, patient_id: 7 }, source: { id: 8, conversation_id: 3, status: 'read', metadata: { wamid: 'wamid.test' } },
     sender: { originId: 4, phoneNumberId: 'secondary' }, window: { open: true, matchedBy: 'message_phone_number_id', lastInboundAt: '2026-10-19T15:55:00Z' },
-    publication: { state: 'not_detected' }, templates: [], executions: [], jobs: [], messages: [], transport: [], reads: 0, optedOut: false };
+    publication: { state: 'not_detected' }, templates: [], executions: [], jobs: [], messages: [], transport: [], reads: 0, optedOut: false, now };
   const save = values => ({ ...values, update: async function (patch) { Object.assign(this, patch); return this; } });
   const model = key => ({ findByPk: async () => state[key] });
   const db = { Sequelize: { Op: { ne: Symbol('ne'), and: Symbol('and') } },
@@ -33,7 +33,7 @@ function fixture() {
     reviewReminderAllowedAt: async (_list, reference) => ({ at: state.clinicAt || reference }),
     getGoogleReviewPublicationState: async () => { state.reads++; if (state.readFailure) throw Error('read_failure'); return state.publication; },
   };
-  const runtime = createRuntime({ db, bulk, now: () => now, normalizePhone: v => String(v || '').replace(/\D/g, ''), serviceWindow: async args => {
+  const deps = { db, bulk, now: () => state.now, normalizePhone: v => String(v || '').replace(/\D/g, ''), serviceWindow: async args => {
     assert.equal(args.activePhoneNumberId, 'secondary'); return state.window;
   }, engine: { computeQuietHoursDelayMs: quiet, resolveScheduledWhatsappSenderConfig: async () => state.sender,
     findOrCreateAutomationWhatsappMessage: async ({ values, deliveryKey }) => {
@@ -41,8 +41,15 @@ function fixture() {
       msg = save({ id: 10, key: deliveryKey, ...values }); state.messages.push(msg); return { message: msg, created: true };
     }, enqueueAutomationWhatsappTransport: async args => { state.transport.push(args); args.msg.metadata.automation_transport_job_id = 'stable'; } },
     enqueueJob: async args => { let job = state.jobs.find(j => j.dedupeScope === args.dedupeScope); if (!job) { job = { id: 1, ...args }; state.jobs.push(job); } return { job }; },
-    triggerJob: async () => {}, stop: { createExecution: async values => { const row = { id: 5, ...values }; state.executions.push(row); return row; }, isStop: () => false } });
-  return { state, runtime, inspect: args => runtime.inspect({ eventId: 9, clinicId: 59, conversationId: 3, now, ...args }), save };
+    triggerJob: async () => {}, stop: { createExecution: async values => { const row = { id: 5, ...values }; state.executions.push(row); return row; }, isStop: () => false } };
+  const runtime = nativeWiring ? loadSource('googleReviewReminder.service', {
+    '../../models': db, './marketingBulkSends.service': bulk, './flowEngineV2.service': deps.engine,
+    './whatsappServiceWindow.service': { resolveWhatsappServiceWindow: deps.serviceWindow },
+    './whatsapp.service': { normalize: deps.normalizePhone, normalizePhoneNumber(phone) { return this.normalize(phone); } },
+    './jobRequests.service': { enqueueUniqueJobRequest: deps.enqueueJob }, './jobScheduler.service': { triggerImmediate: deps.triggerJob },
+    '../lib/automation-runtime-stop': deps.stop,
+  }, {}).current() : createRuntime(deps);
+  return { state, runtime, bulk, inspect: args => runtime.inspect({ eventId: 9, clinicId: 59, conversationId: 3, now: state.now, ...args }), save };
 }
 
 test('native catalog is a readable five-node V2 flow, no model calls or paid-template fallback', () => {
@@ -113,6 +120,13 @@ test('disabled administrator master is not recreated or reactivated', async () =
 test('a valid same-secondary-number reply, current local observation and permitted hours can send', async () => {
   const f = fixture(); const r = await f.inspect(); assert.equal(r.state, 'ready'); assert.equal(r.sender.phoneNumberId, 'secondary');
 });
+test('the production wiring keeps the WhatsApp phone normalizer bound to its service', async () => {
+  const f = fixture({ nativeWiring: true });
+  await f.runtime.schedule(f.state.event);
+  const message = f.save({ id: 11, conversation_id: 3, metadata: { execution_id: 5, google_review_link_event_id: 9 } });
+  const receipt = await f.runtime.authorizeTransport({ message, to: '+34 600 000 000', useTemplate: false, sender: f.state.sender, now });
+  assert.equal(receipt.allowed, true);
+});
 test('scope, test, failed-source, wrong patient, changed recipient and archived list cannot send', async () => {
   const cases = [f => f.state.event.payload.test_send = true, f => f.state.event.payload.clinic_id = 72,
     f => f.state.list = null, f => f.state.list.status = 'archived', f => f.state.list.criteria.dispatch = { cancel_requested: true },
@@ -146,10 +160,47 @@ test('Madrid quiet hours cover summer/winter, weekends and both DST transitions 
     const start = new Date(at), next = quiet({ now: start }); assert(next.delayMs > 0);
     assert.equal(new Intl.DateTimeFormat('es', { timeZone: 'Europe/Madrid', hour: '2-digit', hourCycle: 'h23' }).format(next.scheduledAt), '07');
     const r = await allowedSlot({ now: start, dueAt: start, expiresAt: new Date(+start + 12 * 3600000), clinicSlot: async t => ({ at: t }), quietWindow: quiet });
-    assert.equal(+r.at, +next.scheduledAt);
+    assert.equal(new Intl.DateTimeFormat('es', { timeZone: 'Europe/Madrid', hour: '2-digit', hourCycle: 'h23' }).format(r.at), '10');
     const noSlot = await allowedSlot({ now: start, dueAt: start, expiresAt: new Date(+start + 30 * 60000), clinicSlot: async t => ({ at: t }), quietWindow: quiet });
     assert.equal(noSlot.reason, 'no_allowed_slot_before_whatsapp_expiry');
   }
+});
+test('new waits start at 10 and existing early waits defer the Google check until then', async () => {
+  const f = fixture();
+  f.state.now = new Date('2026-10-20T06:00:00Z');
+  f.state.event.payload.google_link_sent_at = '2026-10-19T10:00:00Z';
+  f.state.window.lastInboundAt = '2026-10-19T09:55:00Z';
+  const scheduled = await f.runtime.schedule(f.state.event);
+  assert.equal(scheduled.due_at, '2026-10-20T08:00:00.000Z');
+  const execution = f.state.executions[0];
+  execution.context.trigger.data.followup_due_at = '2026-10-20T06:00:00Z';
+  const processEngine = loadSource('flowEngineV2.service', { '../../models': {},
+    './jobRequests.service': { getCurrentRuntimeNamespace: () => 'test' },
+    './marketingBulkSends.service': f.bulk, './googleReviewReminder.service': { current: () => f.runtime } }, {}, 10000);
+  const condition = definition().nodes[2];
+  const early = await processEngine._processNode(condition, execution.context, { execution });
+  assert.equal(early.kind, 'waiting');
+  assert.equal(early.wait_until.toISOString(), scheduled.due_at);
+  assert.equal(early.waiting_meta.resume_mode, 'retry_current_node');
+  assert.equal(f.state.reads, 0);
+  f.state.now = new Date(scheduled.due_at);
+  const atTen = await processEngine._processNode(condition, execution.context, { execution });
+  assert.equal(atTen.next_node_id, 'N4');
+  assert.equal(f.state.reads, 1);
+});
+test('the 10:00 boundary cannot extend a recipient window or allow early transport', async () => {
+  const f = fixture();
+  f.state.now = new Date('2026-10-20T07:30:00Z');
+  f.state.event.payload.google_link_sent_at = '2026-10-19T10:00:00Z';
+  f.state.window.lastInboundAt = '2026-10-19T09:55:00Z';
+  await f.runtime.schedule(f.state.event);
+  const message = f.save({ id: 10, conversation_id: 3, metadata: { execution_id: 5, google_review_link_event_id: 9 } });
+  const early = await f.runtime.authorizeTransport({ message, to: '34600000000', useTemplate: false, sender: f.state.sender, now: f.state.now });
+  assert.equal(early.reason, 'queued_outside_allowed_slot');
+  f.state.window.lastInboundAt = '2026-10-19T07:55:00Z';
+  assert.equal((await f.inspect()).reason, 'no_allowed_slot_before_whatsapp_expiry');
+  assert.equal(f.state.reads, 0);
+  assert.equal(f.state.transport.length, 0);
 });
 test('split shifts, a closed weekend and missing clinic calendar cannot bypass the intersection', async () => {
   const start = now;

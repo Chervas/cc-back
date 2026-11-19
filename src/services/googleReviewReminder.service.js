@@ -6,6 +6,7 @@ const FAMILY = 'review_google_publication_reminder_v1';
 const DELAY_MS = 20 * 60 * 60 * 1000;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 const MARGIN_MS = 60 * 1000;
+const START_HOUR = 10;
 const id = value => Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const text = value => String(value || '').trim();
 const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -17,7 +18,7 @@ function definition(clinicId = null, master = null) {
     template_key: clinicId ? `${FAMILY}__clinic_${clinicId}` : FAMILY,
     version: 1, engine_version: 'v2',
     name: 'Recordar la publicación de la reseña en Google',
-    description: 'Un único seguimiento de nuevos enlaces, a partir de 20 h, con comprobación local reciente, horario seguro y ventana WhatsApp abierta. Sin plantilla de pago ni recuperación histórica.',
+    description: 'Un único seguimiento de nuevos enlaces, a partir de 20 h y de las 10:00, con comprobación local reciente, horario de clínica y ventana WhatsApp abierta.',
     trigger_type: 'review_google_link_sent', trigger_config: { managed_feature: 'review_google_publication_reminder', future_links_only: true },
     is_active: true, is_system: !clinicId, clinic_id: clinicId, group_id: null, entry_node_id: 'N1',
     nodes: master?.nodes || [
@@ -32,6 +33,10 @@ function definition(clinicId = null, master = null) {
   };
 }
 
+function reminderQuietWindow(now, computeQuietHoursDelayMs) {
+  return computeQuietHoursDelayMs({ now, endHour: START_HOUR });
+}
+
 // Intersect existing campaign/clinic hours with the platform quiet-hours policy.
 // A late queue is not permission to send outside the original 24 h window.
 async function allowedSlot({ now, dueAt, expiresAt, clinicSlot, quietWindow }) {
@@ -42,7 +47,7 @@ async function allowedSlot({ now, dueAt, expiresAt, clinicSlot, quietWindow }) {
     if (!clinic?.at) return { reason: clinic?.reason || 'clinic_schedule_unavailable' };
     const clinicAt = new Date(clinic.at);
     if (!Number.isFinite(+clinicAt) || clinicAt < candidate) return { reason: 'invalid_clinic_slot' };
-    const quiet = quietWindow({ now: clinicAt });
+    const quiet = reminderQuietWindow(clinicAt, quietWindow);
     const next = quiet.delayMs > 0 ? new Date(quiet.scheduledAt) : clinicAt;
     if (!Number.isFinite(+next) || next >= expiresAt) break;
     if (+next === +candidate) return { at: candidate };
@@ -53,6 +58,14 @@ async function allowedSlot({ now, dueAt, expiresAt, clinicSlot, quietWindow }) {
 
 function createRuntime(deps) {
   const { db, bulk, engine, serviceWindow, enqueueJob, triggerJob, stop } = deps;
+
+  function publicationCheckWait() {
+    const now = deps.now ? deps.now() : new Date();
+    const quiet = reminderQuietWindow(now, engine.computeQuietHoursDelayMs);
+    if (!quiet.delayMs) return null;
+    return { kind: 'waiting', wait_until: quiet.scheduledAt,
+      waiting_meta: { reason: 'review_google_allowed_slot', resume_mode: 'retry_current_node' } };
+  }
 
   async function ensureCatalog(clinicId = null) {
     const latest = key => db.AutomationFlowTemplateV2.findOne({ where: { template_key: key, published_at: { [db.Sequelize.Op.ne]: null } }, order: [['version', 'DESC'], ['id', 'DESC']] });
@@ -72,8 +85,10 @@ function createRuntime(deps) {
       || payload.test_send || payload.status !== 'sent' || payload.kind !== 'review_google_link_followup'
       || ![event.list_id, event.item_id, payload.clinic_id, payload.conversation_id, payload.sender_origin_id].every(id)
       || !text(payload.phoneNumberId)) return { skipped: true, reason: 'not_a_new_confirmed_google_link' };
-    const dueAt = new Date(+new Date(payload.google_link_sent_at) + DELAY_MS);
-    if (!Number.isFinite(+dueAt)) return { skipped: true, reason: 'invalid_link_time' };
+    const minimumDelayAt = new Date(+new Date(payload.google_link_sent_at) + DELAY_MS);
+    if (!Number.isFinite(+minimumDelayAt)) return { skipped: true, reason: 'invalid_link_time' };
+    const quiet = reminderQuietWindow(minimumDelayAt, engine.computeQuietHoursDelayMs);
+    const dueAt = quiet.delayMs > 0 ? quiet.scheduledAt : minimumDelayAt;
     const template = await ensureCatalog(id(payload.clinic_id));
     if (!template.is_active) return { skipped: true, reason: 'automation_deactivated' };
     const key = `google-review-publication:${payload.clinic_id}:${event.list_id}:${event.item_id}`;
@@ -222,16 +237,19 @@ function createRuntime(deps) {
     return { allowed: false, reason };
   }
 
-  return { ensureCatalog, schedule, registerAcceptedLink, inspect, action, authorizeTransport };
+  return { ensureCatalog, schedule, registerAcceptedLink, publicationCheckWait, inspect, action, authorizeTransport };
 }
 
 let runtime;
 function current() {
-  if (!runtime) runtime = createRuntime({ db: require('../../models'), bulk: require('./marketingBulkSends.service'),
-    engine: require('./flowEngineV2.service'), serviceWindow: require('./whatsappServiceWindow.service').resolveWhatsappServiceWindow,
-    normalizePhone: require('./whatsapp.service').normalizePhoneNumber,
-    enqueueJob: require('./jobRequests.service').enqueueUniqueJobRequest,
-    triggerJob: require('./jobScheduler.service').triggerImmediate, stop: require('../lib/automation-runtime-stop') });
+  if (!runtime) {
+    const whatsapp = require('./whatsapp.service');
+    runtime = createRuntime({ db: require('../../models'), bulk: require('./marketingBulkSends.service'),
+      engine: require('./flowEngineV2.service'), serviceWindow: require('./whatsappServiceWindow.service').resolveWhatsappServiceWindow,
+      normalizePhone: phone => whatsapp.normalizePhoneNumber(phone),
+      enqueueJob: require('./jobRequests.service').enqueueUniqueJobRequest,
+      triggerJob: require('./jobScheduler.service').triggerImmediate, stop: require('../lib/automation-runtime-stop') });
+  }
   return runtime;
 }
 

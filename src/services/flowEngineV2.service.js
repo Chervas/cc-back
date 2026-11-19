@@ -7618,6 +7618,11 @@ async function processNode(node, context, runtime = {}) {
         const value = context?.simulation_inputs?.google_review_publication;
         state = { state: ['found', 'not_detected', 'unknown'].includes(value) ? value : 'unknown', simulated: true };
       } else {
+        if (runtime?.execution?.trigger_type === 'review_google_link_sent'
+          && runtime.execution.trigger_entity_type === 'marketing_contact_event') {
+          const wait = require('./googleReviewReminder.service').current().publicationCheckWait();
+          if (wait) return wait;
+        }
         try {
           state = await marketingBulkSendsService.getGoogleReviewPublicationState({
             clinicId: targets.clinic_id,
