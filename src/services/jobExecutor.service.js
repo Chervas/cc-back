@@ -499,7 +499,10 @@ function buildScheduledJobHandlers() {
       if (definition.attachJobRequestId && jobRequest?.id) {
         executorPayload.jobRequestId = jobRequest.id;
       }
-      const result = await executor.call(metaSyncJobs, executorPayload);
+      const result = ['meta_ads_recent', 'meta_ads_midday', 'meta_ads_backfill'].includes(definition.type)
+        ? await executor.call(metaSyncJobs, executorPayload,
+          jobRequest ? require('../lib/metaAdsSyncContinuation').contextForJob(jobRequest) : undefined)
+        : await executor.call(metaSyncJobs, executorPayload);
       if (
         result?.status === 'failed'
         && result.retryable === undefined

@@ -40,6 +40,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     '../jobs/sync.jobs': { metaSyncJobs }, '../../models': models,
     '../config/scheduledJobCatalog': require('../../config/scheduledJobCatalog'),
     '../lib/jobExecutionTimeoutPolicy': require('../../lib/jobExecutionTimeoutPolicy'),
+    '../lib/metaAdsSyncContinuation': require('../../lib/metaAdsSyncContinuation'),
     './jobClaim.service': require('../../services/jobClaim.service'),
   };
   for (const name of [

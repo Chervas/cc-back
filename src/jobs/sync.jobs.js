@@ -17,6 +17,7 @@ const cron = require('node-cron');
 const scAdmission = require('../lib/searchConsoleIngestionAdmission').application;
 const axios = require('axios');
 const crypto = require('crypto');
+const metaAdsContinuation = require('../lib/metaAdsSyncContinuation');
 const SYNC_PROVIDER_HTTP_TIMEOUT_MS = Math.max(
   1000,
   Number(process.env.SYNC_PROVIDER_HTTP_TIMEOUT_MS || 30000) || 30000
@@ -215,7 +216,7 @@ function parseDateInput(value, label) {
   if (Number.isNaN(date.getTime())) {
     throw new Error(`Invalid ${label}: ${value}`);
   }
-  date.setHours(0, 0, 0, 0);
+  date.setUTCHours(0, 0, 0, 0);
   return date;
 }
 
@@ -1161,7 +1162,7 @@ class MetaSyncJobs {
   /**
    * Job: Sincronización diaria de Ads (ventana reciente)
    */
-  async executeAdsSync(options = {}) {
+  async executeAdsSync(options = {}, executionContext) {
     if (process.env.META_MARKETING_ADS_SYNC_ENABLED !== 'true' || process.env.META_MARKETING_BROKER_ENABLED !== 'true') {
       return { status: 'completed', skipped: true, reason: 'meta_ads_sync_disabled', processed: 0 };
     }
@@ -1223,6 +1224,10 @@ class MetaSyncJobs {
         if (seenAccounts.has(key)) return false;
         seenAccounts.add(key); return true;
       });
+      activeAdAccounts.sort((a, b) => Number(a.id) - Number(b.id));
+      const progress = metaAdsContinuation.createRun({ context: executionContext,
+        type: windowLabel === 'midday' ? 'meta_ads_midday' : 'meta_ads_recent', options,
+        adsConfig: { ...this.config.ads, timeZone: this.config.timezone }, assets: activeAdAccounts });
       console.log(`🧾 Cuentas Ads con binding activo: ${activeAdAccounts.length}`);
       report.accounts = activeAdAccounts.length;
       if (!activeAdAccounts.length) {
@@ -1236,52 +1241,54 @@ class MetaSyncJobs {
         return { status: 'completed', skipped: true, reason: report.notEnrolled ? 'meta_ads_not_enrolled' : 'meta_ads_no_accounts', ...report };
       }
 
-      const defaultEnd = new Date();
-      defaultEnd.setHours(0, 0, 0, 0);
-      if (!options.endDate && windowLabel !== 'midday') {
-        defaultEnd.setDate(defaultEnd.getDate() - 1);
-      }
+      const defaultEnd = metaAdsContinuation.calendarEnd({ now: Date.now(), timeZone: this.config.timezone,
+        includeToday: windowLabel === 'midday' });
 
       const parsedEnd = parseDateInput(options.endDate, 'endDate') || defaultEnd;
       const parsedStart = parseDateInput(options.startDate, 'startDate');
       const customWindowDays = Number(options.windowDays || options.days);
 
+      if (!progress.windows) {
+        const windows = [];
+        for (const asset of activeAdAccounts) {
+          let start = parsedStart && new Date(parsedStart), end = new Date(parsedEnd);
+          if (!start) {
+            let days = Number.isFinite(customWindowDays) && customWindowDays > 0 ? Math.floor(customWindowDays)
+              : windowLabel === 'midday' ? Math.max(2, this.config.ads.middayDays || 2) : this.config.ads.recentDays;
+            if (!(Number.isFinite(customWindowDays) && customWindowDays > 0) && windowLabel !== 'midday') {
+              const prev = await SyncLog.count({ where: { clinica_id: asset.clinicaId ?? null, asset_id: asset.id,
+                job_type: { [Op.in]: ['ads_sync', 'ads_backfill'] }, status: 'completed',
+                'status_report.metaAdsAccountDigest': metaAdsContinuation.accountDigest(asset) }, logging: false });
+              if (!prev) days = this.config.ads.initialDays;
+            }
+            start = new Date(end); start.setUTCDate(start.getUTCDate() - (Math.max(1, days) - 1));
+          }
+          [start, end] = ensureAscending(start, end);
+          windows.push({ mappingId: Number(asset.id), startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10) });
+        }
+        progress.initialize(windows);
+      }
+
       for (const [idx, asset] of activeAdAccounts.entries()) {
         try {
           const adsSource = await require('../services/metaMarketingAdsReader.service')
             .forModels(require('../../models')).sourceForAsset(asset.id);
-          // Detectar si es primera vez (sin logs previos)
-          let start;
-          let end = new Date(parsedEnd);
-
-          if (parsedStart) {
-            start = new Date(parsedStart);
-          } else {
-            let days;
-            if (Number.isFinite(customWindowDays) && customWindowDays > 0) {
-              days = Math.floor(customWindowDays);
-            } else {
-              days = windowLabel === 'midday' ? Math.max(2, this.config.ads.middayDays || 2) : this.config.ads.recentDays;
-              if (windowLabel !== 'midday') {
-                try {
-                  const prev = await SyncLog.count({ where: { asset_id: asset.id, job_type: { [Op.in]: ['ads_sync','ads_backfill'] }, status: 'completed' } });
-                  if (!prev) {
-                    days = this.config.ads.initialDays;
-                  }
-                } catch (_) { /* no-op */ }
-              }
-            }
-            days = Math.max(1, days);
-            start = new Date(end);
-            start.setDate(start.getDate() - (days - 1));
-          }
-
-          [start, end] = ensureAscending(start, end);
+          await adsSource.assert();
+          if (progress.isCompleted(asset.id)) { report.resumedSkipped = (report.resumedSkipped || 0) + 1; continue; }
+          const fixedWindow = progress.windowFor(asset.id);
+          const start = new Date(fixedWindow.startDate + 'T00:00:00.000Z'), end = new Date(fixedWindow.endDate + 'T00:00:00.000Z');
 
           console.log(`▶️ AdsSync ${asset.metaAssetName} (${asset.metaAssetId}) ${start.toISOString().slice(0,10)}..${end.toISOString().slice(0,10)}`);
           const assignment = await this._buildMetaAssignmentContext(asset);
           const result = await syncAdAccountMetrics(asset, null, start, end, { assignment, adsSource });
           if (result?.status !== 'completed') throw Object.assign(Error('meta_ads_sync_failed'), { code: 'meta_ads_sync_failed' });
+          await adsSource.assert();
+          await SyncLog.create({ job_type: windowLabel === 'midday' ? 'ads_sync_midday' : 'ads_sync', status: 'completed',
+            asset_id: asset.id, asset_type: 'ad_account', clinica_id: asset.clinicaId ?? null,
+            start_time: syncLog.start_time || new Date(), end_time: new Date(),
+            records_processed: Number(result.insightsRows || 0) + Number(result.actionsRows || 0),
+            status_report: { metaAdsAccountDigest: metaAdsContinuation.accountDigest(asset), ...fixedWindow } });
+          progress.complete(asset.id);
           report.deliveryReasonsRefreshed = false;
           report.processed += 1;
           if (result) {
@@ -1312,7 +1319,10 @@ class MetaSyncJobs {
           const failure = require('../services/metaMarketingAdsReader.service').safeError(err, 'meta_ads_sync_failed');
           report.errors.push({ assetId: asset.id, name: asset.metaAssetName, error: failure.code });
           if (failure.code === 'rate_limited') {
-            report.nextRunAt = new Date(Date.now() + Math.max(60000, failure.retryAfterMs || 2 * 60 * 60 * 1000));
+            // JobRequests uses DATE without fractional precision. Round UP so
+            // its persisted deadline matches the checkpoint and never shortens
+            // the provider's cooldown when SQL removes milliseconds.
+            report.nextRunAt = new Date(Math.ceil((Date.now() + Math.max(60000, failure.retryAfterMs || 2 * 60 * 60 * 1000)) / 1000) * 1000);
             break; // Do not send other accounts through a shared provider pause.
           }
         }
@@ -1327,7 +1337,7 @@ class MetaSyncJobs {
         status_report: report
       });
       console.log('✅ adsSync completado', report);
-      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report };
+      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report, ...progress.result() };
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
       console.error('❌ Error en adsSync:', error);
@@ -1338,7 +1348,7 @@ class MetaSyncJobs {
   /**
    * Job: Backfill semanal de Ads (ventana más larga)
    */
-  async executeAdsBackfill(options = {}) {
+  async executeAdsBackfill(options = {}, executionContext) {
     if (process.env.META_MARKETING_ADS_SYNC_ENABLED !== 'true' || process.env.META_MARKETING_BROKER_ENABLED !== 'true') {
       return { status: 'completed', skipped: true, reason: 'meta_ads_sync_disabled', processed: 0 };
     }
@@ -1395,6 +1405,9 @@ class MetaSyncJobs {
         if (seenAccounts.has(key)) return false;
         seenAccounts.add(key); return true;
       });
+      activeAdAccounts.sort((a, b) => Number(a.id) - Number(b.id));
+      const progress = metaAdsContinuation.createRun({ context: executionContext,
+        type: 'meta_ads_backfill', options, adsConfig: { ...this.config.ads, timeZone: this.config.timezone }, assets: activeAdAccounts });
       console.log(`🧾 Cuentas Ads con binding activo: ${activeAdAccounts.length}`);
       report.accounts = activeAdAccounts.length;
       if (!activeAdAccounts.length) {
@@ -1404,9 +1417,7 @@ class MetaSyncJobs {
       }
 
       // Ventana: últimos M días hasta ayer
-      const defaultEnd = new Date();
-      defaultEnd.setHours(0, 0, 0, 0);
-      defaultEnd.setDate(defaultEnd.getDate() - 1);
+      const defaultEnd = metaAdsContinuation.calendarEnd({ now: Date.now(), timeZone: this.config.timezone });
 
       let end = parseDateInput(options.endDate, 'endDate') || defaultEnd;
       let start = parseDateInput(options.startDate, 'startDate');
@@ -1419,10 +1430,16 @@ class MetaSyncJobs {
 
       if (!start) {
         start = new Date(end);
-        start.setDate(start.getDate() - (Math.max(1, windowDays) - 1));
+        start.setUTCDate(start.getUTCDate() - (Math.max(1, windowDays) - 1));
       }
 
       [start, end] = ensureAscending(start, end);
+      if (!progress.windows) progress.initialize(activeAdAccounts.map(asset => ({ mappingId: Number(asset.id),
+        startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10) })));
+      if (progress.windows.length) {
+        start = new Date(progress.windows[0].startDate + 'T00:00:00.000Z');
+        end = new Date(progress.windows[0].endDate + 'T00:00:00.000Z');
+      }
 
       report.windowDays = diffInDaysInclusive(start, end);
       report.dateRange = {
@@ -1434,12 +1451,21 @@ class MetaSyncJobs {
         try {
           const adsSource = await require('../services/metaMarketingAdsReader.service')
             .forModels(require('../../models')).sourceForAsset(asset.id);
-          const assetStart = new Date(start);
-          const assetEnd = new Date(end);
+          await adsSource.assert();
+          if (progress.isCompleted(asset.id)) { report.resumedSkipped = (report.resumedSkipped || 0) + 1; continue; }
+          const fixedWindow = progress.windowFor(asset.id);
+          const assetStart = new Date(fixedWindow.startDate + 'T00:00:00.000Z');
+          const assetEnd = new Date(fixedWindow.endDate + 'T00:00:00.000Z');
           console.log(`▶️ AdsBackfill ${asset.metaAssetName} (${asset.metaAssetId}) ${assetStart.toISOString().slice(0,10)}..${assetEnd.toISOString().slice(0,10)}`);
           const assignment = await this._buildMetaAssignmentContext(asset);
           const result = await syncAdAccountMetrics(asset, null, assetStart, assetEnd, { assignment, adsSource });
           if (result?.status !== 'completed') throw Object.assign(Error('meta_ads_sync_failed'), { code: 'meta_ads_sync_failed' });
+          await adsSource.assert();
+          await SyncLog.create({ job_type: 'ads_backfill', status: 'completed', asset_id: asset.id, asset_type: 'ad_account',
+            clinica_id: asset.clinicaId ?? null, start_time: syncLog.start_time || new Date(), end_time: new Date(),
+            records_processed: Number(result.insightsRows || 0) + Number(result.actionsRows || 0),
+            status_report: { metaAdsAccountDigest: metaAdsContinuation.accountDigest(asset), ...fixedWindow } });
+          progress.complete(asset.id);
           report.deliveryReasonsRefreshed = false;
           report.processed += 1;
           if (result) {
@@ -1455,7 +1481,7 @@ class MetaSyncJobs {
           const failure = require('../services/metaMarketingAdsReader.service').safeError(err, 'meta_ads_sync_failed');
           report.errors.push({ assetId: asset.id, name: asset.metaAssetName, error: failure.code });
           if (failure.code === 'rate_limited') {
-            report.nextRunAt = new Date(Date.now() + Math.max(60000, failure.retryAfterMs || 2 * 60 * 60 * 1000));
+            report.nextRunAt = new Date(Math.ceil((Date.now() + Math.max(60000, failure.retryAfterMs || 2 * 60 * 60 * 1000)) / 1000) * 1000);
             break; // Do not send other accounts through a shared provider pause.
           }
         }
@@ -1470,7 +1496,7 @@ class MetaSyncJobs {
         status_report: report
       });
       console.log('✅ adsBackfill completado', report);
-      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report };
+      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report, ...progress.result() };
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
       console.error('❌ Error en adsBackfill:', error);
