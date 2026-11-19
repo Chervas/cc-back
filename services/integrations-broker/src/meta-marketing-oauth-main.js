@@ -27,6 +27,8 @@ function validateConfig(config) {
   if(config&&Object.hasOwn(config,'admission')){
     fields.push('admission');const admission=admissionContract.validateSettings(config.admission);
     if(!admission||admission.enabled&&(admission.environment!==config.environment||config.standby===true))fail('invalid_request');
+    if(admission?.discoveryScopeKeys?.length&&config.assetDiscovery!==true)fail('invalid_request');
+    if(admission?.enrollmentScopeKeys?.length&&config.assetEnrollment!==true)fail('invalid_request');
   }
   if (config && Object.hasOwn(config,'standby')) { fields.push('standby'); if(typeof config.standby!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
@@ -124,7 +126,9 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     }
     const agencyBootstrap=config.agencySystemUser?require('./meta-marketing-agency-bootstrap').createAgencyBootstrap({store,policy:config.policy,now:adsNow}):undefined;
     http??=createMetaMarketingOAuthHttp({pacer,agencyBootstrap,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
-    oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id)});
+    const admission=createMetaMarketingAdmission({store,policy:config.policy,settings:config.admission,client:aws.secrets});
+    oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id),
+      ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base)}:{})});
     if(config.adsRead||config.leadAds){
       cursorKey=require('node:crypto').randomBytes(32);
       const cursor=require('./provider-cursor').cursorCodec(cursorKey,adsNow);
@@ -132,16 +136,16 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
       if(config.leadAds)leadsHttp=require('./meta-marketing-leads-http').createMetaMarketingLeadsHttp({pacer,cursor,now:adsNow,...(leadsRequest?{request:leadsRequest}:{})});
     }
     const credentialEpochs=config.credentialRenewal?createMetaMarketingCredentialEpochs({store}):null;
-    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessRegistry(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{}),...(config.leadRecovery?{leadRecovery:config.leadRecovery}:{}),...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{})});
+    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessRegistry(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{}),...(config.leadRecovery?{leadRecovery:config.leadRecovery}:{}),...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{}),
+      ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base)}:{})});
     if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment});
     if(businessConfigs(config).length||config.userCredentialHealth){const businessHttp=businessConfigs(config).length?require('./meta-marketing-business-issuer-http').createIssuerHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})}):null;
       if(businessConfigs(config).length)business=require('./meta-marketing-business').createMetaMarketingBusiness({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,config:businessRegistry(config)});
       const userHealthHttp=require('./meta-marketing-user-health-http').createUserHealthHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
       maintenance=require('./meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({store,epochs:credentialEpochs,enrollment,secrets,http,businessHttp,userHealthHttp,environment:config.environment,...(businessConfigs(config).length?{config:businessRegistry(config)}:{})});}
     if(businessConfigs(config).length)store.setConnectionAuthorityResolver(ref=>enrollment.connectionAuthority(ref,config.policy));
-    const admission=createMetaMarketingAdmission({store,policy:config.policy,settings:config.admission,client:aws.secrets});
-    // Admission only derives the four OAuth grants. Existing static sources
-    // and Enrollment's later asset authority retain their original guards.
+    // Discovery is separately scoped and derives no enrollment/reader grant.
+    // Existing static sources retain their original authority and guards.
     const policyResolver=admission?{resolve(request,principal,base){
       const prepared=admission.resolve(request,principal,base);
       return enrollment?.resolve(request,principal,prepared)||prepared;

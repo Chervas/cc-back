@@ -4,6 +4,9 @@
 const {randomUUID}=require('node:crypto');
 const {CreateSecretCommand,DescribeSecretCommand,GetSecretValueCommand}=require('@aws-sdk/client-secrets-manager');
 const C=require('./meta-marketing-oauth-contract'),P=require('./meta-marketing-admission-contract');
+const D=require('./meta-marketing-discovery-contract');
+const E=require('./meta-marketing-enrollment-contract');
+const enrollmentOperations=[E.OPERATIONS.prepare,E.OPERATIONS.activate,E.OPERATIONS.status,E.OPERATIONS.revoke];
 const {authenticate}=require('./auth'),{request:validateRequest}=require('./contracts');
 const {validatePolicy}=require('./policy'),{canonical}=require('./canonical');
 const {eventFor}=require('./audit'),{BrokerError,fail}=require('./errors');
@@ -54,11 +57,20 @@ function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date
     // Never rewrite or shadow a static binding, grant, history or fingerprint.
     if(liveBase.connections.some(binding=>binding.connectionRef===request.connectionRef))return liveBase;
     const binding=resolveBinding(request.connectionRef);if(!binding)return liveBase;
-    C.authorize({request,principal,binding});
+    if(enrollmentOperations.includes(request.operation))E.authorize({request,principal,binding},config.environment);
+    else C.authorize({request,principal,binding});
     if(principal.id!==gateway&&principal.id!==control)fail('scope_denied');
+    const discovery=config.discoveryScopeKeys?.includes(binding.metaMarketingOAuth.scopeKey)===true;
+    const enrollment=config.enrollmentScopeKeys?.includes(binding.metaMarketingOAuth.scopeKey)===true;
+    if(request.operation===D.OPERATION&&discovery
+      ||enrollment&&[E.OPERATIONS.prepare,E.OPERATIONS.activate].includes(request.operation)){
+      checkBlocks(binding.metaMarketingOAuth.scopeKey,binding.metaMarketingOAuth.clinicIds);
+      checkFootprint(binding.metaMarketingOAuth.scopeKey,binding.metaMarketingOAuth.clinicIds);
+    }
     const grants=[gateway,control].map(principalId=>({principalId,tenantRef:'clinic:'+binding.metaMarketingOAuth.clinicIds[0],
       connectionRef:binding.connectionRef,assetRef:'meta-enroll:'+binding.metaMarketingOAuth.scopeKey,
-      operations:principalId===gateway?Object.values(C.OPERATIONS):[C.OPERATIONS.status,C.OPERATIONS.abort]}));
+      operations:principalId===gateway?[...Object.values(C.OPERATIONS),...(discovery?[D.OPERATION]:[]),...(enrollment?enrollmentOperations:[])]
+        :[C.OPERATIONS.status,C.OPERATIONS.abort,...(enrollment?[E.OPERATIONS.status,E.OPERATIONS.revoke]:[])]}));
     return {...liveBase,connections:[...liveBase.connections,binding],grants:[...liveBase.grants,...grants]};
   }
   const tagsFor=row=>[{Key:'ManagedBy',Value:'clinicaclick-meta-marketing-admission'},

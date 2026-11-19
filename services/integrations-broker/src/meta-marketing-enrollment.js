@@ -5,7 +5,8 @@ const C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-d
 const A=require('./meta-marketing-ads-contract'),X=require('./meta-marketing-enrolled-asset-access-contract');
 const L=require('./meta-marketing-leads-contract'),{timingSafeEqual}=require('node:crypto');
 const V=require('./meta-marketing-enrollment-assets-contract'),R=require('./meta-marketing-credential-renewal-contract');
-function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,leadRecovery,credentialEpochs,businessConfig,enrolledAssetAccess}){
+function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,leadRecovery,credentialEpochs,businessConfig,enrolledAssetAccess,resolvePolicy}){
+  if(resolvePolicy!==undefined&&typeof resolvePolicy!=='function')fail('invalid_request');
   if(adsRead!==undefined){A.config(adsRead);if(typeof adsHttp?.read!=='function')fail('invalid_request');}
   if(leadAds!==undefined){L.config(leadAds);if(typeof leadsHttp?.read!=='function'||typeof secrets?.withLeadVerification!=='function')fail('invalid_request');}
   if(leadRecovery!==undefined){require('./meta-marketing-lead-recovery-config').config(leadRecovery);if(!leadAds)fail('invalid_request');}
@@ -260,13 +261,16 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     if(name){E.validators[name](request.payload);E.authorize({request,principal,binding},environment);}else validateRead(request.operation,request.payload);
     const authority=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey])),configDigest=K.fingerprint(binding);
     const commandDigest=C.hash(canonical({operation:request.operation,tenantRef:request.tenantRef,connectionRef:request.connectionRef,assetRef:request.assetRef,payload:request.payload}));
-    const auditPolicy=leadOperation(request.operation)&&principal.id===L.ingressPrincipal(environment)?resolve(request,principal,policy):policy;
+    // Preparation and confirmation may use a candidate admitted on demand.
+    // Re-resolve only the enrollment control plane, never the reader or ingress.
+    const enrollmentPolicy=()=>name&&resolvePolicy?resolvePolicy(request,principal,policy):policy;
+    const auditPolicy=leadOperation(request.operation)&&principal.id===L.ingressPrincipal(environment)?resolve(request,principal,policy):enrollmentPolicy();
     const event=(action,result,reason)=>eventFor(request,principal,auditPolicy,action,result,reason,now());
     function authorityNow(){
-      currentPrincipal(principal,policy,authority);
-      const fresh=grantBinding(initialRow,source(policy,request.connectionRef));
+      const current=enrollmentPolicy(),key=currentPrincipal(principal,current,authority);
+      const fresh=grantBinding(initialRow,source(current,request.connectionRef));
       if(K.fingerprint(fresh)!==configDigest)fail('scope_denied');
-      require('./auth').authorize(principal,request,isRead?resolve(request,principal,policy):policy);return fresh;
+      require('./auth').authorize(key,request,isRead?resolve(request,key,current):current);return fresh;
     }
     let row=name?owned(request,rowFor(request.payload.enrollmentId)):assetOwner(request,principal,policy).row;
     if(name==='status'){

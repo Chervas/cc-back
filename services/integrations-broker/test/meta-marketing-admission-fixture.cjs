@@ -5,11 +5,13 @@ const {fixture}=require('./meta-marketing-oauth-fixture.cjs');
 const {BrokerStore}=require('../src/store'),{Broker}=require('../src/broker');
 const {createMetaMarketingOAuth,createMetaMarketingOAuthOperations}=require('../src/meta-marketing-oauth');
 const {createMetaMarketingOAuthSecrets}=require('../src/meta-marketing-oauth-secrets');
+const {createMetaMarketingEnrollment}=require('../src/meta-marketing-enrollment');
 const C=require('../src/meta-marketing-oauth-contract');
 const {ACCOUNT,SECRET_KEY}=require('../src/google-main');
 
-function admissionFixture(t){
-  const f=fixture(t),P=require('../src/meta-marketing-admission-contract');
+function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false,enrollmentScopeKeys}={}){
+  const hasDiscovery=discovery||enrollment;
+  const f=fixture(t,{discovery:hasDiscovery,enrollment}),P=require('../src/meta-marketing-admission-contract');
   const {createMetaMarketingAdmission}=require('../src/meta-marketing-admission');
   // Three independent static authorizations remain present throughout every
   // dynamic test. Their contents are fixtures, never deployment configuration.
@@ -26,6 +28,9 @@ function admissionFixture(t){
     appVersionId:f.binding.metaMarketingOAuth.appVersionId,clientSecretArn:f.binding.clientSecretArn,
     redirectUri:f.binding.metaMarketingOAuth.redirectUri,scopes:[...f.binding.metaMarketingOAuth.scopes].sort(),
     scopeKeys:['clinic:123','clinic:124','clinic:125','group:12'],maxConnections:10,slotTtlMs:86400000};
+  const requestedDiscovery=discoveryScopeKeys===undefined?enrollmentScopeKeys:discoveryScopeKeys;
+  if(requestedDiscovery!==undefined)settings.discoveryScopeKeys=[...requestedDiscovery];
+  if(enrollmentScopeKeys!==undefined)settings.enrollmentScopeKeys=[...enrollmentScopeKeys];
   const originalPolicy=JSON.stringify(f.policy),metadata=new Map();
   const state={creates:0,loseCreate:false,denied:false,before:null,after:null,calls:[]};
   const aws={async send(command,options){
@@ -56,10 +61,19 @@ function admissionFixture(t){
     const admission=createMetaMarketingAdmission({store,policy:f.policy,settings:chosenSettings,client:aws,now:f.now});
     const secrets=createMetaMarketingOAuthSecrets({client:aws,accountId:ACCOUNT,
       prefix:'/clinicaclick/integrations/prod/meta-marketing/staging/',kmsKeyArn:SECRET_KEY});
-    const engine=createMetaMarketingOAuth({store,policy:f.policy,secrets,http:f.http,now:f.now});
-    const broker=new Broker({store,policy:f.policy,secrets,policyResolver:admission,
-      operations:createMetaMarketingOAuthOperations(engine),now:f.now});
-    const handle={store,admission,engine,broker,close(){engine.close();try{store.close();}catch{}}};
+    let resourceEnrollment;
+    const resolvePolicy=admission?(request,principal,base)=>admission.resolve(request,principal,base):undefined;
+    const engine=createMetaMarketingOAuth({store,policy:f.policy,secrets,http:f.http,now:f.now,assetDiscovery:hasDiscovery,
+      onAbort:id=>resourceEnrollment?.abortFlow(id),
+      ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base)}:{})});
+    if(enrollment)resourceEnrollment=createMetaMarketingEnrollment({store,secrets,http:f.http,environment:'staging',now:f.now,
+      ...(resolvePolicy?{resolvePolicy}:{})});
+    const policyResolver=admission&&resourceEnrollment?{resolve(request,principal,base){
+      return resourceEnrollment.resolve(request,principal,admission.resolve(request,principal,base));
+    }}:admission||resourceEnrollment;
+    const broker=new Broker({store,policy:f.policy,secrets,policyResolver,
+      operations:{...createMetaMarketingOAuthOperations(engine,{assetDiscovery:hasDiscovery}),...resourceEnrollment?.operations},now:f.now});
+    const handle={store,admission,engine,enrollment:resourceEnrollment,broker,close(){resourceEnrollment?.close();engine.close();try{store.close();}catch{}}};
     handles.push(handle);return handle;
   }
   const current=make();t.after(()=>handles.forEach(handle=>handle.close()));

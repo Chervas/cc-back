@@ -2,7 +2,8 @@
 const K=require('./meta-marketing-credential-shape');
 const { BrokerError, fail } = require('./errors'), { eventFor } = require('./audit');
 const C = require('./meta-marketing-oauth-contract'), D = require('./meta-marketing-discovery-contract'), { GRAPH_VERSION } = require('./meta-marketing-contract');
-function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Date.now(), assetDiscovery = false, onAbort = () => {} }) {
+function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Date.now(), assetDiscovery = false, onAbort = () => {}, resolvePolicy }) {
+  if(resolvePolicy!==undefined&&typeof resolvePolicy!=='function')fail('invalid_request');
   // This table is installed only by the explicit onboarding runtime, not the generic broker.
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_oauth_flows (
     id TEXT PRIMARY KEY, principal TEXT NOT NULL, tenant TEXT NOT NULL, connection TEXT NOT NULL, asset TEXT NOT NULL,
@@ -30,16 +31,16 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
     return !!store.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='meta_marketing_enrollments'").get()
       &&!!store.db.prepare("SELECT 1 FROM meta_marketing_enrollments WHERE connection=? AND state='active' LIMIT 1").get(binding.connectionRef);
   }
-  function append(request, principal, action, result, reason) {
+  function append(request, principal, action, result, reason, auditPolicy=policy) {
     if (store.backlog().pending >= policy.maxBacklog) fail('audit_unavailable');
-    store.appendAudit(eventFor({ ...request, requestId: request.payload.flowId || request.requestId }, principal, policy, action, result, reason, now()));
+    store.appendAudit(eventFor({ ...request, requestId: request.payload.flowId || request.requestId }, principal, auditPolicy, action, result, reason, now()));
   }
   function metadata(row, binding) {
     const candidate = row.state === 'staged' ? K.metadata(JSON.parse(row.credential_metadata), binding) : null;
     return { flowId: row.id, status: row.state, connectionRef: row.connection, scopeKey: K.bindingFor(binding).scopeKey,
       expiresAt: row.expires_at, accessBlocked: true, candidate: candidate ? { versionId: row.id, digest: row.secret_digest, ...candidate } : null };
   }
-  async function reconcile(request, principal, binding, signal) {
+  async function reconcile(request, principal, binding, signal, auditPolicy=policy) {
     let row = checked(request, binding, principal);
     if (row.state !== 'staging') return metadata(row, binding);
     active(request, binding); if (signal.aborted) fail('provider_timeout');
@@ -50,7 +51,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
       if (row.state !== 'staging') fail('oauth_flow_interrupted');
       const value = K.metadata(receipt.metadata, binding);
       if (receipt.versionId !== row.id || receipt.digest !== row.secret_digest || JSON.stringify(value) !== row.credential_metadata) fail('secret_unavailable');
-      append(request, principal, 'integration.completed', 'success', 'oauth_credentials_staged');
+      append(request, principal, 'integration.completed', 'success', 'oauth_credentials_staged',auditPolicy);
       store.db.prepare("UPDATE meta_marketing_oauth_flows SET state='staged',updated_at=? WHERE id=?").run(now(), row.id);
       return metadata(rowFor(row.id), binding);
     });
@@ -61,13 +62,16 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
       K.authorize({ request, principal, binding }); const b = K.bindingFor(binding);
       const name = assetDiscovery && request.operation === D.OPERATION ? 'assets' : Object.keys(C.OPERATIONS).find(k => C.OPERATIONS[k] === request.operation);
       if (!name) fail('operation_denied'); (name === 'assets' ? D.validate : C.validators[name])(request.payload);
+      // Attribute dynamic consent to its already-authorized signed scope. This
+      // snapshot is only for audit; discovery still re-resolves every boundary.
+      const auditPolicy=resolvePolicy&&name!=='assets'?resolvePolicy(request,principal,livePolicy):policy;
       const id = request.payload.flowId || request.requestId;
       if (closed) fail('connection_blocked');
       if (name === 'abort') {
         // Abort is allowed while an exchange is in flight and before a delayed begin arrives.
         const result = store.transaction(() => {
           if (!rowFor(id)) {
-            append(request, principal, 'integration.failed', 'denied', 'oauth_authorization_aborted');
+            append(request, principal, 'integration.failed', 'denied', 'oauth_authorization_aborted',auditPolicy);
             store.db.prepare(`INSERT INTO meta_marketing_oauth_flows(id,principal,tenant,connection,asset,state_hash,config_digest,
               scope_digest,clinic_digest,created_at,expires_at,updated_at,state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'aborted')`)
               .run(id, principal.id.replace(/^control:/,'gateway:'), request.tenantRef, request.connectionRef, request.assetRef,
@@ -75,7 +79,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
           } else {
             const row = checked(request,binding,principal);
             if (row.state !== 'aborted') {
-              append(request,principal,'integration.failed','denied','oauth_authorization_aborted');
+              append(request,principal,'integration.failed','denied','oauth_authorization_aborted',auditPolicy);
               store.db.prepare("UPDATE meta_marketing_oauth_flows SET state='aborted',updated_at=? WHERE id=?").run(now(),id);
             }
           }
@@ -89,29 +93,35 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
       const parentSignal=renewalContexts.get(id)?.signal,parentAbort=()=>controller.abort();
       parentSignal?.addEventListener('abort',parentAbort,{once:true});if(parentSignal?.aborted)controller.abort();
       const timer = setTimeout(() => controller.abort(),name==='finish'&&require('./meta-marketing-agency-contract').isBinding(binding)?120000:25000); timer.unref?.();
-      const discoveryAudit = (action,result,reason) => {
+      const discoveryAudit = (action,result,reason,auditPolicy=policy) => {
         if (store.backlog().pending >= policy.maxBacklog) fail('audit_unavailable');
-        store.appendAudit(eventFor(request,principal,policy,action,result,reason,now()));
+        store.appendAudit(eventFor(request,principal,auditPolicy,action,result,reason,now()));
       };
       try {
         if (name === 'assets') {
           const authority=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey]));
+          let authorizedPolicy=livePolicy;
           const assertCurrent = () => {
-            const configured=livePolicy.principals.find(p=>p.id===principal.id);
+            // Re-resolve durable admission on every provider boundary. The
+            // first Broker grant or a cached dynamic binding is not authority
+            // for a later page, nor for the final inventory response.
+            const currentPolicy=resolvePolicy?resolvePolicy(request,principal,livePolicy):livePolicy;
+            const configured=currentPolicy.principals.find(p=>p.id===principal.id);
             if(!configured?.enabled||C.hash(JSON.stringify([configured.id,configured.keyId,configured.publicKey]))!==authority)fail('scope_denied');
-            require('./auth').authorize(configured,request,livePolicy);
-            const currentBinding=livePolicy.connections.find(c=>c.connectionRef===binding.connectionRef);
+            require('./auth').authorize(configured,request,currentPolicy);
+            const currentBinding=currentPolicy.connections.find(c=>c.connectionRef===binding.connectionRef);
             if(K.fingerprint(currentBinding)!==K.fingerprint(binding))fail('scope_denied');
             const row = checked(request,binding,principal); active(request,binding);
             if (signal.aborted) fail('provider_timeout');
             if (row.state !== 'staged' || row.scope_digest !== request.payload.scopeDigest) fail('scope_denied');
             const value=K.metadata(JSON.parse(row.credential_metadata),binding);
             if ([value.expiresAt,value.dataAccessExpiresAt].some(v=>v!==null && v<=now())) fail('credential_revoked');
+            authorizedPolicy=currentPolicy;
             return row;
           };
           const row=assertCurrent();
           store.transaction(()=>{assertCurrent();if(store.backlog().pending+2>policy.maxBacklog)fail('audit_unavailable');
-            discoveryAudit('integration.requested','accepted','meta_inventory_requested');});
+            discoveryAudit('integration.requested','accepted','meta_inventory_requested',authorizedPolicy);});
           const assets=await secrets.withCandidate(binding,row,row.secret_digest,async context=>{
             const fresh=assertCurrent();if(JSON.stringify(context.metadata)!==fresh.credential_metadata)fail('secret_unavailable');
             return http.discover({binding,...context,signal,authorize:assertCurrent});
@@ -119,7 +129,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
           return store.transaction(()=>{
             const fresh=assertCurrent(),metadata=K.metadata(JSON.parse(fresh.credential_metadata),binding);
             const result=D.result({assets,metadata,request,binding,row:fresh,now:now()});
-            discoveryAudit('integration.completed','success','meta_inventory_verified');
+            discoveryAudit('integration.completed','success','meta_inventory_verified',authorizedPolicy);
             return {requestId:request.requestId,data:result,replayed:false};
           });
         }
@@ -143,7 +153,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
               if (count >= 6) fail('rate_limited');
               const retained=retainedFlows(id);
               if (store.db.prepare("SELECT id FROM meta_marketing_oauth_flows WHERE connection=? AND (state IN ('exchanging','staging','staged') OR (state='awaiting' AND expires_at>?))").all(binding.connectionRef,now()).some(row=>!retained.has(row.id))) fail('oauth_flow_busy');
-              append(request,principal,'integration.requested','accepted','oauth_authorization_requested');
+              append(request,principal,'integration.requested','accepted','oauth_authorization_requested',auditPolicy);
               store.db.prepare(`INSERT INTO meta_marketing_oauth_flows(id,principal,tenant,connection,asset,state_hash,config_digest,
                 scope_digest,clinic_digest,created_at,expires_at,updated_at,state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'awaiting')`)
                 .run(id,principal.id,request.tenantRef,request.connectionRef,request.assetRef,C.hash(p.state),K.fingerprint(binding),p.scopeDigest,p.clinicSetDigest,now(),p.expiresAt,now());
@@ -154,11 +164,11 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
           return { requestId:request.requestId,data:{flowId:id,authUrl:`https://www.facebook.com/${K.graphVersion(binding)}/dialog/oauth?${params}`,expiresAt:p.expiresAt},replayed:!!old };
         }
         let row = checked(request,binding,principal);
-        if (name === 'status') return {requestId:request.requestId,data:await reconcile(request,principal,binding,signal),replayed:false};
+        if (name === 'status') return {requestId:request.requestId,data:await reconcile(request,principal,binding,signal,auditPolicy),replayed:false};
         active(request,binding);
         if (row.state_hash !== C.hash(request.payload.state)) fail('oauth_state_invalid');
         if (row.code_digest && row.code_digest !== C.hash(request.payload.code)) fail('idempotency_conflict');
-        if (['staging','staged'].includes(row.state)) return {requestId:request.requestId,data:await reconcile(request,principal,binding,signal),replayed:true};
+        if (['staging','staged'].includes(row.state)) return {requestId:request.requestId,data:await reconcile(request,principal,binding,signal,auditPolicy),replayed:true};
         if (row.state !== 'awaiting' || row.expires_at <= now()) fail('oauth_flow_interrupted');
         store.transaction(() => {
           row=checked(request,binding,principal); active(request,binding);
@@ -188,12 +198,12 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
               return { versionId:id, digest:encoded.digest };
             } finally { encoded?.body.fill(0); }
           }),signal);
-          return {requestId:request.requestId,data:await reconcile(request,principal,binding,signal),replayed:false};
+          return {requestId:request.requestId,data:await reconcile(request,principal,binding,signal,auditPolicy),replayed:false};
         } finally { code.fill(0); }
       } catch (e) {
         const current=rowFor(id);
         if (current?.state==='exchanging') store.transaction(() => {
-          append(request,principal,'integration.failed','unknown','oauth_exchange_unconfirmed');
+          append(request,principal,'integration.failed','unknown','oauth_exchange_unconfirmed',auditPolicy);
           store.db.prepare("UPDATE meta_marketing_oauth_flows SET state='interrupted',updated_at=? WHERE id=?").run(now(),id);
         });
         throw require('./meta-marketing-graph-pacing').safeError(e,'internal_error');
