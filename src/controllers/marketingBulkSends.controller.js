@@ -101,8 +101,15 @@ function sendError(res, error, fallbackMessage) {
 exports.listCampaigns = async (req, res) => {
   try {
     const scope = await resolveScope(req, { allowAll: false });
+    if (['page', 'page_size', 'record_kind'].some(key => req.query[key] !== undefined)
+      && !await hasMarketingClinicScopeAccess({ userId: req.userData?.userId, clinicIds: scope.clinicIds, access: 'read' })) {
+      throw Object.assign(new Error('No tienes acceso a los envíos masivos de estas clínicas'), { status: 403 });
+    }
     const result = await marketingBulkSendsService.listCampaigns(scope, {
       context: req.query.context || req.query.list_context || req.query.listContext || null,
+      record_kind: req.query.record_kind,
+      page: req.query.page,
+      page_size: req.query.page_size,
     });
     return res.json({
       ...result,

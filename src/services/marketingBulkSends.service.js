@@ -2676,6 +2676,37 @@ function contextToCampaignWhere(context) {
     : { [Op.and]: [Sequelize.literal(`NOT ${reviewCondition}`)] };
 }
 
+function campaignCollectionPagination(options) {
+  if (!['page', 'page_size', 'record_kind'].some(key => options[key] !== undefined)) return null;
+  const invalid = () => Object.assign(new Error('Paginación inválida: usa context=mass_sends, record_kind=campaign|recipient_list, page positivo y page_size=10|25|50.'), {
+    status: 400, code: 'bulk_send_pagination_invalid',
+  });
+  if (normalizeCampaignListContext(options.context) !== 'mass_sends'
+    || !['campaign', 'recipient_list'].includes(options.record_kind)) throw invalid();
+  const integer = (value, fallback) => {
+    if (value === undefined) return fallback;
+    if ((typeof value !== 'string' && typeof value !== 'number') || !/^[1-9]\d*$/.test(String(value))) throw invalid();
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed)) throw invalid();
+    return parsed;
+  };
+  const page = integer(options.page, 1);
+  const pageSize = integer(options.page_size, 10);
+  const offset = (page - 1) * pageSize;
+  if (![10, 25, 50].includes(pageSize) || !Number.isSafeInteger(offset) || offset > 2147483647) throw invalid();
+  return { page, page_size: pageSize, offset, record_kind: options.record_kind };
+}
+
+function campaignCollectionWhere(recordKind) {
+  // Older records have no kind and are intentionally shown in both collections.
+  // JSON null must behave like a missing value, rather than the text "null".
+  const kind = `LOWER(CASE WHEN JSON_TYPE(JSON_EXTRACT(criteria, '$.record_kind')) = 'NULL'
+    THEN '' ELSE COALESCE(JSON_UNQUOTE(JSON_EXTRACT(criteria, '$.record_kind')), '') END)`;
+  return Sequelize.literal(recordKind === 'recipient_list'
+    ? `${kind} IN ('recipient_list', '')`
+    : `${kind} <> 'recipient_list'`);
+}
+
 function cleanReviewInlineFeedbackReason(value) {
   return normalizeText(value || '')
     .replace(/^[\s.,;:!¡¿?\-–—]+/, '')
@@ -6619,6 +6650,30 @@ async function hydrateListTemplateSnapshots(lists) {
 }
 
 async function listCampaigns(scope, options = {}) {
+  const pagination = campaignCollectionPagination(options);
+  if (pagination) {
+    const { count, rows: lists } = await MarketingPatientList.findAndCountAll({
+      where: { [Op.and]: [
+        { objective_id: OBJECTIVE_ID, status: { [Op.ne]: 'archived' } },
+        scopeToWhere(scope),
+        contextToCampaignWhere(options.context),
+        campaignCollectionWhere(pagination.record_kind),
+      ] },
+      order: [['updated_at', 'DESC'], ['id', 'DESC']],
+      limit: pagination.page_size,
+      offset: pagination.offset,
+    });
+    const protectedList = lists.find(list => Number(list.criteria?.review_care_version) === 1);
+    if (protectedList) await guardReviewCare(scope, protectedList);
+    await hydrateListTemplateSnapshots(lists);
+    // Pages reuse stored counters. Contact DISTINCT aggregates and recipient
+    // previews belong to the unchanged legacy statistics response below.
+    return {
+      success: true,
+      items: lists.map(list => serializeCampaign(list)),
+      pagination: { page: pagination.page, page_size: pagination.page_size, total: Number(count) },
+    };
+  }
   const lists = await MarketingPatientList.findAll({
     where: {
       objective_id: OBJECTIVE_ID,
@@ -6678,7 +6733,10 @@ async function listCampaigns(scope, options = {}) {
   aggregate.unique_contacts = Number(uniqueContactsRow?.unique_contacts || 0);
   aggregate.unique_ready_contacts = Number(uniqueContactsRow?.unique_ready_contacts || 0);
   aggregate.unique_sent_contacts = Number(uniqueContactsRow?.unique_sent_contacts || 0);
-  return { success: true, items, aggregate, daily_series: [] };
+  return {
+    success: true, items, aggregate, daily_series: [],
+    ...(normalizeCampaignListContext(options.context) === 'mass_sends' ? { supports_collection_pagination: true } : {}),
+  };
 }
 
 async function createCampaign(scope, body = {}, userId = null) {
