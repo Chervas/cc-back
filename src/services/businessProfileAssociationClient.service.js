@@ -24,7 +24,32 @@ function createClient({client,controlClient}) {
     if (kind === 'prepare' && !['prepared','active'].includes(data.state) || kind === 'activate' && data.state !== 'active' || kind === 'retire' && (!data.previousAssetRetired || !['active','retired'].includes(data.state)) || kind === 'abort' && (data.state !== 'cancelled' || !data.accessBlocked) || !control && kind !== 'status' && data.accessBlocked || data.reassociationCleanupPending===true) C.fail(data.reassociationCleanupPending===true?'outcome_unknown':'broker_response_invalid');
     return data;
   }
-  return { command, async discover(scope,beforeExecute) {
+  return { command, async discoverFirstProfile(handle) {
+    // Only the API's checked, short-lived first-profile context can request
+    // this read. Scope/connection/tenant are never accepted from an HTTP body.
+    // Owner discovery retains its exact grant/account/location allowlists.
+    const inspect = require('./businessProfileFirstProfile.service').inspectContext;
+    const all = [], tokens = new Set(); let pageToken = null;
+    for (let page = 0; page < 4; page++) {
+      const scope = await inspect(handle), requestId = randomUUID();
+      const result = await client.execute({ requestId, operation: PREFIX + 'discover.v1', tenantRef: 'clinic:' + scope.clinica_id,
+        connectionRef: scope.connection_ref, assetRef: scope.scope_ref, payload: { pageToken } }, { timeoutMs: 10000 });
+      await inspect(handle); const data = envelope(result, requestId);
+      if (result.replayed || !exact(data, ['locations', 'nextPageToken']) || !Array.isArray(data.locations)
+        || data.locations.length > 250 || Buffer.byteLength(JSON.stringify(data)) > 786432) C.fail('broker_response_invalid');
+      for (const row of data.locations) {
+        let target;
+        try { target = C.providerTarget(row); } catch { C.fail('broker_response_invalid'); }
+        if (all.some(old => old.locationName === target.locationName)) C.fail('broker_response_invalid');
+        all.push(target);
+      }
+      if (data.nextPageToken === null) return all;
+      if (typeof data.nextPageToken !== 'string' || !/^[A-Za-z0-9_-]{40,4096}$/.test(data.nextPageToken)
+        || tokens.has(data.nextPageToken)) C.fail('broker_response_invalid');
+      tokens.add(data.nextPageToken); pageToken = data.nextPageToken;
+    }
+    C.fail('broker_response_invalid');
+  }, async discover(scope,beforeExecute) {
     const all = []; const tokens = new Set(); let pageToken = null;
     for (let page = 0; page < 4; page++) {
       await beforeExecute(); const requestId = randomUUID();

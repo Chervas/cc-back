@@ -4,7 +4,7 @@ const express = require('express'); const sequelize = require('sequelize'); cons
 const { loadDiscoverySource, unusedMetaSurfaceDependencies } = require('./fixtures/business_profile_discovery.fixture');
 const { connectionForTestServer } = require('./fixtures/campaign_offline_runtime.cjs');
 async function fixture(t) {
-  const state = { allowed: true, managed: true, globalClosed: true, begin: 0, callbacks: 0, statuses: 0, provider: 0, redis: 0, metadata: 0, logs: [], selections: [] };
+  const state = { allowed: true, managed: true, globalClosed: true, begin: 0, callbacks: 0, statuses: 0, provider: 0, redis: 0, metadata: 0, logs: [], selections: [], returnOrigins: [] };
   const sessionRef = randomUUID(); const conn = { id: 81 };
   for (const field of ['accessToken', 'refreshToken']) Object.defineProperty(conn, field, { get() { assert.fail('General API must not obtain a token'); } });
   const models = { Clinica: { findByPk: async () => ({ grupoClinicaId: 9 }), findAll: async () => [{ id_clinica: 71 }] } };
@@ -14,13 +14,13 @@ async function fixture(t) {
   const broker = {
     bindingFor: async (id, service) => {
       state.selections.push(service);
-      if (service !== undefined && !['business_profile', 'search_console', 'analytics'].includes(service)) throw Object.assign(Error('FICTITIOUS_SECRET'), { code: 'google_oauth_service_invalid', httpStatus: 400 });
+      if (service !== undefined && !['business_profile', 'search_console', 'analytics', 'ads'].includes(service)) throw Object.assign(Error('FICTITIOUS_SECRET'), { code: 'google_oauth_service_invalid', httpStatus: 400 });
       return id === 81 && state.managed ? { google_connection_id: 81, cohort: service } : null;
     },
     assertLegacyAllowed: async () => { if (state.globalClosed) throw Object.assign(Error('FICTITIOUS_SECRET'), { code: 'google_oauth_legacy_closed', httpStatus: 409 }); },
     safe: e => e.code === 'google_oauth_legacy_closed' ? e.code : 'google_oauth_unavailable',
     begin: async input => { assert.equal(input.actorId, 501); assert.equal(input.scopeKey, 'clinic:71'); assert.equal(input.sessionRef, sessionRef);
-      assert.equal(input.returnTo, 'https://app.clinicaclick.com'); state.begin++; return { success: true, mode: 'broker', authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=FICTITIOUS_STATE' }; },
+      state.returnOrigins.push(input.returnTo); state.begin++; return { success: true, mode: 'broker', authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=FICTITIOUS_STATE' }; },
     callback: async input => { state.callbacks++; if (input.state !== 'FICTITIOUS_STATE') return null;
       assert.equal(input.code, 'FICTITIOUS_CODE'); assert.equal(input.denied, false);
       return { returnTo: 'https://app.clinicaclick.com', authorization_status: 'activation_pending', pending: true, activation_confirmed: false }; },
@@ -29,6 +29,12 @@ async function fixture(t) {
   };
   const router = loadDiscoverySource('routes/oauth.routes.js', { ...unusedMetaSurfaceDependencies(), express, sequelize, '../../models': models, './auth.middleware': auth,
     '../services/accessSession.service': sessions, '../services/googleOAuthBroker.service': broker,
+    '../lib/googleCutoverAdmission': { application: { run: async (kind, work) => {
+      assert(['oauth_begin', 'oauth_callback'].includes(kind)); return work();
+    } } },
+    '../services/googleReviewedSearchConsoleMapping.service': { additionStatus: async scope => {
+      assert.equal(typeof scope, 'function'); return null;
+    } },
     '../lib/oauthRedirect': require('../../lib/oauthRedirect'), '../lib/oauthMarketingScopeAccess': require('../../lib/oauthMarketingScopeAccess'),
     '../lib/marketingScopeAccess': { hasMarketingClinicScopeAccess: async ({ clinicIds }) => state.allowed && clinicIds.every(id => id === 71) },
     '../services/scopeConnectionResolver.service': { resolveGoogleConnectionForScope: async opts => {
@@ -53,6 +59,7 @@ async function fixture(t) {
 test('managed connect and status resolve only metadata, carry a managed session and do not require API client secrets', async t => {
   const f = await fixture(t); const result = await f.request('connect?clinic_id=71&return_to=https%3A%2F%2Fapp.clinicaclick.com%2Fmarketing');
   assert.equal(result.status, 200, result.text); assert.equal(result.body.mode, 'broker'); assert.equal(result.headers['cache-control'], 'no-store');
+  assert.deepEqual(f.state.returnOrigins, ['https://app.clinicaclick.com']);
   const status = await f.request('connection-status?clinic_id=71'); assert.equal(status.status, 200, status.text);
   assert.equal(status.body.pending, true); assert.equal(f.state.begin, 1); assert.equal(f.state.statuses, 1); assert.equal(f.state.provider + f.state.redis, 0);
 });
@@ -80,12 +87,12 @@ test('authentication and full scope permission precede managed state and URL rea
 });
 test('connect and status pass the explicit Google service to selection; invalid duplicated selectors fail before OAuth', async t => {
   const f = await fixture(t);
-  for (const service of ['search_console', 'analytics']) {
+  for (const service of ['search_console', 'analytics', 'ads']) {
     assert.equal((await f.request('connect?clinic_id=71&google_service=' + service)).status, 200);
     assert.equal((await f.request('connection-status?clinic_id=71&google_service=' + service)).status, 200);
   }
-  assert.deepEqual(f.state.selections, ['search_console', 'search_console', 'analytics', 'analytics']);
+  assert.deepEqual(f.state.selections, ['search_console', 'search_console', 'analytics', 'analytics', 'ads', 'ads']);
   assert.equal((await f.request('connect?clinic_id=71&google_service=analytics&google_service=search_console')).status, 400);
-  assert.equal((await f.request('connection-status?clinic_id=71&google_service=ads')).status, 400);
-  assert.equal(f.state.begin, 2); assert.equal(f.state.statuses, 2); assert.equal(f.state.provider + f.state.redis, 0);
+  assert.equal((await f.request('connection-status?clinic_id=71&google_service=unknown')).status, 400);
+  assert.equal(f.state.begin, 3); assert.equal(f.state.statuses, 3); assert.equal(f.state.provider + f.state.redis, 0);
 });
