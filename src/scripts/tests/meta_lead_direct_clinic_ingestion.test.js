@@ -7,24 +7,24 @@ const { createMetaMarketingLeadReader } = require('../../services/metaMarketingL
 const receiptRef = '11111111-1111-4111-8111-111111111111';
 // Only clinic95 is intentionally shared with the rollout label. Every provider
 // identity, enrollment, receipt, contact and transport below is fictitious.
-function fixture(registry) {
+function fixture(registry, { clinicId = 95, connectionRef = 'fixture-enrollment' } = {}) {
   const state = { calls: [], leads: [], audits: [], forms: [], notices: [], workspace: { id: 'fixture-setting', version: 1,
-    scope_type: 'clinic', scope_id: 95, preferences: registry === undefined ? {} : { meta_lead_routes: registry } },
+    scope_type: 'clinic', scope_id: clinicId, preferences: registry === undefined ? {} : { meta_lead_routes: registry } },
     mappings: [
-      { id: 10, assetType: 'facebook_page', metaAssetId: '501', metaConnectionId: 12, assignmentScope: 'clinic', clinicaId: 95, grupoClinicaId: null },
-      { id: 11, assetType: 'ad_account', metaAssetId: '601', metaConnectionId: 12, assignmentScope: 'clinic', clinicaId: 95, grupoClinicaId: null },
-      { id: 13, assetType: 'facebook_page', metaAssetId: '502', metaConnectionId: 12, assignmentScope: 'clinic', clinicaId: 95, grupoClinicaId: null },
+      { id: 10, assetType: 'facebook_page', metaAssetId: '501', metaConnectionId: 12, assignmentScope: 'clinic', clinicaId: clinicId, grupoClinicaId: null },
+      { id: 11, assetType: 'ad_account', metaAssetId: '601', metaConnectionId: 12, assignmentScope: 'clinic', clinicaId: clinicId, grupoClinicaId: null },
+      { id: 13, assetType: 'facebook_page', metaAssetId: '502', metaConnectionId: 12, assignmentScope: 'clinic', clinicaId: clinicId, grupoClinicaId: null },
     ], foreignScope: false, organic: true };
   const transaction = { LOCK: { UPDATE: 'UPDATE' } };
   const models = {
     ClinicMetaAsset: { findAll: async ({ where }) => state.mappings.filter(row => row.assetType === where.assetType && where.metaAssetId[Op.in].includes(row.metaAssetId)) },
     MetaMarketingBrokerBinding: { findAll: async ({ where }) => where.mapping_id
-      ? [{ mapping_id: where.mapping_id, enrollment_id: receiptRef, scope_key: 'clinic:95', connection_ref: 'fixture-enrollment' }]
+      ? [{ mapping_id: where.mapping_id, enrollment_id: receiptRef, scope_key: `clinic:${clinicId}`, connection_ref: connectionRef }]
       : state.mappings.map(row => ({ mapping_id: row.id, asset_ref: 'meta-' + row.assetType + ':' + row.metaAssetId })) },
-    CampaignWorkspaceSetting: { findOne: async ({ where }) => { assert.deepEqual(where, { scope_type: 'clinic', scope_id: 95 });return state.workspace; },
+    CampaignWorkspaceSetting: { findOne: async ({ where }) => { assert.deepEqual(where, { scope_type: 'clinic', scope_id: clinicId });return state.workspace; },
       findAll: async () => state.workspace ? [state.workspace] : [] },
     ExternalCampaignAssignment: { findAll: async () => [] },
-    Clinica: { findByPk: async id => id === 95 ? { id_clinica: 95, grupoClinicaId: null, estado_clinica: 1 } : null },
+    Clinica: { findByPk: async id => id === clinicId ? { id_clinica: clinicId, grupoClinicaId: null, estado_clinica: 1 } : null },
     LeadIntake: { findOne: async ({ where }) => state.leads.find(lead => lead.external_id === where.external_id), create: async row => { const lead = { id: state.leads.length + 1, ...row };state.leads.push(lead);return lead; } },
     LeadAttributionAudit: { create: async row => state.audits.push(row) },
     FormSubmissionEvent: {
@@ -36,15 +36,15 @@ function fixture(registry) {
   const metadata = mappingId => {
     const row = state.mappings.find(row => row.id === mappingId);
     return { mappingId, kind: row.assetType, id: row.metaAssetId, assetRef: 'meta-' + row.assetType + ':' + row.metaAssetId,
-      connectionId: 12, connectionRef: 'fixture-enrollment', appId: '701', subjectId: '801',
-      enrollmentId: receiptRef, enrollmentHash: 'fictitious-active-enrollment', scopeKey: state.foreignScope ? 'clinic:96' : 'clinic:95', tenantRef: 'clinic:95', clinicIds: [95] };
+      connectionId: 12, connectionRef, appId: '701', subjectId: '801',
+      enrollmentId: receiptRef, enrollmentHash: 'fictitious-active-enrollment', scopeKey: state.foreignScope ? 'clinic:96' : `clinic:${clinicId}`, tenantRef: `clinic:${clinicId}`, clinicIds: [clinicId] };
   };
   const reader = createMetaMarketingLeadReader({ enabled: () => true,
     scope: { prepare: async mappingId => ({ mappingId }), assertContext: async context => metadata(context.mappingId) },
     transactionStates: async (pageId, accountId) => ({ page: metadata(pageId), account: metadata(accountId) }),
     loadRoute: (page, account, transaction) => loadRoute({ models, page, account, transaction }),
     client: { execute: async command => {
-      state.calls.push(command);assert.equal(command.operation, 'meta.marketing.leads.receipt.read.v1');assert.equal(command.tenantRef, 'clinic:95');
+      state.calls.push(command);assert.equal(command.operation, 'meta.marketing.leads.receipt.read.v1');assert.equal(command.tenantRef, `clinic:${clinicId}`);
       assert.deepEqual(command.payload, { receiptRef, responseVersion: 2, adAccountAssetRef: 'meta-ad_account:601' });
       const pageId = command.assetRef.split(':')[1], event = state.event;
       assert.equal(event.page_id, pageId);
@@ -83,6 +83,13 @@ test('paid receipt without a campaign assignment uses the exact direct-clinic ac
   const f = fixture();f.state.workspace = null;f.state.organic = false;
   const { result } = await f.ingest('501');assert.equal(result.status, 'completed');
   assert.equal(f.state.leads[0].clinica_id, 95);assert.equal(f.state.leads[0].source, 'meta_ads');assert.equal(f.state.leads[0].channel, 'paid');
+});
+test('first admitted clinic retains its automatic binding and direct recipient while redelivery deduplicates the form', async () => {
+  const f = fixture(undefined, { clinicId: 123, connectionRef: 'meta-marketing-auto-clinic-123-v1' });
+  await f.ingest('501');await f.ingest('501');
+  assert.equal(f.state.leads.length, 1);assert.equal(f.state.leads[0].clinica_id, 123);
+  assert.equal(f.state.forms.length, 1);
+  assert(f.state.calls.every(command => command.tenantRef === 'clinic:123' && command.connectionRef === 'meta-marketing-auto-clinic-123-v1'));
 });
 test('explicit empty registry remains closed even with one enrolled account and multiple Pages', async () => {
   const f = fixture([]);

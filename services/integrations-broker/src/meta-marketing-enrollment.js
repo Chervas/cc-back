@@ -14,10 +14,13 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   const admittedAdsScopes=Object.freeze([...(admissionAdsReadScopeKeys||[])]);
   const admittedAdsRead=binding=>{const b=K.bindingFor(binding);return admittedAdsScopes.includes(b.scopeKey)
     &&binding.connectionRef===P.connectionRef(b.scopeKey);};
+  const admittedLeadRead=binding=>{const b=K.bindingFor(binding);return X.includes(enrolledAssetAccess,binding)
+    &&binding.connectionRef===P.connectionRef(b.scopeKey);};
   if(adsRead!==undefined){A.config(adsRead);if(typeof adsHttp?.read!=='function')fail('invalid_request');}
   if(leadAds!==undefined){L.config(leadAds);if(typeof leadsHttp?.read!=='function'||typeof secrets?.withLeadVerification!=='function')fail('invalid_request');}
   if(leadRecovery!==undefined){require('./meta-marketing-lead-recovery-config').config(leadRecovery);if(!leadAds)fail('invalid_request');}
-  if(enrolledAssetAccess!==undefined){X.config(enrolledAssetAccess);if(!adsRead||!leadAds)fail('invalid_request');}
+  if(enrolledAssetAccess!==undefined){X.config(enrolledAssetAccess);
+    if(!leadAds||!adsRead&&(!resolvePolicy||!enrolledAssetAccess.scopeKeys.every(scope=>admittedAdsScopes.includes(scope))))fail('invalid_request');}
   const leadReceipts=leadAds?require('./meta-marketing-leads-receipts').createMetaMarketingLeadReceipts({store,now}):null;
   const adsOperation=operation=>Object.values(A.OPERATIONS).includes(operation);
   const leadOperation=operation=>Object.values(L.OPERATIONS).includes(operation);
@@ -275,10 +278,12 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     // Admitted Ads reads must refresh the binding as often as the control
     // plane. Admission adds no reader grant; resolve below derives it again
     // only from the already-confirmed, live per-account authority.
-    const enrollmentPolicy=()=>resolvePolicy&&(name||adsOperation(request.operation)&&admittedAdsRead(binding))
+    const enrollmentPolicy=()=>resolvePolicy&&(name||adsOperation(request.operation)&&admittedAdsRead(binding)
+      ||leadOperation(request.operation)&&admittedLeadRead(binding))
       ?resolvePolicy(request,principal,policy):policy;
     const auditPolicy=leadOperation(request.operation)&&principal.id===L.ingressPrincipal(environment)
-      ||adsOperation(request.operation)&&admittedAdsRead(binding)?resolve(request,principal,enrollmentPolicy()):enrollmentPolicy();
+      ||adsOperation(request.operation)&&admittedAdsRead(binding)||leadOperation(request.operation)&&admittedLeadRead(binding)
+      ?resolve(request,principal,enrollmentPolicy()):enrollmentPolicy();
     const event=(action,result,reason)=>eventFor(request,principal,auditPolicy,action,result,reason,now());
     function authorityNow(){
       const current=enrollmentPolicy(),key=currentPrincipal(principal,current,authority);

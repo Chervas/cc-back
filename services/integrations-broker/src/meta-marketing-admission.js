@@ -7,6 +7,7 @@ const C=require('./meta-marketing-oauth-contract'),P=require('./meta-marketing-a
 const D=require('./meta-marketing-discovery-contract');
 const E=require('./meta-marketing-enrollment-contract');
 const A=require('./meta-marketing-ads-contract');
+const L=require('./meta-marketing-leads-contract'),X=require('./meta-marketing-enrolled-asset-access-contract');
 const enrollmentOperations=[E.OPERATIONS.prepare,E.OPERATIONS.activate,E.OPERATIONS.status,E.OPERATIONS.revoke];
 const {authenticate}=require('./auth'),{request:validateRequest}=require('./contracts');
 const {validatePolicy}=require('./policy'),{canonical}=require('./canonical');
@@ -25,9 +26,15 @@ function validateAdmissionPolicy(policy,settings){
     ||config.scopeKeys.some(scope=>binding.connectionRef===P.connectionRef(scope))))fail('invalid_request');
   return {config,base,gateway,control};
 }
-function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date.now()}){
+function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date.now(),enrolledAssetAccess}){
   const approved=validateAdmissionPolicy(policy,settings);if(!approved)return null;
   const {config,base,gateway,control}=approved,digest=P.settingsDigest(config);
+  if(enrolledAssetAccess!==undefined)X.config(enrolledAssetAccess);
+  const leadScopes=(enrolledAssetAccess?.scopeKeys||[]).filter(scope=>config.enrollmentScopeKeys?.includes(scope));
+  const leadReader=E.roles(config.environment).reader,leadIngress=L.ingressPrincipal(config.environment);
+  if(leadScopes.length&&(!X.REQUIRED_SCOPES.every(scope=>config.scopes.includes(scope))
+    ||!leadScopes.every(scope=>config.adsReadScopeKeys?.includes(scope))
+    ||![leadReader,leadIngress].every(id=>base.principals.some(p=>p.id===id&&p.enabled))))fail('invalid_request');
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_admission_slots (
     scope TEXT PRIMARY KEY,connection TEXT NOT NULL UNIQUE,clinic_ids TEXT NOT NULL,config_digest TEXT NOT NULL,
     version_id TEXT NOT NULL UNIQUE,name TEXT NOT NULL UNIQUE,arn TEXT,state TEXT NOT NULL CHECK(state IN ('preparing','ready')),
@@ -60,6 +67,19 @@ function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date
     // Never rewrite or shadow a static binding, grant, history or fingerprint.
     if(liveBase.connections.some(binding=>binding.connectionRef===request.connectionRef))return liveBase;
     const binding=resolveBinding(request.connectionRef);if(!binding)return liveBase;
+    if(Object.values(L.OPERATIONS).includes(request.operation)){
+      const b=C.bindingFor(binding);
+      const readerOperations=[L.OPERATIONS.destinations,L.OPERATIONS.form,L.OPERATIONS.pageStatus,L.OPERATIONS.pageEnable,L.OPERATIONS.receiptRead];
+      const allowed=principal.id===leadReader&&readerOperations.includes(request.operation)
+        ||principal.id===leadIngress&&L.RECEPTION_OPERATIONS.includes(request.operation);
+      // This resolves only a source binding. The existing Enrollment resolver
+      // still proves the confirmed Page/account, all claims and direct-clinic
+      // route before deriving any grant. No historical recovery is admitted.
+      if(!allowed||!leadScopes.includes(b.scopeKey)||b.clinicIds.length!==1||b.scopeKey!=='clinic:'+b.clinicIds[0]
+        ||request.tenantRef!=='clinic:'+b.clinicIds[0]||!/^meta-facebook_page:[1-9][0-9]{0,29}$/.test(request.assetRef))fail('scope_denied');
+      checkBlocks(b.scopeKey,b.clinicIds);checkFootprint(b.scopeKey,b.clinicIds);
+      return {...liveBase,connections:[...liveBase.connections,binding]};
+    }
     if(Object.values(A.OPERATIONS).includes(request.operation)){
       const b=C.bindingFor(binding);
       // The signed reader gets its admitted binding only. Confirmation,

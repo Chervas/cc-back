@@ -46,7 +46,7 @@ function validateConfig(config) {
   if (config && Object.hasOwn(config,'leadAds')) {fields.push('leadAds');L.config(config.leadAds);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if(config&&Object.hasOwn(config,'leadRecovery')){fields.push('leadRecovery');require('./meta-marketing-lead-recovery-config').config(config.leadRecovery);
     if(config.assetEnrollment!==true||!config.leadAds||config.standby===true)fail('invalid_request');}
-  if(config&&Object.hasOwn(config,'enrolledAssetAccess')){fields.push('enrolledAssetAccess');X.config(config.enrolledAssetAccess);if(config.assetEnrollment!==true||config.assetDiscovery!==true||!config.adsRead||!config.leadAds||config.standby===true)fail('invalid_request');}
+  if(config&&Object.hasOwn(config,'enrolledAssetAccess')){fields.push('enrolledAssetAccess');X.config(config.enrolledAssetAccess);if(config.assetEnrollment!==true||config.assetDiscovery!==true||!config.leadAds||config.standby===true)fail('invalid_request');}
   if (config?.tlsRenewal) { fields.push('tlsRenewal');tlsReload.validateSettings(config.tlsRenewal); }
   if (!config || Object.keys(config).sort().join(',')!==fields.sort().join(',') || config.enabled!==true || config.cohort!==C.COHORT
     || !['dev','staging'].includes(config.environment) || !net.isIP(config.listenAddress) || !Number.isInteger(config.port)
@@ -92,7 +92,12 @@ function validateConfig(config) {
   for(const scope of config.userCredentialHealth?.scopeKeys||[])if(policy.connections.filter(binding=>C.bindingFor(binding).scopeKey===scope).length!==1)fail('invalid_request');
   for(const scope of config.enrolledAssetAccess?.scopeKeys||[]){
     const bindings=policy.connections.filter(binding=>C.bindingFor(binding).scopeKey===scope);
-    if(bindings.length!==1||businessScope(config,scope))fail('invalid_request');
+    if(!bindings.length&&config.admission?.enabled===true&&config.admission.enrollmentScopeKeys?.includes(scope)){
+      if(!config.admission.adsReadScopeKeys?.includes(scope)||!X.REQUIRED_SCOPES.every(s=>config.admission.scopes.includes(s))
+        ||!policy.principals.some(p=>p.id===ingress&&p.enabled===true))fail('invalid_request');
+      continue;
+    }
+    if(bindings.length!==1||businessScope(config,scope)||!config.adsRead)fail('invalid_request');
     const b=C.bindingFor(bindings[0]);if(b.clinicIds.length!==1||scope!=='clinic:'+b.clinicIds[0]||!X.REQUIRED_SCOPES.every(s=>b.scopes.includes(s)))fail('invalid_request');
   }
   if ([...slots].some(arn=>apps.has(arn))) fail('invalid_request');
@@ -127,7 +132,8 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     }
     const agencyBootstrap=config.agencySystemUser?require('./meta-marketing-agency-bootstrap').createAgencyBootstrap({store,policy:config.policy,now:adsNow}):undefined;
     http??=createMetaMarketingOAuthHttp({pacer,agencyBootstrap,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
-    const admission=createMetaMarketingAdmission({store,policy:config.policy,settings:config.admission,client:aws.secrets});
+    const admission=createMetaMarketingAdmission({store,policy:config.policy,settings:config.admission,client:aws.secrets,
+      ...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{})});
     oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id),
       ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base)}:{})});
     if(config.adsRead||config.admission?.adsReadScopeKeys?.length||config.leadAds){

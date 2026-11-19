@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict');
-const {randomUUID,randomBytes}=require('node:crypto');
+const {randomUUID,randomBytes,generateKeyPairSync}=require('node:crypto');
 const {fixture}=require('./meta-marketing-oauth-fixture.cjs');
 const {BrokerStore}=require('../src/store'),{Broker}=require('../src/broker');
 const {createMetaMarketingOAuth,createMetaMarketingOAuthOperations}=require('../src/meta-marketing-oauth');
@@ -9,9 +9,19 @@ const {createMetaMarketingEnrollment}=require('../src/meta-marketing-enrollment'
 const C=require('../src/meta-marketing-oauth-contract');
 const {ACCOUNT,SECRET_KEY}=require('../src/google-main');
 
-function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false,enrollmentScopeKeys,adsReadScopeKeys,adsHttp,credentialEpochs=false}={}){
+function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false,enrollmentScopeKeys,adsReadScopeKeys,adsHttp,credentialEpochs=false,
+  leads=false,leadAds,leadsHttp,enrolledAssetAccess,leadIngress=false}={}){
   const hasDiscovery=discovery||enrollment;
-  const f=fixture(t,{discovery:hasDiscovery,enrollment}),P=require('../src/meta-marketing-admission-contract');
+  const f=fixture(t,{discovery:hasDiscovery,enrollment,leads,adsManagement:leads}),P=require('../src/meta-marketing-admission-contract');
+  if(leadAds)f.config.leadAds=leadAds;
+  if(enrolledAssetAccess)f.config.enrolledAssetAccess=enrolledAssetAccess;
+  if(leadIngress){
+    const keys=generateKeyPairSync('ed25519'),id=require('../src/meta-marketing-leads-contract').ingressPrincipal('staging');
+    f.leadIngressKeys=keys;
+    f.policy.principals.push({id,keyId:id,enabled:true,maxPerMinute:20,publicKey:keys.publicKey.export({type:'spki',format:'pem'})});
+    const signed=f.signed;f.signed=(value,role=false)=>role==='leadIngress'
+      ?require('../src/auth').signRequest(value,{keyId:id,privateKey:keys.privateKey,audience:f.policy.audience,now:f.now()}):signed(value,role);
+  }
   const {createMetaMarketingAdmission}=require('../src/meta-marketing-admission');
   // Three independent static authorizations remain present throughout every
   // dynamic test. Their contents are fixtures, never deployment configuration.
@@ -59,7 +69,8 @@ function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false
   }};
   const handles=[],filename=f.dir+'/admission.sqlite';
   function make(store=new BrokerStore(filename),chosenSettings=settings){
-    const admission=createMetaMarketingAdmission({store,policy:f.policy,settings:chosenSettings,client:aws,now:f.now});
+    const admission=createMetaMarketingAdmission({store,policy:f.policy,settings:chosenSettings,client:aws,now:f.now,
+      ...(enrolledAssetAccess?{enrolledAssetAccess}:{})});
     const secrets=createMetaMarketingOAuthSecrets({client:aws,accountId:ACCOUNT,
       prefix:'/clinicaclick/integrations/prod/meta-marketing/staging/',kmsKeyArn:SECRET_KEY});
     let resourceEnrollment;
@@ -70,12 +81,14 @@ function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false
     const epochs=credentialEpochs?require('../src/meta-marketing-credential-epochs').createMetaMarketingCredentialEpochs({store,now:f.now}):null;
     if(enrollment)resourceEnrollment=createMetaMarketingEnrollment({store,secrets,http:f.http,environment:'staging',now:f.now,
       ...(chosenSettings.adsReadScopeKeys?{admissionAdsReadScopeKeys:chosenSettings.adsReadScopeKeys,adsHttp}:{}),
+      ...(leadAds?{leadAds,leadsHttp}:{}),...(enrolledAssetAccess?{enrolledAssetAccess}:{}),
       ...(epochs?{credentialEpochs:epochs}:{}),
       ...(resolvePolicy?{resolvePolicy}:{})});
     const policyResolver=admission&&resourceEnrollment?{resolve(request,principal,base){
       return resourceEnrollment.resolve(request,principal,admission.resolve(request,principal,base));
     }}:admission||resourceEnrollment;
     const broker=new Broker({store,policy:f.policy,secrets,policyResolver,
+      ...(leadAds?{transportProfile:'meta-marketing'}:{}),
       operations:{...createMetaMarketingOAuthOperations(engine,{assetDiscovery:hasDiscovery}),...resourceEnrollment?.operations},now:f.now});
     const handle={store,admission,engine,enrollment:resourceEnrollment,broker,epochs,close(){resourceEnrollment?.close();engine.close();try{store.close();}catch{}}};
     handles.push(handle);return handle;
