@@ -28,7 +28,7 @@ function fixture() {
   for(const name of Object.keys(state))models[name]={
     async findAll(options={}) {calls.push({name,options});return state[name].filter(row=>matches(row,options.where)).slice(0,options.limit??Infinity).map(row=>project(row,options));},
     async findOne(options={}) {return (await this.findAll(options))[0]||null;},
-    async findByPk(id,options={}) {const row=state[name].find(v=>v[keyFor(name)]===id);if(!row)return null;
+    async findByPk(id,options={}) {calls.push({name,id,options});const row=state[name].find(v=>v[keyFor(name)]===id);if(!row)return null;
       if(name==='GrupoClinica'&&options.include)return {get:()=>({...clone(row),clinicas:clone(state.Clinica.filter(v=>v.grupoClinicaId===id))})};
       return project(row,options);},
     async update(patch,options={}) {writes.push({name,patch:clone(patch),where:options.where});let n=0;for(const row of state[name])if(matches(row,options.where)){Object.assign(row,clone(patch));n++;}return [n];},
@@ -73,6 +73,32 @@ function payload(kind,id,mode='clinic') {
   return ['metaAds','googleAds'].includes(kind)?{adsAccounts:{[kind==='metaAds'?'meta':'google']:section}}:
     { [['facebook','instagram'].includes(kind)?'meta':'google']:{[kind]:section} };
 }
+const GOOGLE_ASSET_TYPES={searchConsole:'google.search_console',analytics:'google.analytics',businessProfile:'google.business_profile',googleAds:'google.ads_account'};
+function orphanedGoogleReference(f,kind,id=10) {
+ const spec=guard.KINDS[kind],old=clone(f.state[spec.registry][0]);
+ f.state.GroupAssetClinicAssignment.push({grupoClinicaId:9,assetType:GOOGLE_ASSET_TYPES[kind],assetId:id,clinicaId:72});
+ old.mapping_id=id;old.state=kind==='businessProfile'?'retired':'blocked';
+ if(kind==='searchConsole') {
+  const site=require('../../../services/integrations-broker/src/google-search-console-contract').site('https://historical.example/');
+  Object.assign(old,{site_url:site.siteUrl,site_hash:site.siteHash,asset_ref:site.assetRef});
+ } else if(kind==='analytics') Object.assign(old,{property_name:'properties/98765',asset_ref:'ga4:98765'});
+ else if(kind==='businessProfile') Object.assign(old,{external_location_id:'98765',asset_ref:'gbp:123:98765'});
+ else Object.assign(old,{customer_id:'9876543210',asset_ref:'ads:9876543210'});
+ f.state[spec.registry].push(old);
+ const request_id=require('node:crypto').randomUUID(),requested_at=new Date('2026-01-01');
+ if(['searchConsole','analytics'].includes(kind)) {
+  const R=require('../../services/googlePropertyRevocation.contract'),type=kind==='searchConsole'?'search_console':'analytics';
+  const record={...R.fromBinding(type,old),request_id,actor_user_id:1,requested_at,state:'confirmed'};
+  R.validate(record);f.state.GooglePropertyBrokerRevocation.push(record);
+ } else if(kind==='businessProfile') f.state.BusinessProfileBrokerRevocation.push({...old,request_id,actor_user_id:1,requested_at,state:'confirmed'});
+ else {
+  const R=require('../../services/googleAdsRevocation.contract');
+  const record={...old,scope_key:'group:9',clinic_ids:'[71,72]',mapping_ids:JSON.stringify([id]),request_id,actor_user_id:1,requested_at,state:'confirmed'};
+  record.tuple_hash=R.tupleHash(record);R.validate(record);f.state.GoogleAdsBrokerRevocation.push(record);
+ }
+ return id;
+}
+const protectedGroupState=f=>clone(Object.fromEntries(Object.entries(f.state).filter(([key])=>!['GrupoClinica','GroupAssetClinicAssignment'].includes(key))));
 async function withEnv(f,fn) {const before={};for(const [key,value]of Object.entries(f.env)){before[key]=process.env[key];process.env[key]=value;}try{return await fn();}finally{for(const key of Object.keys(f.env))before[key]===undefined?delete process.env[key]:process.env[key]=before[key];}}
 const expectConflict=(promise,code)=>assert.rejects(promise,e=>e.status===409&&e.code===code&&!e.message.includes('SENTINEL'));
 
@@ -110,6 +136,88 @@ test('managed Google property sharing preserves source, unselected mappings and 
  await withEnv(f,()=>f.service.updateGroupConfig(9,{google:{searchConsole:{mode:'clinic',clinicAssignments:{71:id,72:null}}}}));
  assert.deepEqual(f.state.GroupAssetClinicAssignment.map(v=>v.clinicaId),[71]);assert.deepEqual(f.state.ClinicWebAsset,originals.m);assert.deepEqual(f.state.GoogleConnectionAssignment,originals.g);
  assert.equal(f.writes.some(v=>v.name==='ClinicWebAsset'),false);
+});
+test('replacing an orphaned Google share selects an existing valid mapping without changing owners, grants, retirements or unrelated shares',async()=>{
+ for(const kind of Object.keys(GOOGLE_ASSET_TYPES))for(const mode of ['clinic','group']) {
+  const f=fixture(),id=google(f,kind),oldId=orphanedGoogleReference(f,kind);
+  const unrelated={grupoClinicaId:9,assetType:'meta.facebook_page',assetId:999,clinicaId:72};f.state.GroupAssetClinicAssignment.push(unrelated);
+  const protectedBefore=protectedGroupState(f);
+  await withEnv(f,()=>f.service.updateGroupConfig(9,payload(kind,id,mode)));
+  assert.deepEqual(protectedGroupState(f),protectedBefore);assert.equal(f.stats.committed,1);
+  assert(f.state.GroupAssetClinicAssignment.some(row=>row.assetType===unrelated.assetType&&row.assetId===unrelated.assetId));
+  assert(!f.state.GroupAssetClinicAssignment.some(row=>row.assetType===GOOGLE_ASSET_TYPES[kind]&&row.assetId===oldId));
+  if(mode==='clinic')assert.deepEqual(f.state.GroupAssetClinicAssignment.filter(row=>row.assetType===GOOGLE_ASSET_TYPES[kind]).map(row=>[row.assetId,row.clinicaId]),[[id,71],[id,72]]);
+  assert(f.writes.every(write=>['GrupoClinica','GroupAssetClinicAssignment'].includes(write.name)));
+  const missingReads=f.calls.filter(call=>call.name===guard.KINDS[kind].model&&call.id===oldId&&call.options.transaction);
+  assert(missingReads.length>=2);assert(missingReads.every(call=>call.options.lock==='UPDATE'));
+ }
+});
+test('clearing an orphaned Google reference grants no mapping or connection and preserves its independent withdrawal records',async()=>{
+ for(const kind of Object.keys(GOOGLE_ASSET_TYPES)) {
+  const f=fixture();google(f,kind);orphanedGoogleReference(f,kind);const before=protectedGroupState(f);
+  await withEnv(f,()=>f.service.updateGroupConfig(9,payload(kind,null)));
+  assert.deepEqual(protectedGroupState(f),before);assert.equal(f.state.GroupAssetClinicAssignment.length,0);assert.equal(f.stats.committed,1);
+ }
+});
+test('an orphaned historical reference never permits explicitly selecting its missing mapping or adopting a foreign owner',async()=>{
+ for(const kind of Object.keys(GOOGLE_ASSET_TYPES))for(const invalid of ['missing','foreign']) {
+  const f=fixture(),id=google(f,kind),oldId=orphanedGoogleReference(f,kind),spec=guard.KINDS[kind];
+  if(invalid==='foreign'){f.state[spec.model][0][spec.clinic]=99;if(kind==='googleAds')f.state[spec.model][0].grupoClinicaId=99;}
+  const before=clone(f.state);
+  await withEnv(f,()=>expectConflict(f.service.updateGroupConfig(9,payload(kind,invalid==='missing'?oldId:id)),'group_asset_authority_conflict'));
+  assert.deepEqual(f.state,before);assert.equal(f.writes.length,0);assert.equal(f.stats.committed,0);
+ }
+});
+test('only a database null proves an absent predecessor; malformed lookup results fail closed',async()=>{
+ for(const kind of Object.keys(GOOGLE_ASSET_TYPES))for(const malformed of [undefined,false,0]) {
+  const f=fixture(),id=google(f,kind),oldId=orphanedGoogleReference(f,kind),model=f.models[guard.KINDS[kind].model],lookup=model.findByPk;
+  model.findByPk=async function(key,options){return key===oldId?malformed:lookup.call(this,key,options);};const before=clone(f.state);
+  await withEnv(f,()=>expectConflict(f.service.updateGroupConfig(9,payload(kind,id)),'group_asset_authority_conflict'));
+  assert.deepEqual(f.state,before);assert.equal(f.writes.length,0);
+ }
+});
+test('an existing inactive previous Google mapping remains protected when it is removed rather than selected again',async()=>{
+ for(const kind of Object.keys(GOOGLE_ASSET_TYPES)) {
+  const f=fixture(),id=google(f,kind),oldId=orphanedGoogleReference(f,kind),spec=guard.KINDS[kind];
+  f.state[spec.model].push({...clone(f.state[spec.model][0]),id:oldId,[spec.active]:false});const before=clone(f.state);
+  await withEnv(f,()=>expectConflict(f.service.updateGroupConfig(9,payload(kind,id)),'group_asset_reconnection_required'));
+  assert.deepEqual(f.state,before);assert.equal(f.writes.length,0);
+ }
+});
+test('missing Google predecessors must remain absent at precommit; a newly disappearing row cannot acquire the orphan exception',async()=>{
+ for(const kind of Object.keys(GOOGLE_ASSET_TYPES))for(const change of ['appeared','disappeared']) {
+  const f=fixture(),id=google(f,kind),spec=guard.KINDS[kind];let oldId;
+  if(change==='appeared')oldId=orphanedGoogleReference(f,kind);
+  else {oldId=id;f.state.GroupAssetClinicAssignment.push({grupoClinicaId:9,assetType:GOOGLE_ASSET_TYPES[kind],assetId:oldId,clinicaId:72});}
+  const before=clone(f.state);
+  f.setHook(async name=>{if(name!=='GroupAssetClinicAssignment')return;if(change==='appeared')f.state[spec.model].push({...clone(f.state[spec.model][0]),id:oldId});else f.state[spec.model]=f.state[spec.model].filter(row=>row.id!==oldId);});
+  await withEnv(f,()=>expectConflict(f.service.updateGroupConfig(9,payload(kind,id)),'group_asset_authority_conflict'));
+  assert.deepEqual(f.state,before);assert.equal(f.stats.committed,0);assert.equal(f.stats.rolledBack,1);
+ }
+});
+test('orphan removal still rejects a changed group cohort or a disconnected destination before persisting a new choice',async()=>{
+ for(const kind of Object.keys(GOOGLE_ASSET_TYPES))for(const change of ['membership','grant']) {
+  const f=fixture(),id=google(f,kind);orphanedGoogleReference(f,kind);let before;
+  f.setBeforeTransaction(()=>{if(change==='membership')f.state.Clinica[1].grupoClinicaId=10;else f.state.GoogleConnectionAssignment.push({id:3,scopeKey:'clinic:72',assignmentScope:'clinic',clinicaId:72,grupoClinicaId:null,googleConnectionId:81,status:'disconnected'});before=clone(f.state);});
+  await withEnv(f,()=>expectConflict(f.service.updateGroupConfig(9,payload(kind,id)),'group_asset_authority_conflict'));
+  assert.deepEqual(f.state,before);assert.equal(f.writes.length,0);assert.equal(f.stats.committed,0);
+ }
+});
+test('orphan removal rechecks the original clinic cohort immediately before commit',async()=>{
+ for(const kind of Object.keys(GOOGLE_ASSET_TYPES)) {
+  const f=fixture(),id=google(f,kind);orphanedGoogleReference(f,kind);const before=clone(f.state);
+  f.setHook(async name=>{if(name==='GroupAssetClinicAssignment')f.state.Clinica[1].grupoClinicaId=10;});
+  await withEnv(f,()=>expectConflict(f.service.updateGroupConfig(9,payload(kind,id)),'group_asset_authority_conflict'));
+  assert.deepEqual(f.state,before);assert.equal(f.stats.committed,0);assert.equal(f.stats.rolledBack,1);
+ }
+});
+test('orphaned Meta references retain their existing rejection when selecting another active asset',async()=>{
+ for(const kind of ['facebook','instagram','metaAds']) {
+  const f=fixture(),id=meta(f,kind),type={facebook:'meta.facebook_page',instagram:'meta.instagram_business',metaAds:'meta.ad_account'}[kind];
+  f.state.GroupAssetClinicAssignment.push({grupoClinicaId:9,assetType:type,assetId:10,clinicaId:72});const before=clone(f.state);
+  await withEnv(f,()=>expectConflict(f.service.updateGroupConfig(9,payload(kind,id)),'group_asset_authority_conflict'));
+  assert.deepEqual(f.state,before);assert.equal(f.writes.length,0);
+ }
 });
 test('active Meta pages, Instagram and Ads remain owned by their registered group while sharing and choosing primary',async()=>{
  const f=fixture(),page=meta(f),ig=meta(f,'instagram',93),ad=meta(f,'metaAds',94),old=clone(f.state.ClinicMetaAsset);

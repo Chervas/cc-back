@@ -60,6 +60,7 @@ function selections(payload, clinicIds) {
 
 async function prepareGroupAssetSelectionGuard({ models, payload, groupId, clinicIds, env = process.env }) {
   const selected = selections(payload || {}, clinicIds);
+  const requested = new Set(selected.map(item=>item.kind+':'+item.id));
   const touched=Object.keys(sections(payload||{})).filter(kind=>KINDS[kind]&&sections(payload||{})[kind]);
   const shareOptions={attributes:['assetType','assetId','clinicaId','grupoClinicaId'],where:{grupoClinicaId:groupId,assetType:{[Op.in]:touched.map(kind=>ASSET_TYPES[kind])}},order:[['assetType','ASC'],['assetId','ASC'],['clinicaId','ASC']],raw:true,logging:false,limit:1001};
   const primaryFields=[...new Set(touched.flatMap(kind=>PRIMARY_FIELDS[kind]||[]))];
@@ -77,7 +78,7 @@ async function prepareGroupAssetSelectionGuard({ models, payload, groupId, clini
     for(const kind of touched){const fields=PRIMARY_FIELDS[kind];if(fields&&previousGroup?.[fields[0]]==='group'&&previousGroup?.[fields[1]]!=null)include(kind,previousGroup[fields[1]],clinicIds.slice());}
     if(selected.length>1000)conflict();selected.sort((a,b)=>a.kind.localeCompare(b.kind)||a.id-b.id);
   }catch(error){if(error instanceof GroupAssetSelectionError)throw error;conflict();}
-  const managed = new Set(), originals = new Map(), securityReads = [];
+  const managed = new Set(), originals = new Map(), securityReads = [], absentPreviousGoogle = new Set();
   const excluded = new Set(['GrupoClinica','GroupAssetClinicAssignment',...Object.values(KINDS).map(v=>v.model)]);
   let transaction, recording = true, order = null, prefixes = null;
   const metaIds = selected.filter(v=>KINDS[v.kind].type).map(v=>v.id);
@@ -136,11 +137,23 @@ async function prepareGroupAssetSelectionGuard({ models, payload, groupId, clini
   }
   async function assertSelection(item, final = false) {
     const spec = KINDS[item.kind], fields = ['id',spec.clinic,spec.active,...spec.fields];
+    const key = item.kind+':'+item.id;
     const row = plain(await view[spec.model].findByPk(item.id,{attributes:[...new Set(fields)],raw:true}));
-    if (!row || spec.type && row.assetType !== spec.type) conflict();
+    if (!row) {
+      // Replacing group choices may remove a historical Google reference whose
+      // mapping no longer exists. It grants no resource access. New selections
+      // must still resolve normally, and an absent predecessor must remain
+      // absent under the transaction's locks through the final check. Existing
+      // inactive/retired mappings and all Meta references keep their guards.
+      if (row === null && !spec.type && !requested.has(key) && (!final || absentPreviousGoogle.has(key))) {
+        if (!final) absentPreviousGoogle.add(key);
+        return;
+      }
+      conflict();
+    }
+    if (absentPreviousGoogle.has(key) || spec.type && row.assetType !== spec.type) conflict();
     if (!active(row[spec.active])) reconnect();
     if (!clinicIds.includes(Number(row[spec.clinic])) && Number(row.grupoClinicaId) !== Number(groupId)) conflict();
-    const key = item.kind+':'+item.id;
     if (final && managed.has(key) && digest(row)!==originals.get(key)) conflict();
     const registry = view[spec.registry]; if (!registry) conflict();
     let registered, isManaged;

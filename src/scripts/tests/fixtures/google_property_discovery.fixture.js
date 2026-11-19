@@ -23,7 +23,11 @@ function propertyFixture(kind = 'analytics') {
     loadConnection: async () => state.connection,
     client: { execute: async (command, budget) => { assert(budget.timeoutMs > 0 && budget.timeoutMs <= 30000); state.calls.push(command);
       await state.afterCall?.(); return { data: structuredClone(state.response) }; } } };
-  const reader = kind === 'analytics' ? createAnalyticsBroker(deps) : createSearchConsoleBroker(deps);
+  const reader = kind === 'analytics' ? createAnalyticsBroker(deps) : createSearchConsoleBroker({
+    ...deps,
+    // Make rate-limit waits advance the same clock used by the test reader.
+    pause: async ms => { state.at += ms; }
+  });
   const service = createGooglePropertyDiscovery({ readers: { [kind]: reader }, now: () => state.at, enabled: () => state.enabled,
     hasManaged: async () => { if (state.registryFailure) throw Error('FICTITIOUS_SQL_SECRET'); return state.managed; },
     listBindings: async (_kind, clinicIds, connectionId, effectiveIds = []) => { await state.beforeList?.(); return state.records.filter(row =>
