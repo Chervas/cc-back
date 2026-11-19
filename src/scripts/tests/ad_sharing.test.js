@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { Op } = require('sequelize');
-const { adSharingCatalogDefinitions, FAMILIES } = require('../../lib/ad-sharing-templates');
+const { adSharingCatalogDefinitions, FAMILIES, NEUTRAL_PROMOTION_FAMILIES } = require('../../lib/ad-sharing-templates');
 const { originalMediaFields, instagramPostMedia, facebookOriginalMedia } = require('../../lib/social-post-original-media');
 const { sharingInput, creativeFromPost, creativeFromCache, creativeFromSnapshot, loadAdSharing } = require('../../services/adSharing.service');
 const { socialAdCreativeSnapshot } = require('../../lib/social-ad-creative-snapshot');
@@ -37,13 +37,20 @@ function fixture() {
   return { args, models, inventory, campaign, group, ad, promotions, calls };
 }
 
-test('catalog has four real draft payloads, two audiences and explicit IMAGE/VIDEO headers without fake approvals or sample handles', () => {
+test('common catalog adds neutral image and video drafts with real public samples and preserves the four original families', () => {
   const rows = adSharingCatalogDefinitions();
-  assert.equal(rows.length, 4); assert.equal(new Set(rows.map(row => row.family_key)).size, 4);
+  assert.equal(rows.length, 6); assert.equal(new Set(rows.map(row => row.family_key)).size, 6);
   for (const row of rows) {
-    assert.equal(row.category, 'MARKETING'); assert.equal(row.is_active, false);
+    assert.equal(row.category, 'MARKETING'); assert.equal(row.is_active, false); assert.equal(row.is_generic, true);
     assert.deepEqual(row.variables.map(v => v.name), ['nombre_paciente', 'nombre_clinica', 'texto_anuncio']);
-    assert.ok(['IMAGE', 'VIDEO'].includes(row.components[0].format)); assert.equal(row.components[0].example, undefined);
+    const header = row.components[0];
+    assert.ok(['IMAGE', 'VIDEO'].includes(header.format));
+    if (row.family_key === NEUTRAL_PROMOTION_FAMILIES[header.format]) {
+      assert.doesNotMatch(row.body_text, /activ[ao]|consultado/);
+      const sample = new URL(header.example.header_handle[0]);
+      assert.equal(sample.protocol, 'https:');
+      assert.match(sample.pathname, header.format === 'VIDEO' ? /\.mp4$/ : /\.png$/);
+    } else assert.equal(header.example, undefined);
     assert.equal(row.status, undefined);
   }
 });
@@ -141,6 +148,30 @@ test('unassigned/wrong-clinic/inactive campaigns never reach posts, credentials 
     f.args.authorizeCreative = () => assert.fail('unauthorized creative');
     assert.equal((await loadAdSharing(f.args)).items.length, 0);
   }
+});
+
+test('unchecking active promotions includes matched inactive creatives and preserves advertising scope', async () => {
+  const f = fixture();
+  f.group.effective_status = 'PAUSED';
+  f.args.input.active_only = 'false';
+  const result = await loadAdSharing(f.args);
+  assert.equal(result.items[0].active, false);
+  assert.equal(result.items[0].status, 'ACTIVE');
+  assert.equal(result.items[0].creative.imageUrl, image);
+  assert.equal(result.items[0].selection.allowed, true);
+  const groupQuery = f.calls.find(q => q.where?.level === 'adset');
+  assert.equal(groupQuery.where[Op.and], undefined);
+
+  f.campaign.clinicId = 72;
+  f.args.authorizeCreative = () => assert.fail('unauthorized creative');
+  assert.deepEqual((await loadAdSharing(f.args)).items, []);
+
+  const scope = { clinicIds: [66] };
+  assert.equal(sharingInput({ purpose: 'patient_promotion' }, scope).activeOnly, true);
+  for (const active_only of [null, ['false'], 0, 'no']) {
+    assert.throws(() => sharingInput({ purpose: 'patient_promotion', active_only }, scope), { code: 'invalid_ad_sharing_request' });
+  }
+  assert.throws(() => sharingInput({ purpose: 'lead_ad', lead_id: '9', active_only: false }, scope), { code: 'invalid_ad_sharing_request' });
 });
 
 test('another clinic post cannot supply material; missing data uses cache-only and never a provider loader', async () => {
@@ -252,10 +283,82 @@ test('native message resolves canonical image/video, replaces client advertising
   }
 });
 
+test('explicitly edited advertising text keeps the canonical media and snapshot and is marked once in metadata', async () => {
+  for (const format of ['IMAGE', 'VIDEO']) {
+    const f = messageFixture(format);
+    f.input.custom_text = true;
+    f.input.creative_sha256 = 'a'.repeat(64);
+    f.templateParams['3'] = '  Oferta de test por 100 € con $1.  ';
+    const result = await resolveAdSharingMessage(f);
+    assert.equal(result.templateParams['3'], 'Oferta de test por 100 € con $1.');
+    assert.equal(result.templateComponents[1].parameters[2].text, result.templateParams['3']);
+    assert.equal(result.templateComponents[0].parameters[0].type, format.toLowerCase());
+    assert.equal(result.metadata.custom_text, true);
+    assert.equal(result.metadata.creative_sha256, f.input.creative_sha256);
+    assert.ok(!JSON.stringify(result.metadata).includes('Oferta de test'));
+  }
+  const f = messageFixture();
+  f.input.custom_text = true; f.input.creative_sha256 = 'a'.repeat(64);
+  f.templateParams['3'] = 'Canonical source text';
+  assert.equal((await resolveAdSharingMessage(f)).metadata.custom_text, undefined);
+});
+
+test('advertising copy cannot use an invalid parameter, exceed the rendered body limit or bypass a stale selection', async () => {
+  for (const text of ['', '\nOferta', 'a\tb', 'a     b', 'x'.repeat(1010), 123, null]) {
+    const f = messageFixture();
+    f.input.custom_text = true; f.input.creative_sha256 = 'a'.repeat(64); f.templateParams['3'] = text;
+    await assert.rejects(resolveAdSharingMessage(f), { code: 'ad_sharing_template_parameters_invalid' });
+  }
+  const f = messageFixture();
+  f.input.custom_text = true;
+  await assert.rejects(resolveAdSharingMessage(f), { code: 'ad_sharing_selection_required' });
+  f.input.creative_sha256 = 'b'.repeat(64);
+  await assert.rejects(resolveAdSharingMessage(f), { code: 'ad_sharing_creative_changed' });
+});
+
+test('an inactive promotion needs explicit opt-out and a neutral approved family for its actual format', async () => {
+  const f = messageFixture('VIDEO');
+  f.input.creative_sha256 = 'a'.repeat(64);
+  const normalLoad = f.load;
+  const calls = [];
+  f.load = async options => {
+    calls.push(options.input);
+    const result = await normalLoad(options);
+    result.items[0].active = false;
+    return result;
+  };
+  await assert.rejects(resolveAdSharingMessage(f), { code: 'ad_sharing_inventory_changed' });
+  f.input.active_only = false;
+  await assert.rejects(resolveAdSharingMessage(f), { code: 'ad_sharing_inactive_promotion_template_required' });
+  const neutral = NEUTRAL_PROMOTION_FAMILIES.VIDEO;
+  f.template.name = neutral;
+  f.models.WhatsappTemplateCatalog.findByPk = async () => ({ family_key: neutral, category: 'MARKETING', is_active: true });
+  const result = await resolveAdSharingMessage(f);
+  assert.equal(result.templateComponents[0].parameters[0].type, 'video');
+  assert.equal(calls.at(-1).active_only, false);
+  f.template.status = 'PENDING';
+  await assert.rejects(resolveAdSharingMessage(f), { code: 'ad_sharing_template_mismatch' });
+});
+
+test('shared promotion templates can target the stored lead, but reject an unmatched lead or unlinked chat', async () => {
+  const f = messageFixture();
+  f.conversation.patient_id = null;
+  const storedLead = await resolveAdSharingMessage(f);
+  assert.equal(storedLead.metadata.lead_id, f.conversation.lead_id);
+  f.input.lead_id = f.conversation.lead_id;
+  assert.equal((await resolveAdSharingMessage(f)).metadata.lead_id, f.conversation.lead_id);
+  f.input.lead_id = 1234;
+  f.models.LeadIntake = { findOne: async () => null };
+  await assert.rejects(resolveAdSharingMessage(f), { code: 'ad_sharing_lead_mismatch' });
+  delete f.input.lead_id;
+  f.conversation.lead_id = null;
+  await assert.rejects(resolveAdSharingMessage(f), { code: 'ad_sharing_patient_required' });
+});
+
 test('native message rejects family/purpose, header, missing asset, stale preview, recipient and injected URL mismatches', async () => {
   for (const change of [f => { f.input.purpose = 'lead_ad'; }, f => { f.template.components[0].format = 'VIDEO'; },
     f => { f.input.creative_sha256 = 'b'.repeat(64); }, f => { f.input.mediaUrl = image; },
-    f => { f.conversation.patient_id = null; }, f => { f.template.status = 'PENDING'; },
+    f => { f.conversation.patient_id = null; f.conversation.lead_id = null; }, f => { f.template.status = 'PENDING'; },
     f => { f.load = async () => ({ items: [] }); }, f => { f.hasAccess = async () => false; }]) {
     const f = messageFixture(); change(f); await assert.rejects(resolveAdSharingMessage(f));
   }

@@ -45,13 +45,16 @@ function authorizationModels(models, ads, groups, settings) {
 
 function sharingInput(input, scope) {
   if (scope.clinicIds?.length !== 1 || !Number.isSafeInteger(Number(scope.clinicIds[0])) || Number(scope.clinicIds[0]) <= 0) fail('single_clinic_scope_required', 400);
-  if (!input || Object.keys(input).some(key => !['purpose', 'lead_id', 'page', 'search'].includes(key)) || !PURPOSES.includes(input.purpose)) fail('invalid_ad_sharing_request', 400);
+  if (!input || Object.keys(input).some(key => !['purpose', 'lead_id', 'page', 'search', 'active_only'].includes(key)) || !PURPOSES.includes(input.purpose)) fail('invalid_ad_sharing_request', 400);
   const page = input.page == null ? 1 : Number(input.page);
   if (!Number.isSafeInteger(page) || page < 1 || page > 10000 || input.page != null && (!['string', 'number'].includes(typeof input.page) || !/^[1-9]\d*$/.test(String(input.page)))) fail('invalid_ad_sharing_page', 400);
   if (input.search != null && (typeof input.search !== 'string' || input.search.length > 120)) fail('invalid_ad_sharing_search', 400);
   if (input.purpose === 'lead_ad' && (!numericId(input.lead_id) || !Number.isSafeInteger(Number(input.lead_id)))) fail('ad_sharing_lead_required', 400);
   if (input.purpose === 'patient_promotion' && input.lead_id != null) fail('invalid_ad_sharing_request', 400);
-  return { purpose: input.purpose, page, search: text(input.search), leadId: input.lead_id, clinicId: Number(scope.clinicIds[0]) };
+  if (input.active_only !== undefined && (input.purpose !== 'patient_promotion'
+    || ![true, false, 'true', 'false'].includes(input.active_only))) fail('invalid_ad_sharing_request', 400);
+  const activeOnly = input.purpose === 'patient_promotion' && ![false, 'false'].includes(input.active_only);
+  return { purpose: input.purpose, page, search: text(input.search), leadId: input.lead_id, clinicId: Number(scope.clinicIds[0]), activeOnly };
 }
 
 function mediaUrl(value, now) {
@@ -214,17 +217,17 @@ async function loadAdSharing({ models, scope, input, now = new Date(), loadInven
   ] }, raw: true });
   const campaigns = inventory.campaigns.filter(c => c.provider === 'meta_ads' && c.assigned && Number(c.clinicId) === request.clinicId
     && selectedByWorkspace(c, inventory, settings, scope)
-    && (request.purpose === 'lead_ad' ? c.account_id === reference.account_id && c.campaign_id === reference.campaign_id : active(c)));
+    && (reference ? c.account_id === reference.account_id && c.campaign_id === reference.campaign_id : !request.activeOnly || active(c)));
   if (!campaigns.length) return { ...result, unavailableReason: 'no_authorized_ads' };
   const groups = await models.SocialAdsEntity.findAll({ where: { level: 'adset', [Op.or]: campaigns.map(c => ({
     ad_account_id: { [Op.in]: accountAliases('meta_ads', c.account_id) }, parent_id: c.campaign_id,
-  })), ...(request.purpose === 'patient_promotion' ? { [Op.and]: [activeWhere] } : {}) }, attributes: fields, raw: true });
+  })), ...(request.activeOnly ? { [Op.and]: [activeWhere] } : {}) }, attributes: fields, raw: true });
   if (!groups.length) return { ...result, unavailableReason: 'no_authorized_ads' };
   const groupMap = new Map(groups.map(g => [`${accountId(g.ad_account_id)}:${g.entity_id}`, g]));
   const search = request.search.replace(/[\\%_]/g, '\\$&');
   const ads = await models.SocialAdsEntity.findAndCountAll({ where: { level: 'ad', [Op.or]: groups.map(g => ({
     ad_account_id: { [Op.in]: accountAliases('meta_ads', g.ad_account_id) }, parent_id: g.entity_id,
-  })), [Op.and]: [...(request.purpose === 'patient_promotion' ? [activeWhere] : []),
+  })), [Op.and]: [...(request.activeOnly ? [activeWhere] : []),
     ...(reference ? [{ entity_id: reference.ad_id }] : []), ...(selectedAdId ? [{ entity_id: selectedAdId }] : []),
     ...(search ? [{ name: { [Op.like]: `%${search}%` } }] : [])] },
   attributes: fields, raw: true, limit: request.purpose === 'lead_ad' || selectedAdId ? 1 : PAGE_SIZE,
@@ -234,14 +237,14 @@ async function loadAdSharing({ models, scope, input, now = new Date(), loadInven
     const group = groupMap.get(`${accountId(ad.ad_account_id)}:${ad.parent_id}`);
     const campaign = group && campaigns.find(c => c.account_id === accountId(ad.ad_account_id) && c.campaign_id === group.parent_id);
     if (!campaign) fail('ad_sharing_inventory_changed');
-    return { ad, campaign, reference: { provider: 'meta_ads', account_id: accountId(ad.ad_account_id), campaign_id: campaign.campaign_id,
+    return { ad, group, campaign, reference: { provider: 'meta_ads', account_id: accountId(ad.ad_account_id), campaign_id: campaign.campaign_id,
       group_id: ad.parent_id, ad_id: ad.entity_id } };
   });
   const beforeModels = authorizationModels(models, entries.map(e => e.ad), groups, settings);
   const beforeAuth = new Map();
   await Promise.all(entries.map(async entry => {
     const auth = await authorize({ models: beforeModels, scope, reference: entry.reference, inventory, campaign: entry.campaign, now });
-    if (request.purpose === 'patient_promotion' && (!active(entry.ad) || !active(groupMap.get(`${entry.reference.account_id}:${entry.reference.group_id}`)))) fail('ad_sharing_inventory_changed');
+    if (request.activeOnly && (!active(entry.ad) || !active(entry.group))) fail('ad_sharing_inventory_changed');
     beforeAuth.set(entry.reference.ad_id, auth);
   }));
   // Batched, exact ad-to-post links. A post belonging to another clinic is
@@ -278,7 +281,8 @@ async function loadAdSharing({ models, scope, input, now = new Date(), loadInven
     }
     finalizeCreative(creative, entry.reference);
     return { reference: entry.reference, title: text(entry.ad.name), campaignName: text(entry.campaign.name),
-      status: String(entry.ad.effective_status || entry.ad.status || 'UNKNOWN'), creative,
+      status: String(entry.ad.effective_status || entry.ad.status || 'UNKNOWN'),
+      active: active(entry.campaign) && active(entry.group) && active(entry.ad), creative,
       templateFamily: FAMILIES[request.purpose][creative.kind || 'IMAGE'],
       selection: { allowed: creative.available && creative.shareText.length <= 1024, maxItems: 1, requiresApprovedTemplate: true } };
   }));
@@ -297,15 +301,15 @@ async function loadAdSharing({ models, scope, input, now = new Date(), loadInven
       const campaign = current.campaigns.find(c => c.provider === 'meta_ads' && c.account_id === entry.reference.account_id
         && c.campaign_id === entry.reference.campaign_id && c.assigned && Number(c.clinicId) === request.clinicId
         && selectedByWorkspace(c, current, currentSettings, scope));
-      if (!campaign || request.purpose === 'patient_promotion' && !active(campaign)) fail('ad_sharing_inventory_changed');
+      if (!campaign || request.activeOnly && !active(campaign)) fail('ad_sharing_inventory_changed');
       const currentAd = currentEntities.find(row => row.level === 'ad' && row.entity_id === entry.reference.ad_id
         && row.parent_id === entry.reference.group_id && accountId(row.ad_account_id) === entry.reference.account_id);
       const currentGroup = currentEntities.find(row => row.level === 'adset' && row.entity_id === entry.reference.group_id
         && row.parent_id === entry.reference.campaign_id && accountId(row.ad_account_id) === entry.reference.account_id);
       if (!currentAd || !currentGroup || snapshotDigest(currentAd.creative_payload) !== snapshotDigest(entry.ad.creative_payload)
-        || request.purpose === 'patient_promotion' && (!active(currentAd) || !active(currentGroup))) fail('ad_sharing_inventory_changed');
+        || request.activeOnly && (!active(currentAd) || !active(currentGroup))) fail('ad_sharing_inventory_changed');
       const next = await authorize({ models: afterModels, scope, reference: entry.reference, inventory: current, campaign, now: new Date() });
-      if (next.fingerprint !== beforeAuth.get(entry.reference.ad_id).fingerprint || request.purpose === 'patient_promotion'
+      if (next.fingerprint !== beforeAuth.get(entry.reference.ad_id).fingerprint || request.activeOnly
         && (next.entity && !active(next.entity) || next.group && !active(next.group))) fail('ad_sharing_inventory_changed');
     }));
   }

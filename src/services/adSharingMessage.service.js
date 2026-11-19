@@ -1,13 +1,15 @@
 'use strict';
 
-const { FAMILIES, PURPOSES } = require('../lib/ad-sharing-templates');
+const { FAMILIES, PURPOSES, NEUTRAL_PROMOTION_FAMILIES, AD_SHARING_FAMILIES } = require('../lib/ad-sharing-templates');
 const { extractWhatsappTemplatePlaceholderIndexes } = require('../lib/whatsapp-template-contract');
 const fail = (code, status = 409) => { throw Object.assign(new Error(code), { code, status }); };
 const plain = value => value?.get ? value.get({ plain: true }) : value;
 const positiveId = value => typeof value === 'string' && /^[1-9]\d{0,63}$/.test(value);
+const hasNumericId = value => Number.isSafeInteger(Number(value)) && Number(value) > 0;
+const MAX_MEDIA_TEMPLATE_BODY_LENGTH = 1024;
 
 function isAdSharingTemplate(template) {
-  return Object.values(FAMILIES).flatMap(value => Object.values(value)).some(family =>
+  return AD_SHARING_FAMILIES.some(family =>
     template?.name === family || String(template?.name || '').startsWith(family + '_')
     || template?.catalog?.family_key === family);
 }
@@ -31,22 +33,27 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
     // Runtime template names may have been customized. The common catalog
     // family remains authoritative even when the caller omits the selection.
     const linked = await readCatalog();
-    if (!Object.values(FAMILIES).some(formats => Object.values(formats).includes(linked?.family_key))) return null;
+    if (!AD_SHARING_FAMILIES.includes(linked?.family_key)) return null;
   }
   if (!input || typeof input !== 'object' || Array.isArray(input)
-    || Object.keys(input).some(key => !['purpose', 'ad_id', 'lead_id', 'creative_sha256', 'variant_id'].includes(key))
+    || Object.keys(input).some(key => !['purpose', 'ad_id', 'lead_id', 'creative_sha256', 'variant_id', 'active_only', 'custom_text'].includes(key))
     || !PURPOSES.includes(input.purpose) || !positiveId(input.ad_id)
     || input.creative_sha256 !== undefined && (typeof input.creative_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(input.creative_sha256))
     || input.variant_id !== undefined && (typeof input.variant_id !== 'string' || !/^[a-f0-9]{64}$/.test(input.variant_id)
-      || input.creative_sha256 === undefined)) fail('ad_sharing_selection_required', 400);
+      || input.creative_sha256 === undefined)
+    || input.active_only !== undefined && (input.active_only !== false || input.purpose !== 'patient_promotion' || !input.creative_sha256)
+    || input.custom_text !== undefined && (input.custom_text !== true || !input.creative_sha256)) fail('ad_sharing_selection_required', 400);
   if (conversation.channel !== 'whatsapp') fail('ad_sharing_whatsapp_required', 400);
   const clinicId = Number(conversation.clinic_id);
   const access = hasAccess || require('../lib/marketingScopeAccess').hasMarketingClinicScopeAccess;
   if (!await access({ userId: Number(userId), clinicIds: [clinicId], access: 'read' })) fail('ad_sharing_scope_forbidden', 403);
   let requestedLeadId = null;
-  if (input.purpose === 'lead_ad') {
+  const needsLead = input.purpose === 'lead_ad' || input.lead_id !== undefined || !hasNumericId(conversation.patient_id);
+  if (needsLead) {
     requestedLeadId = input.lead_id === undefined ? Number(conversation.lead_id) : input.lead_id;
-    if (!Number.isSafeInteger(requestedLeadId) || requestedLeadId <= 0) fail('ad_sharing_lead_required', 400);
+    if (!Number.isSafeInteger(requestedLeadId) || requestedLeadId <= 0) {
+      fail(input.purpose === 'lead_ad' ? 'ad_sharing_lead_required' : 'ad_sharing_patient_required', 400);
+    }
     if (requestedLeadId !== Number(conversation.lead_id)) {
       // The canonical chat may retain a patient's earlier lead. Only the
       // native patient-context and exact-contact resolver can prove that a new
@@ -60,11 +67,14 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
       if (!canonical || Number(canonical.id) !== Number(conversation.id)
         || Number(canonical.clinic_id) !== clinicId || canonical.channel !== 'whatsapp') fail('ad_sharing_lead_mismatch');
     }
-  } else if (!Number.isSafeInteger(Number(conversation.patient_id)) || Number(conversation.patient_id) <= 0 || input.lead_id !== undefined) fail('ad_sharing_patient_required', 400);
+  }
   catalog = await readCatalog();
-  const format = catalog && Object.entries(FAMILIES[input.purpose]).find(([, family]) => family === catalog.family_key)?.[0];
+  const neutralPromotion = input.purpose === 'patient_promotion' && Object.values(NEUTRAL_PROMOTION_FAMILIES).includes(catalog?.family_key);
+  const families = neutralPromotion ? NEUTRAL_PROMOTION_FAMILIES : FAMILIES[input.purpose];
+  const format = catalog && Object.entries(families).find(([, family]) => family === catalog.family_key)?.[0];
   if (!format || catalog.category !== 'MARKETING' || !catalog.is_active
     || template.category !== 'MARKETING' || template.status !== 'APPROVED' || !template.is_active) fail('ad_sharing_template_mismatch');
+  if (input.active_only === false && !neutralPromotion) fail('ad_sharing_inactive_promotion_template_required');
   let components = template.components;
   if (typeof components === 'string') { try { components = JSON.parse(components); } catch { components = []; } }
   const headers = Array.isArray(components) ? components.filter(c => String(c?.type).toUpperCase() === 'HEADER') : [];
@@ -74,7 +84,8 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
   try {
     selection = await (load || require('./adSharing.service').loadAdSharing)({ models,
       scope: { clinicIds: [clinicId], groupId: null }, input: { purpose: input.purpose,
-        ...(input.purpose === 'lead_ad' ? { lead_id: String(requestedLeadId) } : {}) }, selectedAdId: input.ad_id,
+        ...(input.purpose === 'lead_ad' ? { lead_id: String(requestedLeadId) } : {}),
+        ...(input.active_only === false ? { active_only: false } : {}) }, selectedAdId: input.ad_id,
       selectedVariantId: input.variant_id ?? null });
   } catch (error) {
     if (String(error.code || '').startsWith('ad_sharing_')) throw error;
@@ -82,6 +93,9 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
   }
   const selected = selection.items?.find(item => item.reference?.ad_id === input.ad_id);
   if (!selected?.creative?.available || !selected.selection?.allowed) fail('ad_sharing_media_unavailable');
+  if (input.purpose === 'patient_promotion' && selected.active === false && input.active_only !== false) {
+    fail('ad_sharing_inventory_changed');
+  }
   const creative = selected.creative;
   if ((creative.variant_id ?? null) !== (input.variant_id ?? null)) fail('ad_sharing_variant_changed');
   if (selected.templateFamily !== FAMILIES[input.purpose][format] || creative.kind !== format
@@ -90,14 +104,23 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
   const incoming = Array.isArray(templateParams) ? Object.fromEntries(templateParams.map((v, i) => [String(i + 1), v])) : templateParams;
   if (!incoming || typeof incoming !== 'object' || ['1', '2'].some(key => typeof incoming[key] !== 'string' || !incoming[key].trim() || incoming[key].length > 255)
     || Object.keys(incoming).some(key => !['1', '2', '3'].includes(key)) || typeof creative.shareText !== 'string' || !creative.shareText.trim()) fail('ad_sharing_template_parameters_invalid', 400);
-  const params = { '1': incoming['1'], '2': incoming['2'], '3': creative.shareText };
-  const body = buildBody(params);
+  const sourceText = creative.shareText.replace(/\s+/g, ' ').trim();
+  const editedText = incoming['3'];
+  if (input.custom_text === true && (typeof editedText !== 'string' || !editedText.trim()
+    || editedText.length > MAX_MEDIA_TEMPLATE_BODY_LENGTH || /[\x00-\x1f\x7f-\x9f\u2028\u2029]| {5,}/.test(editedText))) {
+    fail('ad_sharing_template_parameters_invalid', 400);
+  }
+  const params = { '1': incoming['1'], '2': incoming['2'], '3': input.custom_text === true ? editedText.trim() : sourceText };
   const bodyText = components.find(c => String(c.type).toUpperCase() === 'BODY')?.text;
-  if (typeof bodyText !== 'string' || !Array.isArray(body) || body.length !== 1 || body[0].type !== 'body') fail('ad_sharing_template_parameters_invalid', 400);
-  if (input.variant_id !== undefined) {
+  if (typeof bodyText !== 'string') fail('ad_sharing_template_parameters_invalid', 400);
+  const message = bodyText.replace(/{{\s*([123])\s*}}/g, (_token, key) => params[key]);
+  if (message.length > MAX_MEDIA_TEMPLATE_BODY_LENGTH) fail('ad_sharing_template_parameters_invalid', 400);
+  const body = buildBody(params);
+  if (!Array.isArray(body) || body.length !== 1 || body[0].type !== 'body') fail('ad_sharing_template_parameters_invalid', 400);
+  if (input.variant_id !== undefined || input.custom_text === true || neutralPromotion) {
     const currentCatalog = await readCatalog(true);
     if (!currentCatalog?.is_active || currentCatalog.category !== 'MARKETING'
-      || currentCatalog.family_key !== FAMILIES[input.purpose][format]) fail('ad_sharing_template_mismatch');
+      || currentCatalog.family_key !== families[format]) fail('ad_sharing_template_mismatch');
   }
   if (!await access({ userId: Number(userId), clinicIds: [clinicId], access: 'read' })) fail('ad_sharing_scope_forbidden', 403);
   const link = creative.mediaParameter?.[format.toLowerCase()]?.link;
@@ -105,9 +128,10 @@ async function resolveAdSharingMessage({ models, conversation, template, input, 
   return {
     templateParams: params,
     templateComponents: [{ type: 'header', parameters: [creative.mediaParameter] }, ...body],
-    message: bodyText.replace(/{{\s*([123])\s*}}/g, (_token, key) => params[key]),
+    message,
     metadata: { purpose: input.purpose, ...(requestedLeadId ? { lead_id: requestedLeadId } : {}), reference: selected.reference, creative_sha256: creative.fingerprint,
       source: creative.source, media_kind: creative.kind,
+      ...(params['3'] !== sourceText ? { custom_text: true } : {}),
       ...(creative.variant_id ? { variant_id: creative.variant_id, snapshot_sha256: creative.snapshot_sha256,
         copy_id: creative.copy_id, provenance: creative.provenance } : {}) },
   };

@@ -2402,7 +2402,7 @@ exports.postMessage = async (req, res) => {
           sender_id: userId || null,
           direction: 'outbound',
           content: attachment ? attachment.caption : message,
-          message_type: attachment ? 'image' : message_type === 'template' ? 'template' : 'text',
+          message_type: attachment ? 'image' : isTemplate ? 'template' : 'text',
           status: 'failed',
           sent_at: new Date(),
           metadata: limitMeta,
@@ -2416,7 +2416,10 @@ exports.postMessage = async (req, res) => {
 
       if (io) {
         const room = `clinic:${conversation.clinic_id}`;
-        const payload = {
+        const payload = canonicalAdSharing ? require('../lib/socket-view-invalidation').invalidation('message:created', {
+          id: limitedMsg.id,
+          conversation_id: Number(conversation.id),
+        }) : {
           id: limitedMsg.id,
           conversation_id: conversation.id,
           content: limitedMsg.content,
@@ -2452,40 +2455,13 @@ exports.postMessage = async (req, res) => {
         sender_id: userId || null,
         direction: 'outbound',
         content: attachment ? attachment.caption : message,
-        message_type: attachment ? 'image' : message_type === 'template' ? 'template' : 'text',
+        message_type: attachment ? 'image' : isTemplate ? 'template' : 'text',
         status: conversation.channel === 'whatsapp' ? 'pending' : 'sent',
         sent_at: new Date(),
         metadata: baseMetadata,
       },
       { transaction }
     );
-
-    // Emit creación de mensaje outbound (aplica también a interno/instagram)
-    if (io) {
-      const rooms = new Set();
-      if (conversation.clinic_id) rooms.add(`clinic:${conversation.clinic_id}`);
-      if (conversation.assignee_id) rooms.add(`user:${conversation.assignee_id}`);
-      const payload = {
-        id: msg.id,
-        conversation_id: String(conversation.id),
-        content: msg.content,
-        direction: msg.direction,
-        message_type: msg.message_type,
-        status: msg.status,
-        sent_at: msg.sent_at,
-      };
-      if (rooms.size === 0) {
-        io.emit('message:created', payload);
-        if (process.env.CHAT_DEBUG === 'true') {
-          console.log('[CHAT] Emit outbound message:created broadcast', { payload });
-        }
-      } else {
-        rooms.forEach((r) => io.to(r).emit('message:created', payload));
-        if (process.env.CHAT_DEBUG === 'true') {
-          console.log('[CHAT] Emit outbound message:created rooms', { rooms: Array.from(rooms), payload });
-        }
-      }
-    }
 
     if (conversation.channel === 'whatsapp' && !attachment) {
       // Encolar solo despues del commit para evitar carreras con la transaccion
@@ -2510,6 +2486,38 @@ exports.postMessage = async (req, res) => {
     // No emitir conversation:updated aquí para evitar sobrescribir unread_count del usuario.
 
     await transaction.commit();
+
+    // Ad headers are resolved by the authenticated message reader. The
+    // realtime event only signals that a committed message can be fetched.
+    if (io) {
+      try {
+        const rooms = new Set();
+        if (conversation.clinic_id) rooms.add(`clinic:${conversation.clinic_id}`);
+        if (conversation.assignee_id) rooms.add(`user:${conversation.assignee_id}`);
+        const payload = canonicalAdSharing ? require('../lib/socket-view-invalidation').invalidation('message:created', {
+          id: msg.id,
+          conversation_id: Number(conversation.id),
+        }) : {
+          id: msg.id,
+          conversation_id: String(conversation.id),
+          content: msg.content,
+          direction: msg.direction,
+          message_type: msg.message_type,
+          status: msg.status,
+          sent_at: msg.sent_at,
+        };
+        if (rooms.size === 0) {
+          io.emit('message:created', payload);
+        } else {
+          rooms.forEach((room) => io.to(room).emit('message:created', payload));
+        }
+        if (process.env.CHAT_DEBUG === 'true') {
+          console.log('[CHAT] Emit outbound message:created', { messageId: msg.id, rooms: Array.from(rooms) });
+        }
+      } catch (realtimeError) {
+        console.warn('[CHAT] No se pudo emitir la creación del mensaje', { messageId: msg.id, code: realtimeError?.code });
+      }
+    }
 
     let outboundWhatsappQueued = false;
     if (attachment) {
