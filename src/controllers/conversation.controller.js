@@ -1776,13 +1776,12 @@ exports.streamMessageMedia = async (req, res) => {
   }
 };
 
-exports.getConversationByPatient = async (req, res) => {
+async function readConversationByPatient(req, res, wantsCurrentNumber) {
   try {
     const userId = req.userData?.userId;
     const patientId = req.params.patientId || req.params.patient_id;
     const requestedClinicId = Number(req.query.clinic_id || req.query.clinicId || 0) || null;
     const currentNumberFrom = req.query.current_number_from;
-    const wantsCurrentNumber = currentNumberFrom !== undefined;
     if (wantsCurrentNumber && (!Number.isSafeInteger(requestedClinicId) || requestedClinicId <= 0
       || typeof currentNumberFrom !== 'string' || !/^[1-9][0-9]*$/.test(currentNumberFrom)
       || !Number.isSafeInteger(Number(currentNumberFrom)) || !Number.isSafeInteger(Number(patientId)) || Number(patientId) <= 0)) {
@@ -1864,7 +1863,10 @@ exports.getConversationByPatient = async (req, res) => {
     console.error('Error getConversationByPatient', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
   }
-};
+}
+
+exports.getConversationByPatient = (req, res) => readConversationByPatient(req, res, false);
+exports.getCurrentNumberConversationByPatient = (req, res) => readConversationByPatient(req, res, true);
 
 exports.getConversationByLead = async (req, res) => {
   try {

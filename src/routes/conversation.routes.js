@@ -16,6 +16,7 @@ router.param('id',async(req,res,next,id)=>{
 
 router.get('/conversations', conversationController.listConversations);
 router.get('/conversations/permissions', conversationController.getConversationPermissions);
+router.get('/conversations/by-patient/:patientId/current-number', conversationController.getCurrentNumberConversationByPatient);
 router.get('/conversations/by-patient/:patientId', conversationController.getConversationByPatient);
 router.get('/conversations/by-lead/:leadId', conversationController.getConversationByLead);
 router.post('/conversations/start-patient-contact', conversationController.startPatientContact);

@@ -62,7 +62,7 @@ test('current-number lookup reads a proved, exact international chat and leaves 
     let allowUnowned = true;
     const handlers = {};
     const controller = fs.readFileSync(require.resolve('../../controllers/conversation.controller'), 'utf8');
-    vm.runInNewContext(controller.slice(controller.indexOf('exports.getConversationByPatient ='), controller.indexOf('exports.getConversationByLead =')), {
+    vm.runInNewContext(controller.slice(controller.indexOf('async function readConversationByPatient('), controller.indexOf('exports.getConversationByLead =')), {
       exports: handlers, db, Paciente: db.Paciente, Conversation: db.Conversation, CitaPaciente: {},
       findCurrentConversation, normalizePhoneE164, contactIdentity: { ...identityService, enrich: async rows => rows },
       whatsappService: { getClinicConfig: async () => sender }, getUserClinics: async () => ({ clinicIds: [72] }),
@@ -81,7 +81,7 @@ test('current-number lookup reads a proved, exact international chat and leaves 
     async function read(query = {}) {
       const req = { userData: { userId: 7 }, params: { patientId: '27' }, query: { clinic_id: '72', current_number_from: '10', ...query } };
       const res = { statusCode: 200, status(statusCode) { this.statusCode = statusCode; return this; }, json(data) { this.data = data; return this; } };
-      return handlers.getConversationByPatient(req, res);
+      return handlers.getCurrentNumberConversationByPatient(req, res);
     }
     const opened = await read();
     assert.equal(opened.statusCode, 200);
@@ -89,6 +89,7 @@ test('current-number lookup reads a proved, exact international chat and leaves 
     assert.equal(opened.data.conversation.patient_id, null);
     assert.equal(opened.data.messages[0].status, 'read');
     assert.equal((await read({ current_number_from: '11' })).statusCode, 404);
+    assert.equal((await read({ current_number_from: undefined })).statusCode, 400);
     assert.equal((await read({ clinic_id: '83' })).statusCode, 403);
     allowUnowned = false;
     assert.equal((await read()).statusCode, 403);

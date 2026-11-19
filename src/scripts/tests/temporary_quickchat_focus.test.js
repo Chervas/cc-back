@@ -107,7 +107,7 @@ test('controller applies the filter before querying, and keeps the existing acce
   assert.match(list, /where\[Op\.and\]\.push\(db\.sequelize\.literal\(temporaryFocusSql\)\)/);
   assert.match(list, /attachTemporaryQuickChatEligibility\(withRouting, req\.userData, CitaPaciente\)/);
   for (const name of ['getMessages', 'getConversationByPatient', 'getConversationByLead']) {
-    const start = source.indexOf(`exports.${name} =`);
+    const start = source.indexOf(name === 'getConversationByPatient' ? 'async function readConversationByPatient(' : `exports.${name} =`);
     const end = source.indexOf('\nexports.', start + 1);
     const endpoint = source.slice(start, end);
     assert.match(endpoint, /ensureQuickChatConversationReadAccess/);
