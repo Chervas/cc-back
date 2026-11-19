@@ -4,13 +4,20 @@ const fs = require('node:fs'), vm = require('node:vm'), path = require('node:pat
 const source = fs.readFileSync(path.resolve(__dirname, '../../services/marketingBulkSends.service.js'), 'utf8');
 const start = source.indexOf('async function getDispatchStatus('), end = source.indexOf('\nasync function reconcileBulkSendTemplateCategory(', start);
 assert(start > 0 && end > start);
-function fixture(status = 'sending') {
+function fixture(status = 'sending', channels = ['whatsapp']) {
   const calls = { loads: 0, reconciles: 0, jobChecks: 0, counterWrites: 0, itemReads: 0, qualityReads: 0, followUps: 0 };
   const filter = { type: 'import_batch', import_batch_id: 'FICTITIOUS_BATCH' };
-  const list = { id: 830, criteria: { dispatch: { status, context: 'review_request' } } };
+  const list = { id: 830, criteria: { channels, dispatch: { status, context: 'review_request' } },
+    email_dispatch: channels.includes('email') ? { status: 'waiting_next_batch' } : null };
+  const emailProgress = { ...list.email_dispatch, channel: 'email', sent: 4, total_to_send: 12 };
+  let emailReads = 0;
   const sandbox = { module: { exports: {} },
     MarketingPatientList: { findByPk: async () => { calls.loads++; return list; } },
     ensureScopeAccess: (_list, scope) => { if (!scope.clinicIds.includes(59)) throw Object.assign(Error('foreign_scope'), { status: 403 }); },
+    normalizeChannels: value => value,
+    marketingEmailDispatchService: {
+      getEmailDispatchProgress: async row => { assert.equal(row, list); emailReads++; return emailProgress; },
+    },
     reconcileListMessageState: async () => { calls.reconciles++; },
     reconcileDispatchJobState: async row => { calls.jobChecks++;
       if (status === 'FICTITIOUS_JOB_FAILED') { row.criteria.dispatch.status = 'failed'; return { reconciled: true }; }
@@ -27,10 +34,10 @@ function fixture(status = 'sending') {
     normalizeDispatchContext: value => value,
     getReviewDispatchFollowUpCounters: async () => { calls.followUps++; return { pending_replies: 3, pending_reminders: 2 }; },
     getDispatchProgress: (row, counters, account) => ({ status: row.criteria.dispatch.status, ...counters, account }),
-    serializeCampaign: row => ({ id: row.id }),
+    serializeCampaign: row => ({ id: row.id, email_dispatch: row.email_dispatch, dispatch: row.criteria.dispatch }),
   };
   vm.runInNewContext(source.slice(start, end) + '\nmodule.exports=getDispatchStatus;', sandbox);
-  return { read: sandbox.module.exports, calls };
+  return { read: sandbox.module.exports, calls, get emailReads() { return emailReads; } };
 }
 test('periodic progress reads current scoped counters without message replay or counter writes', async () => {
   const f = fixture();
@@ -57,4 +64,24 @@ test('both modes reject a foreign scope before items, reconciliation or account 
     const f = fixture(); await assert.rejects(f.read({ clinicIds: [66] }, 830, { progress_only }), { status: 403 });
     assert.deepEqual(f.calls, { loads: 1, reconciles: 0, jobChecks: 0, counterWrites: 0, itemReads: 0, qualityReads: 0, followUps: 0 });
   }
+});
+
+test('email-only periodic tracking reads only persisted email aggregates after scope authorization', async () => {
+  const f = fixture('sending', ['email']);
+  await assert.rejects(f.read({ clinicIds: [66] }, 830, { progress_only: true }), { status: 403 });
+  assert.equal(f.emailReads, 0);
+
+  const result = await f.read({ clinicIds: [59] }, 830, { progress_only: true });
+  assert.equal(result.campaign.email_dispatch.sent, 4);
+  assert.equal(result.campaign.email_dispatch.total_to_send, 12);
+  assert.equal(f.emailReads, 1);
+  assert.deepEqual(f.calls, { loads: 2, reconciles: 0, jobChecks: 0, counterWrites: 0, itemReads: 0, qualityReads: 0, followUps: 0 });
+});
+
+test('mixed campaign tracking keeps independent WhatsApp and email counts', async () => {
+  const f = fixture('sending', ['whatsapp', 'email']);
+  const result = await f.read({ clinicIds: [59] }, 830, { progress_only: true });
+  assert.equal(result.dispatch.sent, 27);
+  assert.equal(result.campaign.email_dispatch.sent, 4);
+  assert.equal(f.emailReads, 1);
 });

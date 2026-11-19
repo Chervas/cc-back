@@ -9403,6 +9403,11 @@ async function getDispatchStatus(scope, campaignId, options = {}) {
   const list = await MarketingPatientList.findByPk(campaignId);
   ensureScopeAccess(list, scope);
   const progressOnly = options.progress_only === true;
+  if (progressOnly && list.email_dispatch && normalizeChannels(list.criteria?.channels || list.action_mode || list.channel).join(',') === 'email') {
+    const campaign = serializeCampaign(list);
+    campaign.email_dispatch = await marketingEmailDispatchService.getEmailDispatchProgress(list);
+    return { success: true, campaign, dispatch: campaign.dispatch };
+  }
   if (progressOnly) {
     const jobState = await reconcileDispatchJobState(list);
     if (jobState.reconciled && list.reload) await list.reload();
@@ -9421,9 +9426,13 @@ async function getDispatchStatus(scope, campaignId, options = {}) {
     ? await getReviewDispatchFollowUpCounters(reloaded, filter)
     : null;
   const progress = getDispatchProgress(reloaded, counters, accountQuality);
+  const campaign = serializeCampaign(reloaded);
+  if (campaign.email_dispatch) {
+    campaign.email_dispatch = await marketingEmailDispatchService.getEmailDispatchProgress(reloaded);
+  }
   return {
     success: true,
-    campaign: serializeCampaign(reloaded),
+    campaign,
     dispatch: followUpCounters
       ? {
         ...progress,

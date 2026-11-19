@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Op } = require('sequelize');
+const { Op, QueryTypes } = require('sequelize');
 const db = require('../../models');
 const emailDelivery = require('./emailDelivery.service');
 const emailTemplates = require('./emailTemplates.service');
@@ -172,6 +172,33 @@ function emailPending(item) {
 function emailDeliveryPending(item) {
   const status = String(emailStatus(item).status || 'pending').toLowerCase();
   return !EMAIL_DELIVERY_TERMINAL.has(status);
+}
+
+async function getEmailDispatchProgress(list) {
+  const [counts] = await db.sequelize.query(`
+    SELECT COUNT(*) AS total_to_send,
+      SUM(status IN ('accepted', 'sent', 'delivered', 'bounced', 'complained') OR sent_at IS NOT NULL OR delivered_at IS NOT NULL) AS sent,
+      SUM(status = 'delivered' OR delivered_at IS NOT NULL) AS delivered,
+      SUM(status IN ('bounced', 'complained', 'suppressed', 'failed', 'rejected', 'cancelled')) AS failed
+    FROM (
+      SELECT COALESCE(LOWER(JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.status'))), '') AS status,
+        NULLIF(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.sent_at')), 'null'), '') AS sent_at,
+        NULLIF(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.delivered_at')), 'null'), '') AS delivered_at
+      FROM MarketingPatientListItems
+      WHERE list_id = :listId AND selected = 1 AND status = 'ready' AND email IS NOT NULL
+    ) AS recipients
+  `, { replacements: { listId: list.id }, type: QueryTypes.SELECT });
+  const sent = Number(counts?.sent || 0);
+  const total = Number(counts?.total_to_send || 0);
+  return {
+    ...list.email_dispatch,
+    channel: 'email',
+    total_to_send: total,
+    sent,
+    delivered: Number(counts?.delivered || 0),
+    failed: Number(counts?.failed || 0),
+    progress_percent: total ? Math.round(sent / total * 100) : 0,
+  };
 }
 
 function mergeEmailStatus(item, patch) {
@@ -649,6 +676,7 @@ module.exports = {
   cancelDispatch,
   pauseDispatch,
   resumeDispatch,
+  getEmailDispatchProgress,
   runDispatchJob,
   sendTest,
   materializeEmailMessage,
