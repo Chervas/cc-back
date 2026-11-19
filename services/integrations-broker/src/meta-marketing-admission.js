@@ -6,6 +6,7 @@ const {CreateSecretCommand,DescribeSecretCommand,GetSecretValueCommand}=require(
 const C=require('./meta-marketing-oauth-contract'),P=require('./meta-marketing-admission-contract');
 const D=require('./meta-marketing-discovery-contract');
 const E=require('./meta-marketing-enrollment-contract');
+const A=require('./meta-marketing-ads-contract');
 const enrollmentOperations=[E.OPERATIONS.prepare,E.OPERATIONS.activate,E.OPERATIONS.status,E.OPERATIONS.revoke];
 const {authenticate}=require('./auth'),{request:validateRequest}=require('./contracts');
 const {validatePolicy}=require('./policy'),{canonical}=require('./canonical');
@@ -16,10 +17,12 @@ function validateAdmissionPolicy(policy,settings){
   const base=structuredClone(validatePolicy(policy));
   const gateway=`gateway:${config.environment}:meta-marketing-oauth`,control=`control:${config.environment}:meta-marketing-oauth`;
   if(!base.principals.some(p=>p.enabled&&p.id===gateway)||!base.principals.some(p=>p.enabled&&p.id===control)
+    ||config.adsReadScopeKeys?.length&&!base.principals.some(p=>p.enabled&&p.id===E.roles(config.environment).reader)
     ||base.connections.length+config.maxConnections>64
     ||!base.connections.some(binding=>{const b=C.bindingFor(binding);return b.appId===config.appId&&b.appVersionId===config.appVersionId
       &&b.redirectUri===config.redirectUri&&binding.clientSecretArn===config.clientSecretArn;}))fail('invalid_request');
-  if(base.connections.some(binding=>config.scopeKeys.includes(C.bindingFor(binding).scopeKey)))fail('invalid_request');
+  if(base.connections.some(binding=>config.scopeKeys.includes(C.bindingFor(binding).scopeKey)
+    ||config.scopeKeys.some(scope=>binding.connectionRef===P.connectionRef(scope))))fail('invalid_request');
   return {config,base,gateway,control};
 }
 function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date.now()}){
@@ -57,6 +60,16 @@ function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date
     // Never rewrite or shadow a static binding, grant, history or fingerprint.
     if(liveBase.connections.some(binding=>binding.connectionRef===request.connectionRef))return liveBase;
     const binding=resolveBinding(request.connectionRef);if(!binding)return liveBase;
+    if(Object.values(A.OPERATIONS).includes(request.operation)){
+      const b=C.bindingFor(binding);
+      // The signed reader gets its admitted binding only. Confirmation,
+      // physical claims, credential health and the per-account grant remain
+      // the Enrollment resolver's authority, never an admission side effect.
+      if(principal.id!==E.roles(config.environment).reader||!config.adsReadScopeKeys?.includes(b.scopeKey)
+        ||request.tenantRef!=='clinic:'+b.clinicIds[0]||!/^meta-ad_account:[1-9][0-9]{0,29}$/.test(request.assetRef))fail('scope_denied');
+      checkBlocks(b.scopeKey,b.clinicIds);
+      return {...liveBase,connections:[...liveBase.connections,binding]};
+    }
     if(enrollmentOperations.includes(request.operation))E.authorize({request,principal,binding},config.environment);
     else C.authorize({request,principal,binding});
     if(principal.id!==gateway&&principal.id!==control)fail('scope_denied');

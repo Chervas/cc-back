@@ -29,6 +29,7 @@ function validateConfig(config) {
     if(!admission||admission.enabled&&(admission.environment!==config.environment||config.standby===true))fail('invalid_request');
     if(admission?.discoveryScopeKeys?.length&&config.assetDiscovery!==true)fail('invalid_request');
     if(admission?.enrollmentScopeKeys?.length&&config.assetEnrollment!==true)fail('invalid_request');
+    if(admission?.adsReadScopeKeys?.length&&config.assetEnrollment!==true)fail('invalid_request');
   }
   if (config && Object.hasOwn(config,'standby')) { fields.push('standby'); if(typeof config.standby!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
@@ -129,15 +130,16 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     const admission=createMetaMarketingAdmission({store,policy:config.policy,settings:config.admission,client:aws.secrets});
     oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id),
       ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base)}:{})});
-    if(config.adsRead||config.leadAds){
+    if(config.adsRead||config.admission?.adsReadScopeKeys?.length||config.leadAds){
       cursorKey=require('node:crypto').randomBytes(32);
       const cursor=require('./provider-cursor').cursorCodec(cursorKey,adsNow);
-      if(config.adsRead)adsHttp=require('./meta-marketing-ads-http').createMetaMarketingAdsHttp({pacer,cursor,now:adsNow,...(adsRequest?{request:adsRequest}:{})});
+      if(config.adsRead||config.admission?.adsReadScopeKeys?.length)adsHttp=require('./meta-marketing-ads-http').createMetaMarketingAdsHttp({pacer,cursor,now:adsNow,...(adsRequest?{request:adsRequest}:{})});
       if(config.leadAds)leadsHttp=require('./meta-marketing-leads-http').createMetaMarketingLeadsHttp({pacer,cursor,now:adsNow,...(leadsRequest?{request:leadsRequest}:{})});
     }
     const credentialEpochs=config.credentialRenewal?createMetaMarketingCredentialEpochs({store}):null;
-    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessRegistry(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead,adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{}),...(config.leadRecovery?{leadRecovery:config.leadRecovery}:{}),...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{}),
-      ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base)}:{})});
+    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessRegistry(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead}:{}),...(adsHttp?{adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{}),...(config.leadRecovery?{leadRecovery:config.leadRecovery}:{}),...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{}),
+      ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base),
+        ...(config.admission.adsReadScopeKeys?{admissionAdsReadScopeKeys:config.admission.adsReadScopeKeys}:{})}:{})});
     if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment});
     if(businessConfigs(config).length||config.userCredentialHealth){const businessHttp=businessConfigs(config).length?require('./meta-marketing-business-issuer-http').createIssuerHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})}):null;
       if(businessConfigs(config).length)business=require('./meta-marketing-business').createMetaMarketingBusiness({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,config:businessRegistry(config)});

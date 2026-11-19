@@ -9,7 +9,7 @@ const {createMetaMarketingEnrollment}=require('../src/meta-marketing-enrollment'
 const C=require('../src/meta-marketing-oauth-contract');
 const {ACCOUNT,SECRET_KEY}=require('../src/google-main');
 
-function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false,enrollmentScopeKeys}={}){
+function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false,enrollmentScopeKeys,adsReadScopeKeys,adsHttp,credentialEpochs=false}={}){
   const hasDiscovery=discovery||enrollment;
   const f=fixture(t,{discovery:hasDiscovery,enrollment}),P=require('../src/meta-marketing-admission-contract');
   const {createMetaMarketingAdmission}=require('../src/meta-marketing-admission');
@@ -31,6 +31,7 @@ function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false
   const requestedDiscovery=discoveryScopeKeys===undefined?enrollmentScopeKeys:discoveryScopeKeys;
   if(requestedDiscovery!==undefined)settings.discoveryScopeKeys=[...requestedDiscovery];
   if(enrollmentScopeKeys!==undefined)settings.enrollmentScopeKeys=[...enrollmentScopeKeys];
+  if(adsReadScopeKeys!==undefined)settings.adsReadScopeKeys=[...adsReadScopeKeys];
   const originalPolicy=JSON.stringify(f.policy),metadata=new Map();
   const state={creates:0,loseCreate:false,denied:false,before:null,after:null,calls:[]};
   const aws={async send(command,options){
@@ -66,14 +67,17 @@ function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false
     const engine=createMetaMarketingOAuth({store,policy:f.policy,secrets,http:f.http,now:f.now,assetDiscovery:hasDiscovery,
       onAbort:id=>resourceEnrollment?.abortFlow(id),
       ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base)}:{})});
+    const epochs=credentialEpochs?require('../src/meta-marketing-credential-epochs').createMetaMarketingCredentialEpochs({store,now:f.now}):null;
     if(enrollment)resourceEnrollment=createMetaMarketingEnrollment({store,secrets,http:f.http,environment:'staging',now:f.now,
+      ...(chosenSettings.adsReadScopeKeys?{admissionAdsReadScopeKeys:chosenSettings.adsReadScopeKeys,adsHttp}:{}),
+      ...(epochs?{credentialEpochs:epochs}:{}),
       ...(resolvePolicy?{resolvePolicy}:{})});
     const policyResolver=admission&&resourceEnrollment?{resolve(request,principal,base){
       return resourceEnrollment.resolve(request,principal,admission.resolve(request,principal,base));
     }}:admission||resourceEnrollment;
     const broker=new Broker({store,policy:f.policy,secrets,policyResolver,
       operations:{...createMetaMarketingOAuthOperations(engine,{assetDiscovery:hasDiscovery}),...resourceEnrollment?.operations},now:f.now});
-    const handle={store,admission,engine,enrollment:resourceEnrollment,broker,close(){resourceEnrollment?.close();engine.close();try{store.close();}catch{}}};
+    const handle={store,admission,engine,enrollment:resourceEnrollment,broker,epochs,close(){resourceEnrollment?.close();engine.close();try{store.close();}catch{}}};
     handles.push(handle);return handle;
   }
   const current=make();t.after(()=>handles.forEach(handle=>handle.close()));

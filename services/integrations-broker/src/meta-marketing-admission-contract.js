@@ -20,8 +20,9 @@ function validateSettings(value){
   if(C.exact(value,'enabled')&&value.enabled===false)return {enabled:false};
   const discovery=Object.hasOwn(value||{},'discoveryScopeKeys');
   const enrollment=Object.hasOwn(value||{},'enrollmentScopeKeys');
+  const adsRead=Object.hasOwn(value||{},'adsReadScopeKeys');
   if(!C.exact(value,'enabled,environment,appId,appVersionId,clientSecretArn,redirectUri,scopes,scopeKeys,maxConnections,slotTtlMs'
-    +(discovery?',discoveryScopeKeys':'')+(enrollment?',enrollmentScopeKeys':''))||value.enabled!==true)fail('invalid_request');
+    +(discovery?',discoveryScopeKeys':'')+(enrollment?',enrollmentScopeKeys':'')+(adsRead?',adsReadScopeKeys':''))||value.enabled!==true)fail('invalid_request');
   const base=prefix(value.environment),appPrefix=ARN_PREFIX+base.replace(/automatic\/$/,'');
   if(typeof value.clientSecretArn!=='string'||!value.clientSecretArn.startsWith(appPrefix)||value.clientSecretArn.startsWith(ARN_PREFIX+base)
     ||!/[A-Za-z0-9]{6}$/.test(value.clientSecretArn)||!/^[A-Za-z0-9/_+=.@-]+$/.test(value.clientSecretArn.slice(ARN_PREFIX.length))
@@ -33,6 +34,9 @@ function validateSettings(value){
     ||value.discoveryScopeKeys.some((key,i)=>!value.scopeKeys.includes(key)||i>0&&key<=value.discoveryScopeKeys[i-1])))fail('invalid_request');
   if(enrollment&&(!Array.isArray(value.enrollmentScopeKeys)||value.enrollmentScopeKeys.length>64
     ||value.enrollmentScopeKeys.some((key,i)=>!value.discoveryScopeKeys?.includes(key)||i>0&&key<=value.enrollmentScopeKeys[i-1])))fail('invalid_request');
+  if(adsRead&&(!Array.isArray(value.adsReadScopeKeys)||value.adsReadScopeKeys.length>64
+    ||value.adsReadScopeKeys.some((key,i)=>!value.enrollmentScopeKeys?.includes(key)||i>0&&key<=value.adsReadScopeKeys[i-1])
+    ||value.adsReadScopeKeys.length&&(!Array.isArray(value.scopes)||!value.scopes.includes('ads_read'))))fail('invalid_request');
   C.bindingFor({provider:C.PROVIDER,connectionRef:connectionRef('clinic:1'),secretArn:'candidate',clientSecretArn:value.clientSecretArn,expiresAt:1,
     metaMarketingOAuth:{appId:value.appId,appVersionId:value.appVersionId,slotVersionId:'a'.repeat(32),redirectUri:value.redirectUri,
       scopeKey:'clinic:1',clinicIds:[1],scopes:value.scopes}});
@@ -51,7 +55,7 @@ function validatePreparation(value,now){
 }
 function settingsDigest(value){
   const config=validateSettings(value);if(!config?.enabled)fail('invalid_request');
-  const {enabled,scopeKeys,maxConnections,slotTtlMs,discoveryScopeKeys,enrollmentScopeKeys,...identity}=config;
+  const {enabled,scopeKeys,maxConnections,slotTtlMs,discoveryScopeKeys,enrollmentScopeKeys,adsReadScopeKeys,...identity}=config;
   return C.hash(canonical(identity));
 }
 function bindingFromSlot(value,row){
