@@ -28,6 +28,15 @@ async function canonical(conversation, options = {}) {
         throw Error('whatsapp_identity_conflict');
     return row;
 }
+async function hasProviderPhoneProof(conversation, phone, sender, { transaction = null, database = db } = {}) {
+    if (!I.phone(phone) || !I.providerId(sender?.phoneNumberId) || !I.providerId(sender?.wabaId)
+        || !await enabled(transaction, database)) return false;
+    const rows = await queryFor(transaction, database)(`SELECT identity_key FROM WhatsappContactIdentities
+      WHERE clinic_id=? AND conversation_id=? AND identity_type='phone' AND identity_value=?
+        AND phone_id=? AND waba_id=? AND source='provider' LIMIT 2`,
+    [Number(conversation.clinic_id), Number(conversation.id), I.phone(phone), sender.phoneNumberId, sender.wabaId]);
+    return rows.length === 1;
+}
 async function memberIds(conversation, options = {}) { return (await cluster(conversation, options)).ids; }
 async function enrich(rows, { searchQuery = '' } = {}) {
     if (!rows.length || !await enabled())
@@ -253,4 +262,4 @@ async function reviewSupersededInbound({ message, conversation, transaction }) {
         appointmentId: null, appointmentStatus: null, intent: 'otra', failureCode: 'previous_contact_identity_review', deadlineAt: null }, { transaction });
     return true;
 }
-module.exports = { queryFor, enabled, cluster, canonical, memberIds, enrich, searchClause, recentMessages, reconcilePatientChange, aggregatePending, assertDestination, restrict, windowMemberIds, windowContext, assertPhoneEndpointCurrent, reviewSupersededInbound };
+module.exports = { queryFor, enabled, cluster, canonical, hasProviderPhoneProof, memberIds, enrich, searchClause, recentMessages, reconcilePatientChange, aggregatePending, assertDestination, restrict, windowMemberIds, windowContext, assertPhoneEndpointCurrent, reviewSupersededInbound };

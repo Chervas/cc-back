@@ -17,6 +17,8 @@ const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversa
 const { canUserAccessFeature } = require('../lib/access-policy');
 const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
 const { isReviewWorkflowWhatsappTemplate } = require('../lib/whatsapp-template-workflow');
+const { findCurrentConversation } = require('../services/patientWhatsappContactChange.service');
+const { normalizePhoneE164 } = require('../lib/phone');
 const {
   extractWhatsappTemplateDisplayButtons,
 } = require('../lib/whatsapp-template-display');
@@ -339,9 +341,9 @@ function resolveMessagePageRequest(query = {}) {
   };
 }
 
-async function getConversationMessagePage(conversation, query = {}) {
+async function getConversationMessagePage(conversation, query = {}, transaction = null) {
   const { limit, beforeMessageId } = resolveMessagePageRequest(query);
-  const where = { conversation_id: { [Op.in]: await contactIdentity.memberIds(conversation) } };
+  const where = { conversation_id: { [Op.in]: await contactIdentity.memberIds(conversation, { transaction }) } };
   if (beforeMessageId) {
     where.id = { [Op.lt]: beforeMessageId };
   }
@@ -351,6 +353,7 @@ async function getConversationMessagePage(conversation, query = {}) {
     order: [['id', 'DESC']],
     limit: limit + 1,
     raw: true,
+    transaction,
   });
   const hasMoreBefore = rawMessages.length > limit;
   const pageRowsDesc = hasMoreBefore ? rawMessages.slice(0, limit) : rawMessages;
@@ -1778,26 +1781,61 @@ exports.getConversationByPatient = async (req, res) => {
     const userId = req.userData?.userId;
     const patientId = req.params.patientId || req.params.patient_id;
     const requestedClinicId = Number(req.query.clinic_id || req.query.clinicId || 0) || null;
-    const patient = await Paciente.findByPk(patientId, {
-      attributes: ['id_paciente', 'clinica_id', 'telefono_movil'],
-      raw: true,
-    });
+    const currentNumberFrom = req.query.current_number_from;
+    const wantsCurrentNumber = currentNumberFrom !== undefined;
+    if (wantsCurrentNumber && (!Number.isSafeInteger(requestedClinicId) || requestedClinicId <= 0
+      || typeof currentNumberFrom !== 'string' || !/^[1-9][0-9]*$/.test(currentNumberFrom)
+      || !Number.isSafeInteger(Number(currentNumberFrom)) || !Number.isSafeInteger(Number(patientId)) || Number(patientId) <= 0)) {
+      return res.status(400).json({ error: 'quickchat_current_number_invalid_context' });
+    }
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (requestedClinicId && !ensureAccess({ clinicIds, isAggregateAllowed }, requestedClinicId)) {
       return res.status(403).json({ error: 'Acceso denegado a la clínica' });
     }
-    const conversationClinicId = requestedClinicId || patient?.clinica_id || null;
-    const conversation = patient
-      ? await findCanonicalWhatsappConversation({
-          clinicId: conversationClinicId,
-          contactId: patient.telefono_movil,
-          patientId: Number(patientId),
-          createIfMissing: false,
-        })
-      : null;
+    let conversation, currentMessagePage;
+    if (wantsCurrentNumber) {
+      conversation = await db.sequelize.transaction({ readOnly: true, isolationLevel: 'REPEATABLE READ' }, async transaction => {
+        const source = await Conversation.findOne({ where: {
+          id: Number(currentNumberFrom), clinic_id: requestedClinicId, channel: 'whatsapp', patient_id: Number(patientId),
+        }, raw: true, transaction });
+        if (!source) throw Object.assign(new Error('conversation_not_found'), { status: 404 });
+        await ensureQuickChatConversationReadAccess(userId, source);
+        const patient = await Paciente.findByPk(patientId, {
+          attributes: ['id_paciente', 'public_id', 'clinica_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'],
+          raw: true, transaction,
+        });
+        if (!patient) return null;
+        const currentPhone = normalizePhoneE164(patient.telefono_movil);
+        const previousPhone = normalizePhoneE164(source.contact_id);
+        if (!currentPhone || !previousPhone || previousPhone === currentPhone) return null;
+        if (Number(patient.clinica_id) !== requestedClinicId && !await db.PacienteClinica.findOne({
+          where: { paciente_id: Number(patientId), clinica_id: requestedClinicId },
+          attributes: ['clinica_id'], raw: true, transaction,
+        })) return null;
+        const current = await findCurrentConversation({ db, patient, clinicId: requestedClinicId, transaction,
+          senderForClinic: clinicId => whatsappService.getClinicConfig(clinicId), identityService: contactIdentity });
+        if (!current) return null;
+        await ensureQuickChatConversationReadAccess(userId, current);
+        currentMessagePage = await getConversationMessagePage(current, req.query, transaction);
+        if (!current.patient_id) return current;
+        return { ...current.toJSON(), paciente: patient };
+      });
+    } else {
+      const patient = await Paciente.findByPk(patientId, {
+        attributes: ['id_paciente', 'clinica_id', 'telefono_movil'], raw: true,
+      });
+      conversation = patient ? await findCanonicalWhatsappConversation({
+        clinicId: requestedClinicId || patient.clinica_id || null,
+        contactId: patient.telefono_movil,
+        patientId: Number(patientId),
+        createIfMissing: false,
+      }) : null;
+    }
 
     if (!conversation) {
-      return res.status(404).json({ error: 'Conversación no encontrada' });
+      return res.status(404).json(wantsCurrentNumber ? {
+        error: 'quickchat_current_number_not_found', message: 'Aún no hay una conversación para el número actual en esta clínica.',
+      } : { error: 'Conversación no encontrada' });
     }
 
     if (!ensureAccess({ clinicIds, isAggregateAllowed }, conversation.clinic_id)) {
@@ -1812,11 +1850,16 @@ exports.getConversationByPatient = async (req, res) => {
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload], userId);
-    const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
+    const { messages, messagesPage } = currentMessagePage || await getConversationMessagePage(conversation, req.query || {});
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([conversationPayload], req.userData, CitaPaciente);
     const [identified]=await contactIdentity.enrich([focusedPayload]);
     return res.json({ conversation: identified, messages, messages_page: messagesPage });
   } catch (err) {
+    if (err.status === 404 && err.message === 'conversation_not_found') return res.status(404).json({ error: err.message });
+    if (err.message === 'quickchat_category_forbidden') return sendQuickChatCategoryForbidden(res, err);
+    if (err.code === 'quickchat_current_number_unverified') return res.status(409).json({ code: err.code, message: err.message });
+    if (err.message === 'whatsapp_identity_conflict') return res.status(409).json({ code: 'whatsapp_contact_identity_conflict',
+      message: 'La conversación del número actual requiere revisión.' });
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getConversationByPatient', err);
     return res.status(500).json({ error: 'Error obteniendo conversación' });
@@ -1975,6 +2018,7 @@ exports.startPatientContact = async (req, res) => {
       await transaction.rollback();
     }
     if (err.code === 'WHATSAPP_CHANNEL_REFUSED') return res.status(409).json({ code: err.code, error: err.code, message: err.message });
+    if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.code, message: err.message });
     const status = Number(err?.status) || 500;
     const knownErrors = new Set([
       'patient_not_found',
@@ -2351,6 +2395,17 @@ exports.postMessage = async (req, res) => {
           }),
         });
         if (canonicalAdSharing) {
+          try {
+            await require('../services/marketingOptOut.service').assertAutomationCommunicationAllowed({
+              clinicId: Number(conversation.clinic_id),
+              patientId: Number(conversation.patient_id) || null,
+              phone: to,
+              scope: 'marketing',
+            });
+          } catch (error) {
+            if (error.code !== 'AUTOMATION_COMMUNICATIONS_RESTRICTED') throw error;
+            throw Object.assign(new Error('ad_sharing_marketing_refused'), { code: 'ad_sharing_marketing_refused', status: 409 });
+          }
           templateParams = canonicalAdSharing.templateParams;
           templateComponents = canonicalAdSharing.templateComponents;
           message = canonicalAdSharing.message;
@@ -2366,7 +2421,6 @@ exports.postMessage = async (req, res) => {
       ...(attachment ? require('../lib/quickchat-image').metadata(attachment) : (metadata || {})),
       ...(templateParams ? { templateParams } : {}),
       ...(templateComponents ? { templateComponents } : {}),
-      ...(canonicalAdSharing ? { ad_sharing: canonicalAdSharing.metadata } : {}),
       ...(resolvedTemplate?.id ? { template_id: Number(resolvedTemplate.id) } : {}),
       ...(resolvedTemplate ? {
         template_buttons: extractWhatsappTemplateDisplayButtons(resolvedTemplate),
@@ -2378,6 +2432,11 @@ exports.postMessage = async (req, res) => {
         : {}),
       ...(clinicConfig?.wabaId ? { wabaId: clinicConfig.wabaId } : {}),
       ...(senderPolicy?.metadata || {}),
+      ...(canonicalAdSharing ? {
+        ad_sharing: canonicalAdSharing.metadata,
+        communication_scope: 'marketing',
+        recipient_patient_id: Number(conversation.patient_id) || null,
+      } : {}),
       ...(limitStatus?.limitedMode
         ? {
             limitedMode: true,
@@ -2468,6 +2527,7 @@ exports.postMessage = async (req, res) => {
       outboundJobPayload = {
         messageId: msg.id,
         conversationId: conversation.id,
+        ...(canonicalAdSharing ? { clinicId: Number(conversation.clinic_id) } : {}),
         to,
         body: message,
         previewUrl,

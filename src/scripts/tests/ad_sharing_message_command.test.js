@@ -9,8 +9,8 @@ const { resolveAdSharingMessage, resolveExistingPatientLeadConversation } = requ
 const { templateDigest, validateMessage, verifyTemplate } = require('../../../services/integrations-broker/src/whatsapp-authorized-contract');
 
 function fixture({ unavailable = false, stale = false, omitSelection = false, repeatLead = false, variant = false,
-  blocked = false, video = false, limited = false, socketFailed = false } = {}) {
-  const calls = { rows: [], queued: [], contacts: [], realtime: [], committed: 0, rolledBack: 0 };
+  blocked = false, marketingRefused = false, video = false, limited = false, socketFailed = false } = {}) {
+  const calls = { rows: [], queued: [], contacts: [], realtime: [], marketingChecks: [], committed: 0, rolledBack: 0 };
   const baseFamily = repeatLead ? 'clinicaclick_enviar_anuncio' : 'clinicaclick_compartir_promocion';
   const family = video ? baseFamily + '_video' : baseFamily;
   const format = video ? 'VIDEO' : 'IMAGE';
@@ -59,6 +59,10 @@ function fixture({ unavailable = false, stale = false, omitSelection = false, re
       if (name === '../services/whatsappTemplateScope.service') return { resolveTemplateInWaba: async () => template };
       if (name === '../services/temporaryPatientDirection.service') return { observeConversation: async () => {} };
       if (name === '../services/leadPatientContext.service') return { get: async () => ({ relationship: 'existing_patient', patient_id: 5, clinic_id: 66, same_clinic: true }) };
+      if (name === '../services/marketingOptOut.service') return { assertAutomationCommunicationAllowed: async options => {
+        calls.marketingChecks.push({ ...options, alreadyQueued: calls.queued.length > 0 });
+        if (marketingRefused) throw Object.assign(new Error('marketing refused'), { code: 'AUTOMATION_COMMUNICATIONS_RESTRICTED' });
+      } };
       if (name === '../services/adSharingMessage.service') return { resolveAdSharingMessage: options => resolveAdSharingMessage({ ...options,
         hasAccess: async () => true, load: async options => {
           assert.equal(options.selectedVariantId, variant ? 'b'.repeat(64) : null);
@@ -88,6 +92,28 @@ test('native conversation command stores canonical copy/header and queues exactl
   assert.equal(payload.body, 'Hola Alex, desde Clinic: Source advertising copy.');
   assert.equal(f.calls.rows[0].content, payload.body);
   assert(!JSON.stringify(f.calls.rows).includes('attacker.invalid'));
+});
+
+test('manual ads check marketing refusal before queueing and carry server-owned scope for the dispatcher to recheck', async () => {
+  const f = fixture();
+  f.req.body.metadata = { communication_scope: 'care', recipient_patient_id: 99, clinicId: 123 };
+  await f.run();
+  assert.equal(f.res.statusCode, 200);
+  assert.deepEqual(f.calls.marketingChecks, [{ clinicId: 66, patientId: 5, phone: '34000000123', scope: 'marketing', alreadyQueued: false }]);
+  assert.equal(f.calls.queued[0][1].clinicId, 66);
+  assert.equal(f.calls.rows[0].metadata.communication_scope, 'marketing');
+  assert.equal(f.calls.rows[0].metadata.recipient_patient_id, 5);
+});
+
+test('an explicit marketing refusal rejects the manual ad without recording a message or contact attempt', async () => {
+  const f = fixture({ repeatLead: true, marketingRefused: true });
+  await f.run();
+  assert.equal(f.res.statusCode, 409);
+  assert.equal(f.res.body.error, 'ad_sharing_marketing_refused');
+  assert.equal(f.calls.rows.length, 0);
+  assert.equal(f.calls.queued.length, 0);
+  assert.equal(f.calls.contacts.length, 0);
+  assert.equal(f.calls.rolledBack, 1);
 });
 
 test('missing asset, stale preview or omitted source selection rolls back before creating or queuing a message', async () => {

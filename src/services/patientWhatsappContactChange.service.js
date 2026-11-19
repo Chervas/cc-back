@@ -1,6 +1,6 @@
 'use strict';
 
-const { normalizePhoneE164 } = require('../lib/phone');
+const { getPhoneIdentityCandidates, normalizePhoneE164 } = require('../lib/phone');
 const EVENT = 'patient.whatsapp_phone_changed';
 
 // Transport identities stay immutable; QuickChat presents one linked history.
@@ -38,4 +38,57 @@ async function record({ db, patientId, clinicId, previousPhone, nextPhone, actor
   return rows;
 }
 
-module.exports = { EVENT, record };
+async function findCurrentConversation({ db, patient, clinicId, transaction, senderForClinic, identityService }) {
+  const phone = normalizePhoneE164(patient.telefono_movil);
+  if (!phone) return null;
+
+  const { Op, fn, col, where, literal } = db.Sequelize;
+  const patientId = Number(patient.id_paciente);
+  const normalizedColumn = name => fn('REGEXP_REPLACE', fn('REGEXP_REPLACE', col(name), '[^0-9]', ''), '^00', '');
+  const candidates = getPhoneIdentityCandidates(phone).map(number => number.replace(/^\+/, ''));
+  const matchesPhone = column => where(normalizedColumn(column), { [Op.in]: [...new Set(candidates)] });
+  const conflict = (message, code = 'whatsapp_contact_identity_conflict') =>
+    Object.assign(new Error(message), { code });
+  const conversations = await db.Conversation.findAll({
+    where: { clinic_id: clinicId, channel: 'whatsapp', [Op.and]: [matchesPhone('contact_id')] },
+    limit: 2, transaction,
+  });
+  if (!conversations.length) return null;
+  const [candidate] = conversations;
+  if (conversations.length !== 1 || normalizePhoneE164(candidate.contact_id) !== phone) {
+    throw conflict('Hay varias conversaciones asociadas a este número o sus datos no coinciden. Revisa el contacto antes de continuar.');
+  }
+  if (candidate.patient_id && Number(candidate.patient_id) !== patientId) {
+    throw conflict('El número actual tiene una conversación vinculada a otra ficha. Revisa ambas fichas antes de continuar.');
+  }
+
+  if (candidate.patient_id) {
+    const canonical = await identityService.canonical(candidate, { transaction });
+    if (Number(canonical.patient_id) !== patientId || Number(canonical.clinic_id) !== clinicId
+      || canonical.channel !== 'whatsapp' || normalizePhoneE164(canonical.contact_id) !== phone) {
+      throw conflict('La conversación de este número apunta a otro teléfono. Revisa el contacto antes de continuar.');
+    }
+    return canonical;
+  }
+
+  // An unassigned contact can only be opened in its own QuickChat category.
+  // A navigation request does not use a phone match to attach or join records.
+  const unverified = () => conflict('Hay una conversación con este número, pero su identidad requiere revisión antes de abrirla.',
+    'quickchat_current_number_unverified');
+  if (candidate.lead_id) throw unverified();
+  const owners = await db.Paciente.findAll({
+    where: { [Op.and]: [matchesPhone('telefono_movil'), {
+      [Op.or]: [{ clinica_id: clinicId }, literal(`EXISTS (SELECT 1 FROM PacienteClinicas current_phone_scope
+        WHERE current_phone_scope.paciente_id = Paciente.id_paciente AND current_phone_scope.clinica_id = ${Number(clinicId)})`)],
+    }] },
+    attributes: ['id_paciente'], limit: 2, raw: true, transaction,
+  });
+  if (owners.length !== 1 || Number(owners[0].id_paciente) !== patientId) throw unverified();
+  const cluster = await identityService.cluster(candidate, { transaction });
+  if (cluster.ids.length !== 1 || cluster.canonicalId !== Number(candidate.id)) throw unverified();
+  const sender = await senderForClinic(clinicId);
+  if (!await identityService.hasProviderPhoneProof(candidate, phone, sender, { transaction, database: db })) throw unverified();
+  return candidate;
+}
+
+module.exports = { EVENT, record, findCurrentConversation };
