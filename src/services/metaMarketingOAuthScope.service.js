@@ -20,18 +20,27 @@ function createScope({models,sessions,now=()=>new Date(),recoveryGuard}){
     if(!await hasMarketingClinicScopeAccess({userId:actorId,clinicIds,access:'write',membershipModel:{findAll:opts=>models.UsuarioClinica.findAll({...opts,...options})}}))C.fail('meta_oauth_scope_forbidden',403);
     return {scopeKey,clinicIds,actorId,sessionRef,sessionExpiresAt,options};
   }
+  function scopeBlocked(scopeKey,transaction){
+    const [assignmentScope,scopeId]=scopeKey.split(':');
+    return require('./metaScopeBlock.service').blocked({assignmentScope,clinicId:assignmentScope==='clinic'?Number(scopeId):null,
+      groupId:assignmentScope==='group'?Number(scopeId):null},{models,transaction,purpose:'meta'});
+  }
   async function captureStructure(authorized,{flow=null,phase='pending',allowExpiredCredential=false,expectedFlowId}={}){
     const {scopeKey,clinicIds,options}=authorized;
-    const raw=await models.MetaMarketingOAuthSlot.findByPk(scopeKey,options);if(!raw)return {...authorized,slot:null};
+    const raw=await models.MetaMarketingOAuthSlot.findByPk(scopeKey,options);
+    if(!raw){
+      // Only an initial authorization with stable absent journals may inspect
+      // admission. Existing flow/recovery/cancellation paths keep their guard.
+      if(expectedFlowId===null&&await scopeBlocked(scopeKey,options.transaction))C.fail('meta_oauth_scope_blocked',409);
+      return {...authorized,slot:null};
+    }
     const slot=C.slot(raw);if(slot.state!=='active'||+slot.expires_at<=+now()||JSON.stringify(clinicIds)!==slot.clinic_ids)C.fail('meta_oauth_scope_changed',409);
     const proof=flow?await recovery.forFlow(flow,options.transaction,{phase,allowExpiredCredential}):await recovery.inspectPrepared({scopeKey,clinicIds,appId:slot.app_id,
       actorId:authorized.actorId,sessionRef:authorized.sessionRef,sessionExpiresAt:authorized.sessionExpiresAt,
       ...(expectedFlowId!==undefined?{expectedFlowId}:{})},options.transaction);
-    const [assignmentScope,scopeId]=scopeKey.split(':');
     // A raw tombstone remains universal. Only a fresh, root-prepared generation
     // can authorize its exact non-WhatsApp scope; legacy readers keep the block.
-    if(await require('./metaScopeBlock.service').blocked({assignmentScope,clinicId:assignmentScope==='clinic'?Number(scopeId):null,
-      groupId:assignmentScope==='group'?Number(scopeId):null},{models,transaction:options.transaction,purpose:'meta'})&&!proof)C.fail('meta_oauth_scope_blocked',409);
+    if(await scopeBlocked(scopeKey,options.transaction)&&!proof)C.fail('meta_oauth_scope_blocked',409);
     const revocations=await models.MetaMarketingBrokerRevocation.findAll({...options,attributes:['tuple_hash'],where:{scope_key:scopeKey},order:[['tuple_hash','ASC']],limit:1001});
     if(revocations.length>1000)C.fail();
     const pieces=[C.slotDigest(slot),clinicIds,revocations.map(r=>r.tuple_hash)];

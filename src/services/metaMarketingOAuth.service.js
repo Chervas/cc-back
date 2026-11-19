@@ -4,7 +4,7 @@ const C=require('./metaMarketingOAuth.contract'),B=require('../../services/integ
 const {fromFlow}=require('../../services/platform-audit/src/meta-oauth-event');
 const D=require('../../services/integrations-broker/src/meta-marketing-discovery-contract'),{fromDiscovery}=require('../../services/platform-audit/src/meta-discovery-event');
 const SAFE=new Set(['meta_oauth_unavailable','meta_oauth_disabled','meta_oauth_scope_invalid','meta_oauth_scope_changed','meta_oauth_scope_forbidden','meta_oauth_scope_blocked',
-  'meta_oauth_session_required','meta_oauth_authorization_expired','meta_oauth_inventory_not_pending','auth_email_verification_required','meta_oauth_busy','meta_oauth_state_invalid','meta_oauth_outcome_unknown','meta_oauth_unconfigured',
+  'meta_oauth_session_required','meta_oauth_authorization_expired','meta_oauth_inventory_not_pending','auth_email_verification_required','meta_oauth_busy','meta_oauth_state_invalid','meta_oauth_outcome_unknown','meta_oauth_unconfigured','meta_oauth_admission_required',
   'broker_response_invalid','broker_configuration_invalid','broker_timeout','broker_unavailable','audit_unavailable']);
 const safe=e=>SAFE.has(e?.code)?e.code:'meta_oauth_unavailable';
 function createService({models,sessions,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_OAUTH_ENABLED==='true',
@@ -160,6 +160,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       return order.scope(input,{},async({transaction,flow,expectedFlowId,input})=>{
         gate();
         const captured=await scope.capture(input,transaction,{expectedFlowId}),latest=flow?await R.findByPk(flow.flow_id,locked(transaction)):null;
+        if(!captured.slot&&!latest&&expectedFlowId===null)return {enabled:true,available:false,status:'none',admission:{state:'required'}};
         if(latest&&Number(latest.actor_user_id)!==input.actorId&&latest.state!=='cancelled')return {enabled:true,available:false,status:'busy'};
         return {enabled:true,available:!!captured.slot&&(!latest||latest.state==='cancelled'),...(latest?projection(plain(latest)):{status:'none'})};
       });
@@ -167,7 +168,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     async begin(input){
       gate();input=require('./metaMarketingTransactionOrder.service').pinInput(input);const state=randomBytes(32).toString('base64url');
       const row=await order.scope(input,{},async({transaction,expectedFlowId})=>{
-        const captured=await scope.capture(input,transaction,{expectedFlowId});if(!captured.slot)C.fail('meta_oauth_unconfigured');
+        const captured=await scope.capture(input,transaction,{expectedFlowId});if(!captured.slot)C.fail(expectedFlowId===null?'meta_oauth_admission_required':'meta_oauth_unconfigured',expectedFlowId===null?409:503);
         if(await R.findOne({attributes:['flow_id'],where:{scope_key:input.scopeKey,state:{[Op.ne]:'cancelled'}},transaction}))C.fail('meta_oauth_busy',409);
         const {slot}=captured,expires=new Date(Math.min(+now()+600000,+input.sessionExpiresAt,+slot.expires_at));if(+expires<=+now())C.fail('meta_oauth_session_required',401);
         const fresh={flow_id:randomUUID(),state_hash:C.hash(state),scope_key:slot.scope_key,connection_ref:slot.connection_ref,asset_ref:slot.asset_ref,app_id:slot.app_id,
