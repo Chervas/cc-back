@@ -17,7 +17,7 @@ test('first-profile inventory defaults OFF and performs no metadata, secret or p
 test('first-profile preflight uses real session/marketing authority and never creates local permissions', async () => {
   const f = fixture(), before = structuredClone(f.state);
   const result = await f.service.preflight(f.input);
-  assert.equal(result.enabled, true); assert.equal(result.canDiscover, true); assert.equal(result.canPrepare, false);
+  assert.equal(result.enabled, true); assert.equal(result.canDiscover, true); assert.equal(result.canPrepare, true);
   assert.match(result.sourceFingerprint, /^[a-f0-9]{64}$/); assert.equal(result.reason, 'owner_scope_required');
   assert.equal(f.commands.length, 0); assert.deepEqual(f.state, before);
   assert(f.calls.some(call => call.name === 'connectionCustody'));
@@ -25,7 +25,7 @@ test('first-profile preflight uses real session/marketing authority and never cr
 });
 test('catalogue is bound to one derived Owner scope and returns no credentials, authority or preparation intent', async () => {
   const f = fixture(), before = structuredClone(f.state), result = await f.service.candidates(f.input);
-  assert.equal(result.inventory_mode, 'broker_first_profile_candidates'); assert.equal(result.canPrepare, false);
+  assert.equal(result.inventory_mode, 'broker_first_profile_candidates'); assert.equal(result.canPrepare, true);
   assert.deepEqual(result.accounts, [{ accountName: 'accounts/100', accountDisplayName: 'FICTITIOUS_ACCOUNT',
     locations: [{ locationId: 'locations/300', name: 'FICTITIOUS_PROFILE_300', address: 'FICTITIOUS_ADDRESS' }] }]);
   assert.equal(f.commands.length, 1);

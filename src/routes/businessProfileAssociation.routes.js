@@ -3,7 +3,7 @@ const express=require('express');const C=require('../services/businessProfileAss
 const firstProfile=require('../services/businessProfileFirstProfile.service');
 function createRouter({service=defaults,firstProfileService=firstProfile,sessions,authorizeScope,resolveConnection}){
  const router=express.Router();
- function requested(req,action){const post=req.method==='POST',v=post?req.body:req.query;if(!v||typeof v!=='object'||Array.isArray(v)||post&&Object.keys(req.query).length)C.fail();const allowed=['clinic_id','assignment_scope',...(action==='prepare'?['attemptId','sourceFingerprint','accountName','locationName','reviewDestinationChangeAccepted']:[])];if(v.reviewDestinationChangeAccepted!==undefined&&typeof v.reviewDestinationChangeAccepted!=='boolean')C.fail();if(!C.positive(v.clinic_id)||v.assignment_scope!==undefined&&v.assignment_scope!=='clinic'||Object.keys(v).some(k=>!allowed.includes(k)))C.fail();return v;}
+ function requested(req,action){const post=req.method==='POST',v=post?req.body:req.query;if(!v||typeof v!=='object'||Array.isArray(v)||post&&Object.keys(req.query).length)C.fail();const allowed=['clinic_id','assignment_scope',...(['prepare','firstProfilePrepare'].includes(action)?['attemptId','sourceFingerprint','accountName','locationName','reviewDestinationChangeAccepted']:[])];if(v.reviewDestinationChangeAccepted!==undefined&&typeof v.reviewDestinationChangeAccepted!=='boolean')C.fail();if(!C.positive(v.clinic_id)||v.assignment_scope!==undefined&&v.assignment_scope!=='clinic'||Object.keys(v).some(k=>!allowed.includes(k)))C.fail();return v;}
  async function context(req,action){const v=requested(req,action);let claims;try{claims=await sessions.verify(sessions.bearer(req.headers.authorization));}catch{C.fail('gbp_association_session_required');}
   if(claims.sessionVersion!==1||claims.type==='cc_delegated_access'||!C.UUID.test(claims.jti)||!C.positive(claims.userId)||!Number.isSafeInteger(claims.exp*1000))C.fail('gbp_association_own_session_required');
   let auth;try{auth=await authorizeScope(req,'write');}catch{C.fail('scope_denied');}
@@ -14,12 +14,13 @@ function createRouter({service=defaults,firstProfileService=firstProfile,session
  const handler=action=>async(req,res)=>{res.set('Cache-Control','private, no-store');try{const v=requested(req,action),input=await context(req,action);let result;
   if(action==='firstProfilePreflight')result=await firstProfileService.preflight(input);
   else if(action==='firstProfileCandidates')result=await firstProfileService.candidates(input);
-  else if(action==='prepare')result=await service.prepare(input,Object.fromEntries(['attemptId','sourceFingerprint','accountName','locationName',...(Object.hasOwn(v,'reviewDestinationChangeAccepted')?['reviewDestinationChangeAccepted']:[])].map(k=>[k,v[k]])));
+  else if(['prepare','firstProfilePrepare'].includes(action))result=await (action==='firstProfilePrepare'?firstProfileService:service).prepare(input,Object.fromEntries(['attemptId','sourceFingerprint','accountName','locationName',...(Object.hasOwn(v,'reviewDestinationChangeAccepted')?['reviewDestinationChangeAccepted']:[])].map(k=>[k,v[k]])));
   else if(['read','confirm','cancel'].includes(action))result=await service[action](input,req.params.attemptId);else result=await service[action](input);
   if(JSON.stringify(await context(req,action))!==JSON.stringify(input))C.fail('gbp_association_scope_changed');
   return res.status(result.attempt&& !['active','prepared','cancelled'].includes(result.attempt.state)?202:200).json({success:true,...result});
  }catch(error){const errors=action.startsWith('firstProfile')?firstProfile:defaults;return res.status(errors.status(error)).json({success:false,error:errors.safe(error)});}};
  router.get('/first-profile/preflight',handler('firstProfilePreflight'));router.get('/first-profile/candidates',handler('firstProfileCandidates'));
+ router.post('/first-profile/requests',handler('firstProfilePrepare'));
  router.get('/capabilities',handler('capabilities'));router.get('/candidates',handler('candidates'));router.get('/requests',handler('list'));router.post('/requests',handler('prepare'));router.get('/requests/:attemptId',handler('read'));router.post('/requests/:attemptId/confirm',handler('confirm'));router.post('/requests/:attemptId/cancel',handler('cancel'));return router;
 }
 module.exports={createRouter};

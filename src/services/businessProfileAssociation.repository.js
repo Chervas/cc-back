@@ -68,7 +68,7 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
     return row;
   }
   async function dependencies(source,auth,transaction,{allowReviewChange=false}={}) {
-    const db=m(),q=opts(transaction),clinicId=Number(auth.clinic.id_clinica);
+    const db=m(),q=opts(transaction);
     if(source) {
       if(source.broker_read_asset_ref===auth.oauth.asset_ref&&Number(source.clinica_id)===Number(auth.oauth.clinica_id))C.fail('gbp_association_oauth_anchor');
       const shares=await db.GroupAssetClinicAssignment.findAll({...q,attributes:['assetId','clinicaId'],raw:true,where:{assetType:'google.business_profile',assetId:Number(source.id)},limit:1});
@@ -81,12 +81,7 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
     }
     // Review dispatches resolve their URL dynamically. Changing that target is
     // an explicit extra user decision, recorded in this same durable intent.
-    const lists=bounded(await db.MarketingPatientList.findAll({...q,attributes:['id','clinica_id','objective_id','source','status','criteria','clinic_ids'],raw:true,
-      where:{[Op.or]:[{clinica_id:clinicId},{grupo_clinica_id:auth.clinic.grupoClinicaId||-1}]},limit:1001}));
-    const applies=row=>Number(row.clinica_id)===clinicId||row.clinic_ids==null||!C.array(row.clinic_ids).length||C.array(row.clinic_ids).some(id=>Number(id)===clinicId);
-    const impacted=lists.filter(row=>applies(row)&&C.reviewCampaign(row)&&!['archived','cancelled'].includes(row.status)).sort((a,b)=>Number(a.id)-Number(b.id));
-    const impact={reviewDestinationChangeRequired:impacted.length>0,affectedReviewCampaignCount:impacted.length,
-      reviewCampaignImpactDigest:C.hash(impacted.map(row=>[Number(row.id),row.clinica_id==null?null:Number(row.clinica_id),row.clinic_ids==null?null:C.array(row.clinic_ids).map(Number).sort((a,b)=>a-b)]))};
+    const impact=await require('./businessProfileReviewImpact.service').readReviewImpact({models:db,clinic:auth.clinic,transaction});
     if(impact.reviewDestinationChangeRequired&&!allowReviewChange)C.fail('gbp_association_campaign_dependency');
     return impact;
   }
@@ -123,10 +118,7 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
   }
   const release = async (row,patch,transaction) => {await row.update({...patch,updated_at:now(),lease_token:null,lease_until:null,next_attempt_at:now()},opts(transaction));return plain(row);};
   const owned=async(claim,transaction)=>{const row=await load(claim.attempt_id,transaction); if (row.lease_token !== claim.lease_token || new Date(row.lease_until).getTime() <= now().getTime() || row.state !== claim.state) C.fail('gbp_association_busy'); return row;};
-  return {snapshot,
-    async history(input,id) {return trans(async transaction=>{await authority(input,transaction,{cleanup:true}); const rows=id ? [await load(id,transaction)] : await m().BusinessProfileAssociationRequest.findAll({...opts(transaction),where:{scope_key:input.scopeKey},order:[['requested_at','DESC'],['attempt_id','ASC']],limit:26});
-      const valid=rows.filter(row=>Number(row.clinica_id) === Number(input.clinicId) && Number(row.google_connection_id) === Number(input.connectionId)); if (id && valid.length !== 1) C.fail('gbp_association_not_found'); return id ? plain(valid[0]) : {rows:valid.slice(0,25).map(plain),hasMore:valid.length>25};});},
-    async enqueue(input,payload,candidate,expectedAuthority) {return trans(async transaction=>{
+  async function enqueueInTransaction(input,payload,candidate,expectedAuthority,transaction,firstProfileAdmission=null) {
       const auth=await authority(input,transaction); if (auth.authorityDigest !== expectedAuthority) C.fail('gbp_association_scope_changed');
       const old=await m().BusinessProfileAssociationRequest.findByPk(payload.attemptId,opts(transaction));
       if (old) {if (old.source_fingerprint !== payload.sourceFingerprint || old.account_id !== C.resource(payload.accountName,'accounts') || old.location_id !== C.resource(payload.locationName,'locations') || (C.object(old.target_snapshot).reviewDestinationChangeAccepted===true)!==(payload.reviewDestinationChangeAccepted===true)) C.fail('idempotency_conflict'); await requestContext(input,old,transaction,{sourceRequired:!['retire_pending','active','cancelled'].includes(old.state),originalSession:false}); return plain(old);}
@@ -152,7 +144,7 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
       if(candidate.reassociation&&!predecessor)C.fail('gbp_association_scope_changed');
       const generationId=predecessor||cancelledCandidate?randomUUID():null;
       const target=await m().ClinicBusinessLocation.create({clinica_id:Number(input.clinicId),google_connection_id:Number(input.connectionId),location_id:'locations/' + locationId,location_name:candidate.name,store_code:candidate.storeCode,is_verified:candidate.isVerified,is_suspended:false,is_active:false,sync_status:'pending',last_synced_at:null,raw_payload:{...candidate.rawLocation,clinicaclick_association_attempt_id:payload.attemptId},broker_read_connection_ref:auth.scope.connection_ref,broker_read_asset_ref:`gbp:${accountId}:${locationId}`},{transaction,logging:false});
-      const date=now(); const row=await m().BusinessProfileAssociationRequest.create({attempt_id:payload.attemptId,scope_key:input.scopeKey,clinica_id:Number(input.clinicId),google_connection_id:Number(input.connectionId),google_user_id:auth.scope.google_user_id,connection_ref:auth.scope.connection_ref,scope_ref:auth.scope.scope_ref,account_id:accountId,location_id:locationId,previous_asset_ref:source?.broker_read_asset_ref || null,source_mapping_id:source?.id || null,target_mapping_id:target.id,source_fingerprint:payload.sourceFingerprint,authority_digest:auth.authorityDigest,oauth_binding_digest:auth.oauthDigest,current_snapshot:C.target(source),target_snapshot:{...candidate,...impact,reviewDestinationChangeAccepted:payload.reviewDestinationChangeAccepted===true,mappingId:Number(target.id)},actor_user_id:Number(input.actorId),session_ref:input.sessionRef,session_expires_at:new Date(input.sessionExpiresAt),prepare_request_id:randomUUID(),activate_request_id:randomUUID(),retire_request_id:randomUUID(),abort_request_id:randomUUID(),command_history:[],state:'prepare_pending',requested_at:date,updated_at:date,next_attempt_at:date,attempts:0,lease_token:null,lease_until:null,last_error:null},{transaction,logging:false});
+      const date=now(); const row=await m().BusinessProfileAssociationRequest.create({attempt_id:payload.attemptId,scope_key:input.scopeKey,clinica_id:Number(input.clinicId),google_connection_id:Number(input.connectionId),google_user_id:auth.scope.google_user_id,connection_ref:auth.scope.connection_ref,scope_ref:auth.scope.scope_ref,account_id:accountId,location_id:locationId,previous_asset_ref:source?.broker_read_asset_ref || null,source_mapping_id:source?.id || null,target_mapping_id:target.id,source_fingerprint:payload.sourceFingerprint,authority_digest:auth.authorityDigest,oauth_binding_digest:auth.oauthDigest,current_snapshot:C.target(source),target_snapshot:{...candidate,...impact,reviewDestinationChangeAccepted:payload.reviewDestinationChangeAccepted===true,mappingId:Number(target.id),...(firstProfileAdmission?{firstProfileAdmission}: {})},actor_user_id:Number(input.actorId),session_ref:input.sessionRef,session_expires_at:new Date(input.sessionExpiresAt),prepare_request_id:randomUUID(),activate_request_id:randomUUID(),retire_request_id:randomUUID(),abort_request_id:randomUUID(),command_history:[],state:'prepare_pending',requested_at:date,updated_at:date,next_attempt_at:date,attempts:0,lease_token:null,lease_until:null,last_error:null},{transaction,logging:false});
       const newBinding={external_location_id:locationId,connection_ref:row.connection_ref,asset_ref:`gbp:${accountId}:${locationId}`,clinica_id:Number(input.clinicId),google_connection_id:Number(input.connectionId),state:'staged',association_attempt_id:row.attempt_id};
       if(generationId){
         const {ancestors=[],...immediate}=predecessor||{};const predecessors=predecessor?[immediate,...ancestors]:[];
@@ -164,7 +156,46 @@ function createRepositoryForAssociation({models,sessions,audit,authorize,now=()=
       else if (existingBinding) C.fail('gbp_association_location_in_use');
       else await m().BusinessProfileBrokerBinding.create(newBinding,{transaction,logging:false});
       await record(row,'association_requested',transaction); await requestContext(input,row,transaction); return plain(row);
-    });},
+  }
+  async function firstHistoryInTransaction(input,payload,transaction) {
+    // A metadata peek must not take the UUID row/gap before ordinary authority
+    // locks (scope, clinic, identity). GET/cancel use that same lock ordering.
+    const hint=await m().BusinessProfileAssociationRequest.findByPk(payload.attemptId,{transaction,raw:true,logging:false,attributes:['attempt_id']});
+    if(hint===null)return null;
+    await authority(input,transaction);
+    const row=await m().BusinessProfileAssociationRequest.findByPk(payload.attemptId,opts(transaction));
+    if(row===null)C.fail('gbp_first_profile_scope_changed');
+    const marker=C.object(C.object(row.target_snapshot).firstProfileAdmission);
+    if(marker.version!==1||marker.sourceFingerprint!==payload.sourceFingerprint||row.scope_key!==input.scopeKey
+      ||Number(row.clinica_id)!==Number(input.clinicId)||Number(row.google_connection_id)!==Number(input.connectionId)
+      ||Number(row.actor_user_id)!==Number(input.actorId)||row.session_ref!==input.sessionRef||+new Date(row.session_expires_at)!==input.sessionExpiresAt
+      ||row.account_id!==C.resource(payload.accountName,'accounts')||row.location_id!==C.resource(payload.locationName,'locations')
+      ||(C.object(row.target_snapshot).reviewDestinationChangeAccepted===true)!==(payload.reviewDestinationChangeAccepted===true))C.fail('idempotency_conflict');
+    await requestContext(input,row,transaction,{sourceRequired:!['active','cancelled','retire_pending'].includes(row.state),originalSession:false});
+    return plain(row);
+  }
+  return {snapshot,
+    async history(input,id) {return trans(async transaction=>{await authority(input,transaction,{cleanup:true}); const rows=id ? [await load(id,transaction)] : await m().BusinessProfileAssociationRequest.findAll({...opts(transaction),where:{scope_key:input.scopeKey},order:[['requested_at','DESC'],['attempt_id','ASC']],limit:26});
+      const valid=rows.filter(row=>Number(row.clinica_id) === Number(input.clinicId) && Number(row.google_connection_id) === Number(input.connectionId)); if (id && valid.length !== 1) C.fail('gbp_association_not_found'); return id ? plain(valid[0]) : {rows:valid.slice(0,25).map(plain),hasMore:valid.length>25};});},
+    enqueue:(input,payload,candidate,expectedAuthority)=>trans(transaction=>enqueueInTransaction(input,payload,candidate,expectedAuthority,transaction)),
+    firstHistory:(input,payload)=>trans(transaction=>firstHistoryInTransaction(input,payload,transaction)),
+    enqueueFirst:(input,payload,handle)=>trans(async transaction=>{
+      const prior=await firstHistoryInTransaction(input,payload,transaction);if(prior)return prior;
+      const admitted=await require('./businessProfileFirstProfile.service').inspectAdmission(handle,{models:m(),input,payload,transaction});
+      if(admitted.previousScope){
+        const keys=Object.keys(admitted.scope);
+        if(C.hash(keys.map(key=>admitted.previousScope[key]))!==C.hash(keys.map(key=>admitted.scope[key]))){
+          const [updated]=await m().BusinessProfileAssociationScope.update(admitted.scope,{...opts(transaction),where:{scope_key:input.scopeKey,state:'active',
+            google_connection_id:Number(input.connectionId),google_user_id:admitted.previousScope.google_user_id,connection_ref:admitted.previousScope.connection_ref}});
+          if(updated!==1)C.fail('gbp_first_profile_scope_changed');
+        }
+      }else await m().BusinessProfileAssociationScope.create(admitted.scope,{transaction,logging:false});
+      const auth=await authority(input,transaction),source=await current(input,transaction);
+      if(source!==null)C.fail('gbp_first_profile_existing_history');
+      const impact=await dependencies(source,auth,transaction,{allowReviewChange:payload.reviewDestinationChangeAccepted===true});
+      const normalized={...payload,sourceFingerprint:await sourceFingerprint(source,impact,auth,input,transaction)};
+      return enqueueInTransaction(input,normalized,admitted.candidate,auth.authorityDigest,transaction,{version:1,sourceFingerprint:payload.sourceFingerprint});
+    }),
     async transition(input,id,kind) {return trans(async transaction=>{await authority(input,transaction,{cleanup:kind==='cancel'});const row=await load(id,transaction);
       if (kind === 'confirm' && ['activate_pending','broker_active','retire_pending','active'].includes(row.state)) {await requestContext(input,row,transaction,{sourceRequired:!['retire_pending','active'].includes(row.state),originalSession:false});return plain(row);}
       if (kind === 'cancel' && row.state === 'cancelled') {await requestContext(input,row,transaction,{sourceRequired:false,originalSession:false,cleanup:true});return plain(row);}
