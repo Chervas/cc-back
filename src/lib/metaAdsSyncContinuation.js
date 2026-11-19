@@ -51,7 +51,10 @@ function contextForJob(job, now = Date.now()) {
   }
   // This reference never enters a queue payload. Only the scheduler's persisted
   // result column is copied; request body/options cannot manufacture a resume.
-  const previous = summary && typeof summary === 'object' && Object.hasOwn(summary, KEY) ? structuredClone(summary[KEY]) : null;
+  let previous = summary && typeof summary === 'object' && Object.hasOwn(summary, KEY) ? structuredClone(summary[KEY]) : null;
+  // Manual retry repurposes the same row and retains its terminal summary.
+  // A terminal result is never continuation authority: start all work afresh.
+  if (previous !== null && ['completed', 'failed'].includes(summary.status)) previous = null;
   if (previous !== null && (job.status !== 'running' || !Number.isSafeInteger(Number(job.attempts)) || Number(job.attempts) < 2
     || summary.status !== 'waiting' || summary.reason !== 'rate_limited' || !Number.isFinite(+new Date(job.next_run_at))
     || +new Date(job.next_run_at) !== +new Date(summary.nextAllowedAt) || +new Date(job.next_run_at) > now)) fail();

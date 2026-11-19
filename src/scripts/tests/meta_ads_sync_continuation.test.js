@@ -93,9 +93,9 @@ for (const [method, type, defaults] of cases) {
     assert.deepEqual(state.preparations, [359, 391, 406, 409], 'completed accounts are locally reauthorized, not blindly skipped');
     assert(state.asserts.includes(359) && state.asserts.includes(391));
     assert(state.runs.every(row => row.start === range.startDate && row.end === range.endDate));
-    assert.deepEqual(second[continuation.KEY].completedMappingIds, [359, 391, 406, 409]);
-    assert.equal(second[continuation.KEY].cohort, undefined);
-    assert(!JSON.stringify(second[continuation.KEY]).includes(state.assets[0].metaAssetId), 'provider account IDs are never persisted in the checkpoint');
+    assert.equal(second[continuation.KEY], undefined, 'terminal results do not retain internal continuation');
+    assert.equal(first[continuation.KEY].cohort, undefined);
+    assert(!JSON.stringify(first[continuation.KEY]).includes(state.assets[0].metaAssetId), 'provider account IDs are never persisted in the checkpoint');
     const successful = state.logs.filter(row => row.asset_id);
     assert.deepEqual(successful.map(row => row.asset_id), [359, 391, 406, 409]);
     assert(successful.every(row => /^[a-f0-9]{64}$/.test(row.status_report.metaAdsAccountDigest)
@@ -110,7 +110,7 @@ test('a retry across midnight freezes implicit dates and skips provider work alr
   assert(originalWindows.every(row => row.endDate === '2026-11-18' && row.startDate === '2026-10-20'));
   Object.assign(request, resumed(request, first)); state.now += 86400000; state.limitedId = null; state.runs.length = 0;
   const second = await job.executeAdsSync({}, continuation.contextForJob(request, state.now));
-  assert.deepEqual(second[continuation.KEY].windows, originalWindows);
+  assert.equal(second[continuation.KEY], undefined);
   assert.deepEqual(state.runs.map(row => row.id), [406, 409]);
   assert(state.runs.every(row => row.end === '2026-11-18' && row.start === '2026-10-20'));
 });
@@ -214,15 +214,33 @@ test('the actual scheduler wrapper passes only the persisted result column throu
   assert.equal(observed.isCompleted(359), true);
 });
 
-test('terminal results and a first attempt never recycle completed account claims as a resumed WAIT', async () => {
+test('a first attempt or edited WAIT never recycle completed account claims as a resumed WAIT', async () => {
   const { job, state } = fixture(), request = { id: 132, type: 'meta_ads_recent' };
   const first = await job.executeAdsSync(range, continuation.contextForJob(request)), due = first.nextAllowedAt + 1;
   const valid = resumed(request, first);
   for (const change of [{ status: 'pending' }, { attempts: 1 }, { next_run_at: new Date(first.nextAllowedAt + 1000) },
-    { result_summary: { ...first, status: 'completed' } }, { result_summary: { ...first, reason: 'other' } }]) {
+    { next_run_at: new Date(state.now) }, { result_summary: { ...first, reason: 'other' } }]) {
     assert.throws(() => continuation.contextForJob({ ...valid, ...change }, due), { code: 'meta_ads_continuation_invalid' });
   }
   assert(state.providerCalls > 0);
+});
+
+test('manual retry with a changed next_run_at starts fresh after a known terminal result, including old stored checkpoints', async () => {
+  for (const [method, type, defaults] of cases) {
+    for (const status of ['completed', 'failed']) {
+      const { job, state } = fixture(), request = { id: 136, type };
+      const first = await job[method]({ ...defaults, ...range }, continuation.contextForJob(request));
+      // Simulate setPending(nextRunAt=now), followed by a new running claim,
+      // retaining the older terminal result exactly as the production API does.
+      const terminal = { ...JSON.parse(JSON.stringify(first)), status };
+      state.now = first.nextAllowedAt + 1000; state.limitedId = null; state.runs.length = 0;
+      const retried = { ...resumed(request, terminal), attempts: 3, next_run_at: new Date(state.now) };
+      const result = await job[method]({ ...defaults, ...range }, continuation.contextForJob(retried, state.now));
+      assert.equal(result.status, 'completed'); assert.equal(result.processed, 4);
+      assert.equal(result.resumedSkipped, undefined); assert.equal(result[continuation.KEY], undefined);
+      assert.deepEqual(state.runs.map(row => row.id), [359, 391, 406, 409]);
+    }
+  }
 });
 
 test('calendar dates use the cron civil timezone and UTC day arithmetic across DST', () => {

@@ -1337,7 +1337,7 @@ class MetaSyncJobs {
         status_report: report
       });
       console.log('✅ adsSync completado', report);
-      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report, ...progress.result() };
+      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report, ...(report.nextRunAt ? progress.result() : {}) };
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
       console.error('❌ Error en adsSync:', error);
@@ -1496,7 +1496,7 @@ class MetaSyncJobs {
         status_report: report
       });
       console.log('✅ adsBackfill completado', report);
-      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report, ...progress.result() };
+      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report, ...(report.nextRunAt ? progress.result() : {}) };
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
       console.error('❌ Error en adsBackfill:', error);
