@@ -25,7 +25,7 @@ function loadBusinessProfileJobs({ models, broker, legacyHttp, matching, credent
   };
   const module = { exports: {} };
   const blocked = new Proxy({}, { get: () => fail });
-  const sandbox = { module, exports: module.exports, Buffer, URL, URLSearchParams, Date: clockDate, setTimeout, clearTimeout, setInterval: fail,
+  const sandbox = { module, exports: module.exports, Buffer, URL, URLSearchParams, Date: clockDate, structuredClone, setTimeout, clearTimeout, setInterval: fail,
     process: { env: { RUNTIME_ROLE: 'gateway', JOBS_AUTO_START: 'false', LOCAL_SYNC_RECENT_DAYS: '1', LOCAL_SYNC_BETWEEN_LOCATIONS_SLEEP_MS: '0', ...env } },
     console: Object.fromEntries(['log', 'warn', 'error'].map(k => [k, (...args) => logs.push(args)])),
     require: name => Object.hasOwn(dependencies, name) ? dependencies[name] : blocked };
