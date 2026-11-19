@@ -1,0 +1,152 @@
+'use strict';
+// Owner-only empty-slot preparation. No provider call, token, asset enrollment,
+// reader grant or modification of a pre-existing static connection occurs here.
+const {randomUUID}=require('node:crypto');
+const {CreateSecretCommand,DescribeSecretCommand,GetSecretValueCommand}=require('@aws-sdk/client-secrets-manager');
+const C=require('./meta-marketing-oauth-contract'),P=require('./meta-marketing-admission-contract');
+const {authenticate}=require('./auth'),{request:validateRequest}=require('./contracts');
+const {validatePolicy}=require('./policy'),{canonical}=require('./canonical');
+const {eventFor}=require('./audit'),{BrokerError,fail}=require('./errors');
+const {SECRET_KEY}=require('./google-main');
+function validateAdmissionPolicy(policy,settings){
+  const config=P.validateSettings(settings);if(!config?.enabled)return null;
+  const base=structuredClone(validatePolicy(policy));
+  const gateway=`gateway:${config.environment}:meta-marketing-oauth`,control=`control:${config.environment}:meta-marketing-oauth`;
+  if(!base.principals.some(p=>p.enabled&&p.id===gateway)||!base.principals.some(p=>p.enabled&&p.id===control)
+    ||base.connections.length+config.maxConnections>64
+    ||!base.connections.some(binding=>{const b=C.bindingFor(binding);return b.appId===config.appId&&b.appVersionId===config.appVersionId
+      &&b.redirectUri===config.redirectUri&&binding.clientSecretArn===config.clientSecretArn;}))fail('invalid_request');
+  if(base.connections.some(binding=>config.scopeKeys.includes(C.bindingFor(binding).scopeKey)))fail('invalid_request');
+  return {config,base,gateway,control};
+}
+function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date.now()}){
+  const approved=validateAdmissionPolicy(policy,settings);if(!approved)return null;
+  const {config,base,gateway,control}=approved,digest=P.settingsDigest(config);
+  store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_admission_slots (
+    scope TEXT PRIMARY KEY,connection TEXT NOT NULL UNIQUE,clinic_ids TEXT NOT NULL,config_digest TEXT NOT NULL,
+    version_id TEXT NOT NULL UNIQUE,name TEXT NOT NULL UNIQUE,arn TEXT,state TEXT NOT NULL CHECK(state IN ('preparing','ready')),
+    created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS meta_marketing_admission_requests (
+    id TEXT PRIMARY KEY,digest TEXT NOT NULL,scope TEXT NOT NULL,created_at INTEGER NOT NULL,completed_at INTEGER);`);
+  const rowFor=scope=>store.db.prepare('SELECT * FROM meta_marketing_admission_slots WHERE scope=?').get(scope);
+  function checkBlocks(scope,clinicIds){
+    const ref=P.connectionRef(scope);
+    if(store.db.prepare('SELECT 1 FROM connections WHERE ref=?').get(ref))store.connection(ref,now());
+    store.assertAssetActive({tenantRef:'clinic:'+clinicIds[0],connectionRef:ref,assetRef:'meta-enroll:'+scope});
+    for(const id of clinicIds)store.assertAssetActive({tenantRef:'clinic:'+id,connectionRef:ref,assetRef:'meta-enroll:clinic:'+id});
+  }
+  function checkFootprint(scope,clinicIds){
+    for(const binding of base.connections){
+      const b=C.bindingFor(binding);
+      if(b.scopeKey===scope||binding.connectionRef===P.connectionRef(scope)||b.clinicIds.some(id=>clinicIds.includes(id)))fail('scope_denied');
+    }
+    for(const row of store.db.prepare('SELECT scope,clinic_ids FROM meta_marketing_admission_slots WHERE scope<>?').all(scope)){
+      let ids;try{ids=JSON.parse(row.clinic_ids);}catch{fail('scope_denied');}
+      if(!Array.isArray(ids)||!ids.length||ids.length>1000||JSON.stringify(ids)!==row.clinic_ids
+        ||ids.some((id,i)=>!Number.isSafeInteger(id)||id<1||id>2147483647||i>0&&id<=ids[i-1]||clinicIds.includes(id)))fail('scope_denied');
+    }
+  }
+  function resolveBinding(ref){
+    const row=store.db.prepare('SELECT * FROM meta_marketing_admission_slots WHERE connection=?').get(ref);
+    return row?P.bindingFromSlot(config,row):null;
+  }
+  function resolve(request,principal,liveBase){
+    // Never rewrite or shadow a static binding, grant, history or fingerprint.
+    if(liveBase.connections.some(binding=>binding.connectionRef===request.connectionRef))return liveBase;
+    const binding=resolveBinding(request.connectionRef);if(!binding)return liveBase;
+    C.authorize({request,principal,binding});
+    if(principal.id!==gateway&&principal.id!==control)fail('scope_denied');
+    const grants=[gateway,control].map(principalId=>({principalId,tenantRef:'clinic:'+binding.metaMarketingOAuth.clinicIds[0],
+      connectionRef:binding.connectionRef,assetRef:'meta-enroll:'+binding.metaMarketingOAuth.scopeKey,
+      operations:principalId===gateway?Object.values(C.OPERATIONS):[C.OPERATIONS.status,C.OPERATIONS.abort]}));
+    return {...liveBase,connections:[...liveBase.connections,binding],grants:[...liveBase.grants,...grants]};
+  }
+  const tagsFor=row=>[{Key:'ManagedBy',Value:'clinicaclick-meta-marketing-admission'},
+    {Key:'ClinicaclickScope',Value:row.scope},{Key:'Purpose',Value:'candidate'}];
+  const placeholderFor=row=>({version:1,provider:'meta-marketing-oauth-slot',connectionRef:row.connection,
+    scopeKey:row.scope,clinicSetDigest:C.hash(row.clinic_ids),appId:config.appId});
+  const validArn=(value,row)=>typeof value==='string'&&value.startsWith(P.ARN_PREFIX+row.name+'-')
+    &&/^[A-Za-z0-9]{6}$/.test(value.slice((P.ARN_PREFIX+row.name+'-').length));
+  async function observe(row,signal){
+    let metadata;
+    try{metadata=await client.send(new DescribeSecretCommand({SecretId:row.arn||row.name}),{abortSignal:signal});}
+    catch(error){if(error?.name==='ResourceNotFoundException')return null;throw error;}
+    if(signal.aborted||!validArn(metadata.ARN,row)||metadata.Name!==row.name||metadata.KmsKeyId!==SECRET_KEY||metadata.DeletedDate
+      ||!metadata.VersionIdsToStages?.[row.version_id]?.includes('AWSCURRENT')
+      ||Object.entries(metadata.VersionIdsToStages).some(([id,stages])=>id!==row.version_id&&stages.includes('AWSCURRENT'))
+      ||tagsFor(row).some(tag=>!metadata.Tags?.some(value=>value.Key===tag.Key&&value.Value===tag.Value)))fail('secret_unavailable');
+    const value=await client.send(new GetSecretValueCommand({SecretId:metadata.ARN,VersionId:row.version_id,VersionStage:'AWSCURRENT'}),{abortSignal:signal});
+    try{
+      if(signal.aborted||value.ARN!==metadata.ARN||value.VersionId!==row.version_id||!value.VersionStages?.includes('AWSCURRENT')
+        ||typeof value.SecretString!=='string'||Buffer.byteLength(value.SecretString)>2048
+        ||canonical(JSON.parse(value.SecretString))!==canonical(placeholderFor(row)))fail('secret_unavailable');
+      return metadata.ARN;
+    }finally{delete value.SecretString;value.SecretBinary?.fill?.(0);}
+  }
+  async function ensureSlot(row,signal){
+    let arn=await observe(row,signal);if(arn)return arn;
+    if(row.state==='ready')fail('secret_unavailable');
+    let createError;
+    try{await client.send(new CreateSecretCommand({Name:row.name,KmsKeyId:SECRET_KEY,ClientRequestToken:row.version_id,
+      SecretString:JSON.stringify(placeholderFor(row)),Tags:tagsFor(row)}),{abortSignal:signal});}catch(error){createError=error;}
+    arn=await observe(row,signal);if(!arn)throw createError||new BrokerError('secret_unavailable');return arn;
+  }
+  async function prepare(raw,headers){
+    if(!Buffer.isBuffer(raw)||raw.length>32768)fail('invalid_request');
+    let request;try{request=validateRequest(JSON.parse(raw.toString('utf8')));}catch{fail('invalid_request');}
+    const principal=authenticate(raw,headers,request,base,now());
+    store.acceptNonce(principal.id,request.nonce,now(),principal.maxPerMinute);
+    if(request.operation!==P.OPERATION||principal.id!==gateway)fail('scope_denied');
+    const intent=P.validatePreparation(request.payload,now());
+    if(!config.scopeKeys.includes(intent.scopeKey)||request.connectionRef!==P.connectionRef(intent.scopeKey)
+      ||request.assetRef!=='meta-enroll:'+intent.scopeKey||request.tenantRef!=='clinic:'+intent.clinicIds[0])fail('scope_denied');
+    const auditPolicy={...base,grants:[{principalId:principal.id,tenantRef:request.tenantRef,assetRef:request.assetRef,
+      connectionRef:request.connectionRef,operations:[P.OPERATION]}]};
+    const requestDigest=C.hash(canonical({connectionRef:request.connectionRef,payload:intent}));
+    const row=store.transaction(()=>{
+      checkBlocks(intent.scopeKey,intent.clinicIds);checkFootprint(intent.scopeKey,intent.clinicIds);
+      const prior=store.db.prepare('SELECT * FROM meta_marketing_admission_requests WHERE id=?').get(request.requestId);
+      if(prior&&(prior.digest!==requestDigest||prior.scope!==intent.scopeKey))fail('idempotency_conflict');
+      let found=rowFor(intent.scopeKey);
+      if(found&&(found.config_digest!==digest||found.clinic_ids!==JSON.stringify(intent.clinicIds)))fail('idempotency_conflict');
+      if(found&&found.expires_at<=now())fail('connection_blocked');
+      if(store.backlog().pending+2>base.maxBacklog)fail('audit_unavailable');
+      if(!found){
+        if(store.db.prepare('SELECT count(*) n FROM meta_marketing_admission_slots').get().n>=config.maxConnections)fail('rate_limited');
+        store.db.prepare("INSERT INTO meta_marketing_admission_slots VALUES (?,?,?,?,?,?,NULL,'preparing',?,?)")
+          .run(intent.scopeKey,request.connectionRef,JSON.stringify(intent.clinicIds),digest,randomUUID(),
+            P.prefix(config.environment)+intent.scopeKey.replace(':','-')+'/candidate',now(),now()+config.slotTtlMs);
+        found=rowFor(intent.scopeKey);
+      }
+      if(!prior){
+        store.db.prepare('INSERT INTO meta_marketing_admission_requests VALUES (?,?,?,?,NULL)').run(request.requestId,requestDigest,intent.scopeKey,now());
+        store.appendAudit(eventFor(request,principal,auditPolicy,'integration.requested','accepted','meta_admission_preparation_requested',now()));
+      }
+      return found;
+    });
+    const signal=AbortSignal.timeout(15000);
+    try{
+      const arn=await ensureSlot(row,signal);
+      return store.transaction(()=>{
+        if(signal.aborted||now()>=intent.expiresAt)fail('oauth_flow_interrupted');
+        checkBlocks(intent.scopeKey,intent.clinicIds);checkFootprint(intent.scopeKey,intent.clinicIds);
+        if(store.backlog().pending>=base.maxBacklog)fail('audit_unavailable');
+        const current=rowFor(intent.scopeKey);
+        if(!current||current.version_id!==row.version_id||current.config_digest!==digest||current.clinic_ids!==JSON.stringify(intent.clinicIds)
+          ||current.arn&&current.arn!==arn||current.expires_at!==row.expires_at||current.expires_at<=now())fail('idempotency_conflict');
+        if(current.state!=='ready'){
+          store.db.prepare("UPDATE meta_marketing_admission_slots SET arn=?,state='ready' WHERE scope=?").run(arn,row.scope);
+          store.seedConnection(row.connection,{state:'active',expiresAt:row.expires_at});
+        }
+        const completed=store.db.prepare('SELECT completed_at FROM meta_marketing_admission_requests WHERE id=?').get(request.requestId);
+        if(completed.completed_at===null){
+          store.appendAudit(eventFor(request,principal,auditPolicy,'integration.completed','success','meta_admission_slot_prepared',now()));
+          store.db.prepare('UPDATE meta_marketing_admission_requests SET completed_at=? WHERE id=?').run(now(),request.requestId);
+        }
+        return {requestId:request.requestId,replayed:completed.completed_at!==null,data:{status:'prepared',connected:false,binding:P.publicBinding(config,rowFor(row.scope))}};
+      });
+    }catch(error){if(error instanceof BrokerError)throw error;fail('secret_unavailable');}
+  }
+  return {prepare,resolve,resolveBinding};
+}
+module.exports={createMetaMarketingAdmission,validateAdmissionPolicy};

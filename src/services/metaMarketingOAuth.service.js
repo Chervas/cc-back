@@ -8,7 +8,8 @@ const SAFE=new Set(['meta_oauth_unavailable','meta_oauth_disabled','meta_oauth_s
   'broker_response_invalid','broker_configuration_invalid','broker_timeout','broker_unavailable','audit_unavailable']);
 const safe=e=>SAFE.has(e?.code)?e.code:'meta_oauth_unavailable';
 function createService({models,sessions,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_OAUTH_ENABLED==='true',
-  workerEnabled=()=>process.env.META_MARKETING_OAUTH_WORKER_ENABLED==='true',discoveryEnabled=()=>process.env.META_MARKETING_OAUTH_DISCOVERY_ENABLED==='true',returnOrigin='https://crm.clinicaclick.com'}){
+  workerEnabled=()=>process.env.META_MARKETING_OAUTH_WORKER_ENABLED==='true',discoveryEnabled=()=>process.env.META_MARKETING_OAUTH_DISCOVERY_ENABLED==='true',
+  admission=null,returnOrigin='https://crm.clinicaclick.com'}){
   const origin=new URL(returnOrigin);if(origin.origin!==returnOrigin||!['http:','https:'].includes(origin.protocol))C.fail();
   const R=models.MetaMarketingOAuthRequest,S=models.MetaMarketingOAuthSlot,scope=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now});
   const audit=require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
@@ -27,6 +28,31 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     await audit.append(value,{transaction});
   }
   const record=(row,reason,transaction,worker=false)=>recordEvent(fromFlow(row,reason,now(),worker),transaction);
+  async function prepareFirstSlot(input){
+    if(!admission?.enabled(input.scopeKey))return;
+    const snapshot=await order.scope(input,{},async({transaction,expectedFlowId})=>{
+      gate();
+      if(expectedFlowId!==null)return null;
+      if(await S.findByPk(input.scopeKey,locked(transaction)))return null;
+      return scope.firstAdmission(input,transaction);
+    });
+    if(!snapshot)return;
+
+    const slot=await admission.prepare(snapshot);
+    await order.scope(input,{},async({transaction,expectedFlowId})=>{
+      gate();
+      if(!admission.enabled(input.scopeKey))C.fail('meta_oauth_admission_required',409);
+      if(expectedFlowId!==null)C.fail('meta_oauth_busy',409);
+      const existing=await S.findByPk(input.scopeKey,locked(transaction));
+      const fresh=await scope.firstAdmission(input,transaction);
+      if(fresh.scopeDigest!==snapshot.scopeDigest||+slot.expires_at<=+now())C.fail('meta_oauth_scope_changed',409);
+      if(existing){
+        if(C.slotDigest(plain(existing))!==C.slotDigest(slot))C.fail('meta_oauth_scope_changed',409);
+        return;
+      }
+      await S.create(slot,{transaction});
+    });
+  }
   async function authorizedRow(row,transaction){
     gate();await scope.revalidate(row,transaction);const fresh=await R.findByPk(row.flow_id,locked(transaction));
     if(!fresh||['slot_digest','scope_digest','session_ref','actor_user_id','state_hash','connection_ref','asset_ref','clinic_ids','scopes','app_id'].some(k=>fresh[k]!==row[k]))C.fail('meta_oauth_scope_changed',409);
@@ -160,13 +186,20 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       return order.scope(input,{},async({transaction,flow,expectedFlowId,input})=>{
         gate();
         const captured=await scope.capture(input,transaction,{expectedFlowId}),latest=flow?await R.findByPk(flow.flow_id,locked(transaction)):null;
-        if(!captured.slot&&!latest&&expectedFlowId===null)return {enabled:true,available:false,status:'none',admission:{state:'required'}};
+        if(!captured.slot&&!latest&&expectedFlowId===null){
+          if(admission?.enabled(input.scopeKey)){
+            await scope.firstAdmission(input,transaction);
+            return {enabled:true,available:true,status:'none'};
+          }
+          return {enabled:true,available:false,status:'none',admission:{state:'required'}};
+        }
         if(latest&&Number(latest.actor_user_id)!==input.actorId&&latest.state!=='cancelled')return {enabled:true,available:false,status:'busy'};
         return {enabled:true,available:!!captured.slot&&(!latest||latest.state==='cancelled'),...(latest?projection(plain(latest)):{status:'none'})};
       });
     },
     async begin(input){
       gate();input=require('./metaMarketingTransactionOrder.service').pinInput(input);const state=randomBytes(32).toString('base64url');
+      await prepareFirstSlot(input);
       const row=await order.scope(input,{},async({transaction,expectedFlowId})=>{
         const captured=await scope.capture(input,transaction,{expectedFlowId});if(!captured.slot)C.fail(expectedFlowId===null?'meta_oauth_admission_required':'meta_oauth_unconfigured',expectedFlowId===null?409:503);
         if(await R.findOne({attributes:['flow_id'],where:{scope_key:input.scopeKey,state:{[Op.ne]:'cancelled'}},transaction}))C.fail('meta_oauth_busy',409);
@@ -246,6 +279,12 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   };
   return service;
 }
-let singleton;const instance=()=>singleton||=createService({models:require('../../models'),sessions:require('./accessSession.service'),client:require('./metaMarketingOAuthClient.service').createClient(),returnOrigin:C.frontendOrigin()});
+let singleton;
+function instance(){
+  if(singleton)return singleton;
+  const client=require('./metaMarketingOAuthClient.service').createClient();
+  const admission=require('./metaMarketingAdmission.service').createAdmission({client});
+  return singleton=createService({models:require('../../models'),sessions:require('./accessSession.service'),client,admission,returnOrigin:C.frontendOrigin()});
+}
 module.exports={createService,safe,...Object.fromEntries(['status','begin','callback','cancel','reconcile','assets','cancelAfterEnrollment'].map(k=>[k,(...args)=>instance()[k](...args)])),
   run:options=>process.env.RUNTIME_ROLE==='gateway'?Promise.resolve({status:'completed',skipped:true,reason:'gateway_runtime'}):process.env.META_MARKETING_OAUTH_WORKER_ENABLED==='true'?instance().run(options):Promise.resolve({status:'completed',skipped:true,reason:'meta_oauth_worker_disabled'})};

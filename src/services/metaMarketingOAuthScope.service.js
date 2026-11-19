@@ -51,6 +51,15 @@ function createScope({models,sessions,now=()=>new Date(),recoveryGuard}){
     if(expectedFlowId!==undefined&&expectedFlowId!==null&&!C.UUID.test(expectedFlowId))C.fail();
     return captureStructure(await authorize(actor,transaction),{expectedFlowId});
   };
+  async function firstAdmission(actor,transaction){
+    const {scopeKey,clinicIds,sessionExpiresAt,options}=await authorize(actor,transaction);
+    if(await scopeBlocked(scopeKey,transaction))C.fail('meta_oauth_scope_blocked',409);
+    const revoked=await models.MetaMarketingBrokerRevocation.findOne({
+      ...options,attributes:['tuple_hash'],where:{scope_key:scopeKey},
+    });
+    if(revoked)C.fail('meta_oauth_scope_blocked',409);
+    return {scopeKey,clinicIds,sessionExpiresAt,scopeDigest:C.hash(JSON.stringify([scopeKey,clinicIds]))};
+  }
   function compare(row,fresh){
     if(!fresh.slot||fresh.slotDigest!==row.slot_digest||fresh.scopeDigest!==row.scope_digest||JSON.stringify(fresh.clinicIds)!==row.clinic_ids
       ||['scope_key','connection_ref','asset_ref','app_id','clinic_ids','scopes','redirect_uri'].some(k=>row[k]!==fresh.slot[k]))C.fail('meta_oauth_scope_changed',409);
@@ -69,6 +78,6 @@ function createScope({models,sessions,now=()=>new Date(),recoveryGuard}){
     if(!clinics.length||clinics.length>1000)C.fail('meta_oauth_scope_changed',409);
     return compare(row,await captureStructure({scopeKey:row.scope_key,clinicIds:clinics.map(v=>Number(v.id_clinica)),options},{flow:row,phase:'active',allowExpiredCredential}));
   }
-  return {authorize,capture,revalidate,revalidateStructure};
+  return {authorize,capture,firstAdmission,revalidate,revalidateStructure};
 }
 module.exports={createScope};

@@ -19,9 +19,15 @@ const {createMetaMarketingEnrollment}=require('./meta-marketing-enrollment');
 const {createMetaMarketingOAuthSecrets}=require('./meta-marketing-oauth-secrets');
 const {createMetaMarketingOAuthHttp}=require('./meta-marketing-oauth-http');
 const {createMetaMarketingOAuth,createMetaMarketingOAuthOperations}=require('./meta-marketing-oauth');
+const admissionContract=require('./meta-marketing-admission-contract');
+const {createMetaMarketingAdmission,validateAdmissionPolicy}=require('./meta-marketing-admission');
 const prefix=environment=>`/clinicaclick/integrations/prod/meta-marketing/${environment}/`;
 function validateConfig(config) {
   const fields=['cohort','enabled','environment','listenAddress','policy','port','stateFile','tlsCertFile','tlsKeyFile'];
+  if(config&&Object.hasOwn(config,'admission')){
+    fields.push('admission');const admission=admissionContract.validateSettings(config.admission);
+    if(!admission||admission.enabled&&(admission.environment!==config.environment||config.standby===true))fail('invalid_request');
+  }
   if (config && Object.hasOwn(config,'standby')) { fields.push('standby'); if(typeof config.standby!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetEnrollment')) { fields.push('assetEnrollment'); if(typeof config.assetEnrollment!=='boolean'||config.assetEnrollment&&!config.assetDiscovery)fail('invalid_request'); }
@@ -43,6 +49,7 @@ function validateConfig(config) {
     || !['dev','staging'].includes(config.environment) || !net.isIP(config.listenAddress) || !Number.isInteger(config.port)
     || config.port<1024 || config.port>65535 || typeof config.stateFile!=='string' || !path.isAbsolute(config.stateFile)) fail('invalid_request');
   const policy=validatePolicy(config.policy),gateway=`gateway:${config.environment}:meta-marketing-oauth`,control=`control:${config.environment}:meta-marketing-oauth`;
+  validateAdmissionPolicy(policy,config.admission);
   for(const entry of config.businessCredentialHistory||[])for(const key of entry.configuration.scopeKeys){
     const bindings=policy.connections.filter(binding=>C.bindingFor(binding).scopeKey===key);
     if(bindings.length!==1||C.bindingFor(bindings[0]).appId!==entry.appId)fail('invalid_request');
@@ -132,14 +139,24 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
       const userHealthHttp=require('./meta-marketing-user-health-http').createUserHealthHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
       maintenance=require('./meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({store,epochs:credentialEpochs,enrollment,secrets,http,businessHttp,userHealthHttp,environment:config.environment,...(businessConfigs(config).length?{config:businessRegistry(config)}:{})});}
     if(businessConfigs(config).length)store.setConnectionAuthorityResolver(ref=>enrollment.connectionAuthority(ref,config.policy));
-    const broker=new Broker({store,policy:config.policy,secrets,policyResolver:enrollment,...(config.leadAds?{transportProfile:'meta-marketing'}:{}),operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations,...renewal?.operations,...business?.operations,...maintenance?.operations}});
+    const admission=createMetaMarketingAdmission({store,policy:config.policy,settings:config.admission,client:aws.secrets});
+    // Admission only derives the four OAuth grants. Existing static sources
+    // and Enrollment's later asset authority retain their original guards.
+    const policyResolver=admission?{resolve(request,principal,base){
+      const prepared=admission.resolve(request,principal,base);
+      return enrollment?.resolve(request,principal,prepared)||prepared;
+    }}:enrollment;
+    const broker=new Broker({store,policy:config.policy,secrets,policyResolver,...(config.leadAds?{transportProfile:'meta-marketing'}:{}),operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations,...renewal?.operations,...business?.operations,...maintenance?.operations}});
     const controlKeys=new Set(config.policy.principals.filter(p=>p.id.startsWith('control:')).map(p=>p.keyId));
     let ordinary=0,controls=0;
     server=createServer({async execute(...args) {
       const control=controlKeys.has(args[1]?.['x-broker-key-id']);
       if (control?controls>=1:ordinary>=2) fail('rate_limited');
       if (control) controls++;else ordinary++;
-      try {return await broker.execute(...args);} finally {if(control) controls--;else ordinary--;}
+      try {
+        let prepare=false;try{prepare=!!admission&&JSON.parse(args[0].toString('utf8')).operation===admissionContract.OPERATION;}catch{}
+        return await (prepare?admission.prepare(...args):broker.execute(...args));
+      } finally {if(control) controls--;else ordinary--;}
     }},{cert,key},config.leadAds?{transportProfile:'meta-marketing'}:{});
     server.maxConnections=16;server.timeout=35000;tlsReload.install(server,config,{cert,key});
     await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(config.port,config.listenAddress,resolve);});

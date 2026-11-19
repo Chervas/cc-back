@@ -4,35 +4,46 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const {Op}=require('sequelize');
 const C=require('../../services/metaMarketingOAuth.contract');
 const B=require('../../../services/integrations-broker/src/meta-marketing-oauth-contract');
+const A=require('../../../services/integrations-broker/src/meta-marketing-admission-contract');
+const {createAdmission}=require('../../services/metaMarketingAdmission.service');
 const {loadDiscoverySource}=require('./fixtures/business_profile_discovery.fixture');
 const order=require('../../services/metaMarketingTransactionOrder.service');
 const blocks=require('../../services/metaScopeBlock.service');
 
 // Actual scope, tombstone and transaction-order code; all storage and external
 // effects are closed fixtures. A write, audit or provider call fails the test.
-function fixture({scopeKey='clinic:71',admitted=false,flowState,foreign=false,tombstones=[],allowed=true,sessionError,blockError,recovery=false}={}){
+function fixture({scopeKey='clinic:71',admitted=false,flowState,foreign=false,tombstones=[],allowed=true,sessionError,blockError,recovery=false,prepareSlot}={}){
   const events=[],effects=[],now=new Date('2030-01-01T00:00:00Z');
   const transaction={LOCK:{UPDATE:'QA_UPDATE'}};
+  let inTransaction=false, revoked=false;
   const actor={scopeKey,actorId:501,sessionRef:'00000000-0000-4000-8000-000000000001',sessionExpiresAt:new Date(+now+3600000)};
   const clinicIds=scopeKey.startsWith('group:')?[71,72]:[71];
   const reject=name=>()=>{effects.push(name);throw Error('UNEXPECTED_EFFECT_'+name);};
   const flow=flowState?{flow_id:'00000000-0000-4000-8000-000000000002',scope_key:scopeKey,app_id:'123',
     actor_user_id:foreign?502:actor.actorId,state:flowState,clinic_ids:JSON.stringify(clinicIds),expires_at:new Date(+now+600000)}:null;
-  const slot=admitted?{scope_key:scopeKey,connection_ref:'connection:fictitious',asset_ref:'meta-enroll:'+scopeKey,app_id:'123',
+  const candidate={scope_key:scopeKey,connection_ref:'connection:fictitious',asset_ref:'meta-enroll:'+scopeKey,app_id:'123',
     clinic_ids:JSON.stringify(clinicIds),scopes:JSON.stringify(['ads_read','public_profile']),
-    redirect_uri:'https://qa.invalid/oauth/meta/marketing/callback',expires_at:new Date(+now+86400000),state:'active'}:null;
+    redirect_uri:'https://qa.invalid/oauth/meta/marketing/callback',expires_at:new Date(+now+86400000),state:'active'};
+  let slot=admitted?candidate:null;
   const checkTx=options=>{assert.equal(options.transaction,transaction);assert.equal(options.lock,transaction.LOCK.UPDATE);};
   const models={
-    sequelize:{transaction:async(options,work)=>{assert.equal(options.isolationLevel,'REPEATABLE READ');events.push('transaction');return work(transaction);}},
+    sequelize:{transaction:async(options,work)=>{
+      assert.equal(options.isolationLevel,'REPEATABLE READ');events.push('transaction');inTransaction=true;
+      try{return await work(transaction);}finally{inTransaction=false;}
+    }},
     Clinica:{findAll:async options=>{checkTx(options);events.push('clinics');return clinicIds.map(id_clinica=>({id_clinica}));},
       findByPk:async(_id,options)=>{checkTx(options);events.push('clinic_parent');return {grupoClinicaId:91};}},
     UsuarioClinica:{findAll:reject('membership_outside_acl')},
     MetaScopeBlock:{findOne:async options=>{checkTx(options);events.push('tombstones');if(blockError)throw blockError;
       return options.where.scope_key[Op.in].some(key=>tombstones.includes(key))?{scope_key:'PRIVATE_BLOCK_KEY'}:null;}},
-    MetaMarketingOAuthSlot:{findByPk:async(key,options)=>{assert.equal(key,scopeKey);checkTx(options);events.push('slot');return slot;}},
+    MetaMarketingOAuthSlot:{findByPk:async(key,options)=>{assert.equal(key,scopeKey);checkTx(options);events.push('slot');return slot;},
+      create:async(row,options)=>{assert.equal(options.transaction,transaction);assert.equal(slot,null);events.push('slot_created');slot=row;}},
     MetaMarketingOAuthRequest:{findOne:async()=>flow,findByPk:async()=>flow,create:reject('flow_create'),update:reject('flow_update')},
     MetaMarketingEnrollmentRequest:{findOne:async()=>null,create:reject('enrollment_create')},
-    MetaMarketingBrokerRevocation:{findAll:async options=>{checkTx(options);events.push('revocations');return [];}}
+    MetaMarketingBrokerRevocation:{
+      findAll:async options=>{checkTx(options);events.push('revocations');return [];},
+      findOne:async options=>{checkTx(options);return revoked?{tuple_hash:'f'.repeat(64)}:null;}
+    }
   };
   const scopeModule=loadDiscoverySource('services/metaMarketingOAuthScope.service.js',{
     './metaMarketingOAuth.contract':C,'./metaScopeBlock.service':blocks,
@@ -50,7 +61,13 @@ function fixture({scopeKey='clinic:71',admitted=false,flowState,foreign=false,to
     './metaMarketingEnrollmentReview.service':{createReview:()=>reject('assignment_review')}
   });
   const sessions={verifyReference:async(_reference,options)=>{checkTx({...options,lock:transaction.LOCK.UPDATE});events.push('session');if(sessionError)throw sessionError;}};
-  const service=module.createService({models,sessions,client:{execute:reject('broker')},now:()=>now,enabled:()=>true});
+  const admission=prepareSlot?{enabled:()=>true,async prepare(snapshot){
+    assert.equal(inTransaction,false);
+    events.push('prepare');
+    await prepareSlot({snapshot,clinicIds,tombstones,revoke:()=>{revoked=true;},deny:()=>{allowed=false;}});
+    return candidate;
+  }}:null;
+  const service=module.createService({models,sessions,client:{execute:reject('broker')},now:()=>now,enabled:()=>true,admission});
   return {actor,service,events,effects,transaction,safe:module.safe,scope:scopeModule.createScope({models,sessions,now:()=>now})};
 }
 const json=value=>JSON.parse(JSON.stringify(value));
@@ -118,6 +135,68 @@ test('scope capture without initial-journal proof retains its existing missing-s
   assert.equal((await f.scope.capture(f.actor,f.transaction)).slot,null);
   assert.equal(f.events.includes('tombstones'),false);
   assert.deepEqual(f.effects,[]);
+});
+
+test('initial slot is prepared outside SQL and recorded only after fresh authorization',async()=>{
+  const f=fixture({prepareSlot:({snapshot})=>{
+    assert.equal(snapshot.scopeKey,'clinic:71');
+    assert.deepEqual([...snapshot.clinicIds],[71]);
+  }});
+  assert.deepEqual(json(await f.service.status(f.actor)),{enabled:true,available:true,status:'none'});
+  assert(!f.events.includes('prepare'));
+  // The closed fixture deliberately stops ordinary OAuth at its audit guard.
+  await assert.rejects(()=>f.service.begin(f.actor),/UNEXPECTED_EFFECT_audit_event/);
+  assert(f.events.indexOf('prepare')<f.events.indexOf('slot_created'));
+  assert(f.events.slice(f.events.indexOf('prepare')+1,f.events.indexOf('slot_created')).includes('acl'));
+  await assert.rejects(()=>f.service.begin(f.actor),/UNEXPECTED_EFFECT_audit_event/);
+  assert.equal(f.events.filter(x=>x==='prepare').length,1);
+  assert.equal(f.events.filter(x=>x==='slot_created').length,1);
+});
+
+test('scope membership, revocation or lost access during preparation defeats insertion',async()=>{
+  for(const [prepareSlot,code,status] of [
+    [({clinicIds})=>{clinicIds.push(73);},'meta_oauth_scope_changed',409],
+    [({tombstones})=>{tombstones.push('clinic:72');},'meta_oauth_scope_blocked',409],
+    [({revoke})=>revoke(),'meta_oauth_scope_blocked',409],
+    [({deny})=>deny(),'meta_oauth_scope_forbidden',403]
+  ]){
+    const f=fixture({scopeKey:'group:5',prepareSlot});
+    await errorCode(()=>f.service.begin(f.actor),code,status);
+    assert(!f.events.includes('slot_created'));assert.deepEqual(f.effects,[]);
+  }
+});
+
+test('the admission client accepts only an exact receipt for an empty candidate in its requested scope',async()=>{
+  const now=new Date('2030-01-01T00:00:00Z');
+  const scopeKey='group:5',clinicIds=[71,72];
+  const snapshot={scopeKey,clinicIds,scopeDigest:C.hash(JSON.stringify([scopeKey,clinicIds])),sessionExpiresAt:new Date(+now+60000)};
+  const config={META_MARKETING_OAUTH_SELF_SERVICE_ENABLED:'true',META_MARKETING_OAUTH_SELF_SERVICE_SCOPES:scopeKey};
+  const binding={scopeKey,clinicIds,connectionRef:A.connectionRef(scopeKey),assetRef:'meta-enroll:'+scopeKey,
+    appId:'123',scopes:['ads_read','public_profile'],redirectUri:'https://qa.invalid/oauth/meta/marketing/callback',expiresAt:+now+86400000};
+  let calls=0;
+  const service=(env,mutate=()=>{})=>createAdmission({env,now:()=>now,client:{async execute(command,budget){
+    calls++;
+    assert.equal(command.operation,A.OPERATION);
+    assert.equal(command.tenantRef,'clinic:71');
+    assert.equal(command.assetRef,'meta-enroll:'+scopeKey);
+    assert.equal(command.connectionRef,binding.connectionRef);
+    assert.equal(command.payload.expiresAt,+snapshot.sessionExpiresAt);
+    assert.equal(command.payload.clinicSetDigest,C.hash(JSON.stringify(clinicIds)));
+    assert.equal(budget.timeoutMs,30000);
+    const receipt={requestId:command.requestId,replayed:false,data:{status:'prepared',connected:false,binding:structuredClone(binding)}};
+    mutate(receipt);return receipt;
+  }}});
+  await errorCode(()=>service({}).prepare(snapshot),'meta_oauth_admission_required',409);
+  assert.equal(calls,0);
+  const slot=await service(config).prepare(snapshot);
+  assert.equal(slot.connection_ref,binding.connectionRef);
+  assert.equal(slot.clinic_ids,'[71,72]');
+  assert.deepEqual(slot.expires_at,new Date(binding.expiresAt));
+  for(const mutate of [
+    r=>{r.data.connected=true;},r=>{r.data.binding.secretArn='UNEXPECTED';},
+    r=>{r.data.binding.clinicIds=[71,73];},r=>{r.data.binding.expiresAt=+now;},
+    r=>{r.requestId='UNRELATED';}
+  ])await errorCode(()=>service(config,mutate).prepare(snapshot),'broker_response_invalid',503);
 });
 
 test('existing authoritative GET/POST router exposes only the typed admission or blocked contract',async()=>{
