@@ -2148,7 +2148,7 @@ class MetaSyncJobs {
       const tokenByConnection = new Map();
 
       if (!locations.length) {
-        await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0, status_report: report });
+        await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0, status_report: structuredClone(report) });
         console.log('ℹ️ businessProfileSync sin ubicaciones activas', { clinicId, locationIds });
         return { status: 'completed', processed: 0, report, syncLogId: syncLog.id };
       }
@@ -2216,7 +2216,7 @@ class MetaSyncJobs {
             last_synced_at: completedAt,
             sync_status: sectionErrors.length ? 'partial' : 'completed'
           });
-          await syncLog.update({ records_processed: report.processed, status_report: report });
+          await syncLog.update({ records_processed: report.processed, status_report: structuredClone(report) });
 
           if (this.config.local.betweenLocationsSleepMs > 0) {
             await new Promise((resolve) => setTimeout(resolve, this.config.local.betweenLocationsSleepMs));
@@ -2242,13 +2242,13 @@ class MetaSyncJobs {
           end_time: new Date(),
           records_processed: report.processed,
           error_message: failure.error_message,
-          status_report: report
+          status_report: structuredClone(report)
         });
         console.error('❌ businessProfileSync finalizó con ubicaciones incompletas', report);
         return failure;
       }
 
-      await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: report.processed, status_report: report });
+      await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: report.processed, status_report: structuredClone(report) });
       console.log('✅ businessProfileSync completado', report);
       return { status: 'completed', processed: report.processed, report, syncLogId: syncLog.id };
     } catch (error) {
@@ -2265,7 +2265,7 @@ class MetaSyncJobs {
         end_time: new Date(),
         records_processed: report.processed,
         error_message: failure.error_message,
-        status_report: report
+        status_report: structuredClone(report)
       });
       console.error('❌ Error en businessProfileSync:', error);
       return failure;
@@ -2295,7 +2295,7 @@ class MetaSyncJobs {
       const tokenByConnection = new Map();
 
       if (!locations.length) {
-        await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0, status_report: report });
+        await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: 0, status_report: structuredClone(report) });
         console.log('ℹ️ businessProfileReviewsSync sin ubicaciones activas', { clinicId, locationIds });
         return { status: 'completed', processed: 0, report, syncLogId: syncLog.id };
       }
@@ -2316,7 +2316,7 @@ class MetaSyncJobs {
             clinicaclick_reviews_sync_status: 'completed',
             clinicaclick_reviews_sync_error: null
           });
-          await syncLog.update({ records_processed: report.processed, status_report: report });
+          await syncLog.update({ records_processed: report.processed, status_report: structuredClone(report) });
 
           if (this.config.local.betweenLocationsSleepMs > 0) {
             await new Promise((resolve) => setTimeout(resolve, this.config.local.betweenLocationsSleepMs));
@@ -2346,13 +2346,13 @@ class MetaSyncJobs {
           end_time: new Date(),
           records_processed: report.processed,
           error_message: failure.error_message,
-          status_report: report
+          status_report: structuredClone(report)
         });
         console.error('❌ businessProfileReviewsSync finalizó con ubicaciones incompletas', report);
         return failure;
       }
 
-      await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: report.processed, status_report: report });
+      await syncLog.update({ status: 'completed', end_time: new Date(), records_processed: report.processed, status_report: structuredClone(report) });
       console.log('✅ businessProfileReviewsSync completado', report);
       return { status: 'completed', processed: report.processed, report, syncLogId: syncLog.id };
     } catch (error) {
@@ -2369,7 +2369,7 @@ class MetaSyncJobs {
         end_time: new Date(),
         records_processed: report.processed,
         error_message: failure.error_message,
-        status_report: report
+        status_report: structuredClone(report)
       });
       console.error('❌ Error en businessProfileReviewsSync:', error);
       return failure;

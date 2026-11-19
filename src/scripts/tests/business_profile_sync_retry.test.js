@@ -207,7 +207,7 @@ async function testBusinessProfileSyncRetriesWhenOneLocationFails() {
     assert.deepEqual(locations[1].updates, [{ sync_status: 'error' }]);
     assert.equal(syncLogUpdates.at(-1).status, 'failed');
     assert.equal(syncLogUpdates.at(-1).records_processed, 1);
-    assert.equal(syncLogUpdates.at(-1).status_report, result.report);
+    assert.deepEqual(syncLogUpdates.at(-1).status_report, result.report);
     assert.equal(syncLogUpdates.at(-1).error_message, result.error_message);
     await assertDurableJobFailure('business_profile_recent', result);
   });
@@ -263,7 +263,7 @@ async function testBusinessProfileReviewsSyncRetriesWhenOneLocationFails() {
     assert.equal(result.report.errors.length, 1);
     assert.match(result.error_message, /1 de 2 ubicaciones/);
     assert.equal(syncLogUpdates.at(-1).status, 'failed');
-    assert.equal(syncLogUpdates.at(-1).status_report, result.report);
+    assert.deepEqual(syncLogUpdates.at(-1).status_report, result.report);
     assert.equal(locations[0].updates.length, 0);
     assert.equal(locations[1].updates.length, 0);
     assert.equal(locationMerges.length, 2);
