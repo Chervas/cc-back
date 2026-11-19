@@ -6771,7 +6771,16 @@ exports.getLeadById = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Lead inválido' });
   }
 
-  const lead = await LeadIntake.findByPk(leadId, {
+  const requestedClinicIds = req.query?.clinicId;
+  const where = { id: leadId };
+  if (requestedClinicIds !== undefined && requestedClinicIds !== 'all') {
+    const clinicWhere = buildIdWhere('clinica_id', parseIntegerList(requestedClinicIds));
+    if (!clinicWhere) return res.status(400).json({ message: 'Clínica inválida' });
+    Object.assign(where, clinicWhere);
+  }
+
+  const lead = await LeadIntake.findOne({
+    where,
     include: [
       { model: Clinica, as: 'clinica', attributes: ['id_clinica', 'nombre_clinica'] },
       { model: GrupoClinica, as: 'grupoClinica', attributes: ['id_grupo', 'nombre_grupo'] },

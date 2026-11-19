@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const db = require('../../../models');
+const { patientFixture } = require('./fixtures/patient_read.fixture');
 const {
   buildFastPatientSearchWhere,
   classifyContactSearchQuery,
@@ -38,15 +39,30 @@ test('la búsqueda telefónica usa candidatos exactos indexables', () => {
   assert.equal(collectLikePatterns(search.where).length, 0);
 });
 
-test('la búsqueda nominal solo construye prefijos y nunca comodines iniciales', () => {
-  const search = buildFastPatientSearchWhere('María López');
+test('las iniciales junto al nombre siguen siendo un criterio y la puntuación sola no busca pacientes', () => {
+  const search = buildFastPatientSearchWhere('María L');
   assert.equal(search.queryType, 'name');
-  const patterns = collectLikePatterns(search.where);
-  assert.ok(patterns.length >= 4);
-  for (const pattern of patterns) {
-    assert.equal(pattern.startsWith('%'), false);
-    assert.equal(pattern.endsWith('%'), true);
+  assert.equal(search.where[Op.and].length, 2);
+  assert.match(search.where[Op.and][1].val, /LIKE '% L%' ESCAPE '!'/);
+  assert.equal(buildFastPatientSearchWhere('%_!').where, null);
+});
+
+test('el ámbito múltiple intersecta permiso nominal y sensible sin adoptar la primera clínica', async () => {
+  for (const filter of ['70,71,72', 'all']) {
+    const f = patientFixture({ allowed: [70, 71], sensitiveAllowed: [71, 72] });
+    const contact = await f.invoke('searchPatientContactTargets', { query: { q: 'Marta G', clinica_id: filter, scope: 'grupo' } });
+    assert.equal(contact.status, 200);
+    assert.deepEqual(f.state.contactSearchInput.clinicIds, [71]);
+    assert.equal(f.state.contactSearchInput.selectedClinicId, null);
+    assert.deepEqual(contact.body.items[0].patient.clinicasVinculadas.map(link => link.clinica_id), [71]);
+    const list = await f.invoke('searchPacientes', { query: { q: 'Marta G', clinica_id: filter } });
+    assert.equal(list.status, 200);
+    assert.deepEqual(list.body[0].clinicasVinculadas.map(link => link.clinica_id), [71]);
   }
+  const f = patientFixture({ allowed: [71], sensitiveAllowed: [71] });
+  assert.equal((await f.invoke('searchPatientContactTargets', { query: { q: 'Marta G', clinica_id: '72', scope: 'grupo' } })).status, 403);
+  assert.equal(f.state.contactSearchInput, undefined);
+  assert.equal((await f.invoke('searchPacientes', { query: { q: 'Marta G', clinica_id: '71,abc' } })).status, 400);
 });
 
 test('el origen de auditoría falla a un valor canónico', () => {

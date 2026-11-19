@@ -57,16 +57,19 @@ function patientFixture(options = {}) {
     canUserAccessFeature: async ({ clinicId }) => state.sensitive && state.allowed.includes(clinicId),
     getAccessibleClinicIdsForFeature: async ({ featureKey, clinicIds }) => {
       if (featureKey === 'patients.sensitive.view' && !state.sensitive) return [];
-      return (clinicIds || state.allowed).filter(id => state.allowed.includes(id));
+      const authorized = featureKey === 'patients.sensitive.view' && state.sensitiveAllowed ? state.sensitiveAllowed : state.allowed;
+      return (clinicIds || authorized).filter(id => authorized.includes(id));
     },
     assertUserCanAccessFeature: async ({ clinicId }) => { if (!state.allowed.includes(clinicId)) throw Object.assign(Error('access_policy_forbidden'), { status: 403 }); },
   };
   const controller = source('controllers/paciente.controller.js', { '../../models': models, sequelize, crypto,
     '../services/platformAudit.patientReads': audit, '../lib/phone': require('../../../lib/phone'), '../lib/access-policy': permissions,
+    '../lib/patient-name-search': require('../../../lib/patient-name-search'),
     '../lib/patient-profile-fields': require('../../../lib/patient-profile-fields'),
     '../lib/cliniccloud-patient-history': require('../../../lib/cliniccloud-patient-history'),
-    '../services/patientContact.service': { PATIENT_EVENT_TYPES: { created: 'created' }, findPatientContactTargets: async () => {
+    '../services/patientContact.service': { PATIENT_EVENT_TYPES: { created: 'created' }, findPatientContactTargets: async input => {
       if (state.readFailure) throw Error('FICTITIOUS_SQL_SECRET');
+      state.contactSearchInput = input;
       return { query: 'FICTITIOUS_SEARCH', query_type: 'name', normalized_phone: null, items: [{ patient: patient().toJSON(), conversation_id: 81 }] };
     } },
     '../services/appointmentActivity.service': { APPOINTMENT_STATUS_EVENT_TYPE: 'status' },

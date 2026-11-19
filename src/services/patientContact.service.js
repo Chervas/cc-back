@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const db = require('../../models');
 const { getPhoneLookupCandidates, normalizePhoneDigits } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
+const { buildPatientNameSearch, escapeLike, normalizePatientSearchQuery: normalizeContactSearchQuery } = require('../lib/patient-name-search');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
 
 const { Op, literal } = db.Sequelize;
@@ -39,10 +40,6 @@ function normalizeOperationalSource(value, fallback = 'patient_modal') {
   return ALLOWED_SOURCES.has(normalized) ? normalized : fallback;
 }
 
-function normalizeContactSearchQuery(value) {
-  return String(value || '').trim().replace(/\s+/g, ' ');
-}
-
 function classifyContactSearchQuery(value) {
   const query = normalizeContactSearchQuery(value);
   const digits = query.replace(/\D+/g, '');
@@ -50,43 +47,6 @@ function classifyContactSearchQuery(value) {
   if (phoneCharactersOnly && digits.length >= 6) return 'phone';
   if (query.includes('@')) return 'email';
   return 'name';
-}
-
-function escapeLikeToken(value) {
-  return String(value || '').replace(/[\\%_]/g, (match) => `\\${match}`);
-}
-
-function buildNamePrefixWhere(query) {
-  const tokens = normalizeContactSearchQuery(query)
-    .split(' ')
-    .map((token) => escapeLikeToken(token.replace(/[^\p{L}\p{N}'’-]+/gu, '')))
-    .filter(Boolean)
-    .slice(0, 6);
-  if (!tokens.length) return null;
-
-  const clauses = [
-    { nombre: { [Op.like]: `${tokens.join(' ')}%` } },
-    { apellidos: { [Op.like]: `${tokens.join(' ')}%` } },
-  ];
-
-  for (let split = 1; split < tokens.length; split += 1) {
-    const left = tokens.slice(0, split).join(' ');
-    const right = tokens.slice(split).join(' ');
-    clauses.push({
-      [Op.and]: [
-        { nombre: { [Op.like]: `${left}%` } },
-        { apellidos: { [Op.like]: `${right}%` } },
-      ],
-    });
-    clauses.push({
-      [Op.and]: [
-        { apellidos: { [Op.like]: `${left}%` } },
-        { nombre: { [Op.like]: `${right}%` } },
-      ],
-    });
-  }
-
-  return { [Op.or]: clauses };
 }
 
 function buildFastPatientSearchWhere(query) {
@@ -108,13 +68,15 @@ function buildFastPatientSearchWhere(query) {
   if (queryType === 'email') {
     return {
       queryType,
-      where: { email: { [Op.like]: `${escapeLikeToken(normalized.toLowerCase())}%` } },
+      where: literal(`\`Paciente\`.\`email\` LIKE ${Paciente.sequelize.escape(`${escapeLike(normalized.toLowerCase())}%`)} ESCAPE '!'`),
       normalizedPhone: null,
     };
   }
+  const name = buildPatientNameSearch(normalized, Paciente.sequelize);
   return {
     queryType,
-    where: buildNamePrefixWhere(normalized),
+    where: name?.where || null,
+    rank: name?.rank,
     normalizedPhone: null,
   };
 }
@@ -136,10 +98,12 @@ function patientClinicScopeWhere(clinicIds) {
   };
 }
 
+function patientContactClinicIds(patient) {
+  return [Number(patient.clinica_id), ...(patient.clinicasVinculadas || []).map(link => Number(link.clinica_id))];
+}
+
 function isPatientLinkedToClinic(patient, clinicId) {
-  const target = Number(clinicId);
-  if (Number(patient?.clinica_id) === target) return true;
-  return (patient?.clinicasVinculadas || []).some((link) => Number(link?.clinica_id) === target);
+  return patientContactClinicIds(patient).includes(Number(clinicId));
 }
 
 async function recordPatientOperationalEvent({
@@ -195,19 +159,33 @@ async function findPatientContactTargets({
       attributes: ['clinica_id', 'es_principal'],
       required: false,
     }],
-    order: [['nombre', 'ASC'], ['apellidos', 'ASC'], ['id_paciente', 'ASC']],
+    order: [...(search.rank ? [[search.rank, 'ASC']] : []), ['nombre', 'ASC'], ['apellidos', 'ASC'], ['id_paciente', 'ASC']],
     limit: Math.min(Math.max(Number(limit) || 8, 1), 12),
     distinct: true,
   });
 
-  const patientIds = patients.map((patient) => Number(patient.id_paciente));
-  const [conversations, authorizationEvents] = patientIds.length
+  const selected = Number(selectedClinicId);
+  const readable = new Set(clinicIds.map(Number));
+  const patientClinics = new Map();
+  const patientsByClinic = new Map();
+  for (const patient of patients) {
+    const memberships = patientContactClinicIds(patient);
+    const clinicId = selected || memberships.find(id => readable.has(id));
+    if (!clinicId) continue;
+    patientClinics.set(Number(patient.id_paciente), clinicId);
+    if (!patientsByClinic.has(clinicId)) patientsByClinic.set(clinicId, []);
+    patientsByClinic.get(clinicId).push(patient);
+  }
+  const clinicPatients = [...patientsByClinic].map(([clinicId, rows]) => ({
+    clinic_id: clinicId,
+    patient_id: { [Op.in]: rows.map(patient => Number(patient.id_paciente)) },
+  }));
+  const [conversations, authorizationEvents] = clinicPatients.length
     ? await Promise.all([
         Conversation.findAll({
           where: {
-            clinic_id: Number(selectedClinicId),
             channel: 'whatsapp',
-            patient_id: { [Op.in]: patientIds },
+            [Op.or]: clinicPatients,
           },
           attributes: ['id', 'patient_id', 'last_message_at', 'createdAt'],
           order: [['last_message_at', 'DESC'], ['createdAt', 'DESC'], ['id', 'DESC']],
@@ -216,9 +194,8 @@ async function findPatientContactTargets({
         PatientOperationalEvent
           ? PatientOperationalEvent.findAll({
               where: {
-                clinic_id: Number(selectedClinicId),
-                patient_id: { [Op.in]: patientIds },
                 event_type: PATIENT_EVENT_TYPES.whatsappAuthorized,
+                [Op.or]: clinicPatients,
               },
               attributes: ['patient_id', 'occurred_at'],
               order: [['occurred_at', 'DESC'], ['id', 'DESC']],
@@ -234,8 +211,11 @@ async function findPatientContactTargets({
     if (!conversationByPatient.has(patientId)) conversationByPatient.set(patientId, conversation);
   });
   const authorizedPatientIds = new Set(authorizationEvents.map((event) => Number(event.patient_id)));
-  const restrictions = await require('./patientCommunicationPreferences.service').channelRestrictions({ db,
-    clinicId: Number(selectedClinicId), phones: patients.map(patient => patient.telefono_movil), patientIds });
+  const { channelRestrictions } = require('./patientCommunicationPreferences.service');
+  const restrictions = new Map(await Promise.all([...patientsByClinic].map(async ([clinicId, rows]) => [
+    clinicId, await channelRestrictions({ db, clinicId,
+      phones: rows.map(patient => patient.telefono_movil), patientIds: rows.map(patient => Number(patient.id_paciente)) }),
+  ])));
 
   return {
     query: normalizeContactSearchQuery(query),
@@ -244,14 +224,17 @@ async function findPatientContactTargets({
     items: patients.map((patient) => {
       const plain = patient.toJSON();
       const patientId = Number(plain.id_paciente);
+      const clinicId = patientClinics.get(patientId);
       const conversation = conversationByPatient.get(patientId);
+      const blocked = restrictions.get(clinicId)?.get(normalizePhoneDigits(plain.telefono_movil)) === true;
       return {
         patient: plain,
+        contact_clinic_id: clinicId,
         conversation_id: conversation?.id || null,
-        linked_to_selected_clinic: isPatientLinkedToClinic(plain, selectedClinicId),
+        linked_to_selected_clinic: patientContactClinicIds(plain).includes(clinicId),
         whatsapp_contact_authorized: authorizedPatientIds.has(patientId),
-        whatsapp_contact_allowed_default: restrictions.get(normalizePhoneDigits(plain.telefono_movil)) !== true,
-        whatsapp_contact_blocked: restrictions.get(normalizePhoneDigits(plain.telefono_movil)) === true,
+        whatsapp_contact_allowed_default: !blocked,
+        whatsapp_contact_blocked: blocked,
       };
     }),
   };

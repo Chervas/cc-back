@@ -30,6 +30,7 @@ const {
 } = require('../lib/patient-group-link');
 const { validatePatientDeclaredOrigin } = require('../lib/patient-declared-origin');
 const { normalizeHumanName } = require('../lib/name');
+const { buildPatientNameSearch, escapeLike, normalizePatientSearchQuery } = require('../lib/patient-name-search');
 const {
   normalizePatientLanguage,
   languageForNewPatient,
@@ -912,6 +913,34 @@ const getClinicaIdsForScope = async (clinicaId, scope) => {
   return clinicasGrupo.map(c => c.id_clinica);
 };
 
+async function patientSearchScope(req) {
+  const filter = String(req.query.clinica_id || '').trim();
+  if (filter === 'all') {
+    const readable = await allClinicsAccessibleToActor(req, 'patients.view');
+    return { selectedClinicId: null, readableClinicIds: readable.length
+      ? await accessibleClinicIds(req, 'patients.sensitive.view', readable) : [] };
+  }
+  const parts = filter.split(',').map(part => part.trim());
+  if (parts.some(part => !/^\d+$/.test(part) || !Number.isSafeInteger(Number(part)) || Number(part) <= 0)) {
+    throw Object.assign(new Error('clinic_id_required'), { status: 400 });
+  }
+  const ids = normalizeClinicIds(parts);
+  const selectedClinicId = ids.length === 1 ? ids[0] : null;
+  // An explicit clinic must be readable before its group can be expanded.
+  if (selectedClinicId) {
+    await accessibleClinicIds(req, 'patients.view', ids, { requireAll: true });
+    await accessibleClinicIds(req, 'patients.sensitive.view', ids, { requireAll: true });
+  }
+  const requested = selectedClinicId && req.query.scope === 'grupo'
+    ? await getClinicaIdsForScope(selectedClinicId, 'grupo') : ids;
+  const readable = await accessibleClinicIds(req, 'patients.view', requested);
+  const readableClinicIds = await accessibleClinicIds(req, 'patients.sensitive.view', readable);
+  if (selectedClinicId && !readableClinicIds.includes(selectedClinicId)) {
+    throw Object.assign(new Error('access_policy_forbidden'), { status: 403 });
+  }
+  return { selectedClinicId, readableClinicIds };
+}
+
 exports.getAllPacientes = async (req, res) => {
   try {
     const requestedLimit = Number.parseInt(String(req.query.limit || ''), 10);
@@ -1031,9 +1060,7 @@ exports.getAllPacientes = async (req, res) => {
 
 exports.searchPacientes = async (req, res) => {
   try {
-    const query = String(req.query.q || req.query.query || '').trim().replace(/\s+/g, ' ');
-    const scope = req.query.scope || 'clinica';
-    const clinicaId = req.query.clinica_id;
+    const query = normalizePatientSearchQuery(req.query.q || req.query.query);
     const normPhone = normalizePhone(req.query.telefono || '');
     const normEmail = normalizeEmail(req.query.email || '');
 
@@ -1043,87 +1070,26 @@ exports.searchPacientes = async (req, res) => {
       return res.json([]);
     }
 
-    const accentInsensitiveLike = (expression, term) => {
-      const normalized = normalizeSearchTerm(term);
-      if (!normalized) return null;
-      return literal(`${accentFoldSql(expression)} LIKE ${Paciente.sequelize.escape(`%${normalized}%`)}`);
-    };
-
-    const fieldLike = (field, term) => {
-      const normalized = normalizeSearchTerm(term);
-      const clauses = [
-        { [field]: { [Op.like]: `%${term}%` } },
-      ];
-      if (normalized) {
-        clauses.push(accentInsensitiveLike(`\`Paciente\`.\`${field}\``, term));
-      }
-      return clauses.filter(Boolean);
-    };
-
-    const fullNameLike = (term) => {
-      const escaped = Paciente.sequelize.escape(`%${term}%`);
-      const clauses = [
-        literal(`CONCAT_WS(' ', \`Paciente\`.\`nombre\`, \`Paciente\`.\`apellidos\`) LIKE ${escaped}`),
-        literal(`CONCAT_WS(' ', \`Paciente\`.\`apellidos\`, \`Paciente\`.\`nombre\`) LIKE ${escaped}`),
-      ];
-      const normalized = normalizeSearchTerm(term);
-      if (normalized) {
-        clauses.push(
-          accentInsensitiveLike(`CONCAT_WS(' ', \`Paciente\`.\`nombre\`, \`Paciente\`.\`apellidos\`)`, term),
-          accentInsensitiveLike(`CONCAT_WS(' ', \`Paciente\`.\`apellidos\`, \`Paciente\`.\`nombre\`)`, term)
-        );
-      }
-      return clauses.filter(Boolean);
-    };
-
+    const fieldLike = (field, term) => literal(`\`Paciente\`.\`${field}\` LIKE ${Paciente.sequelize.escape(`%${escapeLike(term)}%`)} ESCAPE '!'`);
+    const history = /^\d{1,32}$/.test(query) ? query.replace(/^0+(?=\d)/, '') : null;
+    const name = query && !history && !query.includes('@') && !/^[+\d\s()./-]+$/.test(query)
+      ? buildPatientNameSearch(query, Paciente.sequelize, { allowSubstring: true }) : null;
     const whereOr = [];
     if (query) {
-      if (/^\d{1,32}$/.test(query)) whereOr.push({ numero_historia: query.replace(/^0+/, '') });
-      whereOr.push(
-        ...fieldLike('nombre', query),
-        ...fieldLike('apellidos', query),
-        { telefono_movil: { [Op.like]: `%${query}%` } },
-        { email: { [Op.like]: `%${query}%` } },
-        ...fullNameLike(query)
-      );
-
-      const tokens = query.split(' ').filter(token => token.length >= 2).slice(0, 8);
-      if (tokens.length > 1) {
-        whereOr.push({
-          [Op.and]: tokens.map(token => ({
-            [Op.or]: [
-              ...fieldLike('nombre', token),
-              ...fieldLike('apellidos', token),
-              { telefono_movil: { [Op.like]: `%${token}%` } },
-              { email: { [Op.like]: `%${token}%` } },
-              ...fullNameLike(token)
-            ]
-          }))
-        });
+      if (history) whereOr.push({ numero_historia: history });
+      if (name) whereOr.push(name.where);
+      whereOr.push(fieldLike('telefono_movil', query), fieldLike('email', query));
+      if (/^[+\d\s()./-]+$/.test(query)) {
+        const digits = normalizePhone(query);
+        if (digits && digits !== query) whereOr.push(fieldLike('telefono_movil', digits));
       }
     }
-    if (normPhone) {
-      whereOr.push({ telefono_movil: { [Op.like]: `%${normPhone}%` } });
-    }
-    if (normEmail) {
-      whereOr.push({ email: { [Op.like]: `%${normEmail}%` } });
-    }
-    if (!whereOr.length) {
+    if (normPhone) whereOr.push(fieldLike('telefono_movil', normPhone));
+    if (normEmail) whereOr.push(fieldLike('email', normEmail));
+    const { readableClinicIds: clinicIdsList } = await patientSearchScope(req);
+    if (!clinicIdsList.length) {
       auditPatientResponse(req, {});
       return res.json([]);
-    }
-
-    if (!clinicaId) {
-      return res.status(400).json({ message: 'clinica_id es obligatorio para la búsqueda' });
-    }
-
-    const clinicaIds = await getClinicaIdsForScope(clinicaId, scope);
-    const clinicIdsList = await accessibleClinicIds(req, 'patients.view', clinicaIds);
-    if (!await canViewSensitivePatientData(req, clinicIdsList)) {
-      return res.status(403).json({
-        message: 'La búsqueda identificativa de pacientes no está disponible para este rol',
-        error: 'patient_sensitive_data_forbidden',
-      });
     }
     const clinicFilter = clinicIdsList.length === 1 ? clinicIdsList[0] : { [Op.in]: clinicIdsList };
     const clinicExists = clinicIdsList.length > 0
@@ -1153,10 +1119,11 @@ exports.searchPacientes = async (req, res) => {
           include: [{ model: Clinica, as: 'clinica' }]
         }
       ],
-      order: /^\d{1,32}$/.test(query) ? [
-        [literal(`\`Paciente\`.\`numero_historia\` = ${Paciente.sequelize.escape(query.replace(/^0+/, ''))}`), 'DESC'],
-        ['nombre', 'ASC'],
-      ] : [['nombre', 'ASC']],
+      order: [
+        ...(history ? [[literal(`\`Paciente\`.\`numero_historia\` = ${Paciente.sequelize.escape(history)}`), 'DESC']] : []),
+        ...(name ? [[name.rank, 'ASC']] : []),
+        ['nombre', 'ASC'], ['apellidos', 'ASC'], ['id_paciente', 'ASC'],
+      ],
       limit: 20,
       distinct: true
     });
@@ -1175,31 +1142,27 @@ exports.searchPacientes = async (req, res) => {
 
 exports.searchPatientContactTargets = async (req, res) => {
   try {
-    const query = String(req.query.q || req.query.query || '').trim().replace(/\s+/g, ' ');
-    const scope = req.query.scope === 'grupo' ? 'grupo' : 'clinica';
-    const clinicaId = Number.parseInt(String(req.query.clinica_id || ''), 10);
+    const query = normalizePatientSearchQuery(req.query.q || req.query.query);
     const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit || '8'), 10) || 8, 1), 12);
-    if (!clinicaId) {
+    if (!req.query.clinica_id) {
       return res.status(400).json({ message: 'clinica_id es obligatorio' });
     }
-    if (query.length < 2) {
+    if (query.length < 2 && !/^\d+$/.test(query)) {
       auditPatientResponse(req, {});
       return res.json({ query, query_type: 'name', normalized_phone: null, items: [] });
     }
 
-    await accessibleClinicIds(req, 'patients.sensitive.view', [clinicaId], { requireAll: true });
-    const requestedClinicIds = await getClinicaIdsForScope(clinicaId, scope);
-    const readableClinicIds = await accessibleClinicIds(req, 'patients.sensitive.view', requestedClinicIds);
+    const { selectedClinicId, readableClinicIds } = await patientSearchScope(req);
     const result = await findPatientContactTargets({
       query,
       clinicIds: readableClinicIds,
-      selectedClinicId: clinicaId,
+      selectedClinicId,
       limit,
     });
     const scopedResult = { ...result, items: result.items.map(item => ({ ...item, patient: restrictPacientePayloadToClinics(item.patient, readableClinicIds) })) };
     auditPatientResponse(req, { clinicIds: readableClinicIds, patients: scopedResult.items.map(item => item.patient), resultCount: scopedResult.items.length,
       includesSensitive: scopedResult.items.length > 0,
-      checks: [{ featureKey: 'patients.sensitive.view', clinicIds: normalizeClinicIds([clinicaId, ...readableClinicIds]) }] });
+      checks: ['patients.view', 'patients.sensitive.view'].map(featureKey => ({ featureKey, clinicIds: readableClinicIds })) });
     return res.json(scopedResult);
   } catch (error) {
     const handled = sendAccessPolicyError(error, res);

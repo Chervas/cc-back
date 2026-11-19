@@ -111,6 +111,7 @@ async function testLeadAndPatientScopes() {
     directorProfileFindOne: db.PatientDirectionProfile.findOne,
     optOutFindAll: db.MarketingContactOptOut.findAll,
     patientFindOne: db.Paciente.findOne,
+    leadFindOne: db.LeadIntake.findOne,
     appointmentFindOne: db.CitaPaciente.findOne,
     appointmentCount: db.CitaPaciente.count,
   };
@@ -198,6 +199,21 @@ async function testLeadAndPatientScopes() {
       { clinica_id: null, grupo_clinica_id: 5 },
     ), true);
 
+    // The direct route must enforce both the selected clinic and the actor's permissions.
+    const storedLead = { id: 831, clinica_id: 57 };
+    db.LeadIntake.findOne = async ({ where }) => {
+      const allowed = where.clinica_id?.[db.Sequelize.Op.in] ?? [where.clinica_id];
+      return where.id === storedLead.id && allowed.includes(storedLead.clinica_id) ? storedLead : null;
+    };
+    res = responseRecorder();
+    await intakeController.getLeadById({ userData: { userId: 9101 }, params: { id: '831' }, query: { clinicId: '56' } }, res);
+    assert.equal(res.statusCode, 404, 'a globally accessible lead outside the selected clinic cannot be returned');
+
+    res = responseRecorder();
+    await intakeController.getLeadById({ userData: { userId: 9100 }, params: { id: '831' }, query: { clinicId: '56,57' } }, res);
+    assert.equal(res.statusCode, 403, 'claiming multiple clinics cannot grant access to a lead the role cannot read');
+    assert.equal(res.body.error, 'lead_scope_forbidden');
+
     res = responseRecorder();
     await pacienteController.getPacienteById({
       userData: { userId: 9100 },
@@ -224,6 +240,7 @@ async function testLeadAndPatientScopes() {
     db.PatientDirectionProfile.findOne = originals.directorProfileFindOne;
     db.MarketingContactOptOut.findAll = originals.optOutFindAll;
     db.Paciente.findOne = originals.patientFindOne;
+    db.LeadIntake.findOne = originals.leadFindOne;
     db.CitaPaciente.findOne = originals.appointmentFindOne;
     db.CitaPaciente.count = originals.appointmentCount;
   }

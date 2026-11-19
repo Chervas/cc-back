@@ -49,7 +49,7 @@ function fixture(){
     '../lib/external-patient-history':history,
     '../lib/cliniccloud-patient-history':require('../../lib/cliniccloud-patient-history'),
   };
-  const inactive=new Set(['../lib/phone','../lib/patient-declared-origin','../lib/name','../lib/patient-language',
+  const inactive=new Set(['../lib/phone','../lib/patient-group-link','../lib/patient-declared-origin','../lib/name','../lib/patient-name-search','../lib/patient-language',
     '../lib/patient-profile-fields','../services/patientContact.service','../services/appointmentActivity.service','../services/marketingOptOut.service']);
   const filename=path.resolve(__dirname,'../../controllers/paciente.controller.js'),module={exports:{}};
   const load=vm.runInNewContext(`(function(require,module,exports){\n${fs.readFileSync(filename,'utf8')}\n})`,{Buffer},{filename});

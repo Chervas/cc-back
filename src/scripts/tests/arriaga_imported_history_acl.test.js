@@ -31,7 +31,7 @@ function fixture(){
     '../lib/access-policy':{getAccessibleClinicIdsForFeature:async({clinicIds,...context})=>clinicIds.filter(clinicId=>allowed({...context,clinicId})),canUserAccessFeature:async context=>allowed(context)},
     '../lib/external-patient-history':history,'../lib/cliniccloud-patient-history':require('../../lib/cliniccloud-patient-history'),
   };
-  const inactive=new Set(['../lib/phone','../lib/patient-declared-origin','../lib/name','../lib/patient-language','../lib/patient-profile-fields','../services/patientContact.service','../services/appointmentActivity.service','../services/marketingOptOut.service']);
+  const inactive=new Set(['../lib/phone','../lib/patient-group-link','../lib/patient-declared-origin','../lib/name','../lib/patient-name-search','../lib/patient-language','../lib/patient-profile-fields','../services/patientContact.service','../services/appointmentActivity.service','../services/marketingOptOut.service']);
   const filename=path.resolve(__dirname,'../../controllers/paciente.controller.js'),module={exports:{}};
   const load=vm.runInNewContext(`(function(require,module,exports){\n${fs.readFileSync(filename,'utf8')}\n})`,{Buffer},{filename});
   load(name=>{if(Object.hasOwn(dependencies,name))return dependencies[name];if(inactive.has(name))return{};throw Error('TESTONLY unexpected dependency:'+name);},module,module.exports);
