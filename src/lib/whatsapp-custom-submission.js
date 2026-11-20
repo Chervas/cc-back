@@ -20,6 +20,7 @@ function customSubmissionName(input) {
     category: input.category || 'UTILITY', language: input.language || 'es',
     variables: input.variables || [], header: input.headerImageUrl || null,
     ...(input.buttons !== undefined ? { buttons: require('./whatsapp-template-buttons').normalizeQuickReplyButtons(input.buttons) } : {}),
+    ...(input.bulkOptOut === true ? { bulkOptOut: true } : {}),
     usage: input.templateUsage || null,
     replacement: (input.replacementTemplateIds || [input.replaceTemplateId || null]).slice().sort(),
     targets: [...new Set(input.targetWabaIds || [input.wabaId])].map(String).sort(),

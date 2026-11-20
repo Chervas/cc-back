@@ -27,6 +27,7 @@ router.get('/conversations/:id/messages', conversationController.getMessages);
 router.post('/conversations/:id/messages', conversationController.postMessage);
 router.post('/conversations/:id/images', conversationController.postImage);
 router.patch('/conversations/:id/read', conversationController.markAsRead);
+router.post('/conversations/:id/whatsapp-opt-out/:messageId', conversationController.applyVerifiedWhatsappOptOut);
 router.patch('/conversations/:id/automation-attention/resolve', conversationController.resolveAutomationAttention);
 router.post('/conversations/:id/routing-reviews/:reviewId/resolve', conversationController.resolveRoutingReview);
 

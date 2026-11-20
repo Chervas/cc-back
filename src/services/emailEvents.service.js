@@ -2,6 +2,7 @@
 
 const { Op } = require('sequelize');
 const db = require('../../models');
+const { VERSION: ENGAGEMENT_VERSION, LINK_TAG } = require('../lib/marketing-email-engagement-contract');
 const { revokePendingPasswordResetToken } = require('./emailRelatedState.service');
 
 const EVENT_PRECEDENCE = Object.freeze({
@@ -166,6 +167,7 @@ function normalizeSesEvent(rawPayload = {}) {
   );
   const occurredAt = new Date(
     cleanString(detail.timestamp)
+    || cleanString(detail[eventType]?.timestamp)
     || cleanString(detail.occurredAt)
     || cleanString(detail.occurred_at)
     || cleanString(mail.timestamp)
@@ -174,6 +176,9 @@ function normalizeSesEvent(rawPayload = {}) {
     || cleanString(payload.occurred_at)
     || Date.now()
   );
+  const engagement = eventType === 'open' || eventType === 'click';
+  const linkTag = eventType === 'click' ? firstTagValue(detail.click?.linkTags, LINK_TAG) || cleanString(detail.engagementLinkTag) : null;
+  const botClassification = cleanString(detail[eventType]?.isBotEvent || detail.engagementBot);
   const providerEventId = cleanString(payload.id)
     || cleanString(detail.eventId)
     || cleanString(detail.event_id)
@@ -191,6 +196,9 @@ function normalizeSesEvent(rawPayload = {}) {
     providerMessageId,
     outboxPublicId,
     eventType,
+    engagement,
+    linkTag: /^[a-f0-9]{24}$/.test(linkTag || '') ? linkTag : null,
+    likelyBot: botClassification?.toLowerCase() === 'likely',
     severity: severityFor(eventType),
     occurredAt: Number.isNaN(occurredAt.getTime()) ? new Date() : occurredAt,
     summary: {
@@ -378,6 +386,16 @@ async function recordProviderEvent(rawPayload = {}) {
       });
     }
 
+    if (event.engagement) {
+      const tracked = message?.stream === 'marketing' && message.related_type === 'marketing_bulk_send'
+        && message.metadata?.email_engagement === ENGAGEMENT_VERSION;
+      const clickUrl = event.linkTag ? message?.metadata?.engagement_links?.[event.linkTag] : null;
+      if (!tracked || event.likelyBot || (event.eventType === 'click' && !clickUrl)) {
+        return { created: false, email_message_id: message?.id || null };
+      }
+      if (clickUrl) event.summary.click_url = clickUrl;
+    }
+
     const [row, created] = await db.EmailProviderEvent.findOrCreate({
       where: {
         provider: event.provider,
@@ -395,8 +413,8 @@ async function recordProviderEvent(rawPayload = {}) {
       transaction,
     });
 
-    if (!created) {
-      return { created: false, event: row, email_message_id: row.email_message_id || null };
+    if (!created || event.engagement) {
+      return { created, event: row, email_message_id: row.email_message_id || null };
     }
 
     await applyEventToMessage(message, event, { transaction });

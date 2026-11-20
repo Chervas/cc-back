@@ -10,6 +10,7 @@ const marketingEmail = require('./marketingEmail.service');
 const jobRequests = require('./jobRequests.service');
 const { resolveLastAttendedAppointmentDate } = require('../lib/marketing-template-variables');
 const publicLinks = require('../lib/marketingEmailPublicLinks');
+const engagement = require('../lib/marketing-email-engagement');
 const channelSchedules = require('../lib/marketing-channel-schedules');
 
 const JOB_TYPE = 'marketing_bulk_email_dispatch';
@@ -174,31 +175,121 @@ function emailDeliveryPending(item) {
   return !EMAIL_DELIVERY_TERMINAL.has(status);
 }
 
-async function getEmailDispatchProgress(list) {
+async function readEmailAudienceCounts(list) {
   const [counts] = await db.sequelize.query(`
     SELECT COUNT(*) AS total_to_send,
       SUM(status IN ('accepted', 'sent', 'delivered', 'bounced', 'complained') OR sent_at IS NOT NULL OR delivered_at IS NOT NULL) AS sent,
       SUM(status = 'delivered' OR delivered_at IS NOT NULL) AS delivered,
-      SUM(status IN ('bounced', 'complained', 'suppressed', 'failed', 'rejected', 'cancelled')) AS failed
+      SUM(status IN ('bounced', 'complained', 'suppressed', 'failed', 'rejected', 'cancelled')) AS failed,
+      SUM(status IN ('', 'null', 'pending', 'ready', 'queued', 'sending') AND sent_at IS NULL AND delivered_at IS NULL) AS pending_send,
+      SUM(status IN ('accepted', 'sent') AND delivered_at IS NULL) AS awaiting_delivery,
+      SUM(status = 'bounced') AS bounced,
+      SUM(status = 'rejected') AS rejected,
+      SUM(status = 'complained') AS complained
     FROM (
-      SELECT COALESCE(LOWER(JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.status'))), '') AS status,
-        NULLIF(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.sent_at')), 'null'), '') AS sent_at,
-        NULLIF(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(channel_status, '$.email.delivered_at')), 'null'), '') AS delivered_at
-      FROM MarketingPatientListItems
-      WHERE list_id = :listId AND selected = 1 AND status = 'ready' AND email IS NOT NULL
+      SELECT COALESCE(m.status, LOWER(JSON_UNQUOTE(JSON_EXTRACT(i.channel_status, '$.email.status'))), '') AS status,
+        COALESCE(m.sent_at, NULLIF(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(i.channel_status, '$.email.sent_at')), 'null'), '')) AS sent_at,
+        COALESCE(m.delivered_at, NULLIF(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(i.channel_status, '$.email.delivered_at')), 'null'), '')) AS delivered_at
+      FROM MarketingPatientListItems i
+      LEFT JOIN EmailMessages m ON m.id = i.email_message_id AND m.related_type = 'marketing_bulk_send'
+        AND m.related_id = CONCAT(i.list_id, ':', i.id) AND m.stream = 'marketing'
+      WHERE i.list_id = :listId AND i.selected = 1 AND i.status = 'ready' AND i.email IS NOT NULL
     ) AS recipients
   `, { replacements: { listId: list.id }, type: QueryTypes.SELECT });
-  const sent = Number(counts?.sent || 0);
-  const total = Number(counts?.total_to_send || 0);
+  return Object.fromEntries(Object.entries(counts || {}).map(([key, value]) => [key, Number(value || 0)]));
+}
+
+async function getEmailDispatchProgress(list) {
+  const { total_to_send: total = 0, sent = 0, delivered = 0, failed = 0 } = await readEmailAudienceCounts(list);
   return {
     ...list.email_dispatch,
     channel: 'email',
     total_to_send: total,
     sent,
-    delivered: Number(counts?.delivered || 0),
-    failed: Number(counts?.failed || 0),
+    delivered,
+    failed,
     progress_percent: total ? Math.round(sent / total * 100) : 0,
   };
+}
+
+async function getEmailCampaignReport(list) {
+  const [[coverage], [unsubscribes], audience] = await Promise.all([
+    db.sequelize.query(`
+      SELECT COUNT(*) AS tracked_sent, SUM(m.delivered_at IS NOT NULL) AS tracked_delivered,
+        SUM(m.delivered_at IS NOT NULL AND EXISTS (
+          SELECT 1 FROM EmailProviderEvents e WHERE e.email_message_id = m.id AND e.event_type = 'open'
+        )) AS opened_unique,
+        SUM(EXISTS (
+          SELECT 1 FROM EmailProviderEvents e WHERE e.email_message_id = m.id AND e.event_type = 'click'
+        )) AS clicked_unique
+      FROM MarketingPatientListItems i
+      JOIN EmailMessages m ON m.id = i.email_message_id AND m.related_type = 'marketing_bulk_send'
+        AND m.related_id = CONCAT(i.list_id, ':', i.id) AND m.stream = 'marketing'
+      WHERE i.list_id = :listId AND m.sent_at IS NOT NULL
+        AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.email_engagement')) = :version
+    `, { replacements: { listId: list.id, version: engagement.VERSION }, type: QueryTypes.SELECT }),
+    db.sequelize.query(`
+      SELECT COUNT(DISTINCT i.id) AS total
+      FROM MarketingPatientListItems i
+      JOIN MarketingEmailUnsubscribes u ON u.list_id = i.list_id AND u.item_id = i.id
+        AND u.scope_key = :scopeKey
+      WHERE i.list_id = :listId AND i.opt_out_at IS NOT NULL AND u.status = 'unsubscribed'
+    `, { replacements: { listId: list.id, scopeKey: scopeKeyForList(list) }, type: QueryTypes.SELECT }),
+    readEmailAudienceCounts(list),
+  ]);
+  const tracking = {
+    available: Number(coverage?.tracked_sent || 0) > 0,
+    tracked_sent: Number(coverage?.tracked_sent || 0),
+    tracked_delivered: Number(coverage?.tracked_delivered || 0),
+    opened_unique: Number(coverage?.opened_unique || 0),
+    clicked_unique: Number(coverage?.clicked_unique || 0),
+  };
+  const links = tracking.available ? await db.sequelize.query(`
+    SELECT JSON_UNQUOTE(JSON_EXTRACT(e.payload_summary, '$.click_url')) AS url,
+      COUNT(*) AS clicks, COUNT(DISTINCT m.id) AS unique_clicks
+    FROM MarketingPatientListItems i
+    JOIN EmailMessages m ON m.id = i.email_message_id AND m.related_type = 'marketing_bulk_send'
+      AND m.related_id = CONCAT(i.list_id, ':', i.id) AND m.stream = 'marketing'
+    JOIN EmailProviderEvents e ON e.email_message_id = m.id AND e.event_type = 'click'
+    WHERE i.list_id = :listId AND m.sent_at IS NOT NULL
+      AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.email_engagement')) = :version
+      AND JSON_EXTRACT(e.payload_summary, '$.click_url') IS NOT NULL
+    GROUP BY url
+    ORDER BY clicks DESC, unique_clicks DESC, url ASC
+    LIMIT 50
+  `, { replacements: { listId: list.id, version: engagement.VERSION }, type: QueryTypes.SELECT }) : [];
+  const { total_to_send: total, ...counts } = audience;
+  return {
+    totals: { ...counts, total, unsubscribed: Number(unsubscribes?.total || 0) },
+    tracking,
+    links: links.map(({ url, clicks, unique_clicks }) => ({ url, clicks: Number(clicks), unique_clicks: Number(unique_clicks) })),
+  };
+}
+
+async function getEmailRecipientStates(listId, rows) {
+  const ids = [...new Set(rows.map(row => Number(row.email_message_id)).filter(id => Number.isSafeInteger(id) && id > 0))];
+  if (!ids.length) return new Map();
+  const messages = await db.EmailMessage.findAll({
+    where: { id: { [Op.in]: ids }, stream: 'marketing', related_type: 'marketing_bulk_send' },
+    attributes: ['id', 'related_id', 'status', 'sent_at', 'delivered_at', 'bounced_at', 'complained_at', 'rejected_at', 'last_error_code'],
+    raw: true,
+  });
+  const byId = new Map(messages.map(row => [Number(row.id), row]));
+  const states = new Map();
+  for (const item of rows) {
+    const message = byId.get(Number(item.email_message_id));
+    if (!message || message.related_id !== `${listId}:${item.id}`) continue;
+    const existing = emailStatus(item);
+    states.set(Number(item.id), {
+      ...existing,
+      status: message.status,
+      sent_at: message.sent_at || existing.sent_at || null,
+      delivered_at: message.delivered_at || existing.delivered_at || null,
+      failed_at: message.bounced_at || message.complained_at || message.rejected_at || existing.failed_at || null,
+      error_code: message.last_error_code || null,
+    });
+  }
+  return states;
 }
 
 function mergeEmailStatus(item, patch) {
@@ -379,11 +470,16 @@ function composeCampaignContext({ list, item, clinic, template, links = publicLi
   };
 }
 
-function prepareMessageContext({ list, item, clinic, template, scopeKey, unsubscribeUrl }) {
+function prepareMessageContext({ list, item, clinic, template, scopeKey, unsubscribeUrl, trackedLinks }) {
   return async ({ publicId, recipientHash, transaction }) => {
     const links = publicLinks.messageLinks({ publicId, recipientHash, scopeKey, unsubscribeUrl });
     const context = composeCampaignContext({ list, item, clinic, template, links });
     const rendered = emailTemplates.renderMarketingCampaign(context);
+    if (trackedLinks) {
+      rendered.html = engagement.tagLinks(rendered.html, trackedLinks, [
+        links.unsubscribe_url, links.browser_view_url, links.preferences_url,
+      ]);
+    }
     const group = scopeKey.startsWith('group:')
       ? await db.GrupoClinica.findByPk(Number(scopeKey.slice(6)), { transaction, attributes: ['nombre_grupo'] }) : null;
     const scopeLabel = group ? `Grupo ${group.nombre_grupo}` : (scopeKey.startsWith('group:') ? 'el grupo de clínicas' : clinicName(clinic));
@@ -403,6 +499,20 @@ async function queueItem({ list, item, sender, template, scopeKey }) {
     fail('marketing_email_recipient_clinic_missing', 409, 'El contacto no está asignado a una clínica del grupo.');
   }
   const recipientEmail = emailDelivery.normalizeEmail(item.email);
+  const suppression = await emailDelivery.findActiveSuppression({
+    emailHash: emailDelivery.hashEmail(recipientEmail),
+    stream: 'marketing',
+    clinicaId: item.clinica_id || list.clinica_id,
+    groupId: list.grupo_clinica_id,
+  });
+  if (suppression) {
+    await item.update({ channel_status: mergeEmailStatus(item, {
+      status: 'suppressed',
+      error_code: 'email_recipient_suppressed',
+      ...(suppression.reason === 'bounce' ? { suppression_reason: 'bounce' } : {}),
+    }) });
+    return { skipped: true };
+  }
   const unsubscribeUrl = await marketingEmail.issueUnsubscribe({
     scopeKey,
     clinicaId: item.clinica_id || list.clinica_id,
@@ -414,10 +524,16 @@ async function queueItem({ list, item, sender, template, scopeKey }) {
   const clinic = item.clinica_id ? await db.Clinica.findByPk(item.clinica_id) : (list.clinica_id ? await db.Clinica.findByPk(list.clinica_id) : null);
   const variables = templateContext({ list, item, clinic });
   assertTemplateVariables(template, variables, list);
+  const providerConfig = emailProvider.getConfig();
+  const configurationSet = !reviewScope.review && providerConfig.provider === 'ses' && engagement.settings(
+    emailProvider.mapStreamToConfigurationSet('marketing', providerConfig)
+  );
+  const trackedLinks = configurationSet ? engagement.staticLinks(template.rendered_html) : null;
   const result = await emailDelivery.queueEmail({
     stream: 'marketing',
     templateKey: 'marketing.campaign',
     templateVersion: String(template.version || 1),
+    configurationSet: configurationSet || undefined,
     subjectKey: `marketing.template.${template.id}`,
     recipientEmail,
     recipientKind: 'marketing_contact',
@@ -441,8 +557,12 @@ async function queueItem({ list, item, sender, template, scopeKey }) {
       email_template_id: template.id,
       sender_identity_id: sender.id,
       contains_clinical_data: false,
+      ...(trackedLinks ? {
+        email_engagement: engagement.VERSION,
+        engagement_links: Object.fromEntries([...trackedLinks.values()].map(({ id, url }) => [id, url])),
+      } : {}),
     },
-  }, { prepareTemplateContext: prepareMessageContext({ list, item, clinic, template, scopeKey, unsubscribeUrl }) });
+  }, { prepareTemplateContext: prepareMessageContext({ list, item, clinic, template, scopeKey, unsubscribeUrl, trackedLinks }) });
   await item.update({
     email_message_id: result.emailMessage.id,
     channel_status: mergeEmailStatus(item, { status: 'queued', email_message_id: result.emailMessage.id, queued_at: new Date().toISOString() }),
@@ -486,14 +606,16 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   }
   await list.update({ email_dispatch: { ...dispatch, status: 'sending', job_id: jobRequest?.id || dispatch.job_id } });
   let queued = 0;
+  let suppressed = 0;
   let failed = 0;
   for (const item of batch) {
     await list.reload();
     const liveDispatch = list.email_dispatch || {};
     if (liveDispatch.cancel_requested === true || ['paused', 'cancelled'].includes(String(liveDispatch.status || ''))) break;
     try {
-      await queueItem({ list, item, sender, template, scopeKey });
-      queued += 1;
+      const result = await queueItem({ list, item, sender, template, scopeKey });
+      if (result.skipped) suppressed += 1;
+      else queued += 1;
     } catch (error) {
       failed += 1;
       await item.update({ channel_status: mergeEmailStatus(item, { status: 'failed', error_code: error.code || 'email_queue_failed', failed_at: new Date().toISOString() }) });
@@ -503,7 +625,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     list_id: list.id,
     event_type: 'mass_campaign_email_batch_processed',
     channel: 'email',
-    payload: { attempted: batch.length, queued, failed },
+    payload: { attempted: batch.length, queued, suppressed, failed },
     occurred_at: new Date(),
   });
   const remainingRows = await db.MarketingPatientListItem.findAll({
@@ -677,6 +799,8 @@ module.exports = {
   pauseDispatch,
   resumeDispatch,
   getEmailDispatchProgress,
+  getEmailCampaignReport,
+  getEmailRecipientStates,
   runDispatchJob,
   sendTest,
   materializeEmailMessage,

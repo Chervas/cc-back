@@ -2016,6 +2016,7 @@ exports.createCustomTemplate = async (req, res) => {
           language: req.body?.language || 'es',
           variables: req.body?.variables || [],
           buttons: req.body?.buttons,
+          bulkOptOut: req.body?.bulk_opt_out === true,
           templateUsage: templateUsage || null,
           replaceTemplateId: replacements.get(String(asset.wabaId)) || null,
           createdByUserId: userId,

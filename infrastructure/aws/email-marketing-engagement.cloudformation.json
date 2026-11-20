@@ -1,0 +1,232 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Isolated SES marketing campaign engagement. Operational delivery continues through the existing SES gateway rule.",
+  "Parameters": {
+    "EnableEngagement": {
+      "Type": "String",
+      "AllowedValues": [
+        "false",
+        "true"
+      ],
+      "Default": "false"
+    },
+    "GatewayApiDestinationArn": {
+      "Type": "String"
+    },
+    "GatewayInvokeRoleArn": {
+      "Type": "String"
+    },
+    "GatewayDeadLetterQueueArn": {
+      "Type": "String"
+    }
+  },
+  "Conditions": {
+    "Enabled": {
+      "Fn::Equals": [
+        {
+          "Ref": "EnableEngagement"
+        },
+        "true"
+      ]
+    }
+  },
+  "Resources": {
+    "CampaignConfigurationSet": {
+      "Type": "AWS::SES::ConfigurationSet",
+      "Properties": {
+        "Name": "clinicaclick-marketing-engagement",
+        "DeliveryOptions": {
+          "TlsPolicy": "REQUIRE"
+        },
+        "ReputationOptions": {
+          "ReputationMetricsEnabled": true
+        },
+        "SuppressionOptions": {
+          "SuppressedReasons": [
+            "BOUNCE",
+            "COMPLAINT"
+          ]
+        },
+        "SendingOptions": {
+          "SendingEnabled": {
+            "Fn::If": [
+              "Enabled",
+              true,
+              false
+            ]
+          }
+        }
+      }
+    },
+    "CampaignEvents": {
+      "Type": "AWS::SES::ConfigurationSetEventDestination",
+      "Properties": {
+        "ConfigurationSetName": {
+          "Ref": "CampaignConfigurationSet"
+        },
+        "EventDestination": {
+          "Name": "marketing-engagement-eb",
+          "Enabled": {
+            "Fn::If": [
+              "Enabled",
+              true,
+              false
+            ]
+          },
+          "MatchingEventTypes": [
+            "SEND",
+            "DELIVERY",
+            "BOUNCE",
+            "COMPLAINT",
+            "REJECT",
+            "RENDERING_FAILURE",
+            "DELIVERY_DELAY",
+            "OPEN",
+            "CLICK"
+          ],
+          "EventBridgeDestination": {
+            "EventBusArn": {
+              "Fn::Sub": "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
+            }
+          }
+        }
+      }
+    },
+    "OpenToGateway": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Name": "clinicaclick-ses-marketing-open",
+        "EventBusName": "default",
+        "State": {
+          "Fn::If": [
+            "Enabled",
+            "ENABLED",
+            "DISABLED"
+          ]
+        },
+        "EventPattern": {
+          "source": [
+            "aws.ses"
+          ],
+          "detail-type": [
+            "Email Opened"
+          ],
+          "detail": {
+            "mail": {
+              "tags": {
+                "ses:configuration-set": [
+                  {
+                    "Ref": "CampaignConfigurationSet"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "Targets": [
+          {
+            "Id": "SignedEmailGateway",
+            "Arn": {
+              "Ref": "GatewayApiDestinationArn"
+            },
+            "RoleArn": {
+              "Ref": "GatewayInvokeRoleArn"
+            },
+            "DeadLetterConfig": {
+              "Arn": {
+                "Ref": "GatewayDeadLetterQueueArn"
+              }
+            },
+            "RetryPolicy": {
+              "MaximumRetryAttempts": 185,
+              "MaximumEventAgeInSeconds": 86400
+            },
+            "InputTransformer": {
+              "InputPathsMap": {
+                "eventId": "$.id",
+                "providerMessageId": "$.detail.mail.messageId",
+                "eventTime": "$.time",
+                "eventType": "$.detail-type",
+                "outboxId": "$.detail.mail.tags.cc_outbox[0]",
+                "bot": "$.detail.open.isBotEvent"
+              },
+              "InputTemplate": "{\"event_id\":\"<eventId>\",\"event_type\":\"<eventType>\",\"provider_message_id\":\"<providerMessageId>\",\"outbox_public_id\":\"<outboxId>\",\"occurred_at\":\"<eventTime>\",\"engagementBot\":\"<bot>\"}"
+            }
+          }
+        ]
+      }
+    },
+    "ClickToGateway": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Name": "clinicaclick-ses-marketing-click",
+        "EventBusName": "default",
+        "State": {
+          "Fn::If": [
+            "Enabled",
+            "ENABLED",
+            "DISABLED"
+          ]
+        },
+        "EventPattern": {
+          "source": [
+            "aws.ses"
+          ],
+          "detail-type": [
+            "Email Clicked"
+          ],
+          "detail": {
+            "mail": {
+              "tags": {
+                "ses:configuration-set": [
+                  {
+                    "Ref": "CampaignConfigurationSet"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "Targets": [
+          {
+            "Id": "SignedEmailGateway",
+            "Arn": {
+              "Ref": "GatewayApiDestinationArn"
+            },
+            "RoleArn": {
+              "Ref": "GatewayInvokeRoleArn"
+            },
+            "DeadLetterConfig": {
+              "Arn": {
+                "Ref": "GatewayDeadLetterQueueArn"
+              }
+            },
+            "RetryPolicy": {
+              "MaximumRetryAttempts": 185,
+              "MaximumEventAgeInSeconds": 86400
+            },
+            "InputTransformer": {
+              "InputPathsMap": {
+                "eventId": "$.id",
+                "providerMessageId": "$.detail.mail.messageId",
+                "eventTime": "$.time",
+                "eventType": "$.detail-type",
+                "outboxId": "$.detail.mail.tags.cc_outbox[0]",
+                "bot": "$.detail.click.isBotEvent",
+                "linkTag": "$.detail.click.linkTags.cc_link[0]"
+              },
+              "InputTemplate": "{\"event_id\":\"<eventId>\",\"event_type\":\"<eventType>\",\"provider_message_id\":\"<providerMessageId>\",\"outbox_public_id\":\"<outboxId>\",\"occurred_at\":\"<eventTime>\",\"engagementBot\":\"<bot>\",\"engagementLinkTag\":\"<linkTag>\"}"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "ConfigurationSetName": {
+      "Value": {
+        "Ref": "CampaignConfigurationSet"
+      }
+    }
+  }
+}

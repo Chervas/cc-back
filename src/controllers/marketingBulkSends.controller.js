@@ -392,6 +392,19 @@ exports.updateReviewQueueSchedule = async (req,res) => {
   } catch(error) { return sendError(res,error,'No se ha podido guardar la programación'); }
 };
 
+exports.updateBulkWhatsappCadence = async (req, res) => {
+  try {
+    const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    if (!await hasMarketingClinicScopeAccess({ userId: req.userData?.userId, clinicIds: scope.clinicIds, access: 'write' })) {
+      return res.status(403).json({ error: 'No tienes permiso para modificar el ritmo.' });
+    }
+    const result = await marketingBulkSendsService.updateBulkWhatsappCadence(scope, req.params.id, req.body || {}, req.userData?.userId);
+    return res.json(result);
+  } catch (error) {
+    return sendError(res, error, 'No se ha podido guardar el ritmo de WhatsApp');
+  }
+};
+
 exports.startDispatch = async (req, res) => {
   try {
     const scope = await resolveScopeFromRequest(req, { allowAll: false });

@@ -2303,6 +2303,7 @@ async function createCustomTemplateWithLease({
   technicalName = null,
   existingRow = null,
   buttons = undefined,
+  bulkOptOut = false,
 }) {
   const safeClinicId = Number(clinicId || 0) || null;
   const safeWabaId = cleanString(wabaId);
@@ -2364,12 +2365,16 @@ async function createCustomTemplateWithLease({
       },
     } : {}),
   };
-  const extraComponents = buttons === undefined && replacedTemplate
+  let extraComponents = buttons === undefined && replacedTemplate
     ? normalizeTemplateComponentsForMeta(replacedTemplate.components).filter(component => String(component.type).toUpperCase() === 'BUTTONS')
     : buildCustomTemplateExtraComponents({ templateUsage: safeTemplateUsage });
   if (buttons !== undefined) {
     const replies = require('../lib/whatsapp-template-buttons').normalizeQuickReplyButtons(buttons);
     if (replies.length) extraComponents.push({ type: 'BUTTONS', buttons: replies });
+  }
+  const bulkOptOutButtons = require('../lib/whatsapp-bulk-opt-out');
+  if (bulkOptOut || bulkOptOutButtons.buttonIndex(replacedTemplate) >= 0) {
+    extraComponents = bulkOptOutButtons.requireOptOutButton(extraComponents, language);
   }
   const safeTechnicalName = cleanString(technicalName)
     ? normalizeTemplateKey(technicalName).slice(0, 100)

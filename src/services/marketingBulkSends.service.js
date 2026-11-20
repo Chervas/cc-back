@@ -1561,7 +1561,7 @@ function mergeDispatchConfigs(...configs) {
   }, {});
 }
 
-async function getDispatchConfigForList(list, override = null) {
+async function getDispatchConfigForList(list, override = null, whatsappCadence = undefined) {
   const admin = await getAdminBulkSendSettings().catch(() => null);
   const listCriteria = list?.criteria || {};
   const listDispatchConfig = listCriteria.dispatch_config && typeof listCriteria.dispatch_config === 'object'
@@ -1574,7 +1574,14 @@ async function getDispatchConfigForList(list, override = null) {
     ...listCriteria,
     dispatch_config: mergeDispatchConfigs(admin?.settings || {}, listDispatchConfig, listDispatch, override || {}),
   };
-  return getDispatchConfig({ ...list, criteria });
+  const config = getDispatchConfig({ ...list, criteria });
+  if (whatsappCadence === undefined) return config;
+  const defaults = normalizeBulkSendSettingsPayload(admin?.settings || {});
+  return {
+    ...config,
+    batch_size: whatsappCadence?.batch_size ?? defaults.batch_size,
+    delay_ms: whatsappCadence?.delay_ms ?? defaults.delay_ms,
+  };
 }
 
 function mergeCriteria(list, patch) {
@@ -1606,7 +1613,7 @@ async function applyMarketingOptOutExclusions(itemPayloads, scope, transaction =
   });
 }
 
-async function revalidateDispatchExclusions(list, items, scope, transaction = null) {
+async function revalidateDispatchExclusions(list, items, scope, template, transaction = null) {
   if (!Array.isArray(items) || !items.length) return [];
   const careProtected = Number(list?.criteria?.review_care_version) === 1 || items.some(careSnapshots.hasCareSnapshot);
   let careHeld = new Set();
@@ -1614,7 +1621,12 @@ async function revalidateDispatchExclusions(list, items, scope, transaction = nu
     await guardReviewCare(scope, list, items, { background: true });
     careHeld = await require('./reviewCareContext.service').current().heldPatientIds(items.map(item => Number(item.paciente_id)));
   }
-  const optOutSets = await marketingOptOutService.getActiveOptOutSetsForScope(scope, transaction);
+  const marketing = isReviewRequestList(list)
+    || resolveTemplateCommercialFromMetaCategory(template, list.criteria?.template_commercial === true
+      || isCommercialTemplateUsage(list.criteria?.template_usage));
+  const optOutSets = marketing ? await marketingOptOutService.getActiveOptOutSetsForScope(scope, transaction) : null;
+  const blockedWhatsapp = await marketingOptOutService.getBlockedWhatsappNumbersForScope(scope, transaction);
+  const hasEmail = normalizeChannels(list.criteria?.channels || list.action_mode || list.channel || 'whatsapp').includes('email');
   const patientIds = items.map((item) => Number(item.paciente_id || 0)).filter((id) => Number.isInteger(id) && id > 0);
   const rejectedContactRows = patientIds.length && PacienteConsentimiento
     ? await PacienteConsentimiento.findAll({
@@ -1643,16 +1655,29 @@ async function revalidateDispatchExclusions(list, items, scope, transaction = nu
     });
     const noContact = item.paciente_id && rejectedContactPatientIds.has(Number(item.paciente_id));
     const importHeld = careHeld.has(Number(item.paciente_id));
-    if (!hasMarketingOptOut && !noContact && !importHeld) continue;
-    await item.update({
+    const clinicId = item.clinica_id || list.clinica_id || getClinicIdForList(list, scope);
+    const whatsappBlocked = blockedWhatsapp.has(`${clinicId}:${normalizePhoneDigits(item.phone)}`);
+    if (!hasMarketingOptOut && !whatsappBlocked && !noContact && !importHeld) continue;
+    const reasonCode = importHeld ? 'importacion_comunicaciones_retenidas' : whatsappBlocked
+      ? 'whatsapp_channel_refused' : (hasMarketingOptOut ? 'opt_out' : 'no_contactar');
+    const reason = importHeld ? 'Comunicaciones retenidas en la importación.' : whatsappBlocked
+      ? 'La persona ha solicitado no recibir mensajes en este número de WhatsApp'
+      : hasMarketingOptOut ? 'Baja comercial solicitada antes del envío'
+        : 'Paciente con comunicaciones rechazadas antes del envío';
+    // Email uses the same audience row but has independent consent and delivery.
+    // A WhatsApp refusal must never deselect the person for email.
+    const whatsappOnlyRestriction = hasEmail && !importHeld && !noContact;
+    await item.update(whatsappOnlyRestriction ? {
+      dispatch_status: 'skipped',
+      last_error_code: reasonCode,
+      last_error_message: reason,
+    } : {
       status: importHeld ? 'excluded_import_hold' : 'excluded_opt_out',
-      exclusion_reason: importHeld ? 'importacion_comunicaciones_retenidas' : (hasMarketingOptOut ? 'opt_out' : 'no_contactar'),
+      exclusion_reason: reasonCode,
       selected: false,
-      reason: importHeld ? 'Comunicaciones retenidas en la importación.' : hasMarketingOptOut
-        ? 'Baja comercial solicitada antes del envío'
-        : 'Paciente con comunicaciones rechazadas antes del envío',
+      reason,
       dispatch_status: null,
-      opt_out_at: hasMarketingOptOut ? new Date() : item.opt_out_at,
+      opt_out_at: hasMarketingOptOut || whatsappBlocked ? new Date() : item.opt_out_at,
     }, { transaction });
     excluded.push(item);
     await MarketingPatientContactEvent.create({
@@ -1662,7 +1687,7 @@ async function revalidateDispatchExclusions(list, items, scope, transaction = nu
       event_type: 'mass_campaign_contact_excluded_before_send',
       channel: 'whatsapp',
       payload: {
-        reason: importHeld ? 'importacion_comunicaciones_retenidas' : (hasMarketingOptOut ? 'opt_out' : 'no_contactar'),
+        reason: reasonCode,
       },
       occurred_at: new Date(),
     }, { transaction });
@@ -6755,6 +6780,8 @@ async function createCampaign(scope, body = {}, userId = null) {
   const campaignName = normalizeText(body.campaign_name || body.campaignName) || listName;
   const linkTracking = buildLinkTrackingCriteria(body, {});
   const isReviewRequest = isReviewRequestBody(body);
+  const whatsappCadence = recordKind === 'campaign' && channels.includes('whatsapp') && !isReviewRequest
+    ? require('../lib/marketing-whatsapp-cadence').draftCadence(body) : undefined;
   const reviewSource = normalizeReviewRequestSource(body.review_source || body.reviewRequestSource);
   const reviewTreatmentIds = parseReviewTreatmentIds(body);
   const reviewImportListId = parseReviewImportListId(body);
@@ -6821,7 +6848,10 @@ async function createCampaign(scope, body = {}, userId = null) {
     if (isReviewRequest && source !== 'existing_patients_condition' && effectiveScope.reviewCareAuthority) {
       itemPayloads = await prepareReviewItemsForExclusions(itemPayloads, effectiveScope, body);
     }
-    itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, effectiveScope, transaction);
+    if (isReviewRequest || (recordKind === 'campaign' && templateCommercial
+      && channels.includes('whatsapp') && !channels.includes('email'))) {
+      itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, effectiveScope, transaction);
+    }
     if (isReviewRequest && effectiveScope?.scope === 'group') {
       const clinicStatuses = await buildReviewClinicStatuses(effectiveScope, {
         review_source: reviewSource,
@@ -6861,6 +6891,7 @@ async function createCampaign(scope, body = {}, userId = null) {
         list_name: listName,
         channels,
         ...scheduleCriteria,
+        ...(whatsappCadence !== undefined ? { whatsapp_cadence: whatsappCadence } : {}),
         template_usage: templateUsage,
         template_commercial: templateCommercial,
         sender_name: campaignSenderName || null,
@@ -7273,6 +7304,14 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   if (body.consent_acknowledged !== undefined) nextCriteria.consent_acknowledged = body.consent_acknowledged === true;
   Object.assign(nextCriteria, campaignScheduleCriteria(list.criteria || {}, body,
     channels || normalizeChannels(nextCriteria.channels || list.action_mode || list.channel), list));
+  if (body.whatsapp_cadence !== undefined) {
+    ensureDispatchableCampaignRecord(list);
+    if (!['draft', 'prepared'].includes(list.status) || getDispatchConfig(list).job_id || isReviewRequestList(list)
+      || !normalizeChannels(nextCriteria.channels || list.action_mode || list.channel).includes('whatsapp')) {
+      throw Object.assign(new Error('Modifica el ritmo de una cola activa desde el estado del envío.'), { status: 409 });
+    }
+    nextCriteria.whatsapp_cadence = require('../lib/marketing-whatsapp-cadence').draftCadence(body);
+  }
   if (
     body.link_tracking !== undefined ||
     body.link_tracking_enabled !== undefined ||
@@ -7353,7 +7392,10 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
         itemPayloads = await prepareReviewItemsForExclusions(itemPayloads, scope, importBody);
         itemPayloads = itemPayloads.map(item => careSnapshots.bindCareSnapshot(item, list.id));
       }
-      itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
+      if (isReviewRequestList(list) || (nextCriteria.record_kind === 'campaign' && nextCriteria.template_commercial === true
+        && effectiveChannels.includes('whatsapp') && !effectiveChannels.includes('email'))) {
+        itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
+      }
 
       const existingRows = await MarketingPatientListItem.findAll({
         where: { list_id: list.id },
@@ -8346,6 +8388,7 @@ async function buildTemplateComponentsForSend({
   ownerType = 'review_request',
   ownerId = null,
   userId = null,
+  bulkOptOutMode = null,
 }) {
   const components = [];
   const bodyParams = Array.isArray(params) ? params : [];
@@ -8377,6 +8420,10 @@ async function buildTemplateComponentsForSend({
       type: 'body',
       parameters: bodyParams.map((value) => ({ type: 'text', text: String(value ?? '') })),
     });
+  }
+  if (bulkOptOutMode) {
+    const button = require('../lib/whatsapp-bulk-opt-out').sendComponent(template, { test: bulkOptOutMode === 'test' });
+    if (button) components.push(button);
   }
   return components.length ? components : null;
 }
@@ -8484,6 +8531,11 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const templateUsage = resolveTemplateUsageFromMetaCategory(template, requestedTemplateUsage);
   const templateCommercial = resolveTemplateCommercialFromMetaCategory(template, requestedTemplateCommercial);
   const isReviewRequest = isReviewRequestList(list) || isReviewRequestBody(body) || isReviewTemplateUsage(templateUsage);
+  if (body.whatsapp_cadence !== undefined && (!['draft', 'prepared'].includes(list.status) || getDispatchConfig(list).job_id)) {
+    throw Object.assign(new Error('Modifica el ritmo de una cola activa desde el estado del envío.'), { status: 409 });
+  }
+  const whatsappCadence = channels.includes('whatsapp') && !isReviewRequest && !isWelcomeDispatch
+    ? require('../lib/marketing-whatsapp-cadence').draftCadence(body, list.criteria) : undefined;
   const hasExplicitReviewSender = body.review_sender_name !== undefined || body.reviewSenderName !== undefined;
   if (isReviewRequest && hasExplicitReviewSender) {
     requireReviewSenderName(body.review_sender_name ?? body.reviewSenderName);
@@ -8617,7 +8669,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
     capping: true,
     cancelable_queue: true,
   };
-  const dispatchConfig = await getDispatchConfigForList(list, body.dispatch_config || body.dispatchConfig || null);
+  const dispatchConfig = await getDispatchConfigForList(list, body.dispatch_config || body.dispatchConfig || null, whatsappCadence);
   const effectiveDispatchContext = isWelcomeDispatch
     ? 'welcome'
     : (isReviewRequest ? 'review_request' : normalizeDispatchContext(body.dispatch_context || body.dispatch_mode || dispatchConfig.context));
@@ -8706,6 +8758,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       schedule_mode: list.criteria?.schedule_mode || 'now',
       scheduled_at: list.criteria?.scheduled_at || null,
       ...scheduleCriteria,
+      ...(whatsappCadence !== undefined ? { whatsapp_cadence: whatsappCadence } : {}),
       dispatch_config: dispatchConfig,
       dispatch: {
         ...dispatchConfig,
@@ -9030,10 +9083,12 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
     reviewTeamPhotoOverlayColor: reviewTeamPhotoOverlayColorForSelection,
     ownerType: 'review_request_test',
     ownerId: item.id,
+    bulkOptOutMode: !reviewTest && (normalizeDispatchContext(body.dispatch_context || list.criteria?.dispatch?.context) || 'campaign') === 'campaign'
+      ? 'test' : null,
   });
   const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
-  const templateCommercial = body.template_commercial === true
-    || (body.template_commercial !== false && (listCriteria.template_commercial === true || isCommercialTemplateUsage(templateUsage)));
+  const templateCommercial = resolveTemplateCommercialFromMetaCategory(template, body.template_commercial === true
+    || (body.template_commercial !== false && (listCriteria.template_commercial === true || isCommercialTemplateUsage(templateUsage))));
   const conversation = await findCanonicalWhatsappConversation({
     requireExactContact: true,
     clinicId,
@@ -9060,7 +9115,7 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
       list_id: list.id,
       item_id: item.id,
       objective_id: OBJECTIVE_ID,
-      template_usage: templateUsage,
+      template_usage: resolveTemplateUsageFromMetaCategory(template, templateUsage),
       template_commercial: templateCommercial,
       template_category: template.category || template.catalog?.category || null,
       sender_name: listCriteria.sender_name || null,
@@ -9298,19 +9353,28 @@ async function listRecipients(scope, campaignId, query = {}) {
   });
   await guardReviewCare(scope, list, rows);
   const counters = reloaded?.counters || await refreshListCounters(list.id);
-  const report = await buildListReport(list.id);
+  const hasEmail = normalizeChannels(list.criteria?.channels || list.action_mode || list.channel).includes('email');
+  const [report, emailReport, emailStates] = await Promise.all([
+    buildListReport(list.id),
+    hasEmail && String(query.include_email_report).toLowerCase() === 'true'
+      ? marketingEmailDispatchService.getEmailCampaignReport(list)
+      : null,
+    hasEmail ? marketingEmailDispatchService.getEmailRecipientStates(list.id, rows) : null,
+  ]);
   const clickCountsByItem = new Map((report?.item_clicks || []).map((row) => [Number(row.item_id), Number(row.clicks || 0)]));
   return {
     success: true,
     page,
     page_size: pageSize,
     total: count,
-    items: rows.map((row) => ({
-      ...serializeItem(row, { allowReviewCare: !!scope.reviewCareAuthority }),
-      link_clicks: clickCountsByItem.get(Number(row.id)) || 0,
-    })),
+    items: rows.map((row) => {
+      const item = serializeItem(row, { allowReviewCare: !!scope.reviewCareAuthority });
+      const email = emailStates?.get(Number(row.id));
+      if (email) item.channel_status = { ...item.channel_status, email };
+      return { ...item, link_clicks: clickCountsByItem.get(Number(row.id)) || 0 };
+    }),
     summary: counters,
-    report,
+    report: emailReport ? { ...report, email: emailReport } : report,
   };
 }
 
@@ -9503,6 +9567,77 @@ async function updateReviewQueueSchedule(scope, campaignId, body = {}, userId = 
   const updated = await MarketingPatientList.findByPk(campaignId);
   return {success:true,campaign:serializeCampaign(updated),dispatch:getDispatchProgress(updated,updated.counters || null),
     schedule:await getReviewQueueSchedule(scope,campaignId)};
+}
+
+async function updateBulkWhatsappCadence(scope, campaignId, body = {}, userId = null) {
+  const policy = require('../lib/marketing-whatsapp-cadence');
+  const cadence = policy.normalizeCadence(body.whatsapp_cadence);
+  const conflict = message => Object.assign(new Error(message), { status: 409 });
+  const validateCampaign = list => {
+    ensureScopeAccess(list, scope);
+    ensureDispatchableCampaignRecord(list);
+    const clinics = [...new Set([list.clinica_id, ...(Array.isArray(list.clinic_ids) ? list.clinic_ids : [])]
+      .map(Number).filter(id => Number.isSafeInteger(id) && id > 0))];
+    if (!clinics.length || !clinics.every(id => (scope.clinicIds || []).includes(id))) {
+      throw Object.assign(new Error('Necesitas acceso a todas las clínicas de esta cola.'), { status: 403 });
+    }
+    const dispatch = getDispatchConfig(list);
+    if (isReviewRequestList(list)
+      || !normalizeChannels(list.criteria?.channels || list.action_mode || list.channel).includes('whatsapp')
+      || ['welcome', 'review_request'].includes(dispatch.context)
+      || !policy.EDITABLE_STATUSES.includes(dispatch.status) || dispatch.cancel_requested === true
+      || !dispatch.job_id || ['archived', 'failed', 'cancelled', 'paused', 'completed'].includes(list.status)) {
+      throw conflict('El ritmo solo se puede editar en una campaña de WhatsApp programada o entre lotes.');
+    }
+    return dispatch;
+  };
+
+  const initial = await MarketingPatientList.findByPk(campaignId);
+  const initialDispatch = validateCampaign(initial);
+  const runtimeNamespace = process.env.JOB_RUNTIME_NAMESPACE || process.env.RUNTIME_NAMESPACE;
+  return db.sequelize.transaction(async transaction => {
+    // Use the same job→campaign locking order as the review schedule editor.
+    const job = await JobRequest.findByPk(initialDispatch.job_id, { transaction, lock: transaction.LOCK.UPDATE });
+    const list = await MarketingPatientList.findByPk(campaignId, { transaction, lock: transaction.LOCK.UPDATE });
+    const dispatch = validateCampaign(list);
+    if (new Date(list.updated_at).toISOString() !== body.revision || Number(dispatch.job_id) !== Number(initialDispatch.job_id)) {
+      throw conflict('La cola ha cambiado. Comprueba su estado antes de guardar.');
+    }
+    if (job?.status === 'running') throw conflict('Hay un lote en curso. Espera a que termine antes de modificar el ritmo.');
+    if (!job || job.type !== DISPATCH_JOB_TYPE || Number(job.payload?.list_id) !== Number(list.id)
+      || !runtimeNamespace || job.payload?.__runtime_namespace !== runtimeNamespace
+      || !['pending', 'queued', 'waiting'].includes(job.status)) {
+      throw conflict('Comprueba el estado del trabajo antes de modificar el ritmo.');
+    }
+
+    // Delay only a regular wait when the new interval requires it. A shorter
+    // interval starts from the next batch, retaining any existing provider hold.
+    const earliest = policy.earliestDelayChange({ dispatch, job, cadence });
+    const next = earliest ? getNextBusinessAllowedAt(earliest, dispatch.business_hours) : null;
+    if (next) await job.update({ next_run_at: next }, { transaction });
+    await list.update({
+      criteria: {
+        ...list.criteria,
+        whatsapp_cadence: cadence,
+        dispatch_config: { ...(list.criteria.dispatch_config || {}), ...cadence },
+        dispatch: { ...dispatch, ...cadence, ...(next ? { next_allowed_at: next.toISOString() } : {}) },
+      },
+    }, { transaction });
+    await MarketingPatientContactEvent.create({
+      list_id: list.id,
+      event_type: 'mass_campaign_whatsapp_cadence_updated',
+      channel: 'whatsapp',
+      payload: {
+        user_id: userId,
+        before: { batch_size: dispatch.batch_size, delay_ms: dispatch.delay_ms },
+        after: cadence,
+        next_run_at: next?.toISOString() || null,
+      },
+      occurred_at: new Date(),
+    }, { transaction });
+    const campaign = serializeCampaign(list);
+    return { success: true, campaign, dispatch: campaign.dispatch };
+  });
 }
 
 async function reconcileBulkSendTemplateCategory(templateRow, logger = console) {
@@ -10258,7 +10393,7 @@ async function sendDispatchItem({
     deliveryClinicId: clinicConfig?.clinicId || getClinicIdForList(list) });
   const plainItem = item.get ? item.get({ plain: true }) : item;
   const dispatch = getDispatchConfig(list);
-  const dispatchContext = normalizeDispatchContext(dispatchContextOverride || dispatch.context);
+  const dispatchContext = normalizeDispatchContext(dispatchContextOverride || dispatch.context) || 'campaign';
   const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
   const templateComponents = await buildTemplateComponentsForSend({
     template,
@@ -10270,6 +10405,7 @@ async function sendDispatchItem({
     groupId: list.group_id || null,
     ownerType: 'review_request',
     ownerId: item.id,
+    bulkOptOutMode: dispatchContext === 'campaign' && !isReviewRequestList(list) ? 'send' : null,
   });
   const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
   const conversation = await findCanonicalWhatsappConversation({
@@ -10280,8 +10416,9 @@ async function sendDispatchItem({
     createIfMissing: true,
     lastMessageAt: new Date(),
   });
-  const templateUsage = normalizeTemplateUsage(list.criteria?.template_usage || 'promocion');
-  const templateCommercial = list.criteria?.template_commercial === true || isCommercialTemplateUsage(templateUsage);
+  const templateUsage = resolveTemplateUsageFromMetaCategory(template, list.criteria?.template_usage || 'promocion');
+  const templateCommercial = resolveTemplateCommercialFromMetaCategory(template,
+    list.criteria?.template_commercial === true || isCommercialTemplateUsage(templateUsage));
   const appMessage = await Message.create({
     conversation_id: conversation.id,
     sender_id: null,
@@ -10301,6 +10438,7 @@ async function sendDispatchItem({
       template_commercial: templateCommercial,
       template_category: template.category || template.catalog?.category || null,
       template_id: template.id,
+      meta_template_id: template.meta_template_id || null,
       template_name: template.name,
       template_language: template.language || 'es',
       template_params: params,
@@ -10764,7 +10902,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     }),
   });
 
-  await revalidateDispatchExclusions(list, batch, scope);
+  await revalidateDispatchExclusions(list, batch, scope, template);
   const freshBatch = await MarketingPatientListItem.findAll({
     where: {
       id: { [Op.in]: batch.map((item) => item.id) },
@@ -11599,6 +11737,7 @@ module.exports = {
   getAttributedGoogleReviews,
   getReviewQueueSchedule,
   updateReviewQueueSchedule,
+  updateBulkWhatsappCadence,
   getReviewActivityReport,
   getGoogleReviewPublicationState,
   setReviewRequestAutomation,

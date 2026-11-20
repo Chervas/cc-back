@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 
 const db = require('../../../models');
 const emailEvents = require('../../services/emailEvents.service');
+const engagement = require('../../lib/marketing-email-engagement');
 
 function patchProperty(object, key, value) {
   const previous = object[key];
@@ -40,6 +41,59 @@ test('gateway normalizeSesEvent acepta EventBridge SES y sanea resumen', () => {
   assert.equal(event.summary.destination_count, 1);
   assert.doesNotMatch(JSON.stringify(event.summary), /persona@example\.test/i);
   assert.doesNotMatch(JSON.stringify(event.summary), /600 111 222/);
+});
+
+test('campaign engagement tags leave personalized and service links outside tracking', () => {
+  const html = '<a href="https://example.test/menu?utm_campaign=noviembre">Menú</a>'
+    + '<a href="https://example.test/pacientes/cuenta">Ficha</a>'
+    + '<a href="https://example.test/reservar/{{codigo}}">Reserva</a>';
+  const links = engagement.staticLinks(html);
+  const [tracked] = [...links.values()];
+  assert.deepEqual([...links.values()].map(({ url }) => url), ['https://example.test/menu']);
+  const rendered = engagement.tagLinks(html, links, []);
+  assert.match(rendered, new RegExp(`ses:tags="cc_link:${tracked.id};"`));
+  assert.equal((rendered.match(/ses:no-track/g) || []).length, 2);
+  assert.match(engagement.tagLinks(html, links, ['https://example.test/menu?utm_campaign=noviembre']),
+    /href="https:\/\/example.test\/menu\?utm_campaign=noviembre" ses:no-track/);
+  assert.equal(engagement.settings('ordinary', { EMAIL_MARKETING_ENGAGEMENT_CONFIGURATION_SET: 'ordinary' }), null);
+  assert.equal(engagement.settings('ordinary', { EMAIL_MARKETING_ENGAGEMENT_CONFIGURATION_SET: 'campaign-engagement' }), 'campaign-engagement');
+});
+
+test('authenticated SES engagement records only mapped campaign links without rematerializing deliveries', async () => {
+  const link = [...engagement.staticLinks('<a href="https://example.test/menu">Menú</a>').values()][0];
+  const message = {
+    id: 12, stream: 'marketing', related_type: 'marketing_bulk_send', status: 'delivered',
+    metadata: { email_engagement: engagement.VERSION, engagement_links: { [link.id]: link.url } },
+    update() { throw Error('An engagement event must leave delivery state alone'); },
+  };
+  const stored = new Map();
+  const restores = [
+    patchProperty(db.sequelize, 'transaction', async work => work({ LOCK: { UPDATE: 'UPDATE' } })),
+    patchProperty(db.EmailMessage, 'findOne', async () => message),
+    patchProperty(db.EmailProviderEvent, 'findOrCreate', async ({ where, defaults }) => {
+      if (stored.has(where.provider_event_id)) return [stored.get(where.provider_event_id), false];
+      stored.set(where.provider_event_id, defaults);
+      return [defaults, true];
+    }),
+  ];
+  try {
+    const click = { event_id: 'engagement-click-1', event_type: 'Email Clicked', provider_message_id: 'mock-ses',
+      engagementLinkTag: link.id, click: { link: 'https://example.test/email/baja?token=example', ipAddress: '192.0.2.10' } };
+    assert.equal((await emailEvents.recordProviderEvent(click)).created, true);
+    assert.equal((await emailEvents.recordProviderEvent(click)).created, false);
+    assert.equal(stored.get(click.event_id).payload_summary.click_url, link.url);
+    assert.doesNotMatch(JSON.stringify([...stored.values()]), /token=example|192\.0\.2\.10/);
+
+    const open = { event_id: 'engagement-open-1', event_type: 'Email Opened', provider_message_id: 'mock-ses' };
+    assert.equal((await emailEvents.recordProviderEvent({ ...open, engagementBot: 'Likely' })).created, false);
+    assert.equal((await emailEvents.recordProviderEvent(open)).created, true);
+    assert.equal((await emailEvents.recordProviderEvent({ ...click, event_id: 'foreign-tag', engagementLinkTag: 'a'.repeat(24) })).created, false);
+    message.related_type = 'marketing_bulk_send_test';
+    assert.equal((await emailEvents.recordProviderEvent({ ...open, event_id: 'test-open' })).created, false);
+    assert.equal(stored.size, 2);
+  } finally {
+    restores.reverse().forEach((restore) => restore());
+  }
 });
 
 test('gateway recordProviderEvent concilia rebote y crea supresion sin destinatario raw', async () => {

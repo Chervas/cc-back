@@ -38,6 +38,8 @@ function clean(value) {
   return value === undefined || value === null ? '' : String(value).trim();
 }
 
+const DELIVERY_SIGNAL_LIMIT = 2000;
+
 function upper(value) {
   return clean(value).toUpperCase();
 }
@@ -410,21 +412,68 @@ async function estimatePortfolioUniqueRecipients24h(phoneNumberIds = []) {
 async function getTemplateDeliverySignals({ wabaId = null, phoneNumberId = null, template = null } = {}) {
   if (!WhatsappDeliveryEvent) return { successful: 0, failed: 0 };
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const waba = clean(wabaId), sender = clean(phoneNumberId);
+  const metaTemplateId = clean(template?.meta_template_id), templateName = clean(template?.name);
+  const route = { ...(waba ? { waba_id: waba } : {}), ...(sender ? { phone_number_id: sender } : {}) };
+  const namedTemplate = templateName ? { template_name: templateName, template_language: clean(template?.language || 'es') } : {};
+  let identity = metaTemplateId ? { meta_template_id: metaTemplateId } : namedTemplate;
+  const localTemplateId = Number(template?.id);
+  if (metaTemplateId && waba && sender && templateName && Number.isSafeInteger(localTemplateId) && localTemplateId > 0) {
+    // Legacy bulk messages omitted the Meta template ID in final receipts.
+    // An exact Messages API acceptance for the same app message proves the
+    // remote template used. A name match alone cannot prove that identity.
+    const accepted = await WhatsappDeliveryEvent.findAll({
+      where: {
+        ...route,
+        ...namedTemplate,
+        meta_template_id: metaTemplateId,
+        message_id: { [Op.gt]: 0 },
+        list_id: { [Op.gt]: 0 },
+        item_id: { [Op.gt]: 0 },
+        source: 'messages_api_response',
+        event_type: { [Op.in]: ['message_accepted_by_meta', 'message_held_for_quality_assessment'] },
+        occurred_at: { [Op.gte]: since },
+      },
+      attributes: ['message_id'],
+      order: [['occurred_at', 'DESC']],
+      limit: DELIVERY_SIGNAL_LIMIT,
+      raw: true,
+    });
+    const acceptedMessageIds = [...new Set(accepted.map(event => Number(event.message_id))
+      .filter(id => Number.isSafeInteger(id) && id > 0))];
+    const provenMessages = acceptedMessageIds.length ? await Message.findAll({
+      attributes: ['id'],
+      where: {
+        id: { [Op.in]: acceptedMessageIds },
+        direction: 'outbound',
+        'metadata.source': 'marketing_bulk_sends',
+        'metadata.kind': 'mass_campaign_send',
+        'metadata.test_send': { [Op.or]: [{ [Op.is]: null }, { [Op.eq]: 'false' }] },
+        'metadata.template_id': String(localTemplateId),
+        'metadata.template_name': templateName,
+        'metadata.template_language': namedTemplate.template_language,
+        'metadata.wabaId': waba,
+        'metadata.phoneNumberId': sender,
+      },
+      raw: true,
+    }) : [];
+    if (provenMessages.length) identity = {
+      [Op.or]: [
+        identity,
+        { ...namedTemplate, meta_template_id: null, message_id: { [Op.in]: provenMessages.map(message => Number(message.id)) }, source: 'message_status_webhook' },
+      ],
+    };
+  }
   const rows = await WhatsappDeliveryEvent.findAll({
     where: {
       occurred_at: { [Op.gte]: since },
       event_type: { [Op.in]: ['message_sent', 'message_delivered', 'message_read', 'message_failed'] },
-      ...(wabaId ? { waba_id: clean(wabaId) } : {}),
-      ...(phoneNumberId ? { phone_number_id: clean(phoneNumberId) } : {}),
-      ...(template?.meta_template_id
-        ? { meta_template_id: clean(template.meta_template_id) }
-        : template?.name
-          ? { template_name: clean(template.name), template_language: clean(template.language || 'es') }
-          : {}),
+      ...route,
+      ...identity,
     },
     attributes: ['id', 'message_id', 'event_type'],
     order: [['occurred_at', 'DESC']],
-    limit: 2000,
+    limit: DELIVERY_SIGNAL_LIMIT,
     raw: true,
   });
   const success = new Set();
@@ -1192,6 +1241,7 @@ module.exports = {
     computeEffectiveDispatchPolicy,
     extractCapacity,
     getBusinessPortfolioId,
+    getTemplateDeliverySignals,
     listMatchesTemplate,
   },
 };

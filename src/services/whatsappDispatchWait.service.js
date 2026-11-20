@@ -183,7 +183,8 @@ async function run(payload, _job, claim) {
       await require('./whatsappDeliveryGovernance.service').recordImmediateSendResponse({ response: result,
         clinicId: wait.intent.clinicId, wabaId: wait.intent.expectedBinding.wabaId,
         phoneNumberId: wait.intent.expectedBinding.phoneId, messageId: message.id,
-        template: { id: message.metadata.template_id || null, name: wait.intent.message.template.name,
+        template: { id: message.metadata.template_id || null, meta_template_id: message.metadata.meta_template_id || null,
+          name: wait.intent.message.template.name,
           language: wait.intent.message.template.language.code },
         ...(message.metadata.kind !== 'mass_campaign_test' && message.metadata.test_send !== true
           ? { listId: message.metadata.list_id || null, itemId: message.metadata.item_id || null } : {}) }).catch(() => null);

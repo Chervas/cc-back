@@ -218,6 +218,7 @@ router.post('/bulk-sends/campaigns/:id/prepare', marketingBulkSendsController.pr
 router.post('/bulk-sends/campaigns/:id/send', marketingBulkSendsController.startDispatch);
 router.get('/bulk-sends/campaigns/:id/review-schedule', marketingBulkSendsController.getReviewQueueSchedule);
 router.patch('/bulk-sends/campaigns/:id/review-schedule', marketingBulkSendsController.updateReviewQueueSchedule);
+router.patch('/bulk-sends/campaigns/:id/whatsapp-cadence', marketingBulkSendsController.updateBulkWhatsappCadence);
 router.post('/bulk-sends/campaigns/:id/cancel', marketingBulkSendsController.cancelDispatch);
 router.post('/bulk-sends/campaigns/:id/resume', marketingBulkSendsController.resumeDispatch);
 router.post('/bulk-sends/campaigns/:id/test-send', marketingBulkSendsController.sendTest);

@@ -39,6 +39,7 @@ const {
   markBufferedResponseExecutionsForHumanReply,
 } = require('../services/automationHumanIntervention.service');
 const {
+  applyVerifiedStoredBulkWhatsappOptOut,
   getActiveContactRestrictionsForConversations,
 } = require('../services/marketingOptOut.service');
 
@@ -2078,6 +2079,37 @@ exports.markAsRead = async (req, res) => {
   } catch (err) {
     console.error('Error markAsRead', err);
     return res.status(500).json({ error: 'Error marcando conversación como leída' });
+  }
+};
+
+exports.applyVerifiedWhatsappOptOut = async (req, res) => {
+  const conversationId = Number(req.params.id);
+  const inboundMessageId = Number(req.params.messageId);
+  const actorUserId = Number(req.userData?.userId);
+  if (![conversationId, inboundMessageId, actorUserId].every(value => Number.isSafeInteger(value) && value > 0)
+    || Object.keys(req.body || {}).length || Object.keys(req.query || {}).length) {
+    return res.status(400).json({ error: 'whatsapp_opt_out_request_invalid' });
+  }
+  try {
+    const conversation = await Conversation.findByPk(conversationId);
+    if (!conversation) return res.status(404).json({ error: 'conversation_not_found' });
+    const clinicId = Number(conversation.clinic_id);
+    const { clinicIds, isAggregateAllowed } = await getUserClinics(actorUserId);
+    if (!ensureAccess({ clinicIds, isAggregateAllowed }, clinicId)
+      || !await canReadQuickChatConversation(actorUserId, conversation)) {
+      return sendQuickChatCategoryForbidden(res);
+    }
+    for (const featureKey of ['patients.view', 'patients.sensitive.view', 'patients.edit']) {
+      if (!await canUserAccessFeature({ actorId: actorUserId, featureKey, clinicId })) {
+        return res.status(403).json({ error: 'whatsapp_opt_out_patient_permission_required' });
+      }
+    }
+    const result = await applyVerifiedStoredBulkWhatsappOptOut({ conversation, inboundMessageId, actorUserId });
+    if (!result?.applied) return res.status(409).json({ error: result?.reason || 'bulk_opt_out_not_verified' });
+    return res.json({ success: true, scope: result.scope, clinic_id: clinicId });
+  } catch (error) {
+    console.error('Error applying verified WhatsApp opt-out', { code: error?.code || 'internal_error' });
+    return res.status(500).json({ error: 'bulk_opt_out_action_failed' });
   }
 };
 

@@ -6,6 +6,7 @@ const { normalizePhoneDigits, normalizePhoneE164, getPhoneLookupCandidates } = r
 const { getIO } = require('./socket.service');
 const { emitNotificationCreated } = require('./notificationsRealtime.service');
 const reviewResponseClassification = require('./reviewResponseClassification.service');
+const bulkOptOutButtons = require('../lib/whatsapp-bulk-opt-out');
 
 const {
   Clinica,
@@ -234,6 +235,7 @@ async function createQuickChatOptOutNotice({
   triggerMessage,
   updatedItems = [],
   clinicIds = [],
+  scope = null,
   transaction = null,
 }) {
   if (!Message || !conversation?.id || !inboundMessage?.id) return null;
@@ -255,14 +257,19 @@ async function createQuickChatOptOutNotice({
     conversation_id: conversation.id,
     sender_id: null,
     direction: 'outbound',
-    content: 'Se ha dado de baja a este usuario de esta lista y futuros envíos promocionales.',
+    content: scope === 'whatsapp_channel'
+      ? 'Este contacto ha solicitado la baja de WhatsApp. Se han bloqueado nuevos envíos por este canal.'
+      : scope === 'marketing'
+        ? 'Este contacto ha solicitado la baja de las comunicaciones comerciales de WhatsApp.'
+        : 'Se ha dado de baja a este usuario de esta lista y futuros envíos promocionales.',
     message_type: 'event',
     status: 'sent',
     sent_at: inboundMessage.sent_at || inboundMessage.createdAt || new Date(),
     metadata: {
       kind: 'automation_flow_event',
-      reason: 'marketing_opt_out',
+      reason: scope === 'whatsapp_channel' ? 'communication_opt_out' : 'marketing_opt_out',
       source: 'marketing_opt_out',
+      ...(scope ? { scope } : {}),
       hidden_from_patient: true,
       inbound_message_id: inboundMessage.id,
       trigger_message_id: triggerMessage?.id || null,
@@ -271,6 +278,165 @@ async function createQuickChatOptOutNotice({
     },
   }, { transaction });
   return { message, created: true };
+}
+
+function isExplicitBulkOptOutText(text) {
+  const value = normalizeText(text).replace(/[.!¡¿?]+$/g, '').trim();
+  return ['baja', 'stop', 'unsubscribe', 'pedir baja', 'donar-me de baixa'].includes(value)
+    || /^no recibir (?:mas )?(?:avisos|notificaciones|mensajes|comunicaciones|whatsapp|publicidad)$/.test(value)
+    || /\bno (?:quiero|deseo) (?:recibir )?(?:mas )?(?:mensajes|whatsapp|comunicaciones|publicidad)\b/.test(value)
+    || /\bno (?:vull|desitjo) rebre (?:mes )?(?:missatges|whatsapp|comunicacions|publicitat)\b/.test(value)
+    || /\bno me (?:escribais|escriban|mandeis|manden) mas\b/.test(value);
+}
+
+function isLegacyBulkOptOutButton(incoming) {
+  const title = normalizeText(incoming.button?.text);
+  const payload = normalizeText(incoming.button?.payload);
+  return !!title && title === payload && (/^no recibir (?:mas )?(?:avisos|notificaciones|mensajes|comunicaciones|whatsapp|publicidad)$/.test(title)
+    || ['baja', 'pedir baja', 'darme de baja', 'donar-me de baixa', 'stop', 'unsubscribe'].includes(title));
+}
+
+async function legacyBulkOptOutButtonWasApproved(origin, incoming) {
+  const templateId = Number(origin.template_id || 0);
+  if (!Number.isSafeInteger(templateId) || templateId <= 0 || !origin.template_name || !db.WhatsappTemplate) return false;
+  const template = await db.WhatsappTemplate.findOne({
+    where: { id: templateId, name: origin.template_name, waba_id: origin.wabaId || origin.waba_id,
+      status: 'APPROVED' },
+    attributes: ['components'],
+    raw: true,
+  });
+  const title = normalizeText(incoming.button?.text);
+  return Array.isArray(template?.components) && template.components.some(component =>
+    component.type === 'BUTTONS' && Array.isArray(component.buttons)
+      && component.buttons.some(button => button.type === 'QUICK_REPLY' && normalizeText(button.text) === title));
+}
+
+async function recordBulkOptOutOnOriginItem(trigger, inboundMessage, scope, transaction, actorUserId = null) {
+  const listId = Number(trigger.metadata?.list_id || 0);
+  const itemId = Number(trigger.metadata?.item_id || 0);
+  if (!listId || !itemId || !MarketingPatientListItem || !MarketingPatientContactEvent) return false;
+  const item = await MarketingPatientListItem.findOne({
+    where: { id: itemId, list_id: listId, app_message_id: trigger.id },
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+  if (!item || item.opt_out_at) return false;
+  const optedOutAt = inboundMessage.sent_at || inboundMessage.createdAt || new Date();
+  await item.update({ opt_out_at: optedOutAt }, { transaction });
+  await MarketingPatientContactEvent.create({
+    list_id: listId,
+    item_id: itemId,
+    paciente_id: item.paciente_id || null,
+    event_type: 'marketing_opt_out',
+    channel: 'whatsapp',
+    payload: { scope, inbound_message_id: inboundMessage.id, trigger_message_id: trigger.id,
+      ...(actorUserId ? { applied_by_user_id: actorUserId } : {}) },
+    occurred_at: optedOutAt,
+  }, { transaction });
+  await refreshListCounters([listId], transaction);
+  return true;
+}
+
+async function applyBulkWhatsappOptOut({ clinicId, conversation, inboundMessage, actorUserId = null }) {
+  const incoming = inboundMessage?.metadata || {};
+  const payload = incoming.provider_type === 'button' ? cleanString(incoming.button?.payload) : '';
+  const isReservedButton = payload === bulkOptOutButtons.OPT_OUT_PAYLOAD || payload === bulkOptOutButtons.TEST_PAYLOAD;
+  const isLegacyButton = !isReservedButton && !!payload && isLegacyBulkOptOutButton(incoming);
+  const triggerWamid = cleanString(incoming.context?.id);
+  const quotedRefusal = incoming.provider_type === 'text' && !!triggerWamid && isExplicitBulkOptOutText(inboundMessage.content);
+  if (!isReservedButton && !isLegacyButton && !quotedRefusal) return null;
+  if (payload === bulkOptOutButtons.TEST_PAYLOAD) return { handled: true, applied: false, reason: 'bulk_opt_out_test' };
+  const unresolved = () => ({ handled: true, applied: false, reason: 'bulk_opt_out_context_unverified' });
+  if (!MarketingContactOptOut || !Message || Number(conversation?.clinic_id) !== Number(clinicId)
+    || conversation.channel !== 'whatsapp' || inboundMessage?.direction !== 'inbound'
+    || !triggerWamid || !incoming.phone_number_id || !incoming.waba_id) return unresolved();
+
+  const identity = require('./whatsappContactIdentity.service');
+  const conversationIds = await identity.windowMemberIds(conversation);
+  const messages = await Message.findAll({
+    where: {
+      conversation_id: { [Op.in]: conversationIds },
+      direction: 'outbound',
+      message_type: 'template',
+      [Op.and]: [Sequelize.where(Sequelize.json('metadata.wamid'), triggerWamid)],
+    },
+    limit: 2,
+  });
+  const trigger = messages.length === 1 ? messages[0] : null;
+  const origin = trigger?.metadata || {};
+  if (origin.source !== 'marketing_bulk_sends'
+    || String(origin.phoneNumberId || origin.phone_number_id) !== String(incoming.phone_number_id)
+    || String(origin.wabaId || origin.waba_id) !== String(incoming.waba_id)) return unresolved();
+  if (origin.kind === 'mass_campaign_test') return { handled: true, applied: false, reason: 'bulk_opt_out_test' };
+  if (origin.kind !== 'mass_campaign_send'
+    || origin.dispatch_context === 'review_request' || origin.dispatch_context === 'welcome') return unresolved();
+  if (isReservedButton && !Array.isArray(origin.template_components)) return unresolved();
+  if (isReservedButton && !origin.template_components.some(component => component.type === 'button'
+    && component.sub_type === 'quick_reply'
+    && component.parameters?.some(parameter => parameter.type === 'payload' && parameter.payload === payload))) return unresolved();
+  const scope = bulkOptOutButtons.scopeForCategory(origin.template_category);
+  if (!scope) return unresolved();
+  if (isLegacyButton) {
+    const explicitlyMarketing = /\bpublicidad\b/.test(normalizeText(incoming.button?.text));
+    if ((scope !== 'marketing' && explicitlyMarketing) || !await legacyBulkOptOutButtonWasApproved(origin, incoming)) {
+      return unresolved();
+    }
+  }
+
+  if (require('../lib/whatsapp-contact-identity').parseContact(conversation.contact_id)) {
+    const result = await identity.restrict({ conversation, inboundMessage, scope: scope === 'whatsapp_channel' ? 'all' : 'marketing' });
+    if (!result.applied) return unresolved();
+    await db.sequelize.transaction(transaction => recordBulkOptOutOnOriginItem(trigger, inboundMessage, scope, transaction, actorUserId));
+    return { ...result, scope, handled: true, trigger_message_id: trigger.id };
+  }
+  const normalized = normalizePhone(conversation.contact_id);
+  const recipient = normalizePhone(origin.recipient);
+  if (!normalized.phoneDigits || normalized.phoneDigits !== recipient.phoneDigits) return unresolved();
+  const clinicIds = scope === 'marketing' ? await getClinicIdsForMarketingOptOut(clinicId) : [Number(clinicId)];
+  const result = await db.sequelize.transaction(async transaction => {
+    const record = await upsertOptOutRecord({
+      clinicId, clinicIds, patientId: conversation.patient_id || null, phone: normalized.phone,
+      phoneDigits: normalized.phoneDigits, inboundMessage, triggerMessage: trigger, scope,
+      source: 'whatsapp_bulk_opt_out', transaction,
+    });
+    const updatedItem = await recordBulkOptOutOnOriginItem(trigger, inboundMessage, scope, transaction, actorUserId);
+    const notice = await createQuickChatOptOutNotice({
+      conversation, inboundMessage, triggerMessage: trigger, clinicIds, scope, transaction,
+    });
+    if (actorUserId && notice?.created) await notice.message.update({
+      metadata: { ...notice.message.metadata, applied_by_user_id: actorUserId },
+    }, { transaction });
+    return { record, notice, updatedItem };
+  });
+  if (result.notice?.created) emitQuickChatInternalNotice(conversation, result.notice.message);
+  return { handled: true, applied: true, scope, record_id: result.record.id,
+    clinic_ids: clinicIds, trigger_message_id: trigger.id, updated_items: result.updatedItem ? 1 : 0 };
+}
+
+async function applyVerifiedStoredBulkWhatsappOptOut({ conversation, inboundMessageId, actorUserId }) {
+  const clinicId = Number(conversation.clinic_id);
+  if (!clinicId || conversation.channel !== 'whatsapp' || conversation.patient_id
+    || require('../lib/whatsapp-contact-identity').parseContact(conversation.contact_id)) {
+    return { applied: false, reason: 'bulk_opt_out_requires_unlinked_phone' };
+  }
+  const [proof] = await db.sequelize.query(`
+    SELECT m.id
+    FROM Messages m
+    JOIN WhatsappInboxMessageKeys k ON k.message_id = m.id
+    JOIN WhatsappInboxImports i ON i.receipt = JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.inbox_receipt'))
+      AND i.clinic_id = :clinicId AND i.phone_id = JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.phone_number_id'))
+    WHERE m.id = :inboundMessageId AND m.conversation_id = :conversationId AND m.direction = 'inbound'
+      AND JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.provider_type')) = 'button'
+      AND JSON_EXTRACT(m.metadata, '$.passive_recovery') = CAST('true' AS JSON)
+      AND JSON_EXTRACT(m.metadata, '$.historical') = CAST('false' AS JSON)
+      AND COALESCE(JSON_EXTRACT(m.metadata, '$.recovery_without_automation'), CAST('false' AS JSON)) = CAST('false' AS JSON)
+    LIMIT 2
+  `, { replacements: { inboundMessageId, conversationId: conversation.id, clinicId } });
+  if (proof.length !== 1) return { applied: false, reason: 'bulk_opt_out_provider_receipt_required' };
+  const inboundMessage = await Message.findOne({ where: {
+    id: inboundMessageId, conversation_id: conversation.id, direction: 'inbound',
+  } });
+  return inboundMessage ? await applyBulkWhatsappOptOut({ clinicId, conversation, inboundMessage, actorUserId }) : null;
 }
 
 async function upsertOptOutRecord({
@@ -289,7 +455,7 @@ async function upsertOptOutRecord({
   const targetClinicIds = Array.from(new Set((clinicIds || [clinicId]).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
   const records = [];
   for (const targetClinicId of targetClinicIds) {
-    const [record] = await MarketingContactOptOut.findOrCreate({
+    const [record, created] = await MarketingContactOptOut.findOrCreate({
       where: {
         clinica_id: targetClinicId,
         phone_digits: phoneDigits,
@@ -312,6 +478,10 @@ async function upsertOptOutRecord({
       transaction,
     });
 
+    if (source === 'whatsapp_bulk_opt_out' && (created || Number(record.inbound_message_id) === Number(inboundMessage?.id))) {
+      records.push(record);
+      continue;
+    }
     const patch = {
       paciente_id: record.paciente_id || patientId || null,
       phone: record.phone || phone,
@@ -871,6 +1041,23 @@ async function getActiveOptOutSetsForScope(scope, transaction = null) {
   };
 }
 
+async function getBlockedWhatsappNumbersForScope(scope, transaction = null) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!MarketingContactOptOut || !clinicIds.length) return new Set();
+  const rows = await MarketingContactOptOut.findAll({
+    where: {
+      clinica_id: { [Op.in]: clinicIds },
+      channel: 'whatsapp',
+      scope: 'whatsapp_channel',
+      status: 'active',
+    },
+    attributes: ['clinica_id', 'phone_digits'],
+    raw: true,
+    transaction,
+  });
+  return new Set(rows.map(row => `${row.clinica_id}:${row.phone_digits}`));
+}
+
 async function assertAutomationCommunicationAllowed({ clinicId, patientId = null, phone, scope = 'care' }) {
   if (!MarketingContactOptOut) return;
   const normalizedClinicId = Number(clinicId || 0);
@@ -891,25 +1078,34 @@ async function assertAutomationCommunicationAllowed({ clinicId, patientId = null
   if (normalizedScope === 'marketing') await require('../lib/bs-privacy-commercial-preferences').assertCommercialAllowed({
     db, clinicIds: [normalizedClinicId], patientIds: normalizedPatientId > 0 ? [normalizedPatientId] : null, phone,
   });
+  await assertStoredCommunicationAllowed({ clinicId: normalizedClinicId, patientId: normalizedPatientId,
+    phone, scope: normalizedScope, includeChannel: true });
+}
+
+async function assertStoredCommunicationAllowed({ clinicId, patientId, phone, scope, includeChannel = false }) {
+  if (!MarketingContactOptOut) return;
+  const phoneDigits = normalizePhoneDigits(phone);
   const identityWhere = [];
-  if (normalizedPatientId > 0) identityWhere.push({ paciente_id: normalizedPatientId });
+  if (patientId > 0) identityWhere.push({ paciente_id: patientId });
   if (phoneDigits) identityWhere.push({ phone_digits: phoneDigits });
+  if (!clinicId || !identityWhere.length) return;
   const restriction = await MarketingContactOptOut.findOne({
     where: {
-      clinica_id: normalizedClinicId,
+      clinica_id: clinicId,
       channel: 'whatsapp',
       status: 'active',
-      [Op.or]: [{ scope: normalizedScope, [Op.or]: identityWhere },
-        ...(phoneDigits ? [{ scope: 'whatsapp_channel', phone_digits: phoneDigits }] : [])],
+      [Op.or]: [{ scope, [Op.or]: identityWhere },
+        ...(includeChannel && phoneDigits ? [{ scope: 'whatsapp_channel', phone_digits: phoneDigits }] : [])],
     },
     order: [['updated_at', 'DESC']],
   });
   if (!restriction) return;
 
-  const error = new Error(`automation_${normalizedScope}_communications_restricted`);
+  const error = new Error(`automation_${scope}_communications_restricted`);
   error.code = 'AUTOMATION_COMMUNICATIONS_RESTRICTED';
   error.status = 409;
-  error.details = { restriction_id: restriction.id, scope: normalizedScope };
+  error.retryable = false;
+  error.details = { restriction_id: restriction.id, scope: restriction.scope || scope };
   throw error;
 }
 
@@ -1109,18 +1305,23 @@ async function resolveWhatsappNumberRestrictionAfterChange({ patientId, previous
 }
 
 module.exports = {
+  applyBulkWhatsappOptOut,
+  applyVerifiedStoredBulkWhatsappOptOut,
   applyCommunicationOptOut,
   applyInboundContactClassification,
   applyInboundOptOutIfNeeded,
   assertAutomationCommunicationAllowed,
+  assertStoredCommunicationAllowed,
   getActiveContactRestrictionsForConversations,
   getActiveContactRestrictionsForPatient,
   getActiveOptOutSetsForScope,
+  getBlockedWhatsappNumbersForScope,
   includesOptOutKeyword,
   isMarketingOutboundMessage,
   isContactOptedOut,
   resolveWhatsappNumberRestrictionAfterChange,
   __testing: {
+    isExplicitBulkOptOutText,
     isMarketingOutboundMessage,
   },
 };

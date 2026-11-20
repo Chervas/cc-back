@@ -598,6 +598,21 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
   try {
     const clinicId = positiveInt(conversation.clinic_id || claim.clinic_id);
     const channel = normalizeChannel(conversation.channel || claim.channel);
+    if (channel === 'whatsapp') {
+      const bulkOptOut = await marketingOptOutService.applyBulkWhatsappOptOut({ clinicId, conversation, inboundMessage: message });
+      if (bulkOptOut?.handled) {
+        await message.update({ metadata: { ...(message.metadata || {}), bulk_whatsapp_opt_out: bulkOptOut } });
+        if (bulkOptOut.reason === 'bulk_opt_out_context_unverified') {
+          await conversationAutomationState.setState({ clinicId, conversationId: conversation.id,
+            sourceMessageId: message.id, stage: 'review', status: 'review', needsResponse: true,
+            manualActionRequired: true, failureCode: bulkOptOut.reason });
+        }
+        await markClaimCompleted(claim, 'marketing_opt_out', bulkOptOut.record_id || null, {
+          scope: bulkOptOut.scope || null, reason: bulkOptOut.reason || null,
+        });
+        return { status: 'completed', result: { claim_id: claim.id, owner: 'marketing_opt_out' } };
+      }
+    }
     const programConfirmation = await require('./patientProgramBookingNotice.service').current().inbound({ message, conversation });
     if (programConfirmation.handled) {
       await markClaimCompleted(claim, 'patient_program_booking_notice', programConfirmation.request_event_id || null,

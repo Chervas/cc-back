@@ -206,10 +206,14 @@ test('real Utility custom-template creation converts UI named body and persists 
     bodyText: 'Hola {{nombre}}, tu fecha especial es {{fechaultimotratamiento}}.',
     variables: [{ name: 'nombre', example: 'Ejemplo' }, { name: 'fechaultimotratamiento', example: '01/01/2000' }],
     createdByUserId: 90001,
+    bulkOptOut: true,
   });
   assert.equal(result.submitted, true); assert.equal(released, 1);
   assert.equal(submissions[0].template.category, 'UTILITY');
   assert.equal(submissions[0].template.components[0].text, 'Hola {{1}}, tu fecha especial es {{2}}.');
+  assert.deepEqual(submissions[0].template.components[1], {
+    type: 'BUTTONS', buttons: [{ type: 'QUICK_REPLY', text: 'Pedir baja' }],
+  });
   assert.deepEqual(initialRows[0].variables.map(variable => [variable.index, variable.name]), [
     [1, 'nombre'], [2, 'fechaultimotratamiento'],
   ]);
@@ -227,5 +231,8 @@ test('real Utility custom-template creation converts UI named body and persists 
     [{ type: 'text', text: 'Ana' }, { type: 'text', text: '03/12/2026' }],
     [{ type: 'text', text: 'Beatriz' }, { type: 'text', text: '29/02/2028' }],
   ]);
+  const expectedButton = { type: 'button', sub_type: 'quick_reply', index: '0',
+    parameters: [{ type: 'payload', payload: require('../../lib/whatsapp-bulk-opt-out').TEST_PAYLOAD }] };
+  assert.deepEqual(providerPayloads.map(payload => payload.template.components[1]), [expectedButton, expectedButton]);
   assert(items.every(item => !item.last_visit_at));
 });

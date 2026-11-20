@@ -684,6 +684,9 @@ class WhatsAppService {
         }
         await require('../lib/bs-privacy-commercial-preferences').assertCommercialAllowed({ db, clinicIds: [clinicId],
             patientIds: patientId ? [patientId] : null, phone: payload.to });
+        await require('./marketingOptOut.service').assertStoredCommunicationAllowed({
+            clinicId, patientId, phone: payload.to, scope: 'marketing',
+        });
     }
 
     async dispatchMessage(payload, clinicConfig = {}, healthContext = {}) {

@@ -4,6 +4,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const { Op } = require('sequelize');
 const db = require('../../../models');
 const {
   HOLD_STATUS,
@@ -16,6 +17,88 @@ const {
   __testing,
 } = require('../../services/whatsappDeliveryGovernance.service');
 const marketingBulkSendsService = require('../../services/marketingBulkSends.service');
+
+function matchesDeliveryWhere(row, where) {
+  return Reflect.ownKeys(where).every(key => {
+    const expected = where[key];
+    if (key === Op.or) return expected.some(option => matchesDeliveryWhere(row, option));
+    const raw = String(key).split('.').reduce((object, member) => object?.[member], row);
+    const value = raw != null && String(key).startsWith('metadata.') ? String(raw) : raw;
+    if (expected == null) return value == null;
+    if (typeof expected !== 'object') return value === expected;
+    return Reflect.ownKeys(expected).every(operation => {
+      const operand = expected[operation];
+      if (operation === Op.in) return operand.includes(value);
+      if (operation === Op.gt) return value > operand;
+      if (operation === Op.gte) return value >= operand;
+      if (operation === Op.is) return value == null && operand === null;
+      if (operation === Op.eq) return value === operand;
+      if (operation === Op.or) return operand.some(option => matchesDeliveryWhere({ value }, { value: option }));
+      return false;
+    });
+  });
+}
+
+test('historical warmup counts only final receipts with exact Meta acceptance and persisted bulk message identity', async t => {
+  const template = { id: 6556, meta_template_id: 'meta-template-fixture', name: 'template_fixture', language: 'es' };
+  const scope = { wabaId: 'waba-fixture', phoneNumberId: 'sender-fixture', template };
+  const route = {
+    waba_id: scope.wabaId, phone_number_id: scope.phoneNumberId,
+    template_name: template.name, template_language: template.language,
+  };
+  const accepted = (message_id, changes = {}) => ({
+    ...route, message_id, list_id: 1, item_id: message_id, meta_template_id: template.meta_template_id,
+    event_type: 'message_accepted_by_meta', source: 'messages_api_response', occurred_at: new Date(), ...changes,
+  });
+  const receipt = (message_id, changes = {}) => ({
+    ...route, message_id, id: message_id, meta_template_id: null, event_type: 'message_delivered',
+    source: 'message_status_webhook', occurred_at: new Date(), ...changes,
+  });
+  const message = (id, changes = {}) => ({
+    id, direction: 'outbound', metadata: {
+      source: 'marketing_bulk_sends', kind: 'mass_campaign_send', template_id: template.id,
+      template_name: template.name, template_language: template.language,
+      wabaId: scope.wabaId, phoneNumberId: scope.phoneNumberId, ...changes,
+    },
+  });
+  const messages = [
+    message(2), message(3), message(4), message(5, { kind: 'mass_campaign_test' }),
+    message(6, { template_id: 6555 }), message(7), message(8), message(9),
+    message(10, { wabaId: 'other-waba' }), message(11, { template_language: 'ca' }),
+    message(13, { test_send: true }),
+  ];
+  const events = [
+    receipt(1, { meta_template_id: template.meta_template_id }),
+    receipt(1, { meta_template_id: template.meta_template_id, event_type: 'message_read' }),
+    accepted(2), receipt(2),
+    accepted(3, { meta_template_id: 'different-version' }), receipt(3),
+    accepted(4, { phone_number_id: 'different-sender' }), receipt(4),
+    accepted(5), receipt(5), accepted(6), receipt(6),
+    accepted(7), receipt(7), receipt(7, { event_type: 'message_failed' }),
+    accepted(8), receipt(8, { meta_template_id: 'different-version' }),
+    accepted(9), receipt(9, { template_name: 'different-template' }),
+    accepted(10), receipt(10), accepted(11), receipt(11),
+    receipt(12), // A matching legacy name alone proves nothing.
+    accepted(13), receipt(13),
+  ];
+  t.mock.method(db.WhatsappDeliveryEvent, 'findAll', async query => {
+    assert.strictEqual(query.limit, 2000);
+    return events.filter(row => matchesDeliveryWhere(row, query.where));
+  });
+  t.mock.method(db.Message, 'findAll', async query => {
+    assert.deepStrictEqual(query.attributes, ['id']);
+    return messages.filter(row => matchesDeliveryWhere(row, query.where));
+  });
+  assert.deepStrictEqual(await __testing.getTemplateDeliverySignals(scope), { successful: 2, failed: 1 });
+  assert.deepStrictEqual(await __testing.getTemplateDeliverySignals({ ...scope, phoneNumberId: null }),
+    { successful: 1, failed: 0 }, 'without an exact sender, legacy receipts stay excluded');
+});
+
+test('bulk dispatch persists the remote template identity before transport', () => {
+  const service = fs.readFileSync(path.resolve(__dirname, '../../services/marketingBulkSends.service.js'), 'utf8');
+  const send = service.slice(service.indexOf('async function sendDispatchItem('), service.indexOf('async function runDispatchJob('));
+  assert.match(send, /await Message\.create\([\s\S]*meta_template_id: template\.meta_template_id \|\| null[\s\S]*await whatsappService\.sendMessage/);
+});
 
 assert.strictEqual(HOLD_STATUS, 'held_for_quality_assessment');
 assert.strictEqual(parseCapacity('TIER_250'), 250);
