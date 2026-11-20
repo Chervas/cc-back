@@ -1,0 +1,82 @@
+'use strict';
+const assert = require('node:assert/strict');
+const http = require('node:http');
+const { DataTypes, QueryTypes } = require('sequelize');
+const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
+const { createWorkspace } = require('../../services/dpdWorkspace.service');
+const { compare, snapshot } = require('../../lib/securitySchemaContract');
+const contract = require('../../../ops/security/schema-contract.json');
+
+withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackServer }) => {
+  const migration = require('../../../migrations/20261120090000-create-dpd-workspace');
+  await migration.up(sql.getQueryInterface(), DataTypes);
+  models.DpdWorkspaceEntry = require('../../../models/dpdworkspaceentry')(sql,DataTypes);
+  const actual = await snapshot((statement) => sql.query(statement,{type:QueryTypes.SELECT}));
+  assert.equal(compare(actual,{defaults:contract.defaults,tables:{DpdWorkspaceEntries:contract.tables.DpdWorkspaceEntries},migrations:[]}).compatible,true);
+  let clock = new Date();
+  const service = createWorkspace(models.DpdWorkspaceEntry, () => clock);
+  const express = require('express');
+  const app = express();
+  app.use(express.json(), require('cookie-parser')());
+  app.use('/api/dpd', require('../../routes/dpdWorkspace.routes').createRouter(service,(req,res,next) => {
+    if (!req.headers['test-user']) return res.sendStatus(401);
+    req.userData={userId:Number(req.headers['test-user'])};
+    if (req.headers.delegated) req.authDelegation={};
+    next();
+  }));
+  const server = http.createServer(app);
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  registerOwnedLoopbackServer(server);
+  const req = (path,method='GET',body,headers={}) => new Promise((resolve,reject)=>{
+    const request=http.request({host:'127.0.0.1',port:server.address().port,path:'/api/dpd'+path,method,headers:{'content-type':'application/json',...headers}},res=>{
+      let text='';res.on('data',d=>text+=d);res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,body:res.headers['content-type']?.includes('json')?JSON.parse(text):text}));
+    });
+    request.on('error',reject);request.end(body && JSON.stringify(body));
+  });
+  const admin={'test-user':'1'};
+  try {
+    assert.equal((await req('/')).status,401);
+    assert.equal((await req('/','GET',null,{'test-user':'99'})).status,403);
+    assert.equal((await req('/','GET',null,{...admin,delegated:'yes'})).status,403);
+    const d=(await req('/','GET',null,admin)).body;
+    assert.deepEqual([d.controls.length,d.tasks.length,d.milestones.length,d.archive.length],[108,171,40,153]);
+    const put=(key,revision,value)=>req('/entries/'+key,'PUT',{revision,value},admin);
+    assert.equal((await put('guest-access',0,{})).status,400);
+    assert.equal((await put('field-clinica',0,'Confidencial')).status,400);
+    assert.equal((await put('contract',0,d.blocks)).status,200);
+    const edits=await Promise.all([put('field-firmante',0,'Dirección'),put('field-firmante',0,'Apoderada')]);
+    assert.deepEqual(edits.map(e=>e.status).sort(),[200,409]);
+    assert.equal((await put('review-M2-01',0,{status:'Validado por el DPD',owner:'DPD',note:''})).status,400);
+    assert.equal((await put('review-M2-01',0,{status:'Parcial',owner:'Dirección',note:'Referencia de prueba'})).status,200);
+    const email='test@example.invalid';
+    const invite=async revision=>(await req('/invitation','POST',{revision,email},admin)).body.invitation;
+    const open=(invitation,address=email)=>req('/guest/open','POST',{invitation,email:address});
+    const first=await invite(0);
+    assert.equal((await open(first,'another@example.invalid')).status,403);
+    const opened=await open(first);
+    assert.equal(opened.status,204);
+    assert.equal((await open(first)).status,403);
+    const set=opened.headers['set-cookie'][0];
+    for(const flag of ['Secure','HttpOnly','SameSite=Strict','Path=/api/dpd/guest']) assert.ok(set.includes(flag));
+    const headers={cookie:set.split(';')[0]};
+    const guest=(await req('/guest','GET',null,headers));
+    assert.equal(guest.status,200);assert.equal(guest.headers['cache-control'],'private, no-store');
+    assert.equal(guest.body.changes['review-M2-01'].value.status,'Parcial');
+    assert.equal(guest.body.controls[0].verdict,'Incumplimiento');
+    assert.ok(!guest.body.guest && !guest.body.changes['guest-access']);
+    assert.equal((await req('/','GET',null,headers)).status,401);
+    assert.equal((await req('/entries/contract','PUT',{revision:1,value:d.blocks},headers)).status,401);
+    const rows=JSON.stringify(await models.DpdWorkspaceEntry.findAll({raw:true}));
+    assert.ok(!rows.includes(first) && !rows.includes(headers.cookie.split('=')[1]));
+    const second=await invite(2);
+    assert.equal((await req('/guest','GET',null,headers)).status,403);
+    clock=new Date(clock.getTime()+25*3600000);
+    assert.equal((await open(second)).status,403);
+    const third=await invite(3);
+    const last=await open(third);
+    const current={cookie:last.headers['set-cookie'][0].split(';')[0]};
+    assert.equal((await req('/invitation/revoke','POST',{revision:5},admin)).status,200);
+    assert.equal((await req('/guest','GET',null,current)).status,403);
+    report.checks.push('MySQL schema and corpus counts','global admin, ordinary, anonymous and delegated access','concurrent edit conflict and evidence validation','single-use invitation, private cookie, expiry, revocation and read-only guest');
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+}).catch(e=>{ console.error(e.stack); process.exitCode=1; });

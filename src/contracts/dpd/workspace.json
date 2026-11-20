@@ -1,0 +1,3563 @@
+{
+  "source": "El informe v1.1 analiza la información disponible a 31/08/2026. Se conservan sus 108 dictámenes por control y sus 37 hallazgos (9 mayores, 20 menores y 8 observaciones). El plan de acción v1.4 desarrolla 37 hitos en 153 acciones: 64 de La Voz/terceros, 56 de Techlegal y 33 compartidas. La planificación v1.0 de 20/10 asigna un ejecutor principal y contiene 40 hitos y 171 tareas: 75 de La Voz y 96 de Techlegal. Añade H38–H40 (16 tareas) y amplía H21 de cuatro a seis. Los mismos identificadores de tarea pueden tener contenido distinto entre versiones, en particular H21. Las fuentes se conservan por separado.\n\nLa planificación de octubre organiza esta revisión. Q2, Q3 y Q4 corresponden al ciclo de servicio 2026/2027. «Cliente» en los PDF de Techlegal es La Voz Medios Digitales, cliente del DPD. Cada clínica es responsable de sus propias decisiones asistenciales, permisos comerciales e instrucciones. Techlegal conserva la validación final de cada hito.\n\nLa columna de dictamen reproduce la auditoría. Las apreciaciones de noviembre citan archivos y recorridos, sin pruebas de producción nuevas ni inspección de pólizas, contratos de proveedor o expedientes internos. «Sin evidencia suficiente» significa que el material examinado no permite certificar la tarea. «Brecha identificada» señala evidencia concreta contraria en el alcance indicado. «Condicionado» identifica un supuesto que puede no activarse. Los dictámenes «No aplica» conservan la motivación y el alcance de la auditoría.\n\nReferencias internas: manual central del frontend, dev e5666678c; backend dev f31436a7. Los números 04, 07, 14.6, 16, 18.15, 19, 20.x, 31–33, 35 y 39 designan capítulos del manual. Los nombres de los documentos se usan como referencias portables para compartir esta matriz.",
+  "blocks": [
+    {
+      "title": "Contrato de encargado del tratamiento – Plataforma Clínica Clic",
+      "text": ""
+    },
+    {
+      "title": "Reunidos",
+      "text": "De una parte, {{clinica}}, con NIF {{nif}} y domicilio en {{domicilio}}, representada por D./Dña. {{representante}},(en adelante, el «RESPONSABLE» o la «CLÍNICA»).\n\nDe otra parte, LA VOZ MEDIOS DIGITALES, S.L., titular de la plataforma Clínica Clic, con NIF B13601737 y domicilio en Avd. Andalucía nº49. 13004 Ciudad Real , representada por D./Dña. {{firmante}},en adelante, el «ENCARGADO»).\n\nEl RESPONSABLE y el ENCARGADO (conjuntamente, las «Partes») se reconocen capacidad suficiente para suscribir el presente contrato y"
+    },
+    {
+      "title": "Exponen",
+      "text": "I. Que el ENCARGADO es titular y explota la plataforma Clínica Clic (en adelante, la «Plataforma»), un software en modalidad de servicio (SaaS) para la gestión integral de clínicas que incluye, entre otras, funcionalidades de agenda, historia clínica, gestión documental, firma de consentimientos, comunicaciones con pacientes, captación de pacientes, marketing, analítica, creación y alojamiento de páginas web, automatizaciones y funcionalidades basadas en inteligencia artificial.\n\nII. Que el RESPONSABLE ha contratado el uso de la Plataforma conforme a las Condiciones de uso de Clínica Clic aceptadas en el proceso de alta (en adelante, el «Contrato de Servicios») y, para su prestación, el ENCARGADO necesita tratar por cuenta del RESPONSABLE datos personales de los que este es responsable, incluidos datos relativos a la salud.\n\nIII. Que el artículo 28.3 del Reglamento (UE) 2016/679, General de Protección de Datos («RGPD») y el artículo 33 de la Ley Orgánica 3/2018, de Protección de Datos Personales y garantía de los derechos digitales («LOPDGDD») exigen que el tratamiento por cuenta de terceros se rija por un contrato que vincule al encargado con el responsable.\n\nPor ello, las Partes suscriben el presente contrato de encargo del tratamiento (en adelante, el «Contrato»), que se regirá por las siguientes"
+    },
+    {
+      "title": "Cláusulas",
+      "text": ""
+    },
+    {
+      "title": "1. Objeto y ámbito",
+      "text": "1.1. El presente Contrato regula las condiciones en que el ENCARGADO tratará datos personales por cuenta del RESPONSABLE con ocasión de la prestación de los servicios de la Plataforma previstos en el Contrato de Servicios.\n\n1.2. La descripción del tratamiento (naturaleza, finalidades, categorías de datos e interesados, operaciones y funcionalidades afectadas) figura en el Anexo I. Las medidas de seguridad figuran en el Anexo II; los subencargados autorizados y las integraciones con terceros, en el Anexo III\n\n1.3. Quedan fuera del ámbito de este Contrato los tratamientos en los que el ENCARGADO actúe como responsable.\n\n1.4. En caso de contradicción entre el Contrato de Servicios y este Contrato en materia de protección de datos, prevalecerá lo dispuesto en este Contrato."
+    },
+    {
+      "title": "2. Duración",
+      "text": "El Contrato entra en vigor en la fecha de su aceptación o firma y permanecerá vigente mientras lo esté el Contrato de Servicios. Las obligaciones que por su naturaleza deban subsistir (confidencialidad, devolución o supresión de datos, conservación bloqueada y responsabilidad) continuarán vigentes tras su terminación."
+    },
+    {
+      "title": "3. Obligaciones y funciones del RESPONSABLE",
+      "text": "3.1. Corresponde al RESPONSABLE, como titular de los tratamientos:\n\na) Determinar las finalidades del tratamiento y disponer de base jurídica suficiente para cada una de ellas, incluida, cuando trate datos de salud, una circunstancia que lo habilite conforme al artículo 9.2 del RGPD.\n\nb) Informar a los pacientes y demás interesados conforme a los artículos 13 y 14 del RGPD y, cuando sea necesario, recabar y conservar su consentimiento. El consentimiento informado asistencial y el consentimiento para comunicaciones comerciales deberán recabarse de forma separada. Los modelos de cláusulas informativas, consentimientos u otros documentos que, en su caso, el ENCARGADO facilite a través de la Plataforma se ofrecen únicamente a modo de ejemplo, no tienen el carácter de asesoramiento jurídico y su revisión, adaptación y uso son responsabilidad exclusiva del RESPONSABLE, sin que el ENCARGADO asuma responsabilidad alguna por ellos.\n\nc) Garantizar la licitud y exactitud de los datos que incorpore a la Plataforma, incluidas las importaciones de pacientes y contactos, y conservar la acreditación del origen de los datos y de los permisos de comunicación comercial de cada contacto.\n\nd) Configurar los perfiles y permisos de las personas a las que dé acceso a la Plataforma (en adelante, los «Usuarios autorizados») conforme a los principios de minimización y necesidad de conocer, respetando como mínimo los criterios del Anexo IV, y dar de baja sin demora a los usuarios que dejen de prestar servicios en la clínica.\n\ne) Velar por que sus Usuarios autorizados estén sujetos a deber de confidencialidad, custodien sus credenciales y utilicen la Plataforma conforme a este Contrato.\n\nf) Decidir y responder de las campañas y comunicaciones que realice a través de la Plataforma (reactivación de pacientes, envíos masivos, solicitud de reseñas, recordatorios u otras), de sus criterios de segmentación y del cumplimiento del artículo 21 de la Ley 34/2002, de servicios de la sociedad de la información y de comercio electrónico («LSSI»). Las campañas que utilicen como criterio de selección datos de salud (por ejemplo, el tratamiento recibido) solo podrán activarse cuando el RESPONSABLE disponga de base jurídica y, en su caso, del consentimiento explícito del paciente para esa finalidad.\n\ng) Responder de los textos legales (aviso legal, política de privacidad, política de cookies y cláusulas informativas) y del cumplimiento normativo de las páginas web, landing pages, formularios, widgets y contenidos creados o servidos mediante la Plataforma, incluida la decisión sobre las cookies y tecnologías de seguimiento que se utilicen y la configuración del sistema de gestión del consentimiento, conforme al artículo 22.2 de la LSSI. Los textos que, en su caso, el ENCARGADO facilite se ofrecen únicamente a modo de ejemplo, no tienen el carácter de asesoramiento jurídico y el ENCARGADO no asume responsabilidad alguna por ellos.\n\nh) Realizar, cuando proceda, la evaluación de impacto relativa a la protección de datos y la consulta previa a la autoridad de control. El ENCARGADO podrá facilitar un modelo de evaluación de impacto únicamente a modo de ejemplo; su ejecución, adaptación y contenido son responsabilidad exclusiva del RESPONSABLE.\n\ni) Atender los derechos de los interesados y, en su caso, notificar las violaciones de seguridad a la autoridad de control y comunicarlas a los interesados.\n\nj) Supervisar el tratamiento, incluida la realización de las inspecciones y auditorías previstas en la cláusula 13.\n\n3.2. Salvo que se contrate expresamente, los servicios del ENCARGADO no incluyen la redacción de textos legales ni el asesoramiento jurídico al RESPONSABLE, sin perjuicio del deber de advertencia previsto en la cláusula 4.3.\n\n3.3. Cuando el RESPONSABLE dé acceso a la Plataforma a una agencia de marketing u otro tercero que le preste servicios, este accederá con el perfil de agencia, que no permite visualizar datos de salud ni identificadores innecesarios de pacientes. La relación entre el RESPONSABLE y dicho tercero, incluido el contrato de encargo que en su caso proceda, es ajena al ENCARGADO."
+    },
+    {
+      "title": "4. Obligaciones del ENCARGADO. Instrucciones documentadas",
+      "text": "4.1. El ENCARGADO tratará los datos personales únicamente siguiendo instrucciones documentadas del RESPONSABLE, incluidas las relativas a transferencias internacionales, y únicamente para prestar los servicios de la Plataforma. Si el Derecho de la Unión o de los Estados miembros le obliga a realizar otro tratamiento, informará previamente al RESPONSABLE de esa exigencia legal, salvo que tal Derecho lo prohíba por razones importantes de interés público.\n\n4.2. Tienen la consideración de instrucciones documentadas: este Contrato y el Contrato de Servicios, la configuración de la Plataforma que realice el RESPONSABLE o sus Usuarios autorizados (alta de usuarios y permisos, activación de funcionalidades, integraciones, automatizaciones y campañas); y las comunicaciones escritas, incluido el correo electrónico, entre las Partes.\n\n4.3. Deber de advertencia. Si, en opinión del ENCARGADO, una instrucción infringe el RGPD u otras disposiciones de protección de datos, informará inmediatamente al RESPONSABLE y podrá suspender su ejecución hasta que este la confirme, modifique o retire por escrito, sin que la suspensión constituya incumplimiento contractual.\n\n4.4. El ENCARGADO no comunicará los datos a terceros, salvo a los subencargados autorizados conforme a la cláusula 9 o cuando medie instrucción expresa del RESPONSABLE, incluida la activación de una Integración."
+    },
+    {
+      "title": "5. Confidencialidad y personal autorizado",
+      "text": "5.1. El ENCARGADO garantiza que las personas autorizadas para tratar los datos, incluidos empleados y profesionales externos, se han comprometido por escrito a respetar la confidencialidad, han recibido la formación necesaria en protección de datos y seguridad de la información y solo acceden a los datos en la medida necesaria para sus funciones. El deber de confidencialidad subsistirá tras la finalización de su relación con el ENCARGADO.\n\n5.2. Accesos de soporte. El personal del ENCARGADO solo accederá a historias clínicas o a documentación sanitaria concreta cuando resulte imprescindible para atender una incidencia o solicitud del RESPONSABLE, o para garantizar la seguridad y continuidad del servicio. Estos accesos serán temporales, se limitarán a lo necesario y quedarán registrados con indicación de la persona, la clínica, el paciente o recurso consultado, la finalidad, la operación y la fecha. Siempre que sea posible, el soporte se prestará con datos sintéticos o sin visualizar datos de salud."
+    },
+    {
+      "title": "6. Medidas de seguridad",
+      "text": "6.1. El ENCARGADO aplicará las medidas técnicas y organizativas apropiadas para garantizar un nivel de seguridad adecuado al riesgo, conforme al artículo 32 del RGPD, teniendo en cuenta que la Plataforma trata a gran escala datos relativos a la salud. Dichas medidas se describen en el Anexo II y serán revisadas periódicamente.\n\n6.2. El ENCARGADO podrá actualizar las medidas del Anexo II siempre que ello no suponga una reducción del nivel global de seguridad, e informará al RESPONSABLE de los cambios relevantes.\n\n6.3. Si, como resultado de su análisis de riesgos o de una evaluación de impacto, el RESPONSABLE considerase necesarias medidas adicionales, lo comunicará por escrito de forma motivada. Las Partes acordarán de buena fe las medidas y un plazo razonable de implantación. Si estas exceden del nivel de servicio contratado y suponen un coste adicional, el ENCARGADO presentará un presupuesto. Si no hubiera acuerdo y el ENCARGADO no pudiera garantizar un nivel de seguridad adecuado sin esas medidas, cualquiera de las Partes podrá resolver el Contrato de Servicios sin penalización."
+    },
+    {
+      "title": "7. Registro de accesos a la información clínica",
+      "text": "7.1. La Plataforma mantendrá un registro de las consultas y operaciones realizadas sobre la historia clínica y la documentación sanitaria de los pacientes (en adelante, el «Registro de accesos») que identifique el usuario, su perfil, la clínica, el paciente, el recurso afectado, la operación realizada, la fecha y hora y el resultado.\n\n7.2. El Registro de accesos estará protegido frente a su modificación o borrado no autorizados y se conservará durante un plazo mínimo de tres (3) años, o el plazo superior que establezca la normativa aplicable o indique el RESPONSABLE.\n\n7.3. El RESPONSABLE podrá consultar y exportar el Registro de accesos relativo a sus pacientes, en formato comprensible, para atender solicitudes de los interesados, investigar incidentes o realizar auditorías internas. Esta obligación tiene en cuenta el derecho de los pacientes a conocer los accesos a sus datos de salud reconocido por el Reglamento (UE) 2025/327, relativo al Espacio Europeo de Datos de Salud, y el criterio de la AEPD sobre la trazabilidad de los accesos a datos de salud."
+    },
+    {
+      "title": "8. Funcionalidades de inteligencia artificial",
+      "text": "8.1. Las funcionalidades de la Plataforma que utilizan sistemas de inteligencia artificial, su finalidad, el proveedor y los datos que se le envían se identifican en los Anexos I y III. El ENCARGADO no incorporará nuevas funcionalidades de IA que traten datos personales del RESPONSABLE sin informarle previamente, y las que traten datos de salud podrán ser desactivadas por el RESPONSABLE sin afectar a la operativa clínica esencial.\n\n8.2. El ENCARGADO:\n\na) Enviará a los proveedores de IA únicamente los datos estrictamente necesarios para cada funcionalidad.\n\nb) Configurará las cuentas de dichos proveedores de forma que los datos del RESPONSABLE no se utilicen para entrenar o mejorar sus modelos y su retención se limite al mínimo que permita el servicio.\n\nc) No utilizará los datos del RESPONSABLE para entrenar modelos propios ni de terceros.\n\n8.3. El ENCARGADO pone a disposición del RESPONSABLE herramientas de IA como parte de la Plataforma. Corresponde al RESPONSABLE decidir su activación, supervisar su uso y revisar sus resultados, incluida la supervisión humana de aquellas funcionalidades que modifiquen información del paciente (por ejemplo, el estado de una cita). Asimismo, corresponde al RESPONSABLE informar a los pacientes de que interactúan con un sistema de IA o de que un contenido ha sido generado o modificado con IA, cuando así lo exija el artículo 50 del Reglamento (UE) 2024/1689, de Inteligencia Artificial. El ENCARGADO no asumirá responsabilidad alguna por el uso que el RESPONSABLE haga de dichas herramientas ni por el cumplimiento de estas obligaciones de supervisión e información."
+    },
+    {
+      "title": "9. Subencargados",
+      "text": "9.1. Conforme al artículo 28.2 del RGPD, el RESPONSABLE otorga al ENCARGADO autorización general por escrito para recurrir a otros encargados del tratamiento (en adelante, «subencargados»). Los subencargados autorizados a la fecha del Contrato figuran en el Anexo III, que el ENCARGADO mantendrá actualizado y accesible en {{inventario}}.\n\n9.2. El ENCARGADO informará al RESPONSABLE, con una antelación mínima de treinta (30) días naturales, de cualquier incorporación o sustitución de subencargados, indicando su identidad, el servicio prestado, los datos afectados, la ubicación del tratamiento y, en su caso, el mecanismo de transferencia internacional aplicable. La comunicación se realizará conforme a la cláusula 17.\n\n9.3. Dentro de dicho plazo, el RESPONSABLE podrá oponerse por escrito y de forma motivada, por razones relacionadas con la protección de datos. En tal caso, las Partes buscarán de buena fe una alternativa (incluida la desactivación de la funcionalidad afectada para el RESPONSABLE) y, si no fuera posible, el RESPONSABLE podrá resolver el Contrato de Servicios sin penalización y con derecho al reembolso de la parte proporcional de las cantidades abonadas por adelantado. Transcurrido el plazo sin oposición, el cambio se entenderá autorizado.\n\n9.4. Cuando la sustitución de un subencargado resulte urgente por razones de seguridad o de continuidad del servicio, el ENCARGADO podrá efectuarla y la comunicará al RESPONSABLE en el plazo más breve posible, quien conservará el derecho de oposición previsto en el apartado anterior.\n\n9.5. El ENCARGADO impondrá a cada subencargado, mediante contrato u otro acto jurídico, las mismas obligaciones de protección de datos establecidas en este Contrato, con garantías suficientes conforme al artículo 28 del RGPD. Respecto de los proveedores que operan con condiciones estandarizadas, esta obligación podrá cumplirse mediante la aceptación de su acuerdo de tratamiento de datos, siempre que ofrezca dichas garantías.\n\n9.6. Conforme al artículo 28.4 del RGPD, el ENCARGADO seguirá siendo plenamente responsable ante el RESPONSABLE del cumplimiento de las obligaciones de sus subencargados.\n\n9.7. Los terceros que prestan los servicios con los que el RESPONSABLE conecta la Plataforma con su propia cuenta (por ejemplo, Google Ads, Google Analytics, Meta Ads o Google Business Profile; en adelante, las «Integraciones») no son subencargados del ENCARGADO: el RESPONSABLE los contrata directamente y actúa frente a ellos conforme a las condiciones que acepte con cada uno. El ENCARGADO se limita a conectar la Plataforma con dichos servicios siguiendo la instrucción del RESPONSABLE y a tratar los datos que reciba de ellos por cuenta de este."
+    },
+    {
+      "title": "10. Transferencias internacionales",
+      "text": "10.1. El ENCARGADO tratará los datos, como regla general, en el Espacio Económico Europeo (EEE). Solo realizará transferencias a terceros países u organizaciones internacionales, incluidos los accesos remotos desde ellos, en ejecución de instrucciones documentadas del RESPONSABLE.\n\n10.2. Mediante la aceptación de este Contrato, el RESPONSABLE autoriza las transferencias derivadas de los subencargados del Anexo III, con la ubicación y garantía allí indicadas, siempre que se amparen en alguno de los siguientes mecanismos:\n\na) Una decisión de adecuación conforme al artículo 45 del RGPD, incluida la Decisión de Ejecución (UE) 2023/1795 relativa al Marco de Privacidad de Datos UE-EE. UU., respecto de entidades certificadas en dicho marco (comprobable en la lista oficial).\n\nb) Las cláusulas contractuales tipo de la Decisión de Ejecución (UE) 2021/914, en el módulo que corresponda.\n\nc) Cualquier otra garantía adecuada del artículo 46 del RGPD.\n\n10.3. Los datos de salud se alojarán en todo caso en el EEE. Solo podrán ser objeto de transferencia internacional cuando resulte imprescindible para una funcionalidad concreta, figure expresamente en el Anexo III y el RESPONSABLE la haya activado."
+    },
+    {
+      "title": "11. Violaciones de la seguridad de los datos personales",
+      "text": "El ENCARGADO notificará al RESPONSABLE, sin dilación indebida y en un plazo máximo de treinta y seis (36) horas desde que tenga conocimiento de ella, cualquier violación de la seguridad de los datos personales que afecte a los datos tratados por cuenta del RESPONSABLE, junto con la información relevante de que disponga, conforme a la cláusula 17."
+    },
+    {
+      "title": "12. Asistencia al RESPONSABLE",
+      "text": "Teniendo en cuenta la naturaleza del tratamiento y la información a su disposición, el ENCARGADO asistirá al RESPONSABLE en la atención de las solicitudes de ejercicio de los derechos de los interesados y en el cumplimiento de las obligaciones previstas en los artículos 32 a 36 del RGPD."
+    },
+    {
+      "title": "13. Demostración del cumplimiento y auditorías",
+      "text": "13.1. El ENCARGADO pondrá a disposición del RESPONSABLE la información necesaria para demostrar el cumplimiento de las obligaciones de este Contrato. A tal efecto, mantendrá disponible un resumen actualizado de las medidas de seguridad, de los subencargados y, cuando existan, de los resultados de auditorías o pruebas de seguridad independientes.\n\n13.2. El RESPONSABLE podrá realizar, por sí o mediante un auditor independiente sujeto a confidencialidad, una auditoría o inspección al año, con un preaviso mínimo de treinta (30) días naturales, en horario laboral y sin afectar a la seguridad ni a los datos de otros clientes. Podrá realizar auditorías adicionales cuando se haya producido una violación de seguridad que le afecte o lo requiera una autoridad de control.\n\n13.3. Los costes de la auditoría serán a cargo del RESPONSABLE, salvo que esta revele un incumplimiento relevante del ENCARGADO, en cuyo caso este asumirá los costes razonables."
+    },
+    {
+      "title": "14. Fin de la prestación del servicio",
+      "text": "14.1. A la finalización del Contrato de Servicios, el RESPONSABLE podrá exportar sus datos desde la Plataforma durante un plazo de treinta (30) días naturales y comunicará por escrito al ENCARGADO, dentro de ese plazo, su elección entre:\n\na) la devolución de los datos personales en un formato estructurado, de uso común y lectura mecánica, que incluirá la historia clínica y la documentación asociada (informes, consentimientos firmados, fotografías y archivos), la agenda, los contactos y el Registro de accesos; o\n\nb) su supresión.\n\nSi el RESPONSABLE no comunica su elección en dicho plazo, el ENCARGADO le remitirá un requerimiento escrito. Transcurridos quince (15) días naturales adicionales sin respuesta, el ENCARGADO pondrá a su disposición una copia de los datos conforme a la letra a) y, transcurrido un nuevo plazo de quince (15) días naturales, procederá a su supresión.\n\n14.2. El ENCARGADO ejecutará la opción elegida en un plazo máximo de treinta (30) días naturales desde la comunicación del RESPONSABLE.\n\n14.3. La devolución mediante exportación estándar no tendrá coste para el RESPONSABLE. Los trabajos adicionales (migración técnica o adaptación a formatos no estándar) se presupuestarán conforme a las tarifas vigentes del ENCARGADO. La devolución de los datos no quedará condicionada al pago de cantidades pendientes, sin perjuicio del derecho del ENCARGADO a reclamarlas.\n\n14.4. La supresión alcanzará a todas las copias, incluidas las que obren en poder de los subencargados. Las copias de seguridad se eliminarán conforme a su ciclo ordinario de rotación; entretanto, permanecerán protegidas y sin tratamiento activo.\n\n14.5. A solicitud del RESPONSABLE, el ENCARGADO emitirá un certificado de devolución o supresión.\n\n14.6. La obligación de conservar la historia clínica durante los plazos legales corresponde al RESPONSABLE, que deberá solicitar su devolución antes de que se produzca la supresión. No obstante, cuando el Derecho de la Unión o de España exija al ENCARGADO conservar determinados datos, este los mantendrá bloqueados conforme al artículo 32 de la LOPDGDD, a disposición exclusiva de jueces, tribunales y autoridades competentes durante el plazo de prescripción de las responsabilidades que pudieran derivarse."
+    },
+    {
+      "title": "15. Prohibición de uso para fines propios",
+      "text": "15.1. El ENCARGADO no utilizará los datos personales tratados por cuenta del RESPONSABLE para fines propios ni de terceros, incluidos fines comerciales, publicitarios, de elaboración de perfiles o de entrenamiento de modelos de IA. Si el ENCARGADO destinara los datos a otra finalidad, será considerado responsable del tratamiento conforme al artículo 28.10 del RGPD.\n\n15.2. No se considerará un uso para fines propios el tratamiento de métricas técnicas de funcionamiento de la Plataforma (rendimiento, errores, disponibilidad) que no permitan identificar a pacientes ni a otros interesados."
+    },
+    {
+      "title": "16. Responsabilidad",
+      "text": "16.1. Cada Parte responderá de los daños y sanciones que se deriven del incumplimiento de las obligaciones que le corresponden conforme al RGPD, la LOPDGDD y este Contrato, de acuerdo con el artículo 82 del RGPD.\n\n16.2. El ENCARGADO no será responsable de las consecuencias de los tratamientos efectuados conforme a las instrucciones o la configuración del RESPONSABLE.\n\n16.3. Las limitaciones de responsabilidad previstas en el Contrato de Servicios no serán aplicables a los daños causados por dolo o culpa grave, ni a las sanciones administrativas impuestas a una Parte como consecuencia de un incumplimiento imputable a la otra.\n\n16.4. El ENCARGADO mantendrá vigente un seguro de responsabilidad civil que cubra la actividad de desarrollo y explotación de la Plataforma, incluidos los incidentes de seguridad y protección de datos, con un límite mínimo de {{seguro}} euros por siniestro."
+    },
+    {
+      "title": "17. Comunicaciones",
+      "text": "17.1. Las comunicaciones derivadas de este Contrato se realizarán por escrito a las direcciones de correo electrónico que cada Parte tenga indicadas en la Plataforma. El RESPONSABLE mantendrá actualizada en la Plataforma su dirección de contacto en materia de privacidad, y las comunicaciones remitidas a ella se considerarán válidamente realizadas.\n\n17.2. Las comunicaciones del ENCARGADO dirigidas a la generalidad de sus clientes (por ejemplo, cambios de subencargados) podrán realizarse, además, mediante aviso destacado en la Plataforma."
+    },
+    {
+      "title": "18. Legislación aplicable y jurisdicción",
+      "text": "Este Contrato se rige por la legislación española y por el Derecho de la Unión Europea. Para cualquier controversia, las Partes se someten a los Juzgados y Tribunales de Ciudad Real, salvo que la normativa aplicable establezca otro fuero imperativo.\n\nY, en prueba de conformidad, las Partes aceptan el presente Contrato en la fecha indicada.\nFecha de firma o aceptación: {{fecha}}\n\nEL RESPONSABLE: \t\t\t\t\tEL ENCARGADO:\n\nLa Voz Medios Digitales, S.L."
+    },
+    {
+      "title": "Anexo I. Descripción del tratamiento",
+      "text": "1. Naturaleza y finalidad. Prestación al RESPONSABLE del servicio de software Clínica Clic para la gestión clínica, administrativa y de comunicación con pacientes, incluidos el alojamiento de los datos, su soporte técnico, las copias de seguridad y, en la medida en que el RESPONSABLE las active, las funcionalidades de marketing, web, automatización e IA.\n\n2. Funcionalidades y operaciones de tratamiento\n\n| Módulo | Tratamiento por cuenta del RESPONSABLE |\n| --- | --- |\n| Pacientes e historia clínica | Alta y gestión de fichas; historias clínicas por especialidad (dental con odontograma, nutrición con antropometrías, estética, capilar y otras); informes, recetas, fotografías clínicas y archivos adjuntos. |\n| Consentimientos y firma | Generación de consentimientos informados y documentos, firma digital en tablet o mediante enlace, y conservación del documento firmado. |\n| Agenda y personal | Citas, recordatorios, huecos de agenda y bloqueos; alta de personal y asignación de roles; control horario del personal. |\n| Comunicaciones | Mensajería bidireccional de WhatsApp (API de Meta, modo coexistencia), correo electrónico, plantillas y envíos masivos. |\n| Automatizaciones e IA | Interpretación de la intención de los mensajes de pacientes (confirmación o cancelación de citas), transcripción de audios, asistentes conversacionales y generación de contenidos. |\n| Captación y CRM | Formularios, widget de chat y modal de llamada en webs, registro y seguimiento de leads. |\n| Marketing | Campañas de reactivación de pacientes, envíos masivos, solicitud de reseñas, gestión de presupuestos, informes de rendimiento y conexión con cuentas publicitarias y de analítica del RESPONSABLE. |\n| Web y cookies | Creación, alojamiento o servicio mediante CDN de webs y landing pages; herramienta de gestión del consentimiento de cookies. |\n| Contabilidad | Presupuestos, financiación, facturación y cobros. |\n| Seguridad y soporte | Autenticación, registros de actividad y de accesos, copias de seguridad, monitorización y atención de incidencias. |\n\nLas operaciones incluyen la recogida, registro, organización, estructuración, conservación, consulta, utilización, comunicación por transmisión a los subencargados e Integraciones autorizadas, limitación, supresión y destrucción de los datos.\n\n3. Categorías de interesados\n\nPacientes y, en su caso, sus representantes legales (incluidos los de pacientes menores de edad).\n\nPotenciales pacientes y personas que contactan con la clínica (leads).\n\nPersonal y colaboradores de la clínica que usan la Plataforma (profesionales sanitarios, auxiliares, recepción, administración, gestoría).\n\nUsuarios de las páginas web y landing pages del RESPONSABLE servidas mediante la Plataforma.\n\n4. Categorías de datos personales\n\nIdentificativos y de contacto: nombre y apellidos, DNI/NIE, fecha de nacimiento, sexo, dirección, teléfono, correo electrónico, firma.\n\nDatos relativos a la salud (artículo 9 RGPD): historia clínica, anamnesis, alergias, diagnósticos, tratamientos realizados y planificados, odontogramas, mediciones antropométricas, fotografías clínicas, informes, recetas, consentimientos informados y cualquier información sanitaria contenida en comunicaciones o audios.\n\nEconómicos: presupuestos, aceptación, financiación, facturas y pagos.\n\nComunicaciones: conversaciones de WhatsApp y correo electrónico, audios, respuestas a campañas y encuestas de satisfacción.\n\nComerciales: origen del contacto, estado de los permisos y preferencias de comunicación comercial, segmentaciones configuradas por el RESPONSABLE.\n\nNavegación: datos técnicos y de consentimiento de cookies de los usuarios de las webs del RESPONSABLE.\n\nPersonal de la clínica: datos identificativos, de contacto, rol, agenda y registros de jornada.\n\nTrazabilidad: registros de actividad y de accesos de los Usuarios autorizados.\n\n5. Duración. Durante la vigencia del Contrato de Servicios y, tras su finalización, durante los plazos de la cláusula 14."
+    },
+    {
+      "title": "Anexo II. Medidas de seguridad",
+      "text": "El ENCARGADO aplica, como mínimo, las siguientes medidas:\n\n| Ámbito | Medidas |\n| --- | --- |\n| Gobierno de la seguridad | Política de seguridad aprobada y revisada al menos anualmente; responsable de seguridad designado; inventario de activos, sistemas críticos y proveedores; análisis de riesgos de la Plataforma. |\n| Control de acceso | Cuentas nominativas; matriz de roles y permisos con mínimo privilegio y necesidad de conocer (Anexo IV); acceso a la historia clínica limitado por defecto a los profesionales asignados al paciente; revisión periódica de cuentas privilegiadas. |\n| Autenticación y sesiones | Política de contraseñas robustas almacenadas mediante funciones de hash seguras; autenticación multifactor obligatoria para administradores, perfiles de soporte y usuarios con acceso amplio a información clínica, y disponible para el resto; revocación centralizada de sesiones y tokens ante baja, suspensión o cambio de contraseña; caducidad de enlaces de firma y acceso. |\n| Trazabilidad | Registro de accesos a la información clínica (cláusula 7) y registros de actividad protegidos frente a modificación; registro específico de los accesos de soporte; alertas ante patrones de acceso anómalos o masivos. |\n| Cifrado | Cifrado en tránsito mediante TLS (HTTPS); cifrado en reposo de bases de datos, volúmenes, archivos y copias de seguridad que contengan datos clínicos; gestión segura de claves y secretos. |\n| Segregación | Separación lógica de los datos de cada clínica; entornos de desarrollo, pruebas y producción separados, con bases de datos, credenciales y claves independientes; prohibición de usar datos reales de pacientes en entornos no productivos. |\n| Desarrollo seguro | Repositorios privados con MFA; revisión de código y pruebas antes del despliegue; respuestas de la API limitadas a los campos necesarios; gestión de vulnerabilidades con priorización y seguimiento. |\n| Archivos | Validación del tipo real y tamaño de los archivos subidos y análisis antimalware antes de ponerlos a disposición de los usuarios; las imágenes y documentos clínicos no se sirven a través de redes de distribución de contenidos y se muestran mediante enlaces de caducidad breve. |\n| Protección perimetral | Cortafuegos, protección frente a ataques de denegación de servicio y de fuerza bruta, y actualización periódica de sistemas y dependencias. |\n| Copias y continuidad | Copias de seguridad periódicas, cifradas y conservadas de forma segura; procedimiento de restauración total y selectiva por clínica; pruebas de restauración periódicas; objetivos de recuperación definidos. |\n| Incidentes | Procedimiento de gestión de incidentes que incluye la evaluación de posibles violaciones de datos personales, registro de incidentes y medidas adoptadas. |\n| Pruebas de seguridad | Prueba de intrusión independiente periódica y tras cambios relevantes, con seguimiento de la corrección de los hallazgos. |\n| Personal | Compromisos de confidencialidad; formación periódica en protección de datos, seguridad e inteligencia artificial; baja inmediata de accesos al finalizar la relación. |\n| Proveedores | Evaluación previa de subencargados y proveedores de IA; contratos o acuerdos de tratamiento con garantías del artículo 28 RGPD; revisión de la configuración efectiva de sus cuentas (región, retención y uso para entrenamiento). |"
+    },
+    {
+      "title": "Anexo III. Subencargados e Integraciones",
+      "text": "A) Subencargados autorizados\n\n| Subencargado | Servicio | Datos tratados | Ubicación | Garantía |\n| --- | --- | --- | --- | --- |\n| Amazon Web Services (entidad contratante según el AWS Customer Agreement: {{proveedor_1_1}}) | Alojamiento de la Plataforma: servidores, base de datos, archivos (incluidas imágenes y documentos clínicos) y copias de seguridad | Todas las categorías del Anexo I | UE – región eu-west-3 (París, Francia) | Tratamiento en el EEE. El AWS GDPR Data Processing Addendum incorpora las cláusulas contractuales tipo para cualquier transferencia fuera del EEE. |\n| Amazon Web Services – Amazon CloudFront | Red de distribución de contenidos para archivos estáticos y multimedia general de la Plataforma (no incluye imágenes ni documentos clínicos) | Datos técnicos de conexión y contenido no clínico en tránsito | {{proveedor_2_4}} | AWS GDPR Data Processing Addendum con cláusulas contractuales tipo. |\n| Amazon Web Services – Amazon Bedrock | Servicios de IA para el procesamiento de mensajes y datos de la Plataforma | {{proveedor_3_3}} | UE – regiones de Francia y Alemania | Tratamiento en el EEE. AWS GDPR Data Processing Addendum. |\n| Cloudflare, Inc. | Servicio y protección de páginas web y landing pages creadas mediante la Plataforma | Datos de navegación y contenido en tránsito de las webs | Centros de datos en EE. UU. y Europa | Marco de Privacidad de Datos UE-EE. UU. y cláusulas contractuales tipo incorporadas al DPA de Cloudflare. |\n| WhatsApp Ireland Limited (Meta) – WhatsApp Business Cloud API | Mensajería de WhatsApp con pacientes y leads | Teléfono, nombre y contenido de los mensajes, incluidos audios | EE. UU. (transferencia a WhatsApp LLC y Meta Platforms, Inc.) | Marco de Privacidad de Datos UE-EE. UU., según el WhatsApp Business Data Transfer Addendum. |\n| Groq, Inc. (GroqCloud) | Transcripción de audios de WhatsApp e interpretación de la intención de los mensajes de pacientes | Audios y mensajes de pacientes | EE. UU. (Google Cloud Platform, EE. UU.) | Cláusulas contractuales tipo (Decisión 2021/914) incorporadas al DPA de Groq. |\n| OpenAI Ireland Limited | {{proveedor_7_2}} | {{proveedor_7_3}} | EE. UU. y otros países de su red de subencargados (Microsoft, Oracle, Cerebras, AWS), salvo proyecto con residencia de datos en Europa {{proveedor_7_4}} | DPA de OpenAI; transferencias fuera del EEE sobre la base de cláusulas contractuales tipo. |\n| Google – Gemini API (servicios de pago) | {{proveedor_8_2}} | {{proveedor_8_3}} | EE.UU | Google Data Processing Addendum. transferencias fuera del EEE sobre la base de cláusulas contractuales tipo. |\n| {{proveedor_9_1}} | Envío de invitaciones, notificaciones y correos a pacientes y leads | Nombre, correo electrónico y contenido del mensaje | {{proveedor_9_4}} | {{proveedor_9_5}} |\n| {{proveedor_10_1}} | Correo de soporte | Datos incluidos en las comunicaciones de soporte | {{proveedor_10_4}} | {{proveedor_10_5}} |\n\nB) Integraciones activadas por el RESPONSABLE (no son subencargados del ENCARGADO)\n\nInicio de sesión con Google, Google Business Profile, Google Search Console, Google Ads, Google Analytics 4, Meta Ads, Facebook e Instagram y, en su caso, TikTok, así como cualquier otra plataforma que se incorpore en el futuro.\n\nEl RESPONSABLE las conecta con su propia cuenta y es quien acepta las condiciones de tratamiento de cada proveedor. La Plataforma solo enviará a estas Integraciones datos de pacientes cuando el RESPONSABLE active expresamente una funcionalidad que lo requiera."
+    }
+  ],
+  "fields": [
+    {
+      "key": "clinica",
+      "label": "Razón social de la clínica",
+      "scope": "cliente"
+    },
+    {
+      "key": "nif",
+      "label": "NIF de la clínica",
+      "scope": "cliente"
+    },
+    {
+      "key": "domicilio",
+      "label": "Domicilio de la clínica",
+      "scope": "cliente"
+    },
+    {
+      "key": "representante",
+      "label": "Representante y cargo de la clínica",
+      "scope": "cliente"
+    },
+    {
+      "key": "firmante",
+      "label": "Representante y cargo de La Voz",
+      "scope": "modelo"
+    },
+    {
+      "key": "inventario",
+      "label": "Acceso de la clínica al inventario vigente",
+      "scope": "modelo"
+    },
+    {
+      "key": "seguro",
+      "label": "Límite de la póliza por siniestro (euros)",
+      "scope": "modelo"
+    },
+    {
+      "key": "fecha",
+      "label": "Fecha de firma o aceptación",
+      "scope": "cliente"
+    },
+    {
+      "key": "proveedor_1_1",
+      "label": "AWS · Entidad",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_2_4",
+      "label": "CloudFront · Ubicación",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_3_3",
+      "label": "Bedrock · Datos tratados",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_7_2",
+      "label": "OpenAI · Servicio",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_7_3",
+      "label": "OpenAI · Datos tratados",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_7_4",
+      "label": "OpenAI · Ubicación",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_8_2",
+      "label": "Gemini · Servicio",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_8_3",
+      "label": "Gemini · Datos tratados",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_9_1",
+      "label": "Correo transaccional · Entidad",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_9_4",
+      "label": "Correo transaccional · Ubicación",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_9_5",
+      "label": "Correo transaccional · Garantía",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_10_1",
+      "label": "Correo corporativo · Entidad",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_10_4",
+      "label": "Correo corporativo · Ubicación",
+      "scope": "modelo"
+    },
+    {
+      "key": "proveedor_10_5",
+      "label": "Correo corporativo · Garantía",
+      "scope": "modelo"
+    }
+  ],
+  "checklist": [
+    {
+      "title": "Reunidos y firmas",
+      "detail": "Clínica: razón social, NIF, domicilio, nombre y calidad del representante. Identificar al responsable jurídico de cada centro. Si se firma por un grupo, acreditar representación de las entidades afectadas.\nClínica",
+      "group": "Campos que rellena cada parte",
+      "id": "check-1"
+    },
+    {
+      "title": "Reunidos y firmas",
+      "detail": "LA VOZ MEDIOS DIGITALES, S.L., NIF B13601737. El titular confirmó **Calle Andalucía 49, 13004 Ciudad Real** para la política pública. El modelo dice «Avd. Andalucía». Contrastar con la ficha fiscal y usar un domicilio uniforme. Añadir nombre y cargo o facultades de quien firma por La Voz.\nDirección",
+      "group": "Campos que rellena cada parte",
+      "id": "check-2"
+    },
+    {
+      "title": "Expositivo II, 2 y cierre",
+      "detail": "Fecha de firma o registro fehaciente de aceptación, versión del encargo y del contrato de servicios, partes y evidencia de representación. El modelo dice «en la fecha indicada», sin campo de fecha.\nAmbas partes",
+      "group": "Campos que rellena cada parte",
+      "id": "check-3"
+    },
+    {
+      "title": "9.1 y 9.2",
+      "detail": "URL o apartado donde **la propia clínica** pueda consultar el inventario vigente, versión remitida y canal para notificación de cambios. Pendiente acordar acceso y entrega. El panel privado de administración y DPD tiene otro público.\nLa Voz y Techlegal",
+      "group": "Campos que rellena cada parte",
+      "id": "check-4"
+    },
+    {
+      "title": "16.4",
+      "detail": "Importe por siniestro y vigencia real, actividad asegurada, alcance de seguridad y protección de datos, exclusiones y sublímites. Usar certificado o condiciones particulares.\nDirección y aseguradora",
+      "group": "Campos que rellena cada parte",
+      "id": "check-5"
+    },
+    {
+      "title": "17",
+      "detail": "Correo de privacidad y notificaciones de la clínica. Para La Voz consta privacidad@clinicaclick.com. DPD identificado en el manual: José Antonio Maroto Fernández, de Techlegal, jamf@techlegal.es. Confirmar que el canal de incidentes se atiende dentro del plazo.\nAmbas partes",
+      "group": "Campos que rellena cada parte",
+      "id": "check-6"
+    },
+    {
+      "title": "1.2, 3.1.d y Anexo II",
+      "detail": "Se mencionan **criterios del Anexo IV** en 3.1.d y en la tabla de seguridad; el archivo acaba en el Anexo III.B y 1.2 sólo enumera I–III. Pedir el anexo de roles, conciliarlo con permisos efectivos o revisar con Techlegal las remisiones.\nTechlegal y producto",
+      "group": "Campos que rellena cada parte",
+      "id": "check-7"
+    },
+    {
+      "title": "Anexo I",
+      "detail": "Identificar módulos contratados, funciones opcionales, tipos de datos y terceros según las instrucciones del cliente. Unificar la grafía de la marca.\nLa Voz y clínica",
+      "group": "Campos que rellena cada parte",
+      "id": "check-8"
+    },
+    {
+      "title": "AWS",
+      "detail": "Infraestructura AWS y RDS en París; binarios clínicos en almacenamiento privado local del servidor de aplicación. Separar estos recursos, las copias y el material público.\nNombre de entidad contratante en factura/acuerdo, región y cobertura de cada componente, ubicaciones de copias y accesos de soporte.",
+      "group": "Anexo III · propuestas para revisar con el DPD",
+      "id": "check-9"
+    },
+    {
+      "title": "CloudFront",
+      "detail": "Sirve material público autorizado. La ubicación del bucket de origen no fija por sí sola los puntos de distribución.\nÁmbito real de la distribución, datos de conexión y garantía aplicable.",
+      "group": "Anexo III · propuestas para revisar con el DPD",
+      "id": "check-10"
+    },
+    {
+      "title": "Bedrock",
+      "detail": "IA de texto sobre mensajes y fragmentos necesarios de conversación según la automatización, incluida interpretación de respuestas de cita. Pueden contener datos de salud. Entrada documentada en España (eu-south-2) con perfiles europeos.\nValidar campos por función, regiones de inferencia permitidas por perfil, accesos y retención. Corregir «Francia y Alemania» como lista cerrada.",
+      "group": "Anexo III · propuestas para revisar con el DPD",
+      "id": "check-11"
+    },
+    {
+      "title": "Cloudflare",
+      "detail": "El modelo le atribuye protección y entrega de webs y landing pages.\nServicio y entidad efectivamente contratados, información de formularios en tránsito, países y garantía aplicable a la entidad y al servicio.",
+      "group": "Anexo III · propuestas para revisar con el DPD",
+      "id": "check-12"
+    },
+    {
+      "title": "WhatsApp/Meta",
+      "detail": "Mensajería de pacientes y leads, incluidos identificadores, contenido y medios según uso. Mantener diferenciada de las integraciones publicitarias contratadas por la clínica.\nContratación por cada modalidad, entidades, ubicaciones, accesos y garantía vigente.",
+      "group": "Anexo III · propuestas para revisar con el DPD",
+      "id": "check-13"
+    },
+    {
+      "title": "Groq",
+      "detail": "En el manual consta **transcripción de audios de WhatsApp**. La clasificación de intención se documenta en Bedrock. El audio puede contener salud.\nCorregir la finalidad, confirmar DPA, transferencia, retención efectiva y activación por clínica; validar con Techlegal la cláusula 10.3.",
+      "group": "Anexo III · propuestas para revisar con el DPD",
+      "id": "check-14"
+    },
+    {
+      "title": "OpenAI",
+      "detail": "OCR de documentos, funciones web y análisis de visibilidad. Revisar campos de documentos/facturas y texto de consultas caso por caso.\nQué funciones están activas, información personal accesible por cada una, entidad, proyecto, residencia y retención contratadas. Eliminar el corchete suelto de ubicación.",
+      "group": "Anexo III · propuestas para revisar con el DPD",
+      "id": "check-15"
+    },
+    {
+      "title": "Gemini",
+      "detail": "Consultas de visibilidad en marketing.\nDelimitar consultas, menciones personales e identificadores, modalidad de servicio, entidad contratante, región y garantías del proyecto.",
+      "group": "Anexo III · propuestas para revisar con el DPD",
+      "id": "check-16"
+    },
+    {
+      "title": "Correo de la aplicación",
+      "detail": "**Amazon SES**, con uso en eu-west-3 acreditado para correo transaccional y alcance comercial documentado. El destinatario y el contenido dependen del tipo de aviso.\nEntidad/DPA, ubicación y garantías, coberturas por tipo de envío y cualquier otro transporte empleado.",
+      "group": "Anexo III · propuestas para revisar con el DPD",
+      "id": "check-17"
+    },
+    {
+      "title": "Correo corporativo",
+      "detail": "El soporte recibe información que aportan los usuarios.\nIdentificar quién aloja el buzón y con qué contrato, ubicación y garantía. SES solo identifica el canal de envío documentado de la aplicación.",
+      "group": "Anexo III · propuestas para revisar con el DPD",
+      "id": "check-18"
+    },
+    {
+      "title": "Integraciones y servicios auxiliares",
+      "detail": "El apartado B distingue cuentas que contrata y conecta la clínica.\nRevisar quién contrata cada servicio según función, soporte y accesos reales. Revisar posibles proveedores adicionales. El listado se valida con las cuentas y contratos efectivos.",
+      "group": "Anexo III · propuestas para revisar con el DPD",
+      "id": "check-19"
+    },
+    {
+      "title": "5.1–5.2 y 7.1–7.3",
+      "detail": "Conservar evidencia de formación y confidencialidad. El registro técnico y la atribución del soporte ya tienen implantación por recorridos. Falta acreditar cobertura de las consultas y operaciones descritas, motivo de acceso, exportación para cada clínica y **al menos tres años** de retención efectiva.",
+      "group": "Compromisos con impacto antes de la firma",
+      "id": "check-20"
+    },
+    {
+      "title": "8 y 10",
+      "detail": "Precisar controles de activación y desactivación, supervisión de decisiones, zonas de alojamiento y procesamiento, entrenamiento y retención efectivos por proveedor. Incluir las transferencias autorizadas en el mismo contrato.",
+      "group": "Compromisos con impacto antes de la firma",
+      "id": "check-21"
+    },
+    {
+      "title": "9, 11 y 17",
+      "detail": "Acreditar proceso de cambios de subencargados con preaviso de 30 días, tratamiento de objeciones, excepción urgente y responsables de avisar a cada clínica. Las **36 h** son el máximo contractual desde conocimiento de la brecha para informar a la clínica, además de hacerlo sin dilación indebida.",
+      "group": "Compromisos con impacto antes de la firma",
+      "id": "check-22"
+    },
+    {
+      "title": "13 y 14",
+      "detail": "Validar el acceso a evidencias para auditoría y ensayar la exportación y devolución completas, borrado o bloqueo aplicable, certificado y tratamiento en copias y terceros. Revisar la secuencia de salida: 30 días de elección y exportación, requerimiento y 15 + 15 días si no responde; 30 días desde la instrucción para ejecutar la opción elegida.",
+      "group": "Compromisos con impacto antes de la firma",
+      "id": "check-23"
+    },
+    {
+      "title": "Anexo II",
+      "detail": "Cotejar mínimo privilegio por paciente y perfil, cobertura MFA, cifrado de **todos** los soportes, control de cambios, perímetro, alertas de acceso, copias, recuperación selectiva por clínica, RPO/RTO y prueba de intrusión independiente. El circuito de imágenes web documenta ausencia de escáner antimalware externo. Para afirmar el control general, se necesita evidencia de todos los circuitos aplicables. Distinguir lo operativo de los compromisos de implantación que las partes puedan acordar.",
+      "group": "Compromisos con impacto antes de la firma",
+      "id": "check-24"
+    },
+    {
+      "title": "Contrato de servicios",
+      "detail": "Contrastar condiciones, aceptación, canales y versiones. El proyecto documenta una propuesta separada de lector y aceptación. Las políticas públicas sí tienen versión publicada. Conciliar la propuesta con el Word de Techlegal antes de integrar cualquier texto clínico.",
+      "group": "Compromisos con impacto antes de la firma",
+      "id": "check-25"
+    }
+  ],
+  "controls": [
+    {
+      "id": "M2-01",
+      "title": "Inventario de tratamientos",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "No se ha acreditado un Registro de Actividades de Tratamiento completo. (p. 22).",
+      "note": "Ver H18 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-02",
+      "title": "Riesgos de los tratamientos",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "No se ha acreditado un análisis de riesgos integral de los tratamientos de la plataforma. (p. 22).",
+      "note": "Ver H18 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-03",
+      "title": "EIPD en tratamientos de alto riesgo",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "No se ha acreditado una EIPD para los tratamientos de alto riesgo vinculados a datos de salud. (p. 22).",
+      "note": "Ver H18 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-04",
+      "title": "Gobierno interno de privacidad",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "La gestión de privacidad se encontraba en un nivel informal y requiere un marco de gobierno. (p. 22).",
+      "note": "Ver H18 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-05",
+      "title": "Delegado de Protección de Datos",
+      "group": "M2 · Protección de datos",
+      "verdict": "Alerta",
+      "basis": "La necesidad y configuración de la función de DPD debe quedar documentada; Techlegal presta asesoramiento, pero no se ha incorporado evidencia formal de designación al expediente. (p. 22).",
+      "note": "Titular y contacto de Techlegal constan en la política de noviembre. Pendiente adjuntar la designación formal al expediente."
+    },
+    {
+      "id": "M2-06",
+      "title": "Privacidad desde el diseño",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "Persisten funciones sin privacidad por defecto suficiente, especialmente en accesos y roles. (p. 22).",
+      "note": "Ver H1, H2, H3, H11, H18 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-07",
+      "title": "Formación y confidencialidad del personal",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "La entidad no dispone de un plan de formación en protección de datos y confidencialidad para el personal implicado en la prestación y soporte de la plataforma. (p. 22).",
+      "note": "Ver H22 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-08",
+      "title": "Bases jurídicas y consentimiento",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "No se ha acreditado base jurídica suficiente para campañas comerciales basadas en tratamientos clínicos. (p. 22).",
+      "note": "Ver H6, H32 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-09",
+      "title": "Información de privacidad demostrable",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "La documentación contractual y de información del onboarding online no está cerrada. (p. 22).",
+      "note": "Ver H21 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-10",
+      "title": "Atención de derechos RGPD",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "La entidad no dispone de un procedimiento formal para la recepción, tramitación y respuesta de solicitudes de ejercicio de derechos RGPD. (p. 22).",
+      "note": "Ver H23 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-11",
+      "title": "Proveedores que tratan datos",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "El mapa de proveedores y garantías no está completamente acreditado. (p. 22).",
+      "note": "Ver H7, H19, H26 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-12",
+      "title": "Contratos con encargados",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "No consta verificada la cobertura contractual de todos los encargados y subencargados. (p. 22).",
+      "note": "Ver H19, H21 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-13",
+      "title": "Tratamiento de datos por cuenta de clientes",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "La plataforma actúa como encargado para clínicas y debe completar el gobierno de subencargados y soporte. (p. 22).",
+      "note": "Ver H19 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-14",
+      "title": "Acuerdos entre corresponsables",
+      "group": "M2 · Protección de datos",
+      "verdict": "No aplica",
+      "basis": "No se ha identificado en el alcance un tratamiento que exija calificar a La Voz y una clínica como corresponsables; debe revisarse si aparece una funcionalidad con decisión conjunta de fines y medios. (p. 22).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M2-15",
+      "title": "Transferencias internacionales",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "No están acreditadas todas las ubicaciones, retenciones y garantías de proveedores de IA externos. (p. 22).",
+      "note": "Ver H7, H19, H26 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-16",
+      "title": "Datos necesarios y conservación",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "La conservación y bloqueo de historias clínicas no están completamente parametrizados. (p. 22).",
+      "note": "Ver H20 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-17",
+      "title": "Datos sensibles menores y colectivos vulnerables",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "Existen accesos amplios y usos de datos sanitarios para marketing sin salvaguardas suficientes acreditadas. (p. 22).",
+      "note": "Ver H1, H2, H3, H6, H7, H11, H20, H32 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-18",
+      "title": "Privacidad laboral y derechos digitales",
+      "group": "M2 · Protección de datos",
+      "verdict": "Pendiente",
+      "basis": "La privacidad laboral de la entidad no forma parte del alcance funcional principal de esta auditoría de plataforma. (p. 22).",
+      "note": "Existe funcionalidad de personal/control horario. Separar empleados de La Voz y empleados de cada clínica al validar alcance."
+    },
+    {
+      "id": "M2-19",
+      "title": "Videovigilancia",
+      "group": "M2 · Protección de datos",
+      "verdict": "No aplica",
+      "basis": "No se ha identificado tratamiento de videovigilancia propio de la plataforma en el alcance revisado. (p. 22).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M2-20",
+      "title": "Medidas de seguridad exigidas por el RGPD",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "Se han detectado deficiencias relevantes en accesos, sesiones, entornos, copias y trazabilidad. (p. 22).",
+      "note": "Ver H1, H2, H3, H4, H5, H9, H10, H11, H12, H14, H16 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-21",
+      "title": "Brechas de datos personales",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "No se ha acreditado un procedimiento formal de brechas integrado con la gestión técnica de incidentes. (p. 23).",
+      "note": "Ver H17 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-22",
+      "title": "Perfilado y decisiones automatizadas",
+      "group": "M2 · Protección de datos",
+      "verdict": "Alerta",
+      "basis": "Existe segmentación de pacientes y automatización basada en tratamiento, presupuesto y otros atributos; no se han identificado decisiones exclusivamente automatizadas con efectos jurídicos, pero el perfilado comercial requiere límites. (p. 23).",
+      "note": "Ver H6 en el plan de esta revisión."
+    },
+    {
+      "id": "M2-23",
+      "title": "Revisión periódica de privacidad",
+      "group": "M2 · Protección de datos",
+      "verdict": "Incumplimiento",
+      "basis": "No existe todavía una revisión periódica formalizada del sistema de privacidad. (p. 23).",
+      "note": "Ver H18 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-01",
+      "title": "Identificación básica de activos digitales",
+      "group": "M3 · Activos digitales",
+      "verdict": "Alerta",
+      "basis": "Existe inventario técnico relevante, pero faltan titulares, cuentas, responsables y contactos de emergencia en varios activos. (p. 23).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M3-02",
+      "title": "Titularidad de dominios y cuentas críticas",
+      "group": "M3 · Activos digitales",
+      "verdict": "Correcto",
+      "basis": "La titularidad de los dominios y activos críticos revisados se atribuye a La Voz Medios Digitales, S.L. y no se han detectado incidencias materiales en este control. (p. 23).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M3-03",
+      "title": "Aviso legal e identificación de la empresa",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "El Aviso Legal presenta deficiencias materiales: incluye referencias a un dominio ajeno, datos identificativos incompletos y cláusulas no adaptadas de forma coherente a Clinicaclick. (p. 23).",
+      "note": "Ver H28 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-04",
+      "title": "Coherencia entre dominio marca y entidad",
+      "group": "M3 · Activos digitales",
+      "verdict": "Correcto",
+      "basis": "La entrevista identifica a La Voz Medios Digitales, S.L. como titular del proyecto y del dominio, y la marca Clínica Clic está registrada. (p. 23).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M3-05",
+      "title": "Condiciones de uso del activo digital",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "No consta la existencia de unas condiciones de uso de la plataforma adaptadas al modelo SaaS y al proceso de alta online previsto. (p. 23).",
+      "note": "Ver H21 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-06",
+      "title": "Inventario de cookies y tecnologías",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "El inventario y la información sobre cookies no reflejan de forma fiable las tecnologías efectivamente utilizadas y la documentación revisada presenta inconsistencias. (p. 23).",
+      "note": "Ver H25 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-07",
+      "title": "Banner y panel de cookies",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "Se ha comprobado que se instalan cookies publicitarias antes de obtener el consentimiento válido del usuario, por lo que no existe bloqueo previo efectivo. (p. 23).",
+      "note": "Ver H25 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-08",
+      "title": "Política de cookies",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "La política de cookies revisada es incorrecta y no se encuentra adecuadamente sincronizada con las cookies y tecnologías efectivamente utilizadas. (p. 23).",
+      "note": "Ver H25 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-09",
+      "title": "Respeto de preferencias de cookies",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "La instalación de cookies publicitarias antes del consentimiento evidencia que las preferencias del usuario no se respetan técnicamente desde el inicio de la navegación. (p. 23).",
+      "note": "Ver H25 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-10",
+      "title": "Normas sobre contenidos de usuarios",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "No consta la existencia de normas específicas que regulen la publicación y gestión de contenidos de usuarios en las funcionalidades de la plataforma. (p. 23).",
+      "note": "Ver H29 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-11",
+      "title": "Retirada de contenidos ilícitos",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "No consta un procedimiento específico para comunicar, revisar y retirar contenidos ilícitos cuando puedan alojarse o gestionarse a través de la plataforma. (p. 24).",
+      "note": "Ver H29 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-12",
+      "title": "Rol en marketplaces y plataformas",
+      "group": "M3 · Activos digitales",
+      "verdict": "No aplica",
+      "basis": "No se ha identificado que Clinicaclick opere como marketplace o plataforma de intermediación entre terceros en el alcance funcional revisado. (p. 24).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M3-13",
+      "title": "Buscadores rankings y comparadores",
+      "group": "M3 · Activos digitales",
+      "verdict": "No aplica",
+      "basis": "No se han identificado buscadores, rankings o comparadores sujetos a reglas específicas de ordenación o transparencia en el alcance revisado. (p. 24).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M3-14",
+      "title": "Reseñas testimonios y publicidad",
+      "group": "M3 · Activos digitales",
+      "verdict": "Alerta",
+      "basis": "El sistema de reseñas dirige a Google solo las valoraciones de cinco y requiere revisión de transparencia. (p. 24).",
+      "note": "Ver H33 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-15",
+      "title": "Política de privacidad del activo digital",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "La política de privacidad revisada contiene referencias y datos ajenos a Clinicaclick, omisiones e información jurídica desactualizada o contradictoria, por lo que no permite cumplir adecuadamente el deber de transparencia. (p. 24).",
+      "note": "Política específica de Clinicaclick publicada el 08/11. Revisar la web y demás puntos de recogida con Techlegal. Ver H8 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-16",
+      "title": "Formularios y recogida de datos",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "Los formularios y puntos de recogida de datos no disponen de un esquema homogéneo y acreditado de información de primera capa, enlace a política y, cuando proceda, consentimientos separados. (p. 24).",
+      "note": "Ver H25 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-17",
+      "title": "Alta y baja en comunicaciones comerciales",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "Las comunicaciones comerciales con pacientes presentan carencias de legitimación y trazabilidad. (p. 24).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M3-18",
+      "title": "Servicios de terceros integrados",
+      "group": "M3 · Activos digitales",
+      "verdict": "Incumplimiento",
+      "basis": "Las integraciones externas son numerosas y el inventario contractual/técnico no está completamente cerrado. (p. 24).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M3-19",
+      "title": "Normativa sectorial aplicable",
+      "group": "M3 · Activos digitales",
+      "verdict": "Alerta",
+      "basis": "Los requisitos sectoriales del software sanitario y del Espacio Europeo de Datos de Salud deben incorporarse al roadmap. (p. 24).",
+      "note": "Ver H10, H35 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-20",
+      "title": "Accesibilidad digital",
+      "group": "M3 · Activos digitales",
+      "verdict": "Alerta",
+      "basis": "La web presenta aspectos de accesibilidad pendientes de corrección, incluida una estructura semántica irregular. Dado el calendario de exigibilidad identificado en el análisis, se mantiene como observación y no como incumplimiento actual. (p. 24).",
+      "note": "Ver H37 en el plan de esta revisión."
+    },
+    {
+      "id": "M3-21",
+      "title": "Obligaciones como servicio digital DSA",
+      "group": "M3 · Activos digitales",
+      "verdict": "No aplica",
+      "basis": "No se ha identificado que la plataforma actúe como servicio intermediario en el sentido que active obligaciones materiales específicas del DSA en el alcance revisado. (p. 24).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M3-22",
+      "title": "Obligaciones del Reglamento de Datos",
+      "group": "M3 · Activos digitales",
+      "verdict": "Pendiente",
+      "basis": "No se ha realizado análisis específico de aplicabilidad del Reglamento de Datos a la plataforma. (p. 24).",
+      "note": "Pedir al DPD valoración de aplicabilidad para el servicio SaaS y sus posibilidades de exportación."
+    },
+    {
+      "id": "M3-23",
+      "title": "Requisitos legales del software de facturación",
+      "group": "M3 · Activos digitales",
+      "verdict": "Alerta",
+      "basis": "Existe módulo de contabilidad, pero la conexión con Veri*factu se encontraba pendiente durante la entrevista. (p. 24).",
+      "note": "Contrastar las funciones reales de facturación con la documentación fiscal y el alcance según entidad."
+    },
+    {
+      "id": "M5-01",
+      "title": "Mapa de canales y herramientas de marketing",
+      "group": "M5 · Marketing",
+      "verdict": "Correcto",
+      "basis": "La plataforma identifica y centraliza canales de captación, WhatsApp, email, Meta, Google y otros activos de marketing. (p. 24).",
+      "note": "Ver H3 en el plan de esta revisión."
+    },
+    {
+      "id": "M5-02",
+      "title": "Responsables y revisión legal de campañas",
+      "group": "M5 · Marketing",
+      "verdict": "Correcto",
+      "basis": "Se acordó que nuevas campañas y tratamientos de marketing se sometan a revisión legal previa antes de implantarse. (p. 25).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M5-03",
+      "title": "Formularios landing pages y captación de leads",
+      "group": "M5 · Marketing",
+      "verdict": "Incumplimiento",
+      "basis": "Los widgets de captación requieren información de privacidad y validación homogénea. (p. 25).",
+      "note": "Ver H25 en el plan de esta revisión."
+    },
+    {
+      "id": "M5-04",
+      "title": "Origen y trazabilidad de contactos comerciales",
+      "group": "M5 · Marketing",
+      "verdict": "Incumplimiento",
+      "basis": "En importaciones se confía en la declaración del cliente sobre permisos sin trazabilidad suficiente por contacto. (p. 25).",
+      "note": "Ver H6 en el plan de esta revisión."
+    },
+    {
+      "id": "M5-05",
+      "title": "Base legal de comunicaciones comerciales",
+      "group": "M5 · Marketing",
+      "verdict": "Incumplimiento",
+      "basis": "No se ha acreditado base jurídica suficiente para reactivación comercial basada en tratamientos. (p. 25).",
+      "note": "Ver H6 en el plan de esta revisión."
+    },
+    {
+      "id": "M5-06",
+      "title": "Bajas y preferencias comerciales",
+      "group": "M5 · Marketing",
+      "verdict": "Alerta",
+      "basis": "La plataforma puede gestionar consentimientos, pero debe asegurar baja y preferencias separadas y demostrables para marketing. (p. 25).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M5-07",
+      "title": "Correo electrónico y SMS comerciales",
+      "group": "M5 · Marketing",
+      "verdict": "Incumplimiento",
+      "basis": "El email de reactivación de pacientes requiere regularización de base jurídica, oposición y trazabilidad. (p. 25).",
+      "note": "Ver H6 en el plan de esta revisión."
+    },
+    {
+      "id": "M5-08",
+      "title": "Mensajería instantánea comercial",
+      "group": "M5 · Marketing",
+      "verdict": "Incumplimiento",
+      "basis": "WhatsApp comercial a pacientes requiere regularización de base jurídica, oposición y trazabilidad. (p. 25).",
+      "note": "Ver H6 en el plan de esta revisión."
+    },
+    {
+      "id": "M5-09",
+      "title": "Llamadas comerciales",
+      "group": "M5 · Marketing",
+      "verdict": "No aplica",
+      "basis": "La plataforma no ejecuta campañas de llamadas comerciales en el alcance funcional revisado. (p. 25).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M5-10",
+      "title": "Cookies píxeles y seguimiento publicitario",
+      "group": "M5 · Marketing",
+      "verdict": "Alerta",
+      "basis": "Existe CMP, pero falta validación técnica completa del bloqueo de seguimiento publicitario. (p. 25).",
+      "note": "Ver H32 en el plan de esta revisión."
+    },
+    {
+      "id": "M5-11",
+      "title": "Audiencias publicitarias y remarketing",
+      "group": "M5 · Marketing",
+      "verdict": "Alerta",
+      "basis": "El remarketing con pacientes estaba previsto pero no validado; debe mantenerse deshabilitado hasta completar el análisis. (p. 25).",
+      "note": "Ver H32 en el plan de esta revisión."
+    },
+    {
+      "id": "M5-12",
+      "title": "Mensajes publicitarios verificables",
+      "group": "M5 · Marketing",
+      "verdict": "Pendiente",
+      "basis": "Control no revisado con evidencia suficiente en el alcance actual. (p. 25).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M5-13",
+      "title": "Anuncios en plataformas digitales",
+      "group": "M5 · Marketing",
+      "verdict": "Pendiente",
+      "basis": "Control no revisado con evidencia suficiente en el alcance actual. (p. 25).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M5-14",
+      "title": "Influencers y contenido patrocinado",
+      "group": "M5 · Marketing",
+      "verdict": "No aplica",
+      "basis": "La plataforma no ejecuta prácticas de marketing con influencers o contenido patrocinado en el alcance revisado. (p. 25).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M5-15",
+      "title": "Reseñas testimonios y prueba social",
+      "group": "M5 · Marketing",
+      "verdict": "Alerta",
+      "basis": "El filtrado de reseñas por puntuación requiere revisión de transparencia y políticas de plataforma. (p. 25).",
+      "note": "Ver H33 en el plan de esta revisión."
+    },
+    {
+      "id": "M5-16",
+      "title": "Precios descuentos y promociones",
+      "group": "M5 · Marketing",
+      "verdict": "Pendiente",
+      "basis": "Control no revisado con evidencia suficiente en el alcance actual. (p. 25).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M5-17",
+      "title": "Sorteos concursos y bases legales",
+      "group": "M5 · Marketing",
+      "verdict": "No aplica",
+      "basis": "No se ejecutan sorteos, concursos o promociones sujetos a bases legales desde la plataforma en el alcance revisado. (p. 25).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M5-18",
+      "title": "Afiliados referidos y comisiones",
+      "group": "M5 · Marketing",
+      "verdict": "No aplica",
+      "basis": "No se han identificado programas de afiliados, referidos o comisiones gestionados por la plataforma. (p. 25).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M5-19",
+      "title": "Bases externas y scraping de contactos",
+      "group": "M5 · Marketing",
+      "verdict": "Correcto",
+      "basis": "No se han detectado usos ilícitos de bases externas ni prácticas de scraping de contactos en el alcance auditado. (p. 25).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M5-20",
+      "title": "Publicidad comparativa y marcas de terceros",
+      "group": "M5 · Marketing",
+      "verdict": "Correcto",
+      "basis": "No se han detectado infracciones relacionadas con publicidad comparativa o uso indebido de marcas de terceros. (p. 25).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M5-21",
+      "title": "Prácticas comerciales engañosas o agresivas",
+      "group": "M5 · Marketing",
+      "verdict": "Correcto",
+      "basis": "No se han detectado prácticas comerciales engañosas o agresivas que permitan calificar este control como incumplido. (p. 26).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M5-22",
+      "title": "Marketing de productos regulados",
+      "group": "M5 · Marketing",
+      "verdict": "No aplica",
+      "basis": "No se ha identificado marketing de productos sujetos a regulación sectorial específica ejecutado por la plataforma. (p. 26).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M5-23",
+      "title": "Revisión periódica de marketing legal",
+      "group": "M5 · Marketing",
+      "verdict": "Alerta",
+      "basis": "Existe revisión legal previa acordada, pero falta convertirla en procedimiento estable y revisión periódica. (p. 26).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M7-01",
+      "title": "Inventario de sistemas de IA y automatizaciones",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Correcto",
+      "basis": "La documentación técnica contiene un inventario detallado de modelos, proveedores y casos de uso de IA. (p. 26).",
+      "note": "Ver H26 en el plan de esta revisión."
+    },
+    {
+      "id": "M7-02",
+      "title": "Política interna de uso de IA y automatización",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Incumplimiento",
+      "basis": "No se ha acreditado una política interna completa que regule datos permitidos, proveedores, transparencia, supervisión e incidencias. (p. 26).",
+      "note": "Ver H27 en el plan de esta revisión."
+    },
+    {
+      "id": "M7-03",
+      "title": "Responsables internos de IA",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Pendiente",
+      "basis": "Control no revisado con evidencia suficiente en el alcance actual. (p. 26).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M7-04",
+      "title": "Transparencia sobre IA ante usuarios y clientes",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Incumplimiento",
+      "basis": "No consta una persona responsable formalmente designada para asegurar y supervisar las obligaciones de transparencia asociadas al uso de IA en la plataforma. (p. 26).",
+      "note": "Revisar avisos en interfaces realmente expuestas. Ver también H27. Ver H24 en el plan de esta revisión."
+    },
+    {
+      "id": "M7-05",
+      "title": "Datos personales en sistemas de IA",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Incumplimiento",
+      "basis": "Existen flujos de audio y documentos personales hacia proveedores de IA cuya gobernanza no está completamente acreditada. (p. 26).",
+      "note": "Ver H7, H26 en el plan de esta revisión."
+    },
+    {
+      "id": "M7-06",
+      "title": "IA integrada en productos y servicios",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Alerta",
+      "basis": "La IA está integrada en funciones del producto con controles parciales; deben cerrarse datos, transparencia y fallback. (p. 26).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M7-07",
+      "title": "IA desarrollada o integrada para clientes",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Alerta",
+      "basis": "La plataforma integra IA para clínicas clientes; debe documentar las obligaciones y configuración por caso de uso. (p. 26).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M7-08",
+      "title": "Supervisión humana de decisiones relevantes",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Correcto",
+      "basis": "El asistente de confirmación utiliza nivel de confianza y contempla intervención humana en respuestas dudosas. (p. 26).",
+      "note": "Ver H34 en el plan de esta revisión."
+    },
+    {
+      "id": "M7-09",
+      "title": "Revisión de resultados generados por IA",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Alerta",
+      "basis": "Existe revisión humana parcial, pero no se ha acreditado un proceso formal de control de calidad de resultados. (p. 26).",
+      "note": "Ver H34 en el plan de esta revisión."
+    },
+    {
+      "id": "M7-10",
+      "title": "Datos de entrenamiento validación y sesgos",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "No aplica",
+      "basis": "No se ha identificado entrenamiento o validación de modelos propios con datos de pacientes. (p. 26).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M7-11",
+      "title": "IA generativa con datos sensibles",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Incumplimiento",
+      "basis": "La transcripción de audio puede incluir datos de salud y utiliza un proveedor externo sin garantías completas acreditadas. (p. 26).",
+      "note": "Ver H7 en el plan de esta revisión."
+    },
+    {
+      "id": "M7-12",
+      "title": "Proveedores de IA y automatización",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Incumplimiento",
+      "basis": "Faltan evidencias completas por proveedor sobre región, retención, contratos y configuración efectiva. (p. 26).",
+      "note": "Ver H7, H19, H26 en el plan de esta revisión."
+    },
+    {
+      "id": "M7-13",
+      "title": "Automatizaciones con datos personales",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Alerta",
+      "basis": "Existen automatizaciones con datos personales y fallback; deben documentarse límites y proveedor efectivo. (p. 26).",
+      "note": "Ver H34 en el plan de esta revisión."
+    },
+    {
+      "id": "M7-14",
+      "title": "Agentes de IA y acciones autónomas",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Alerta",
+      "basis": "Existen automatizaciones y agentes limitados; no se ha acreditado un marco específico para acciones autónomas de mayor impacto. (p. 26).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M7-15",
+      "title": "Contenido generado por IA y etiquetado",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Incumplimiento",
+      "basis": "El criterio y la implementación de etiquetado de contenidos y avisos de interacción con IA no están cerrados. (p. 27).",
+      "note": "Ver H27 en el plan de esta revisión."
+    },
+    {
+      "id": "M7-16",
+      "title": "Incidencias de IA y automatización",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Incumplimiento",
+      "basis": "No se ha acreditado un registro y procedimiento específico para incidentes de IA y automatización. (p. 27).",
+      "note": "Ver H34 en el plan de esta revisión."
+    },
+    {
+      "id": "M7-17",
+      "title": "Prácticas de IA prohibidas",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Correcto",
+      "basis": "No se han identificado en la evidencia prácticas de IA prohibidas. (p. 27).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M7-18",
+      "title": "Sistemas de IA de alto riesgo",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "No aplica",
+      "basis": "Los casos de uso de IA identificados en la plataforma no se han clasificado como sistemas de IA de alto riesgo conforme al Reglamento de IA. (p. 27).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M7-19",
+      "title": "Modelos de IA propios y fundacionales",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "No aplica",
+      "basis": "No se desarrollan modelos fundacionales propios; se consumen modelos de terceros. (p. 27).",
+      "note": "Conservar el dictamen y revisar si cambia la actividad descrita."
+    },
+    {
+      "id": "M7-20",
+      "title": "Revisión periódica de IA y automatizaciones",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Incumplimiento",
+      "basis": "No se ha acreditado una revisión periódica formal del inventario, proveedores, incidentes y controles de IA. (p. 27).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M7-21",
+      "title": "Alfabetización y formación en IA",
+      "group": "M7 · Inteligencia artificial",
+      "verdict": "Incumplimiento",
+      "basis": "No existe un programa acreditado de alfabetización y formación del personal en materia de IA adaptado a los sistemas utilizados. (p. 27).",
+      "note": "Ver H24 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-01",
+      "title": "Reglas básicas de seguridad de la información",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "No se ha acreditado una política de seguridad consolidada y aprobada que cubra todos los controles relevantes. (p. 27).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M8-02",
+      "title": "Responsables y sistemas críticos de seguridad",
+      "group": "M8 · Seguridad",
+      "verdict": "Alerta",
+      "basis": "Se identifican sistemas críticos y responsables operativos, pero el inventario y los responsables nominales deben completarse. (p. 27).",
+      "note": "Mantener el dictamen de origen hasta aportar evidencia posterior específica."
+    },
+    {
+      "id": "M8-03",
+      "title": "Accesos usuarios y permisos mínimos",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "Existen accesos excesivos por clínica, propietario, agencia y soporte, además de revocación incompleta. (p. 27).",
+      "note": "Ver H1, H2, H3, H4, H9, H11, H13 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-04",
+      "title": "Contraseñas MFA y claves técnicas",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "MFA no implantado en la aplicación y revocación central de sesiones ausente; se detecta además riesgo de exposición de hash. (p. 27).",
+      "note": "Ver H4, H5, H11, H12, H13 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-05",
+      "title": "Equipos dispositivos y puestos de trabajo seguros",
+      "group": "M8 · Seguridad",
+      "verdict": "Pendiente",
+      "basis": "No se han auditado de forma suficiente los dispositivos y puestos de trabajo utilizados por el equipo de La Voz Medios Digitales, S.L. (p. 27).",
+      "note": "Pedir inventario y medidas de equipos del personal; la seguridad de la tablet de firma sólo cubre parte del control."
+    },
+    {
+      "id": "M8-06",
+      "title": "Comunicaciones y acceso remoto seguro",
+      "group": "M8 · Seguridad",
+      "verdict": "Correcto",
+      "basis": "Las comunicaciones de aplicación se realizan mediante HTTPS y existen controles de firma o token en varias integraciones; quedan mejoras perimetrales en otros controles. (p. 27).",
+      "note": "Ver H30 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-07",
+      "title": "Copias de seguridad y recuperación",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "Existen snapshots de instancia, pero no restauración selectiva por clínica ni pruebas acreditadas de recuperación. (p. 27).",
+      "note": "Ver H16 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-08",
+      "title": "Proveedores tecnológicos y alojamiento crítico",
+      "group": "M8 · Seguridad",
+      "verdict": "Alerta",
+      "basis": "AWS y otros proveedores críticos están identificados, pero faltan verificaciones de cuenta, contratos, ubicación y continuidad. (p. 27).",
+      "note": "Ver H14, H19 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-09",
+      "title": "Manejo de información sensible",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "Persisten riesgos en archivos clínicos, IA externa, enlaces y separación de datos sensibles. (p. 27).",
+      "note": "Ver H14, H15, H20 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-10",
+      "title": "Concienciación y hábitos de seguridad",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "La entidad no dispone de un programa formal de sensibilización y concienciación en seguridad de la información para el personal. (p. 27).",
+      "note": "Ver H22 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-11",
+      "title": "Actualizaciones y configuración segura de sistemas críticos",
+      "group": "M8 · Seguridad",
+      "verdict": "Alerta",
+      "basis": "Existen controles técnicos y monitorización, pero quedan pendientes firewall, parcheo efectivo, cifrado integral y antimalware de subidas. (p. 28).",
+      "note": "Ver H14, H15, H30 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-12",
+      "title": "Pruebas proporcionadas de seguridad",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "No existe un pentest independiente vigente; las pruebas realizadas no equivalen a una auditoría de intrusión. (p. 28).",
+      "note": "Solicitar informe independiente y remediaciones. Ver H31 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-13",
+      "title": "Seguridad básica en desarrollo y despliegue",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "Los entornos comparten elementos críticos de confianza y persisten riesgos en serialización de autenticación y tokens de firma. (p. 28).",
+      "note": "Ver H4, H5, H13, H15 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-14",
+      "title": "Continuidad mínima ante caídas de sistemas críticos",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "No se han aprobado RPO/RTO ni se ha probado una recuperación selectiva; existen dependencias críticas de mensajería y proveedores. (p. 28).",
+      "note": "Ver H16 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-15",
+      "title": "Procedimiento de incidentes de seguridad",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "El reporte de incidentes se realiza de forma informal y no existe un procedimiento integral acreditado. (p. 28).",
+      "note": "Ver H17 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-16",
+      "title": "Registro de incidentes y mejoras posteriores",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "La trazabilidad de incidentes y accesos clínicos no está completa ni normalizada. (p. 28).",
+      "note": "Ver H9, H10, H17 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-17",
+      "title": "Revisión periódica de seguridad mínima",
+      "group": "M8 · Seguridad",
+      "verdict": "Incumplimiento",
+      "basis": "No se ha acreditado un ciclo periódico formal de revisión de seguridad y cierre de hallazgos. (p. 28).",
+      "note": "Ver H17, H30, H31 en el plan de esta revisión."
+    },
+    {
+      "id": "M8-18",
+      "title": "Requisitos especiales de seguridad y certificaciones",
+      "group": "M8 · Seguridad",
+      "verdict": "Alerta",
+      "basis": "Debe completarse el análisis de requisitos sectoriales, interoperabilidad y coberturas/certificaciones exigibles. (p. 28).",
+      "note": "Ver H35, H36 en el plan de esta revisión."
+    }
+  ],
+  "milestones": [
+    {
+      "id": "H1",
+      "title": "Limitar cada médico a sus pacientes asignados",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Hallazgo B1 · M2-06, M2-17, M2-20, M8-03.",
+        "La matriz de roles y el acceso por clínica están documentados. Falta demostrar la regla por paciente asignado en todas las lecturas, incluidas excepciones, búsqueda y archivos. Fuente: 07 y 18.25."
+      ]
+    },
+    {
+      "id": "H2",
+      "title": "Limitar el acceso del propietario a los datos clínicos",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Hallazgo B2 · M2-06, M2-17, M2-20, M8-03.",
+        "El propietario conserva facultades clínicas por defecto en algunos módulos. Comparar con el requisito de acceso excepcional, su justificación, registro y revisión. Fuente: 07, permisos de propietario y cierre de informes."
+      ]
+    },
+    {
+      "id": "H3",
+      "title": "Mostrar a las agencias solo datos anónimos y métricas",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Hallazgo B3 · M2-06, M2-17, M2-20, M8-03, M5-01.",
+        "Se documentan restricciones de marketing y proyecciones seudonimizadas para atribución. Seudonimizar permite distinguir personas; Techlegal pide anonimización o agregación y pruebas en todas las salidas. Fuente: 07, rol agencia."
+      ]
+    },
+    {
+      "id": "H4",
+      "title": "Separar desarrollo, pruebas y producción",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Hallazgo C1 · M8-03, M8-04, M8-13, M2-20.",
+        "CRM usa RDS y DEV opera con datos y raíz locales. Delimitar staging como nombre técnico de CRM frente a entornos de prueba. Aportar matriz de identidades/secretos, pruebas de rechazo y política efectiva de datos ficticios. Fuente: 31 y 32, estado vigente de los entornos; 04, sesiones."
+      ]
+    },
+    {
+      "id": "H5",
+      "title": "Eliminar cualquier exposición de credenciales en la autenticación",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Hallazgo C2 · M8-04, M8-13, M2-20.",
+        "Se documenta la exclusión del hash en login y la invalidación de sesiones. Completar todas las variantes de login, renovación, desbloqueo, logs y cachés. Fuente: 04; 19, Sesiones administrativas globales."
+      ]
+    },
+    {
+      "id": "H6",
+      "title": "Regularizar las campañas de reactivación de pacientes",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Hallazgo E1 · M2-08, M2-17, M2-22, M5-04, M5-05, M5-07, M5-08.",
+        "Existe exclusión por baja y hay segmentación por tratamiento. Acreditar base jurídica y prueba de alta comercial por origen/importación. La clínica decide sobre cada campaña; La Voz responde por los controles ofrecidos. Fuente: 20.11, reactivación; 19, envíos masivos."
+      ]
+    },
+    {
+      "id": "H7",
+      "title": "Regularizar la transcripción de audios mediante IA",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Hallazgo F1 · M2-11, M2-15, M2-17, M7-05, M7-11, M7-12.",
+        "Consta transcripción transitoria por Groq y posibles datos de salud fuera del EEE. Pendientes garantías de la cuenta y decisión documentada sobre el uso transitorio o la sustitución. Fuente: 14.6, Transcripción de audio y transferencia internacional."
+      ]
+    },
+    {
+      "id": "H8",
+      "title": "Sustituir la política de privacidad por una específica de Clinicaclick",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Hallazgo I2 · M3-15.",
+        "Texto específico con versión publicada en CRM, identidad y DPD. Verificar que todos los puntos de recogida y la web comercial usan el texto que corresponde y que transferencias y plazos reflejan la operación real. Fuente: legal/README y texto de privacidad del 08/11; 19."
+      ]
+    },
+    {
+      "id": "H18",
+      "title": "Dejar documentado el sistema de privacidad de Clinicaclick",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Hallazgo A1 · M2-01, M2-02, M2-03, M2-04, M2-06, M2-23.",
+        "Reunir RAT de La Voz en sus dos roles, análisis de riesgos, EIPD cuando proceda y revisión aprobada. Las decisiones de licitud de cada clínica y su EIPD tienen otro titular. Fuente: Informe, hallazgo A1; contrato §§3.1.h y 6."
+      ]
+    },
+    {
+      "id": "H19",
+      "title": "Cerrar el mapa de proveedores, subencargados y transferencias",
+      "quarter": "Q2",
+      "context": [
+        "Media · Hallazgo A2 · M2-11, M2-12, M2-13, M2-15, M7-12, M8-08.",
+        "Inventario y transferencias descritos en parte. Conciliar contratos de la cuenta, accesos remotos, cobertura de mensajería/correo y fichas de IA. Fuente: Anexo III; 14.6, 32, 33 y política pública."
+      ]
+    },
+    {
+      "id": "H21",
+      "title": "Formalizar la contratación y el encargo de tratamiento de Clinicaclick",
+      "quarter": "Q2",
+      "context": [
+        "Media · Hallazgo A4 · M2-09, M2-12, M3-05.",
+        "Hay borrador de encargo, con campos y anexo pendientes. Hay propuesta separada de aceptación versionada por clínica. Adjuntar términos vigentes, acuse, identidad/facultades y versión, o formalizar firma por otra vía acordada. Fuente: Word v1.1 y 19, candidata contractual del 08/11."
+      ]
+    },
+    {
+      "id": "H23",
+      "title": "Implantar un procedimiento para atender derechos RGPD",
+      "quarter": "Q2",
+      "context": [
+        "Media · Hallazgo H2 · M2-10.",
+        "Hay canal y distinción entre tratamientos propios y por cuenta de clínicas. Falta procedimiento completo, registro de solicitudes, plazos y evidencia de asistencia. Fuente: Páginas públicas de privacidad y eliminación; contrato §12."
+      ]
+    },
+    {
+      "id": "H31",
+      "title": "Superar un pentest externo antes del despliegue masivo",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Hallazgo D5 · M8-12, M8-17.",
+        "Pedir encargo, informe independiente y revisión posterior de remediaciones si existen. No consta cierre externo en las fuentes revisadas. Fuente: Informe D5; Anexo II."
+      ]
+    },
+    {
+      "id": "H36",
+      "title": "Cerrar la cobertura de responsabilidad civil del software",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Hallazgo G2 · M8-18.",
+        "El borrador tiene el importe vacío. El documento para la aseguradora no es la póliza. Solicitar certificado, límite por siniestro, sublímites y cobertura de privacidad/seguridad. Fuente: Word §16.4; informe G2."
+      ]
+    },
+    {
+      "id": "H38",
+      "title": "Actualizar la información RGPD de consentimientos y formularios",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Incorporado en la planificación de octubre.",
+        "Hay conservación de documentos y versiones. Revisar con Techlegal el conjunto de 64 formularios citado, textos vigentes por idioma y las autorizaciones independientes. Fuente: 18.15, modelos y firmas; planificación, Q2."
+      ]
+    },
+    {
+      "id": "H39",
+      "title": "Separar el uso clínico de imágenes de sus usos secundarios",
+      "quarter": "Q2",
+      "context": [
+        "Alta · Incorporado en la planificación de octubre.",
+        "Hay separación de archivos privados y públicos. Falta acreditar autorizaciones distintas por finalidad y canal, revocación y trazabilidad por foto/paciente. Fuente: 32, imágenes clínicas; planificación, Q2."
+      ]
+    },
+    {
+      "id": "H9",
+      "title": "Registrar y limitar los accesos de soporte a historias clínicas",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo B4 · M2-20, M8-03, M8-16.",
+        "La sesión delegada dura hasta 15 minutos y registra actor real y efectivo. Falta demostrar la finalidad, revisión periódica y cobertura de cualquier acceso directo de soporte. Fuente: 39, Atribución del soporte delegado; 04, Ver como usuario."
+      ]
+    },
+    {
+      "id": "H10",
+      "title": "Completar el registro de accesos clínicos y permitir su exportación",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo B5 · M2-20, M8-16, M3-19.",
+        "Captura y entrega protegida documentadas por recorrido. Faltan cobertura global de la historia, retención efectiva y exportación controlada por clínica en los términos del contrato. Fuente: 39, auditoría; runbook de lecturas de pacientes."
+      ]
+    },
+    {
+      "id": "H11",
+      "title": "Asegurar el portal de paciente, las firmas y el uso de tablets",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo B6 · M2-06, M2-17, M2-20, M8-03, M8-04.",
+        "Existen firma y entrega a tablet con documentos versionados. Revisar vinculación del portal, caducidad en lectura y firma, aislamiento de dispositivos y limpieza con dos pacientes sintéticos. Fuente: 18.15 y runbook tablet-consent-operations."
+      ]
+    },
+    {
+      "id": "H12",
+      "title": "Activar doble factor en los accesos sensibles",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo C3 · M8-04, M2-20.",
+        "MFA por correo en modo obligatorio en el acceso ordinario, con dispositivos de confianza documentados. Aportar matriz completa de perfiles sensibles, excepciones y evidencia por perfil. Fuente: 04, Estado operativo y Doble paso por correo."
+      ]
+    },
+    {
+      "id": "H13",
+      "title": "Poder cerrar sesiones y revocar accesos de forma inmediata",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo C4 · M8-03, M8-04, M8-13.",
+        "Sesión central y revocación documentadas, incluidas pruebas HTTP y sockets. Completar alcance para bajas, suspensión, sesiones no administrativas y autorizaciones externas. Fuente: 04 y runbook admin-session-deployment."
+      ]
+    },
+    {
+      "id": "H14",
+      "title": "Acreditar el cifrado de todos los datos almacenados",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo D1 · M2-20, M8-08, M8-09, M8-11.",
+        "RDS cifrado en París, gestión de secretos y dominios de claves documentados. Falta inventario completo de volúmenes con binarios clínicos, snapshots, copias y evidencia por soporte. Fuente: 32, almacenamiento clínico; runbook RDS Multi-AZ."
+      ]
+    },
+    {
+      "id": "H15",
+      "title": "Analizar los archivos subidos antes de abrirlos",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo D2 · M8-09, M8-11, M8-13.",
+        "Para imágenes web el código registra escáner no disponible; sí hay decodificación y saneado de determinados formatos. El análisis previo universal que promete el Anexo II no se acredita. Fuente: 13-backend, WebMediaAssets; 32; servicio publicMediaStorage."
+      ]
+    },
+    {
+      "id": "H16",
+      "title": "Poder restaurar una clínica sin afectar a las demás",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo D3 · M8-07, M8-14, M2-20.",
+        "Existen evidencias de copia y recuperación de infraestructura. Pedir prueba selectiva íntegra por clínica, con adjuntos, y objetivos aprobados de pérdida de datos y recuperación. Fuente: 32; 16, copias; runbook RDS Multi-AZ."
+      ]
+    },
+    {
+      "id": "H17",
+      "title": "Formalizar la gestión de vulnerabilidades e incidentes",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo D6 · M8-15, M8-16, M8-17, M2-21.",
+        "El canal técnico de avisos y las bitácoras ayudan a detectar incidentes. Pendiente acreditar política de brechas, responsables, plazo de comunicación, registro formal y seguimiento. Fuente: 39, monitor de seguridad."
+      ]
+    },
+    {
+      "id": "H20",
+      "title": "Aplicar plazos de conservación y bloqueo a las historias clínicas",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo A3 · M2-16, M2-17, M8-09.",
+        "La clínica fija conservación según su normativa y solicita devolución. La Voz debe aplicar instrucciones de bloqueo, acceso excepcional y trazabilidad. Pedir la matriz y pruebas de expediente bloqueado. Fuente: Contrato §§14.5–14.6; informe A3."
+      ]
+    },
+    {
+      "id": "H22",
+      "title": "Implantar formación anual en privacidad y seguridad",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo H1 · M2-07, M8-10.",
+        "Solicitar plan anual aprobado, materiales y constancia de participación y confidencialidad por función. El ZIP encarga estas actuaciones; su ejecución no queda acreditada. Fuente: Informe, hallazgo H1; contrato §5.1."
+      ]
+    },
+    {
+      "id": "H24",
+      "title": "Designar responsable y formar al equipo en inteligencia artificial",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo H3 · M7-04, M7-21.",
+        "Solicitar designación formal de coordinación de IA y programa con asistencia y revisiones. Nombrar un DPD no cubre automáticamente esta designación. Fuente: Informe, hallazgo H3."
+      ]
+    },
+    {
+      "id": "H25",
+      "title": "Corregir cookies, consentimiento y formularios de captación",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo E3 · M3-06, M3-07, M3-08, M3-09, M3-16, M5-03.",
+        "Confirmar proveedor, inventario de cookies y cumplimiento por plantilla/widget y en cada dominio aplicable. La política del CRM y la información de privacidad aportan cobertura distinta. Fuente: 20.14, webs; informe E3."
+      ]
+    },
+    {
+      "id": "H26",
+      "title": "Tener controlados todos los proveedores y flujos de IA",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo F2 · M7-01, M7-05, M7-12, M2-11, M2-15.",
+        "Hay inventario, perfiles europeos y telemetría por modelo y proveedor. Falta contrastar retención, cuenta efectiva, base jurídica y todos los casos de fallback. Fuente: 14.6, monitorización y política pública."
+      ]
+    },
+    {
+      "id": "H27",
+      "title": "Informar al usuario cuando interactúe con IA",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo F3 · M7-02, M7-15.",
+        "Distinguir asistente que habla con pacientes de clasificación interna. Inventariar por interfaz cuándo se informa, con texto/versión aprobados y capturas. La clínica participa en información al paciente. Fuente: Contrato §8.3; 14.6 y 35."
+      ]
+    },
+    {
+      "id": "H28",
+      "title": "Sustituir el Aviso Legal por uno específico de Clinicaclick",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo I1 · M3-03.",
+        "Identidad, domicilio y DPD publicados. Contrastar aviso legal específico de la web, datos registrales y coherencia con contrato y dominio. Fuente: Informe I1; política pública, Prestador."
+      ]
+    },
+    {
+      "id": "H29",
+      "title": "Definir reglas y retirada de contenidos de usuarios",
+      "quarter": "Q3",
+      "context": [
+        "Media · Hallazgo I3 · M3-10, M3-11.",
+        "Acordar para los contenidos que alojamos reglas, canal de notificación y procedimiento de retirada/registro. Techlegal delimitó el alcance según el servicio contratado. Fuente: Informe I3; 20.14."
+      ]
+    },
+    {
+      "id": "H40",
+      "title": "Implantar una biblioteca jurídica versionada para los consentimientos",
+      "quarter": "Q3",
+      "context": [
+        "Media · Incorporado en la planificación de octubre.",
+        "Hay editor, duplicación, plantillas y documentos versionados. Falta acreditar el contenido jurídico vigente, datos de cada clínica y retirada de obsoletos en ambos idiomas. Fuente: 18.15, plantillas y versiones; planificación, Q3."
+      ]
+    },
+    {
+      "id": "H30",
+      "title": "Detectar accesos anómalos y reforzar el perímetro",
+      "quarter": "Q4",
+      "context": [
+        "Media · Hallazgo D4 · M8-06, M8-11, M8-17.",
+        "Hay monitor y controles por servicio. Acreditar reglas para lecturas clínicas anómalas, exposición de los componentes y proceso de revisión/cierre de alertas. Fuente: 39, Monitor de seguridad; auditoría de plataforma."
+      ]
+    },
+    {
+      "id": "H32",
+      "title": "Bloquear el remarketing de pacientes hasta validarlo",
+      "quarter": "Q4",
+      "context": [
+        "Media · Hallazgo E2 · M2-08, M2-17, M5-10, M5-11.",
+        "Comprobar el bloqueo efectivo de audiencias de pacientes y reglas por plataforma. Consentimiento y validación de políticas sólo si se habilita este uso. Fuente: Informe E2; contrato §3.1.f."
+      ]
+    },
+    {
+      "id": "H33",
+      "title": "Eliminar el filtrado previo de reseñas",
+      "quarter": "Q4",
+      "context": [
+        "Media · Hallazgo E4 · M3-14, M5-15.",
+        "Hay documentación de un flujo con umbral 5/5. Revisar el comportamiento vigente conforme al requisito de no seleccionar opiniones positivas y aportar una comparación de las dos ramas. Fuente: Informe E4; 20.10, reseñas, filtro público 5/5."
+      ]
+    },
+    {
+      "id": "H34",
+      "title": "Formalizar cuándo debe intervenir una persona en respuestas de IA",
+      "quarter": "Q4",
+      "context": [
+        "Media · Hallazgo F4 · M7-08, M7-09, M7-13, M7-16.",
+        "Están descritos umbrales y revisión de respuestas dudosas. Acreditar política transversal, revisión de errores y desactivación por clínica conservando la atención manual. Fuente: 14.6; 35, asistente de citas; informe F4."
+      ]
+    },
+    {
+      "id": "H35",
+      "title": "Incorporar EHDS e interoperabilidad al roadmap",
+      "quarter": "Q4",
+      "context": [
+        "Media · Hallazgo G1 · M3-19, M8-18.",
+        "Techlegal debe determinar aplicabilidad y calendario de EHDS para el producto. Pedir decisión y referencias explícitas de portabilidad e interoperabilidad en roadmap. Fuente: Informe G1 y M3-19; contrato §7.3."
+      ]
+    },
+    {
+      "id": "H37",
+      "title": "Corregir los problemas de accesibilidad de la web",
+      "quarter": "Q4",
+      "context": [
+        "Media · Hallazgo I4 · M3-20.",
+        "Revisar la web señalada en la auditoría, conservar resultados de accesibilidad, correcciones y seguimiento. El QA de una pantalla de CRM no demuestra accesibilidad del sitio completo. Fuente: Informe I4."
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "H1.1",
+      "title": "Implantar en backend una regla de acceso que limite por defecto la historia clínica a los profesionales asignados al paciente.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H1"
+    },
+    {
+      "id": "H1.2",
+      "title": "Definir y documentar las excepciones necesarias para sustituciones, equipos asistenciales, guardias y situaciones de emergencia.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H1"
+    },
+    {
+      "id": "H1.3",
+      "title": "Añadir pruebas negativas que acrediten que un profesional no puede consultar pacientes ajenos a su ámbito autorizado.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H1"
+    },
+    {
+      "id": "H1.4",
+      "title": "Verificar el cierre del asunto «Limitar cada médico a sus pacientes asignados».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H1"
+    },
+    {
+      "id": "H2.1",
+      "title": "Separar los permisos de gestión empresarial de los permisos de acceso a información clínica.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H2"
+    },
+    {
+      "id": "H2.2",
+      "title": "Configurar el acceso clínico del propietario como permiso excepcional, desactivado por defecto y sujeto a una finalidad documentada.",
+      "owner": "La Voz",
+      "status": "Brecha identificada",
+      "milestone": "H2"
+    },
+    {
+      "id": "H2.3",
+      "title": "Registrar y revisar periódicamente los accesos clínicos efectuados por perfiles no asistenciales.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H2"
+    },
+    {
+      "id": "H2.4",
+      "title": "Verificar el cierre del asunto «Limitar el acceso del propietario a los datos clínicos».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H2"
+    },
+    {
+      "id": "H3.1",
+      "title": "Definir una lista cerrada de datos y métricas visibles para el rol de agencia, excluyendo datos de salud e identificadores no necesarios.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H3"
+    },
+    {
+      "id": "H3.2",
+      "title": "Aplicar anonimización o agregación también en exportaciones, eventos en tiempo real, chats y enlaces generados por la plataforma.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H3"
+    },
+    {
+      "id": "H3.3",
+      "title": "Bloquear el rol de agencia en producción hasta superar pruebas de aislamiento con datos sintéticos.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H3"
+    },
+    {
+      "id": "H3.4",
+      "title": "Verificar el cierre del asunto «Mostrar a las agencias solo datos anónimos y métricas».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H3"
+    },
+    {
+      "id": "H4.1",
+      "title": "Separar las bases de datos de desarrollo, staging y producción con usuarios y credenciales independientes.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H4"
+    },
+    {
+      "id": "H4.2",
+      "title": "Separar las claves JWT y demás secretos criptográficos por entorno.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H4"
+    },
+    {
+      "id": "H4.3",
+      "title": "Evitar el uso de datos clínicos reales en entornos no productivos y documentar las reglas de datos de prueba.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H4"
+    },
+    {
+      "id": "H4.4",
+      "title": "Ejecutar pruebas de rechazo cruzado entre entornos tras la segregación.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H4"
+    },
+    {
+      "id": "H4.5",
+      "title": "Verificar el cierre del asunto «Separar desarrollo, pruebas y producción».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H4"
+    },
+    {
+      "id": "H5.1",
+      "title": "Cambiar las respuestas de autenticación a una lista cerrada de campos permitidos que excluya cualquier hash o secreto.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H5"
+    },
+    {
+      "id": "H5.2",
+      "title": "Validar con una cuenta sintética los flujos de login, renovación y desbloqueo de sesión.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H5"
+    },
+    {
+      "id": "H5.3",
+      "title": "Revisar logs, cachés y almacenamiento del navegador para confirmar que el hash no queda persistido en ningún punto.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H5"
+    },
+    {
+      "id": "H5.4",
+      "title": "Verificar el cierre del asunto «Eliminar cualquier exposición de credenciales en la autenticación».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H5"
+    },
+    {
+      "id": "H6.1",
+      "title": "Bloquear por defecto las campañas de reactivación basadas en tratamientos hasta definir la base jurídica aplicable y los requisitos de consentimiento.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H6"
+    },
+    {
+      "id": "H6.2",
+      "title": "Separar el consentimiento asistencial del consentimiento para comunicaciones comerciales y poder acreditar su otorgamiento y retirada.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H6"
+    },
+    {
+      "id": "H6.3",
+      "title": "Evitar que plantillas o segmentaciones revelen información sanitaria innecesaria en el propio mensaje.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H6"
+    },
+    {
+      "id": "H6.4",
+      "title": "Registrar el origen de los contactos importados y el estado de sus permisos comerciales.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H6"
+    },
+    {
+      "id": "H6.5",
+      "title": "Verificar el cierre del asunto «Regularizar las campañas de reactivación de pacientes».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H6"
+    },
+    {
+      "id": "H7.1",
+      "title": "Documentar exactamente qué audios y campos se envían al proveedor y en qué supuestos.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H7"
+    },
+    {
+      "id": "H7.2",
+      "title": "Acreditar contrato, ubicación, retención y garantías de transferencia del proveedor utilizado.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H7"
+    },
+    {
+      "id": "H7.3",
+      "title": "Si las garantías no resultan suficientes, migrar la transcripción a una solución que permita un tratamiento compatible con los requisitos definidos por la plataforma.",
+      "owner": "La Voz",
+      "status": "Condicionado al supuesto",
+      "milestone": "H7"
+    },
+    {
+      "id": "H7.4",
+      "title": "Verificar el cierre del asunto «Regularizar la transcripción de audios mediante IA».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H7"
+    },
+    {
+      "id": "H8.1",
+      "title": "Redactar una política de privacidad específica para Clinicaclick y eliminar cualquier referencia a terceros o tratamientos ajenos.",
+      "owner": "Techlegal",
+      "status": "Acreditado en el alcance indicado",
+      "milestone": "H8"
+    },
+    {
+      "id": "H8.2",
+      "title": "Identificar correctamente al responsable y sus datos de contacto y completar las finalidades, bases jurídicas, destinatarios, transferencias y plazos de conservación reales.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H8"
+    },
+    {
+      "id": "H8.3",
+      "title": "Eliminar referencias jurídicas obsoletas y coordinar el contenido con la configuración real de cookies, perfilado, proveedores e integraciones.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H8"
+    },
+    {
+      "id": "H8.4",
+      "title": "Versionar y conservar evidencia de las políticas publicadas.",
+      "owner": "Techlegal",
+      "status": "Acreditado en el alcance indicado",
+      "milestone": "H8"
+    },
+    {
+      "id": "H8.5",
+      "title": "Verificar el cierre del asunto «Sustituir la política de privacidad por una específica de Clinicaclick».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H8"
+    },
+    {
+      "id": "H18.1",
+      "title": "Elaborar y aprobar el Registro de Actividades de Tratamiento de La Voz Medios Digitales, S.L., incluyendo de forma diferenciada los tratamientos propios y los realizados por cuenta de las clínicas.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H18"
+    },
+    {
+      "id": "H18.2",
+      "title": "Realizar un análisis de riesgos específico de la plataforma y de sus tratamientos de datos de salud.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H18"
+    },
+    {
+      "id": "H18.3",
+      "title": "Determinar y documentar los tratamientos que requieren una evaluación de impacto y, cuando proceda, completar la EIPD antes del despliegue general.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H18"
+    },
+    {
+      "id": "H18.4",
+      "title": "Formalizar un procedimiento de privacidad desde el diseño aplicable a nuevas funcionalidades, integraciones y campañas.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H18"
+    },
+    {
+      "id": "H18.5",
+      "title": "Establecer una revisión periódica del sistema de privacidad y de las medidas derivadas de la auditoría.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H18"
+    },
+    {
+      "id": "H18.6",
+      "title": "Verificar el cierre del asunto «Dejar documentado el sistema de privacidad de Clinicaclick».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H18"
+    },
+    {
+      "id": "H19.1",
+      "title": "Completar un inventario de proveedores y subencargados indicando servicio, finalidad, categorías de datos, ubicación, transferencias, contrato aplicable y responsable de revisión.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H19"
+    },
+    {
+      "id": "H19.2",
+      "title": "Formalizar o verificar los acuerdos de encargo y las autorizaciones de subencargados necesarias para la prestación de la plataforma.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H19"
+    },
+    {
+      "id": "H19.3",
+      "title": "Documentar las garantías aplicables a cualquier tratamiento fuera del EEE o acceso desde terceros países.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H19"
+    },
+    {
+      "id": "H19.4",
+      "title": "Mantener una ficha de evaluación específica para cada proveedor de IA utilizado con datos personales.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H19"
+    },
+    {
+      "id": "H19.5",
+      "title": "Verificar el cierre del asunto «Cerrar el mapa de proveedores, subencargados y transferencias».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H19"
+    },
+    {
+      "id": "H21.1",
+      "title": "Redactar y aprobar condiciones de contratación y uso específicas de Clinicaclick y del servicio SaaS.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H21"
+    },
+    {
+      "id": "H21.2",
+      "title": "Redactar el acuerdo de encargado del tratamiento del art. 28 RGPD para las clínicas usuarias.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H21"
+    },
+    {
+      "id": "H21.3",
+      "title": "Regular subencargados, medidas de seguridad y devolución, exportación y supresión de datos al finalizar el servicio.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H21"
+    },
+    {
+      "id": "H21.4",
+      "title": "Actualizar la cláusula de privacidad del contrato, separando gestión comercial, comunicaciones opcionales y plazos de conservación.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H21"
+    },
+    {
+      "id": "H21.5",
+      "title": "Incorporar la aceptación versionada de las condiciones y del encargo en el proceso de alta de clínicas.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H21"
+    },
+    {
+      "id": "H21.6",
+      "title": "Verificar documentalmente el cierre del asunto «Formalizar la contratación y el encargo de tratamiento de Clinicaclick».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H21"
+    },
+    {
+      "id": "H23.1",
+      "title": "Redactar y aprobar un procedimiento sencillo de ejercicio de derechos con canales, responsables, plazos y registro de actuaciones.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H23"
+    },
+    {
+      "id": "H23.2",
+      "title": "Definir el mecanismo de asistencia a las clínicas cuando una solicitud afecte a datos tratados por Clinicaclick por cuenta del cliente.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H23"
+    },
+    {
+      "id": "H23.3",
+      "title": "Crear un registro mínimo de solicitudes y respuestas que permita acreditar su gestión.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H23"
+    },
+    {
+      "id": "H23.4",
+      "title": "Verificar el cierre del asunto «Implantar un procedimiento para atender derechos RGPD».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H23"
+    },
+    {
+      "id": "H31.1",
+      "title": "Contratar una prueba de intrusión independiente sobre la superficie expuesta de la plataforma antes del despliegue masivo.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H31"
+    },
+    {
+      "id": "H31.2",
+      "title": "Documentar la corrección de los hallazgos y realizar una verificación posterior de los puntos críticos.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H31"
+    },
+    {
+      "id": "H31.3",
+      "title": "Verificar el cierre del asunto «Superar un pentest externo antes del despliegue masivo».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H31"
+    },
+    {
+      "id": "H36.1",
+      "title": "Cerrar y documentar la póliza de responsabilidad civil que cubra expresamente la actividad de desarrollo y explotación de la plataforma.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H36"
+    },
+    {
+      "id": "H36.2",
+      "title": "Revisar límites, exclusiones y cobertura de incidentes de seguridad y protección de datos antes del lanzamiento general.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H36"
+    },
+    {
+      "id": "H36.3",
+      "title": "Verificar el cierre del asunto «Cerrar la cobertura de responsabilidad civil del software».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H36"
+    },
+    {
+      "id": "H38.1",
+      "title": "Identificar las cláusulas de privacidad desactualizadas presentes en los 64 formularios y consentimientos.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H38"
+    },
+    {
+      "id": "H38.2",
+      "title": "Redactar un texto RGPD común y actualizado que identifique a la clínica responsable y las finalidades asistenciales.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H38"
+    },
+    {
+      "id": "H38.3",
+      "title": "Separar la información del tratamiento asistencial de las autorizaciones opcionales y del consentimiento médico.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H38"
+    },
+    {
+      "id": "H38.4",
+      "title": "Actualizar los modelos de privacidad, formulario médico y autorización de comunicaciones comerciales con información suficiente.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H38"
+    },
+    {
+      "id": "H38.5",
+      "title": "Incorporar los textos a los formularios de la plataforma y conservar la versión facilitada a cada paciente.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H38"
+    },
+    {
+      "id": "H38.6",
+      "title": "Verificar documentalmente la actualización de las cláusulas RGPD en formularios y consentimientos.",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H38"
+    },
+    {
+      "id": "H39.1",
+      "title": "Distinguir en los formularios la fotografía necesaria para la historia clínica de las imágenes destinadas a usos secundarios.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H39"
+    },
+    {
+      "id": "H39.2",
+      "title": "Preparar una autorización independiente para difusión científica y docente cuando sea necesaria.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H39"
+    },
+    {
+      "id": "H39.3",
+      "title": "Revisar la autorización comercial de imágenes para recoger los canales permitidos y facilitar su retirada.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H39"
+    },
+    {
+      "id": "H39.4",
+      "title": "Registrar por paciente y fotografía las autorizaciones concretas y evitar usos no autorizados.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H39"
+    },
+    {
+      "id": "H39.5",
+      "title": "Verificar documentalmente la separación de los usos clínicos, docentes y comerciales de imágenes.",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H39"
+    },
+    {
+      "id": "H9.1",
+      "title": "Registrar de forma específica los accesos de soporte a expedientes clínicos, incluyendo actor, clínica, paciente, finalidad, recurso, operación, fecha y resultado.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H9"
+    },
+    {
+      "id": "H9.2",
+      "title": "Establecer un modo de soporte con acceso temporal y justificado a datos reales, evitando privilegios permanentes.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H9"
+    },
+    {
+      "id": "H9.3",
+      "title": "Revisar periódicamente los accesos realizados por perfiles administrativos o de soporte.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H9"
+    },
+    {
+      "id": "H9.4",
+      "title": "Verificar el cierre del asunto «Registrar y limitar los accesos de soporte a historias clínicas».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H9"
+    },
+    {
+      "id": "H10.1",
+      "title": "Completar el esquema de auditoría para registrar las lecturas y operaciones relevantes sobre historias clínicas.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H10"
+    },
+    {
+      "id": "H10.2",
+      "title": "Proteger los logs frente a modificación o borrado no autorizado y definir su retención.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H10"
+    },
+    {
+      "id": "H10.3",
+      "title": "Habilitar una exportación controlada de los registros de acceso para atender solicitudes y auditorías.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H10"
+    },
+    {
+      "id": "H10.4",
+      "title": "Verificar el cierre del asunto «Completar el registro de accesos clínicos y permitir su exportación».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H10"
+    },
+    {
+      "id": "H11.1",
+      "title": "Definir antes del lanzamiento del portal una vinculación unívoca y verificable entre la cuenta del paciente y su ficha.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H11"
+    },
+    {
+      "id": "H11.2",
+      "title": "Revisar los enlaces de firma para que la caducidad y el estado se comprueben en cada lectura y firma.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H11"
+    },
+    {
+      "id": "H11.3",
+      "title": "Valorar una segunda verificación proporcionada para documentos o datos especialmente sensibles.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H11"
+    },
+    {
+      "id": "H11.4",
+      "title": "Configurar la tablet para que el personal seleccione el expediente antes de entregar el dispositivo y limpiar la pantalla al finalizar cada firma.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H11"
+    },
+    {
+      "id": "H11.5",
+      "title": "Verificar el cierre del asunto «Asegurar el portal de paciente, las firmas y el uso de tablets».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H11"
+    },
+    {
+      "id": "H12.1",
+      "title": "Implantar MFA obligatorio para administradores, propietarios con acceso clínico y perfiles de soporte.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H12"
+    },
+    {
+      "id": "H12.2",
+      "title": "Extender el MFA al resto de usuarios con acceso a historias clínicas, salvo excepción justificada y documentada.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H12"
+    },
+    {
+      "id": "H12.3",
+      "title": "Verificar el cierre del asunto «Activar doble factor en los accesos sensibles».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H12"
+    },
+    {
+      "id": "H13.1",
+      "title": "Implantar una sesión central o un mecanismo equivalente que permita revocar sesiones activas desde el servidor.",
+      "owner": "La Voz",
+      "status": "Acreditado en el alcance indicado",
+      "milestone": "H13"
+    },
+    {
+      "id": "H13.2",
+      "title": "Invalidar sesiones y tokens de renovación ante cambio de contraseña, baja o suspensión del usuario.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H13"
+    },
+    {
+      "id": "H13.3",
+      "title": "Cerrar conexiones en tiempo real y revisar autorizaciones OAuth cuando se revoque el acceso de un usuario.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H13"
+    },
+    {
+      "id": "H13.4",
+      "title": "Verificar el cierre del asunto «Poder cerrar sesiones y revocar accesos de forma inmediata».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H13"
+    },
+    {
+      "id": "H14.1",
+      "title": "Verificar y documentar el cifrado efectivo de todos los volúmenes, snapshots y copias que puedan contener datos clínicos.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H14"
+    },
+    {
+      "id": "H14.2",
+      "title": "Documentar las claves y permisos de administración asociados al cifrado sin incorporar secretos a la documentación de auditoría.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H14"
+    },
+    {
+      "id": "H14.3",
+      "title": "Valorar cifrado adicional a nivel de aplicación para secretos o categorías de datos cuyo riesgo lo justifique.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H14"
+    },
+    {
+      "id": "H14.4",
+      "title": "Verificar el cierre del asunto «Acreditar el cifrado de todos los datos almacenados».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H14"
+    },
+    {
+      "id": "H15.1",
+      "title": "Incorporar una fase de cuarentena y análisis antimalware de los archivos subidos antes de hacerlos disponibles.",
+      "owner": "La Voz",
+      "status": "Brecha identificada",
+      "milestone": "H15"
+    },
+    {
+      "id": "H15.2",
+      "title": "Validar el contenido real del archivo además de su extensión o MIME declarado.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H15"
+    },
+    {
+      "id": "H15.3",
+      "title": "Registrar el resultado del análisis y bloquear de forma segura los archivos rechazados.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H15"
+    },
+    {
+      "id": "H15.4",
+      "title": "Verificar el cierre del asunto «Analizar los archivos subidos antes de abrirlos».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H15"
+    },
+    {
+      "id": "H16.1",
+      "title": "Documentar la política de copias indicando frecuencia, retención, cobertura, ubicación y permisos.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H16"
+    },
+    {
+      "id": "H16.2",
+      "title": "Diseñar un procedimiento de recuperación selectiva por clínica que preserve la integridad de los datos de terceros.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H16"
+    },
+    {
+      "id": "H16.3",
+      "title": "Realizar y documentar una prueba de restauración total y otra selectiva con datos sintéticos.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H16"
+    },
+    {
+      "id": "H16.4",
+      "title": "Definir RPO y RTO para los servicios críticos.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H16"
+    },
+    {
+      "id": "H16.5",
+      "title": "Verificar el cierre del asunto «Poder restaurar una clínica sin afectar a las demás».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H16"
+    },
+    {
+      "id": "H17.1",
+      "title": "Crear una categoría específica de seguridad en Jira con prioridad, responsable, fecha de detección, impacto y estado de remediación.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H17"
+    },
+    {
+      "id": "H17.2",
+      "title": "Aprobar un procedimiento de gestión de incidentes que incluya la evaluación de posible brecha de datos personales.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H17"
+    },
+    {
+      "id": "H17.3",
+      "title": "Mantener un registro de incidentes y documentar las medidas adoptadas y las lecciones aprendidas.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H17"
+    },
+    {
+      "id": "H17.4",
+      "title": "Definir un canal claro para que usuarios y administradores comuniquen incidentes de seguridad.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H17"
+    },
+    {
+      "id": "H17.5",
+      "title": "Verificar el cierre del asunto «Formalizar la gestión de vulnerabilidades e incidentes».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H17"
+    },
+    {
+      "id": "H20.1",
+      "title": "Definir una matriz de conservación y bloqueo por categoría documental y ámbito territorial aplicable a las clínicas.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H20"
+    },
+    {
+      "id": "H20.2",
+      "title": "Implementar estados de conservación y bloqueo que impidan el acceso ordinario una vez finalizada la finalidad asistencial, manteniendo únicamente los accesos legalmente justificados.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H20"
+    },
+    {
+      "id": "H20.3",
+      "title": "Registrar las operaciones de desbloqueo o reactivación de expedientes y su motivo.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H20"
+    },
+    {
+      "id": "H20.4",
+      "title": "Verificar el cierre del asunto «Aplicar plazos de conservación y bloqueo a las historias clínicas».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H20"
+    },
+    {
+      "id": "H22.1",
+      "title": "Aprobar un plan anual de formación en protección de datos y confidencialidad adaptado a las funciones del equipo.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H22"
+    },
+    {
+      "id": "H22.2",
+      "title": "Implantar un programa básico y periódico de sensibilización en seguridad que cubra credenciales, phishing, uso de dispositivos, incidentes y tratamiento de información clínica.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H22"
+    },
+    {
+      "id": "H22.3",
+      "title": "Conservar evidencia de la formación impartida y de la participación del personal.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H22"
+    },
+    {
+      "id": "H22.4",
+      "title": "Verificar el cierre del asunto «Implantar formación anual en privacidad y seguridad».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H22"
+    },
+    {
+      "id": "H24.1",
+      "title": "Designar formalmente a la persona responsable de coordinar el cumplimiento de las obligaciones de transparencia sobre IA.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H24"
+    },
+    {
+      "id": "H24.2",
+      "title": "Definir un programa básico de alfabetización en IA adaptado a los sistemas y responsabilidades del equipo.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H24"
+    },
+    {
+      "id": "H24.3",
+      "title": "Conservar evidencia de la formación y revisar su contenido cuando cambien los sistemas o casos de uso.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H24"
+    },
+    {
+      "id": "H24.4",
+      "title": "Verificar el cierre del asunto «Designar responsable y formar al equipo en inteligencia artificial».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H24"
+    },
+    {
+      "id": "H25.1",
+      "title": "Bloquear todas las cookies y tecnologías publicitarias no necesarias hasta obtener un consentimiento válido.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H25"
+    },
+    {
+      "id": "H25.2",
+      "title": "Corregir la política de cookies para que refleje las cookies, proveedores, finalidades y plazos realmente utilizados.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H25"
+    },
+    {
+      "id": "H25.3",
+      "title": "Mantener un inventario actualizado de cookies y tecnologías por cada plantilla o web desplegada.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H25"
+    },
+    {
+      "id": "H25.4",
+      "title": "Verificar técnicamente que las elecciones de rechazo y configuración se respetan desde el inicio y durante toda la navegación.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H25"
+    },
+    {
+      "id": "H25.5",
+      "title": "Incorporar información de privacidad de primera capa en cada widget o formulario que recoja datos.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H25"
+    },
+    {
+      "id": "H25.6",
+      "title": "Verificar el cierre del asunto «Corregir cookies, consentimiento y formularios de captación».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H25"
+    },
+    {
+      "id": "H26.1",
+      "title": "Mantener un inventario de IA por finalidad que identifique proveedor, modelo, región, datos enviados, retención, base jurídica y revisión humana.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H26"
+    },
+    {
+      "id": "H26.2",
+      "title": "Acreditar la configuración efectiva de cada cuenta y no únicamente la documentación pública del proveedor.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H26"
+    },
+    {
+      "id": "H26.3",
+      "title": "Registrar el proveedor y modelo efectivamente utilizado cuando exista fallback o selección dinámica.",
+      "owner": "La Voz",
+      "status": "Acreditado en el alcance indicado",
+      "milestone": "H26"
+    },
+    {
+      "id": "H26.4",
+      "title": "Verificar el cierre del asunto «Tener controlados todos los proveedores y flujos de IA».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H26"
+    },
+    {
+      "id": "H27.1",
+      "title": "Definir una política de transparencia de IA con reglas por tipo de interacción y contenido.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H27"
+    },
+    {
+      "id": "H27.2",
+      "title": "Incorporar el aviso correspondiente en los flujos donde el paciente interactúe directamente con un asistente o sistema de IA.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H27"
+    },
+    {
+      "id": "H27.3",
+      "title": "Definir y aplicar criterios internos de etiquetado para contenidos generados o modificados mediante IA.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H27"
+    },
+    {
+      "id": "H27.4",
+      "title": "Verificar el cierre del asunto «Informar al usuario cuando interactúe con IA».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H27"
+    },
+    {
+      "id": "H28.1",
+      "title": "Sustituir las referencias a dominios, actividades y cláusulas ajenas por un Aviso Legal íntegramente adaptado a Clinicaclick.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H28"
+    },
+    {
+      "id": "H28.2",
+      "title": "Completar los datos identificativos y registrales exigibles del prestador.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H28"
+    },
+    {
+      "id": "H28.3",
+      "title": "Revisar la coherencia del domicilio, datos de contacto, jurisdicción y régimen de propiedad intelectual antes de publicar la nueva versión.",
+      "owner": "Techlegal",
+      "status": "Parcial",
+      "milestone": "H28"
+    },
+    {
+      "id": "H28.4",
+      "title": "Verificar el cierre del asunto «Sustituir el Aviso Legal por uno específico de Clinicaclick».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H28"
+    },
+    {
+      "id": "H29.1",
+      "title": "Definir unas reglas básicas sobre contenidos permitidos y prohibidos cuando los usuarios puedan aportar o publicar contenido.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H29"
+    },
+    {
+      "id": "H29.2",
+      "title": "Implantar un canal sencillo para comunicar contenidos ilícitos o contrarios a las reglas de uso.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H29"
+    },
+    {
+      "id": "H29.3",
+      "title": "Definir un procedimiento interno de revisión, retirada y conservación de evidencia de las actuaciones realizadas.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H29"
+    },
+    {
+      "id": "H29.4",
+      "title": "Verificar el cierre del asunto «Definir reglas y retirada de contenidos de usuarios».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H29"
+    },
+    {
+      "id": "H40.1",
+      "title": "Definir los bloques jurídicos reutilizables de privacidad e imágenes para la biblioteca de formularios.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H40"
+    },
+    {
+      "id": "H40.2",
+      "title": "Parametrizar automáticamente en los modelos la identidad y los datos de contacto de cada clínica.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H40"
+    },
+    {
+      "id": "H40.3",
+      "title": "Implantar versiones únicas vigentes, registro de cambios y trazabilidad del documento firmado.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H40"
+    },
+    {
+      "id": "H40.4",
+      "title": "Retirar las versiones jurídicas obsoletas y revisar una muestra de modelos en español e inglés.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H40"
+    },
+    {
+      "id": "H40.5",
+      "title": "Verificar documentalmente que la biblioteca funciona con modelos jurídicos actualizados y versionados.",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H40"
+    },
+    {
+      "id": "H30.1",
+      "title": "Verificar la exposición real de los hosts y documentar los controles perimetrales aplicados en AWS y Cloudflare.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H30"
+    },
+    {
+      "id": "H30.2",
+      "title": "Definir patrones de acceso anómalo a historias clínicas y generar alertas sobre los eventos de mayor riesgo.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H30"
+    },
+    {
+      "id": "H30.3",
+      "title": "Incorporar al panel de seguridad la revisión de alertas y su resolución.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H30"
+    },
+    {
+      "id": "H30.4",
+      "title": "Verificar el cierre del asunto «Detectar accesos anómalos y reforzar el perímetro».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H30"
+    },
+    {
+      "id": "H32.1",
+      "title": "Mantener deshabilitada la creación de audiencias de pacientes hasta disponer de un análisis jurídico específico.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H32"
+    },
+    {
+      "id": "H32.2",
+      "title": "Si se mantuviera la funcionalidad, diseñar un consentimiento específico, granular y revocable y validar las políticas del proveedor publicitario.",
+      "owner": "Techlegal",
+      "status": "Condicionado al supuesto",
+      "milestone": "H32"
+    },
+    {
+      "id": "H32.3",
+      "title": "Verificar el cierre del asunto «Bloquear el remarketing de pacientes hasta validarlo».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H32"
+    },
+    {
+      "id": "H33.1",
+      "title": "Revisar jurídicamente el flujo de reseñas y las políticas de Google antes de mantener el filtrado por puntuación.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H33"
+    },
+    {
+      "id": "H33.2",
+      "title": "Evitar mecanismos que puedan presentar como representativa una selección artificial de opiniones.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H33"
+    },
+    {
+      "id": "H33.3",
+      "title": "Verificar el cierre del asunto «Eliminar el filtrado previo de reseñas».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H33"
+    },
+    {
+      "id": "H34.1",
+      "title": "Documentar los umbrales de confianza y los supuestos que obligan a intervención humana.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H34"
+    },
+    {
+      "id": "H34.2",
+      "title": "Registrar incidencias relevantes de IA y revisar periódicamente falsos positivos o interpretaciones incorrectas.",
+      "owner": "La Voz",
+      "status": "Parcial",
+      "milestone": "H34"
+    },
+    {
+      "id": "H34.3",
+      "title": "Mantener una opción de desactivación segura de la IA sin bloquear la operativa clínica esencial.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H34"
+    },
+    {
+      "id": "H34.4",
+      "title": "Verificar el cierre del asunto «Formalizar cuándo debe intervenir una persona en respuestas de IA».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H34"
+    },
+    {
+      "id": "H35.1",
+      "title": "Elaborar una nota de aplicabilidad y calendario regulatorio específico para la plataforma.",
+      "owner": "Techlegal",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H35"
+    },
+    {
+      "id": "H35.2",
+      "title": "Incorporar al roadmap técnico los requisitos de interoperabilidad, portabilidad y trazabilidad que resulten aplicables.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H35"
+    },
+    {
+      "id": "H35.3",
+      "title": "Verificar el cierre del asunto «Incorporar EHDS e interoperabilidad al roadmap».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H35"
+    },
+    {
+      "id": "H37.1",
+      "title": "Corregir la jerarquía semántica de encabezados y los defectos de accesibilidad identificados en la web.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H37"
+    },
+    {
+      "id": "H37.2",
+      "title": "Incorporar una revisión de accesibilidad al ciclo de desarrollo antes de la fecha de exigibilidad aplicable.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H37"
+    },
+    {
+      "id": "H37.3",
+      "title": "Conservar evidencia de las comprobaciones y correcciones realizadas.",
+      "owner": "La Voz",
+      "status": "Sin evidencia suficiente",
+      "milestone": "H37"
+    },
+    {
+      "id": "H37.4",
+      "title": "Verificar el cierre del asunto «Corregir los problemas de accesibilidad de la web».",
+      "owner": "Techlegal",
+      "status": "Validación del DPD pendiente",
+      "milestone": "H37"
+    }
+  ],
+  "archive": [
+    {
+      "id": "H1.1",
+      "title": "Implantar en backend una regla de acceso que limite por defecto la historia clínica a los profesionales asignados al paciente.",
+      "page": "24"
+    },
+    {
+      "id": "H1.2",
+      "title": "Definir y documentar las excepciones necesarias para sustituciones, equipos asistenciales, guardias y situaciones de emergencia.",
+      "page": "25"
+    },
+    {
+      "id": "H1.3",
+      "title": "Añadir pruebas negativas que acrediten que un profesional no puede consultar pacientes ajenos a su ámbito autorizado.",
+      "page": "25"
+    },
+    {
+      "id": "H1.4",
+      "title": "Verificar el cierre del hito «Limitar cada médico a sus pacientes asignados».",
+      "page": "26"
+    },
+    {
+      "id": "H2.1",
+      "title": "Separar los permisos de gestión empresarial de los permisos de acceso a información clínica.",
+      "page": "27"
+    },
+    {
+      "id": "H2.2",
+      "title": "Configurar el acceso clínico del propietario como permiso excepcional, desactivado por defecto y sujeto a una finalidad documentada.",
+      "page": "28"
+    },
+    {
+      "id": "H2.3",
+      "title": "Registrar y revisar periódicamente los accesos clínicos efectuados por perfiles no asistenciales.",
+      "page": "28"
+    },
+    {
+      "id": "H2.4",
+      "title": "Verificar el cierre del hito «Limitar el acceso del propietario a los datos clínicos».",
+      "page": "29"
+    },
+    {
+      "id": "H3.1",
+      "title": "Definir una lista cerrada de datos y métricas visibles para el rol de agencia, excluyendo datos de salud e identificadores no necesarios.",
+      "page": "30"
+    },
+    {
+      "id": "H3.2",
+      "title": "Aplicar anonimización o agregación también en exportaciones, eventos en tiempo real, chats y enlaces generados por la plataforma.",
+      "page": "31"
+    },
+    {
+      "id": "H3.3",
+      "title": "Bloquear el rol de agencia en producción hasta superar pruebas de aislamiento con datos sintéticos.",
+      "page": "31"
+    },
+    {
+      "id": "H3.4",
+      "title": "Verificar el cierre del hito «Mostrar a las agencias solo datos anónimos y métricas».",
+      "page": "32"
+    },
+    {
+      "id": "H4.1",
+      "title": "Separar las bases de datos de desarrollo, staging y producción con usuarios y credenciales independientes.",
+      "page": "33"
+    },
+    {
+      "id": "H4.2",
+      "title": "Separar las claves JWT y demás secretos criptográficos por entorno.",
+      "page": "34"
+    },
+    {
+      "id": "H4.3",
+      "title": "Evitar el uso de datos clínicos reales en entornos no productivos y documentar las reglas de datos de prueba.",
+      "page": "34"
+    },
+    {
+      "id": "H4.4",
+      "title": "Ejecutar pruebas de rechazo cruzado entre entornos tras la segregación.",
+      "page": "35"
+    },
+    {
+      "id": "H4.5",
+      "title": "Verificar el cierre del hito «Separar desarrollo, pruebas y producción».",
+      "page": "35"
+    },
+    {
+      "id": "H5.1",
+      "title": "Cambiar las respuestas de autenticación a una lista cerrada de campos permitidos que excluya cualquier hash o secreto.",
+      "page": "37"
+    },
+    {
+      "id": "H5.2",
+      "title": "Validar con una cuenta sintética los flujos de login, renovación y desbloqueo de sesión.",
+      "page": "37"
+    },
+    {
+      "id": "H5.3",
+      "title": "Revisar logs, cachés y almacenamiento del navegador para confirmar que el hash no queda persistido en ningún punto.",
+      "page": "38"
+    },
+    {
+      "id": "H5.4",
+      "title": "Verificar el cierre del hito «Eliminar cualquier exposición de credenciales en la autenticación».",
+      "page": "38"
+    },
+    {
+      "id": "H6.1",
+      "title": "Bloquear por defecto las campañas de reactivación basadas en tratamientos hasta definir la base jurídica aplicable y los requisitos de consentimiento.",
+      "page": "39"
+    },
+    {
+      "id": "H6.2",
+      "title": "Separar el consentimiento asistencial del consentimiento para comunicaciones comerciales y poder acreditar su otorgamiento y retirada.",
+      "page": "40"
+    },
+    {
+      "id": "H6.3",
+      "title": "Evitar que plantillas o segmentaciones revelen información sanitaria innecesaria en el propio mensaje.",
+      "page": "41"
+    },
+    {
+      "id": "H6.4",
+      "title": "Registrar el origen de los contactos importados y el estado de sus permisos comerciales.",
+      "page": "41"
+    },
+    {
+      "id": "H6.5",
+      "title": "Verificar el cierre del hito «Regularizar las campañas de reactivación de pacientes».",
+      "page": "42"
+    },
+    {
+      "id": "H7.1",
+      "title": "Documentar exactamente qué audios y campos se envían al proveedor y en qué supuestos.",
+      "page": "43"
+    },
+    {
+      "id": "H7.2",
+      "title": "Acreditar contrato, ubicación, retención y garantías de transferencia del proveedor utilizado.",
+      "page": "44"
+    },
+    {
+      "id": "H7.3",
+      "title": "Si las garantías no resultan suficientes, migrar la transcripción a una solución que permita un tratamiento compatible con los requisitos definidos por la plataforma.",
+      "page": "44"
+    },
+    {
+      "id": "H7.4",
+      "title": "Verificar el cierre del hito «Regularizar la transcripción de audios mediante IA».",
+      "page": "45"
+    },
+    {
+      "id": "H8.1",
+      "title": "Redactar una política de privacidad específica para Clinicaclick y eliminar cualquier referencia a terceros o tratamientos ajenos.",
+      "page": "46"
+    },
+    {
+      "id": "H8.2",
+      "title": "Identificar correctamente al responsable y sus datos de contacto y completar las finalidades, bases jurídicas, destinatarios, transferencias y plazos de conservación reales.",
+      "page": "47"
+    },
+    {
+      "id": "H8.3",
+      "title": "Eliminar referencias jurídicas obsoletas y coordinar el contenido con la configuración real de cookies, perfilado, proveedores e integraciones.",
+      "page": "47"
+    },
+    {
+      "id": "H8.4",
+      "title": "Versionar y conservar evidencia de las políticas publicadas.",
+      "page": "48"
+    },
+    {
+      "id": "H8.5",
+      "title": "Verificar el cierre del hito «Sustituir la política de privacidad por una específica de Clinicaclick».",
+      "page": "48"
+    },
+    {
+      "id": "H9.1",
+      "title": "Registrar de forma específica los accesos de soporte a expedientes clínicos, incluyendo actor, clínica, paciente, finalidad, recurso, operación, fecha y resultado.",
+      "page": "49"
+    },
+    {
+      "id": "H9.2",
+      "title": "Establecer un modo de soporte con acceso temporal y justificado a datos reales, evitando privilegios permanentes.",
+      "page": "50"
+    },
+    {
+      "id": "H9.3",
+      "title": "Revisar periódicamente los accesos realizados por perfiles administrativos o de soporte.",
+      "page": "51"
+    },
+    {
+      "id": "H9.4",
+      "title": "Verificar el cierre del hito «Registrar y limitar los accesos de soporte a historias clínicas».",
+      "page": "51"
+    },
+    {
+      "id": "H10.1",
+      "title": "Completar el esquema de auditoría para registrar las lecturas y operaciones relevantes sobre historias clínicas.",
+      "page": "52"
+    },
+    {
+      "id": "H10.2",
+      "title": "Proteger los logs frente a modificación o borrado no autorizado y definir su retención.",
+      "page": "53"
+    },
+    {
+      "id": "H10.3",
+      "title": "Habilitar una exportación controlada de los registros de acceso para atender solicitudes y auditorías.",
+      "page": "54"
+    },
+    {
+      "id": "H10.4",
+      "title": "Verificar el cierre del hito «Completar el registro de accesos clínicos y permitir su exportación».",
+      "page": "54"
+    },
+    {
+      "id": "H11.1",
+      "title": "Definir antes del lanzamiento del portal una vinculación unívoca y verificable entre la cuenta del paciente y su ficha.",
+      "page": "55"
+    },
+    {
+      "id": "H11.2",
+      "title": "Revisar los enlaces de firma para que la caducidad y el estado se comprueben en cada lectura y firma.",
+      "page": "56"
+    },
+    {
+      "id": "H11.3",
+      "title": "Valorar una segunda verificación proporcionada para documentos o datos especialmente sensibles.",
+      "page": "57"
+    },
+    {
+      "id": "H11.4",
+      "title": "Configurar la tablet para que el personal seleccione el expediente antes de entregar el dispositivo y limpiar la pantalla al finalizar cada firma.",
+      "page": "57"
+    },
+    {
+      "id": "H11.5",
+      "title": "Verificar el cierre del hito «Asegurar el portal de paciente, las firmas y el uso de tablets».",
+      "page": "58"
+    },
+    {
+      "id": "H12.1",
+      "title": "Implantar MFA obligatorio para administradores, propietarios con acceso clínico y perfiles de soporte.",
+      "page": "59"
+    },
+    {
+      "id": "H12.2",
+      "title": "Extender el MFA al resto de usuarios con acceso a historias clínicas, salvo excepción justificada y documentada.",
+      "page": "60"
+    },
+    {
+      "id": "H12.3",
+      "title": "Verificar el cierre del hito «Activar doble factor en los accesos sensibles».",
+      "page": "60"
+    },
+    {
+      "id": "H13.1",
+      "title": "Implantar una sesión central o un mecanismo equivalente que permita revocar sesiones activas desde el servidor.",
+      "page": "61"
+    },
+    {
+      "id": "H13.2",
+      "title": "Invalidar sesiones y tokens de renovación ante cambio de contraseña, baja o suspensión del usuario.",
+      "page": "62"
+    },
+    {
+      "id": "H13.3",
+      "title": "Cerrar conexiones en tiempo real y revisar autorizaciones OAuth cuando se revoque el acceso de un usuario.",
+      "page": "63"
+    },
+    {
+      "id": "H13.4",
+      "title": "Verificar el cierre del hito «Poder cerrar sesiones y revocar accesos de forma inmediata».",
+      "page": "63"
+    },
+    {
+      "id": "H14.1",
+      "title": "Verificar y documentar el cifrado efectivo de todos los volúmenes, snapshots y copias que puedan contener datos clínicos.",
+      "page": "64"
+    },
+    {
+      "id": "H14.2",
+      "title": "Documentar las claves y permisos de administración asociados al cifrado sin incorporar secretos a la documentación de auditoría.",
+      "page": "65"
+    },
+    {
+      "id": "H14.3",
+      "title": "Valorar cifrado adicional a nivel de aplicación para secretos o categorías de datos cuyo riesgo lo justifique.",
+      "page": "66"
+    },
+    {
+      "id": "H14.4",
+      "title": "Verificar el cierre del hito «Acreditar el cifrado de todos los datos almacenados».",
+      "page": "66"
+    },
+    {
+      "id": "H15.1",
+      "title": "Incorporar una fase de cuarentena y análisis antimalware de los archivos subidos antes de hacerlos disponibles.",
+      "page": "67"
+    },
+    {
+      "id": "H15.2",
+      "title": "Validar el contenido real del archivo además de su extensión o MIME declarado.",
+      "page": "68"
+    },
+    {
+      "id": "H15.3",
+      "title": "Registrar el resultado del análisis y bloquear de forma segura los archivos rechazados.",
+      "page": "68"
+    },
+    {
+      "id": "H15.4",
+      "title": "Verificar el cierre del hito «Analizar los archivos subidos antes de abrirlos».",
+      "page": "69"
+    },
+    {
+      "id": "H16.1",
+      "title": "Documentar la política de copias indicando frecuencia, retención, cobertura, ubicación y permisos.",
+      "page": "70"
+    },
+    {
+      "id": "H16.2",
+      "title": "Diseñar un procedimiento de recuperación selectiva por clínica que preserve la integridad de los datos de terceros.",
+      "page": "71"
+    },
+    {
+      "id": "H16.3",
+      "title": "Realizar y documentar una prueba de restauración total y otra selectiva con datos sintéticos.",
+      "page": "71"
+    },
+    {
+      "id": "H16.4",
+      "title": "Definir RPO y RTO para los servicios críticos.",
+      "page": "72"
+    },
+    {
+      "id": "H16.5",
+      "title": "Verificar el cierre del hito «Poder restaurar una clínica sin afectar a las demás».",
+      "page": "72"
+    },
+    {
+      "id": "H17.1",
+      "title": "Crear una categoría específica de seguridad en Jira con prioridad, responsable, fecha de detección, impacto y estado de remediación.",
+      "page": "73"
+    },
+    {
+      "id": "H17.2",
+      "title": "Aprobar un procedimiento de gestión de incidentes que incluya la evaluación de posible brecha de datos personales.",
+      "page": "74"
+    },
+    {
+      "id": "H17.3",
+      "title": "Mantener un registro de incidentes y documentar las medidas adoptadas y las lecciones aprendidas.",
+      "page": "75"
+    },
+    {
+      "id": "H17.4",
+      "title": "Definir un canal claro para que usuarios y administradores comuniquen incidentes de seguridad.",
+      "page": "75"
+    },
+    {
+      "id": "H17.5",
+      "title": "Verificar el cierre del hito «Formalizar la gestión de vulnerabilidades e incidentes».",
+      "page": "76"
+    },
+    {
+      "id": "H18.1",
+      "title": "Elaborar y aprobar el Registro de Actividades de Tratamiento de La Voz Medios Digitales, S.L., incluyendo de forma diferenciada los tratamientos propios y los realizados por cuenta de las clínicas.",
+      "page": "77"
+    },
+    {
+      "id": "H18.2",
+      "title": "Realizar un análisis de riesgos específico de la plataforma y de sus tratamientos de datos de salud.",
+      "page": "78"
+    },
+    {
+      "id": "H18.3",
+      "title": "Determinar y documentar los tratamientos que requieren una evaluación de impacto y, cuando proceda, completar la EIPD antes del despliegue general.",
+      "page": "78"
+    },
+    {
+      "id": "H18.4",
+      "title": "Formalizar un procedimiento de privacidad desde el diseño aplicable a nuevas funcionalidades, integraciones y campañas.",
+      "page": "79"
+    },
+    {
+      "id": "H18.5",
+      "title": "Establecer una revisión periódica del sistema de privacidad y de las medidas derivadas de la auditoría.",
+      "page": "79"
+    },
+    {
+      "id": "H18.6",
+      "title": "Verificar el cierre del hito «Dejar documentado el sistema de privacidad de Clinicaclick».",
+      "page": "80"
+    },
+    {
+      "id": "H19.1",
+      "title": "Completar un inventario de proveedores y subencargados indicando servicio, finalidad, categorías de datos, ubicación, transferencias, contrato aplicable y responsable de revisión.",
+      "page": "81"
+    },
+    {
+      "id": "H19.2",
+      "title": "Formalizar o verificar los acuerdos de encargo y las autorizaciones de subencargados necesarias para la prestación de la plataforma.",
+      "page": "82"
+    },
+    {
+      "id": "H19.3",
+      "title": "Documentar las garantías aplicables a cualquier tratamiento fuera del EEE o acceso desde terceros países.",
+      "page": "82"
+    },
+    {
+      "id": "H19.4",
+      "title": "Mantener una ficha de evaluación específica para cada proveedor de IA utilizado con datos personales.",
+      "page": "83"
+    },
+    {
+      "id": "H19.5",
+      "title": "Verificar el cierre del hito «Cerrar el mapa de proveedores, subencargados y transferencias».",
+      "page": "84"
+    },
+    {
+      "id": "H20.1",
+      "title": "Definir una matriz de conservación y bloqueo por categoría documental y ámbito territorial aplicable a las clínicas.",
+      "page": "85"
+    },
+    {
+      "id": "H20.2",
+      "title": "Implementar estados de conservación y bloqueo que impidan el acceso ordinario una vez finalizada la finalidad asistencial, manteniendo únicamente los accesos legalmente justificados.",
+      "page": "85"
+    },
+    {
+      "id": "H20.3",
+      "title": "Registrar las operaciones de desbloqueo o reactivación de expedientes y su motivo.",
+      "page": "86"
+    },
+    {
+      "id": "H20.4",
+      "title": "Verificar el cierre del hito «Aplicar plazos de conservación y bloqueo a las historias clínicas».",
+      "page": "86"
+    },
+    {
+      "id": "H21.1",
+      "title": "Redactar y aprobar unas condiciones de uso específicas para Clinicaclick y su modelo SaaS.",
+      "page": "87"
+    },
+    {
+      "id": "H21.2",
+      "title": "Integrar las condiciones en el proceso de alta online y conservar evidencia de la versión aceptada por cada cliente.",
+      "page": "88"
+    },
+    {
+      "id": "H21.3",
+      "title": "Coordinar las condiciones de uso con el contrato de encargado del tratamiento y el régimen de subencargados.",
+      "page": "89"
+    },
+    {
+      "id": "H21.4",
+      "title": "Verificar el cierre del hito «Publicar y aceptar las condiciones de uso de Clinicaclick».",
+      "page": "89"
+    },
+    {
+      "id": "H22.1",
+      "title": "Aprobar un plan anual de formación en protección de datos y confidencialidad adaptado a las funciones del equipo.",
+      "page": "90"
+    },
+    {
+      "id": "H22.2",
+      "title": "Implantar un programa básico y periódico de sensibilización en seguridad que cubra credenciales, phishing, uso de dispositivos, incidentes y tratamiento de información clínica.",
+      "page": "91"
+    },
+    {
+      "id": "H22.3",
+      "title": "Conservar evidencia de la formación impartida y de la participación del personal.",
+      "page": "92"
+    },
+    {
+      "id": "H22.4",
+      "title": "Verificar el cierre del hito «Implantar formación anual en privacidad y seguridad».",
+      "page": "92"
+    },
+    {
+      "id": "H23.1",
+      "title": "Redactar y aprobar un procedimiento sencillo de ejercicio de derechos con canales, responsables, plazos y registro de actuaciones.",
+      "page": "93"
+    },
+    {
+      "id": "H23.2",
+      "title": "Definir el mecanismo de asistencia a las clínicas cuando una solicitud afecte a datos tratados por Clinicaclick por cuenta del cliente.",
+      "page": "94"
+    },
+    {
+      "id": "H23.3",
+      "title": "Crear un registro mínimo de solicitudes y respuestas que permita acreditar su gestión.",
+      "page": "94"
+    },
+    {
+      "id": "H23.4",
+      "title": "Verificar el cierre del hito «Implantar un procedimiento para atender derechos RGPD».",
+      "page": "95"
+    },
+    {
+      "id": "H24.1",
+      "title": "Designar formalmente a la persona responsable de coordinar el cumplimiento de las obligaciones de transparencia sobre IA.",
+      "page": "96"
+    },
+    {
+      "id": "H24.2",
+      "title": "Definir un programa básico de alfabetización en IA adaptado a los sistemas y responsabilidades del equipo.",
+      "page": "97"
+    },
+    {
+      "id": "H24.3",
+      "title": "Conservar evidencia de la formación y revisar su contenido cuando cambien los sistemas o casos de uso.",
+      "page": "97"
+    },
+    {
+      "id": "H24.4",
+      "title": "Verificar el cierre del hito «Designar responsable y formar al equipo en inteligencia artificial».",
+      "page": "98"
+    },
+    {
+      "id": "H25.1",
+      "title": "Bloquear todas las cookies y tecnologías publicitarias no necesarias hasta obtener un consentimiento válido.",
+      "page": "99"
+    },
+    {
+      "id": "H25.2",
+      "title": "Corregir la política de cookies para que refleje las cookies, proveedores, finalidades y plazos realmente utilizados.",
+      "page": "99"
+    },
+    {
+      "id": "H25.3",
+      "title": "Mantener un inventario actualizado de cookies y tecnologías por cada plantilla o web desplegada.",
+      "page": "100"
+    },
+    {
+      "id": "H25.4",
+      "title": "Verificar técnicamente que las elecciones de rechazo y configuración se respetan desde el inicio y durante toda la navegación.",
+      "page": "101"
+    },
+    {
+      "id": "H25.5",
+      "title": "Incorporar información de privacidad de primera capa en cada widget o formulario que recoja datos.",
+      "page": "101"
+    },
+    {
+      "id": "H25.6",
+      "title": "Verificar el cierre del hito «Corregir cookies, consentimiento y formularios de captación».",
+      "page": "102"
+    },
+    {
+      "id": "H26.1",
+      "title": "Mantener un inventario de IA por finalidad que identifique proveedor, modelo, región, datos enviados, retención, base jurídica y revisión humana.",
+      "page": "103"
+    },
+    {
+      "id": "H26.2",
+      "title": "Acreditar la configuración efectiva de cada cuenta y no únicamente la documentación pública del proveedor.",
+      "page": "104"
+    },
+    {
+      "id": "H26.3",
+      "title": "Registrar el proveedor y modelo efectivamente utilizado cuando exista fallback o selección dinámica.",
+      "page": "104"
+    },
+    {
+      "id": "H26.4",
+      "title": "Verificar el cierre del hito «Tener controlados todos los proveedores y flujos de IA».",
+      "page": "105"
+    },
+    {
+      "id": "H27.1",
+      "title": "Definir una política de transparencia de IA con reglas por tipo de interacción y contenido.",
+      "page": "106"
+    },
+    {
+      "id": "H27.2",
+      "title": "Incorporar el aviso correspondiente en los flujos donde el paciente interactúe directamente con un asistente o sistema de IA.",
+      "page": "107"
+    },
+    {
+      "id": "H27.3",
+      "title": "Definir y aplicar criterios internos de etiquetado para contenidos generados o modificados mediante IA.",
+      "page": "107"
+    },
+    {
+      "id": "H27.4",
+      "title": "Verificar el cierre del hito «Informar al usuario cuando interactúe con IA».",
+      "page": "108"
+    },
+    {
+      "id": "H28.1",
+      "title": "Sustituir las referencias a dominios, actividades y cláusulas ajenas por un Aviso Legal íntegramente adaptado a Clinicaclick.",
+      "page": "109"
+    },
+    {
+      "id": "H28.2",
+      "title": "Completar los datos identificativos y registrales exigibles del prestador.",
+      "page": "109"
+    },
+    {
+      "id": "H28.3",
+      "title": "Revisar la coherencia del domicilio, datos de contacto, jurisdicción y régimen de propiedad intelectual antes de publicar la nueva versión.",
+      "page": "110"
+    },
+    {
+      "id": "H28.4",
+      "title": "Verificar el cierre del hito «Sustituir el Aviso Legal por uno específico de Clinicaclick».",
+      "page": "111"
+    },
+    {
+      "id": "H29.1",
+      "title": "Definir unas reglas básicas sobre contenidos permitidos y prohibidos cuando los usuarios puedan aportar o publicar contenido.",
+      "page": "112"
+    },
+    {
+      "id": "H29.2",
+      "title": "Implantar un canal sencillo para comunicar contenidos ilícitos o contrarios a las reglas de uso.",
+      "page": "112"
+    },
+    {
+      "id": "H29.3",
+      "title": "Definir un procedimiento interno de revisión, retirada y conservación de evidencia de las actuaciones realizadas.",
+      "page": "113"
+    },
+    {
+      "id": "H29.4",
+      "title": "Verificar el cierre del hito «Definir reglas y retirada de contenidos de usuarios».",
+      "page": "113"
+    },
+    {
+      "id": "H30.1",
+      "title": "Verificar la exposición real de los hosts y documentar los controles perimetrales aplicados en AWS y Cloudflare.",
+      "page": "114"
+    },
+    {
+      "id": "H30.2",
+      "title": "Definir patrones de acceso anómalo a historias clínicas y generar alertas sobre los eventos de mayor riesgo.",
+      "page": "115"
+    },
+    {
+      "id": "H30.3",
+      "title": "Incorporar al panel de seguridad la revisión de alertas y su resolución.",
+      "page": "116"
+    },
+    {
+      "id": "H30.4",
+      "title": "Verificar el cierre del hito «Detectar accesos anómalos y reforzar el perímetro».",
+      "page": "116"
+    },
+    {
+      "id": "H31.1",
+      "title": "Contratar una prueba de intrusión independiente sobre la superficie expuesta de la plataforma antes del despliegue masivo.",
+      "page": "117"
+    },
+    {
+      "id": "H31.2",
+      "title": "Documentar la corrección de los hallazgos y realizar una verificación posterior de los puntos críticos.",
+      "page": "118"
+    },
+    {
+      "id": "H31.3",
+      "title": "Verificar el cierre del hito «Superar un pentest externo antes del despliegue masivo».",
+      "page": "118"
+    },
+    {
+      "id": "H32.1",
+      "title": "Mantener deshabilitada la creación de audiencias de pacientes hasta disponer de un análisis jurídico específico.",
+      "page": "119"
+    },
+    {
+      "id": "H32.2",
+      "title": "Si se mantuviera la funcionalidad, diseñar un consentimiento específico, granular y revocable y validar las políticas del proveedor publicitario.",
+      "page": "120"
+    },
+    {
+      "id": "H32.3",
+      "title": "Verificar el cierre del hito «Bloquear el remarketing de pacientes hasta validarlo».",
+      "page": "121"
+    },
+    {
+      "id": "H33.1",
+      "title": "Revisar jurídicamente el flujo de reseñas y las políticas de Google antes de mantener el filtrado por puntuación.",
+      "page": "122"
+    },
+    {
+      "id": "H33.2",
+      "title": "Evitar mecanismos que puedan presentar como representativa una selección artificial de opiniones.",
+      "page": "122"
+    },
+    {
+      "id": "H33.3",
+      "title": "Verificar el cierre del hito «Eliminar el filtrado previo de reseñas».",
+      "page": "123"
+    },
+    {
+      "id": "H34.1",
+      "title": "Documentar los umbrales de confianza y los supuestos que obligan a intervención humana.",
+      "page": "124"
+    },
+    {
+      "id": "H34.2",
+      "title": "Registrar incidencias relevantes de IA y revisar periódicamente falsos positivos o interpretaciones incorrectas.",
+      "page": "125"
+    },
+    {
+      "id": "H34.3",
+      "title": "Mantener una opción de desactivación segura de la IA sin bloquear la operativa clínica esencial.",
+      "page": "125"
+    },
+    {
+      "id": "H34.4",
+      "title": "Verificar el cierre del hito «Formalizar cuándo debe intervenir una persona en respuestas de IA».",
+      "page": "126"
+    },
+    {
+      "id": "H35.1",
+      "title": "Elaborar una nota de aplicabilidad y calendario regulatorio específico para la plataforma.",
+      "page": "127"
+    },
+    {
+      "id": "H35.2",
+      "title": "Incorporar al roadmap técnico los requisitos de interoperabilidad, portabilidad y trazabilidad que resulten aplicables.",
+      "page": "128"
+    },
+    {
+      "id": "H35.3",
+      "title": "Verificar el cierre del hito «Incorporar EHDS e interoperabilidad al roadmap».",
+      "page": "128"
+    },
+    {
+      "id": "H36.1",
+      "title": "Cerrar y documentar la póliza de responsabilidad civil que cubra expresamente la actividad de desarrollo y explotación de la plataforma.",
+      "page": "129"
+    },
+    {
+      "id": "H36.2",
+      "title": "Revisar límites, exclusiones y cobertura de incidentes de seguridad y protección de datos antes del lanzamiento general.",
+      "page": "130"
+    },
+    {
+      "id": "H36.3",
+      "title": "Verificar el cierre del hito «Cerrar la cobertura de responsabilidad civil del software».",
+      "page": "130"
+    },
+    {
+      "id": "H37.1",
+      "title": "Corregir la jerarquía semántica de encabezados y los defectos de accesibilidad identificados en la web.",
+      "page": "131"
+    },
+    {
+      "id": "H37.2",
+      "title": "Incorporar una revisión de accesibilidad al ciclo de desarrollo antes de la fecha de exigibilidad aplicable.",
+      "page": "132"
+    },
+    {
+      "id": "H37.3",
+      "title": "Conservar evidencia de las comprobaciones y correcciones realizadas.",
+      "page": "133"
+    },
+    {
+      "id": "H37.4",
+      "title": "Verificar el cierre del hito «Corregir los problemas de accesibilidad de la web».",
+      "page": "133"
+    }
+  ]
+}

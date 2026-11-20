@@ -300,6 +300,7 @@ app.use('/api/automations', automationsRoutes);
 console.log('Ruta /api/automations configurada');
 app.use('/api/automation-catalog', automationCatalogRoutes);
 console.log('Ruta /api/automation-catalog configurada');
+if (!IS_GATEWAY_RUNTIME) app.use('/api/dpd', require('./routes/dpdWorkspace.routes'));
 app.use('/api/admin/campaign-playbooks', adminCampaignPlaybooksRoutes);
 console.log('Ruta /api/admin/campaign-playbooks configurada');
 app.use('/api/admin/managed-campaigns', adminManagedCampaignsRoutes);
