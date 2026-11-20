@@ -42,6 +42,11 @@ function createWorkspace(Entry, now = () => new Date()) {
     return data;
   }
   async function getGuest() { return Entry.findByPk(guestKey, { raw: true, logging: false }); }
+  async function currentGrantRevision(expected) {
+    const row = await getGuest();
+    if (Number.isSafeInteger(expected) && row && row.value.invitationRevision === expected) return row.revision;
+    return expected;
+  }
   function guestInfo(row) {
     if (!row) return { revision: 0, state: 'Sin invitación' };
     const v = row.value;
@@ -62,10 +67,10 @@ function createWorkspace(Entry, now = () => new Date()) {
       if (!text(email,254) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw error(400, 'Introduce el correo del invitado.');
       const secret = token();
       const until = new Date(now().getTime() + 86400000).toISOString();
-      const row = await write(guestKey, body.revision, { email, until, invite: digest(secret) }, actor);
+      const row = await write(guestKey, await currentGrantRevision(body.revision), { email, until, invite: digest(secret) }, actor);
       return { guest: guestInfo(row), invitation: secret };
     },
-    async revoke(revision, actor) { return guestInfo(await write(guestKey, revision, {}, actor)); },
+    async revoke(revision, actor) { return guestInfo(await write(guestKey, await currentGrantRevision(revision), {}, actor)); },
     async redeem(body) {
       const invalid = () => error(403, 'El correo o la invitación no son válidos, o el enlace ya ha caducado.');
       if (!validToken(body.invitation) || !text(body.email,254)) throw invalid();
@@ -74,7 +79,7 @@ function createWorkspace(Entry, now = () => new Date()) {
           || Date.parse(row.value.until) <= now().getTime()) throw invalid();
       const session = token();
       const until = new Date(now().getTime() + 8 * 3600000).toISOString();
-      await write(guestKey, row.revision, { email: row.value.email, session: digest(session), until }, row.updated_by);
+      await write(guestKey, row.revision, { email: row.value.email, invitationRevision: row.revision, session: digest(session), until }, row.updated_by);
       return session;
     },
     async checkSession(secret) {

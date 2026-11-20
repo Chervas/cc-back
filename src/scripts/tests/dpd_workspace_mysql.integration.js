@@ -68,14 +68,15 @@ withIsolatedCampaignMysql(async ({ sql, models, report, registerOwnedLoopbackSer
     assert.equal((await req('/entries/contract','PUT',{revision:1,value:d.blocks},headers)).status,401);
     const rows=JSON.stringify(await models.DpdWorkspaceEntry.findAll({raw:true}));
     assert.ok(!rows.includes(first) && !rows.includes(headers.cookie.split('=')[1]));
-    const second=await invite(2);
+    const second=await invite(1);
+    assert.equal((await req('/invitation/revoke','POST',{revision:1},admin)).status,409);
     assert.equal((await req('/guest','GET',null,headers)).status,403);
     clock=new Date(clock.getTime()+25*3600000);
     assert.equal((await open(second)).status,403);
     const third=await invite(3);
     const last=await open(third);
     const current={cookie:last.headers['set-cookie'][0].split(';')[0]};
-    assert.equal((await req('/invitation/revoke','POST',{revision:5},admin)).status,200);
+    assert.equal((await req('/invitation/revoke','POST',{revision:4},admin)).status,200);
     assert.equal((await req('/guest','GET',null,current)).status,403);
     report.checks.push('MySQL schema and corpus counts','global admin, ordinary, anonymous and delegated access','concurrent edit conflict and evidence validation','single-use invitation, private cookie, expiry, revocation and read-only guest');
   } finally { await new Promise(resolve=>server.close(resolve)); }
