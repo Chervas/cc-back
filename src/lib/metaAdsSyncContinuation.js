@@ -5,6 +5,7 @@ const TYPES = new Set(['meta_ads_recent', 'meta_ads_midday', 'meta_ads_backfill'
 const contexts = new WeakMap();
 const KEY = 'metaAdsContinuation';
 const MAX_ACCOUNTS = 1000, MAX_DAYS = 3660;
+const BUSY = 'oauth_flow_busy', MIN_WAIT_MS = 60000, MAX_BUSY_ATTEMPTS = 3;
 const fail = () => { throw Object.assign(Error('meta_ads_continuation_invalid'), { code: 'meta_ads_continuation_invalid' }); };
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join(',') === keys.split(',').sort().join(',');
@@ -55,12 +56,17 @@ function contextForJob(job, now = Date.now()) {
   // Manual retry repurposes the same row and retains its terminal summary.
   // A terminal result is never continuation authority: start all work afresh.
   if (previous !== null && ['completed', 'failed'].includes(summary.status)) previous = null;
+  if (summary?.status === 'waiting' && summary.reason === BUSY && previous === null) fail();
   if (previous !== null && (job.status !== 'running' || !Number.isSafeInteger(Number(job.attempts)) || Number(job.attempts) < 2
-    || summary.status !== 'waiting' || summary.reason !== 'rate_limited' || !Number.isFinite(+new Date(job.next_run_at))
+    || summary.status !== 'waiting' || !['rate_limited', BUSY].includes(summary.reason) || !Number.isFinite(+new Date(job.next_run_at))
     || +new Date(job.next_run_at) !== +new Date(summary.nextAllowedAt) || +new Date(job.next_run_at) > now)) fail();
+  // Explicit scheduler waits do not consult its normal failure retry budget.
+  // Bound contention retries to actual durable claims and the smaller limit.
+  const busyCanWait = job.status === 'running' && positive(job.attempts) && positive(job.max_attempts)
+    && Number(job.attempts) < Math.min(Number(job.max_attempts), MAX_BUSY_ATTEMPTS);
   const context = Object.freeze({});
   contexts.set(context, { jobId: Number(job.id), type: job.type,
-    previous });
+    previous, busyCanWait });
   return context;
 }
 function createRun({ context, type, options, adsConfig, assets }) {
@@ -103,6 +109,14 @@ function createRun({ context, type, options, adsConfig, assets }) {
     windowFor(id) { const row = value?.windows.find(row => row.mappingId === Number(id)); if (!row) fail(); return row; },
     isCompleted(id) { return completed.has(Number(id)); },
     complete(id) { if (!cohort.some(row => row[0] === Number(id))) fail(); completed.add(Number(id)); },
+    waitUntil(error, now) {
+      let delay;
+      if (error.code === 'rate_limited') delay = Math.max(MIN_WAIT_MS, error.retryAfterMs || 2 * 60 * 60 * 1000);
+      else if (error.code === BUSY && issued?.busyCanWait) delay = MIN_WAIT_MS;
+      else return null;
+      // JobRequests stores seconds. Round up to avoid shortening any pause.
+      return new Date(Math.ceil((now + delay) / 1000) * 1000);
+    },
     result() {
       if (!issued) return {};
       const snapshot = { ...value, completedMappingIds: [...completed].sort((a, b) => a - b) };

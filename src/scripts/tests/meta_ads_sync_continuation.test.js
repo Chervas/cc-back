@@ -14,7 +14,7 @@ const asset = id => ({ id, metaConnectionId: id < 400 ? 173 : 172, assetType: 'a
   metaAssetId: String(100000 + id), assignmentScope: 'clinic', clinicaId: 70, grupoClinicaId: null });
 function fixture() {
   const state = { now: Date.UTC(2026, 10, 19, 12), assets: [359, 391, 406, 409].map(asset), runs: [],
-    preparations: [], asserts: [], logs: [], countQueries: [], limitedId: 406, cooldownUntil: 0,
+    preparations: [], asserts: [], logs: [], countQueries: [], limitedId: 406, busyId: null, cooldownUntil: 0,
     blocked: new Set(), providerCalls: 0 };
   class Clock extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
@@ -49,6 +49,7 @@ function fixture() {
       state.runs.push({ id: value.id, start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) });
       if (state.cooldownUntil > state.now) throw Object.assign(Error('rate_limited'), {
         code: 'rate_limited', retryAfterMs: state.cooldownUntil - state.now });
+      if (state.busyId === value.id) throw Object.assign(Error('oauth_flow_busy'), { code: 'oauth_flow_busy' });
       state.providerCalls++;
       if (state.limitedId === value.id) {
         state.cooldownUntil = state.now + 7200000;
@@ -101,7 +102,64 @@ for (const [method, type, defaults] of cases) {
     assert(successful.every(row => /^[a-f0-9]{64}$/.test(row.status_report.metaAdsAccountDigest)
       && row.records_processed === 3 && row.status === 'completed'));
   });
+
+  test(`${type} defers a busy Owner and resumes unfinished accounts after the durable deadline`, async () => {
+    const { state, job } = fixture();
+    state.limitedId = null;
+    state.busyId = 406;
+    state.now += 123;
+    const request = { id: 141, type, status: 'running', attempts: 1, max_attempts: 3 };
+    const options = { ...defaults, ...range };
+    const first = await job[method](options, continuation.contextForJob(request, state.now));
+    assert.equal(first.status, 'waiting');
+    assert.equal(first.reason, 'oauth_flow_busy');
+    assert.equal(first.nextAllowedAt, Math.ceil((state.now + 60000) / 1000) * 1000);
+    assert.equal(first.errors[0].error, 'oauth_flow_busy');
+    assert.deepEqual(first[continuation.KEY].completedMappingIds, [359, 391]);
+    assert.equal(state.providerCalls, 2);
+    assert(!state.logs.some(row => row.asset_id === 406));
+
+    const claimed = resumed(request, JSON.parse(JSON.stringify(first)));
+    assert.throws(() => continuation.contextForJob(claimed, first.nextAllowedAt - 1), { code: 'meta_ads_continuation_invalid' });
+    assert.throws(() => continuation.contextForJob({
+      ...claimed, result_summary: { status: 'waiting', reason: 'oauth_flow_busy', nextAllowedAt: first.nextAllowedAt },
+    }, first.nextAllowedAt), { code: 'meta_ads_continuation_invalid' });
+
+    state.now = first.nextAllowedAt + 1000;
+    state.busyId = null;
+    state.runs.length = 0;
+    const second = await job[method](options, continuation.contextForJob(claimed, state.now));
+    assert.equal(second.status, 'completed');
+    assert.equal(second.resumedSkipped, 2);
+    assert.deepEqual(state.runs.map(row => row.id), [406, 409]);
+    assert(state.runs.every(row => row.start === range.startDate && row.end === range.endDate));
+  });
 }
+
+test('a persistent busy Owner cannot requeue after the configured or absolute retry limit', async () => {
+  for (const [attempts, max_attempts] of [[1, 1], [2, 2], [3, 10]]) {
+    const { state, job } = fixture();
+    state.limitedId = null;
+    state.busyId = 406;
+    const request = { id: 142, type: 'meta_ads_recent', status: 'running', attempts, max_attempts };
+    const result = await job.executeAdsSync(range, continuation.contextForJob(request, state.now));
+    assert.equal(result.status, 'failed');
+    assert.equal(result.errors[0].error, 'oauth_flow_busy');
+    assert.equal(result.nextAllowedAt, undefined);
+    assert.equal(result[continuation.KEY], undefined);
+  }
+});
+
+test('a direct backfill without a durable job context reports the busy error without queuing a resume', async () => {
+  const { state, job } = fixture();
+  state.limitedId = null;
+  state.busyId = 406;
+  const result = await job.executeAdsBackfill(range);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.errors[0].error, 'oauth_flow_busy');
+  assert.equal(result.nextAllowedAt, undefined);
+  assert.equal(result[continuation.KEY], undefined);
+});
 
 test('a retry across midnight freezes implicit dates and skips provider work already completed', async () => {
   const { state, job } = fixture(), request = { id: 124, type: 'meta_ads_recent' };

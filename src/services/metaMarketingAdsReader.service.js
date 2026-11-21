@@ -7,7 +7,7 @@ const SAFE = new Set(['broker_cohort_disabled', 'meta_ads_sync_disabled', 'meta_
   'meta_broker_scope_changed', 'meta_broker_not_active', 'broker_response_invalid', 'broker_configuration_invalid',
   'broker_timeout', 'broker_unavailable', 'connection_blocked', 'asset_revoked', 'scope_denied', 'operation_denied',
   'invalid_request', 'secret_unavailable', 'secret_version_changed', 'credential_revoked', 'provider_failed', 'provider_timeout',
-  'provider_unauthorized', 'rate_limited', 'audit_unavailable', 'meta_ads_sync_failed', 'meta_ads_persistence_failed', 'meta_credential_renewal_required','meta_business_activation_uncertain']);
+  'provider_unauthorized', 'rate_limited', 'oauth_flow_busy', 'audit_unavailable', 'meta_ads_sync_failed', 'meta_ads_persistence_failed', 'meta_credential_renewal_required','meta_business_activation_uncertain']);
 const fail = code => { throw Object.assign(Error(code), { code }); };
 function validateJobFilters(options) {
   for (const key of ['clinicIds', 'groupIds']) {

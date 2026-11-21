@@ -1318,12 +1318,11 @@ class MetaSyncJobs {
         } catch (err) {
           const failure = require('../services/metaMarketingAdsReader.service').safeError(err, 'meta_ads_sync_failed');
           report.errors.push({ assetId: asset.id, name: asset.metaAssetName, error: failure.code });
-          if (failure.code === 'rate_limited') {
-            // JobRequests uses DATE without fractional precision. Round UP so
-            // its persisted deadline matches the checkpoint and never shortens
-            // the provider's cooldown when SQL removes milliseconds.
-            report.nextRunAt = new Date(Math.ceil((Date.now() + Math.max(60000, failure.retryAfterMs || 2 * 60 * 60 * 1000)) / 1000) * 1000);
-            break; // Do not send other accounts through a shared provider pause.
+          const waitUntil = progress.waitUntil(failure, Date.now());
+          if (waitUntil) {
+            report.nextRunAt = waitUntil;
+            report.reason = failure.code;
+            break; // Resume the remaining accounts from the durable checkpoint.
           }
         }
       }
@@ -1337,7 +1336,7 @@ class MetaSyncJobs {
         status_report: report
       });
       console.log('✅ adsSync completado', report);
-      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report, ...(report.nextRunAt ? progress.result() : {}) };
+      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, nextAllowedAt: report.nextRunAt?.getTime(), ...report, ...(report.nextRunAt ? progress.result() : {}) };
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
       console.error('❌ Error en adsSync:', error);
@@ -1480,9 +1479,11 @@ class MetaSyncJobs {
         } catch (err) {
           const failure = require('../services/metaMarketingAdsReader.service').safeError(err, 'meta_ads_sync_failed');
           report.errors.push({ assetId: asset.id, name: asset.metaAssetName, error: failure.code });
-          if (failure.code === 'rate_limited') {
-            report.nextRunAt = new Date(Math.ceil((Date.now() + Math.max(60000, failure.retryAfterMs || 2 * 60 * 60 * 1000)) / 1000) * 1000);
-            break; // Do not send other accounts through a shared provider pause.
+          const waitUntil = progress.waitUntil(failure, Date.now());
+          if (waitUntil) {
+            report.nextRunAt = waitUntil;
+            report.reason = failure.code;
+            break; // Resume the remaining accounts from the durable checkpoint.
           }
         }
       }
@@ -1496,7 +1497,7 @@ class MetaSyncJobs {
         status_report: report
       });
       console.log('✅ adsBackfill completado', report);
-      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, reason: report.nextRunAt ? 'rate_limited' : undefined, nextAllowedAt: report.nextRunAt?.getTime(), ...report, ...(report.nextRunAt ? progress.result() : {}) };
+      return { status: report.nextRunAt ? 'waiting' : status, retryable: false, nextAllowedAt: report.nextRunAt?.getTime(), ...report, ...(report.nextRunAt ? progress.result() : {}) };
     } catch (error) {
       await syncLog.update({ status: 'failed', end_time: new Date(), error_message: error.message, status_report: report });
       console.error('❌ Error en adsBackfill:', error);

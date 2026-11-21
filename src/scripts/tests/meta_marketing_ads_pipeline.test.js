@@ -35,6 +35,20 @@ function readerFixture() {
   return { reader, state };
 }
 
+test('typed Ads reader preserves authenticated Owner contention without raw broker details', async () => {
+  const { reader, state } = readerFixture();
+  const context = await reader.prepare(1);
+  state.onCommand = () => {
+    throw Object.assign(fail('oauth_flow_busy'), { config: { token: 'SENTINEL' } });
+  };
+  await assert.rejects(reader.read(context, 'campaigns', { pageToken: null }), error => {
+    assert.equal(error.code, 'oauth_flow_busy');
+    assert.equal(error.retryable, false);
+    assert.equal(error.config, undefined);
+    return true;
+  });
+});
+
 test('typed reader requires opt-in and validates payload before contacting the broker', async () => {
   const f = readerFixture(); f.state.enabled = false;
   await assert.rejects(() => f.reader.prepare(1), { code: 'meta_ads_sync_disabled' });
