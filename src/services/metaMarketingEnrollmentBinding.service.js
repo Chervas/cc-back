@@ -1,6 +1,7 @@
 'use strict';
 const {Op,literal,where}=require('sequelize'),C=require('./metaMarketingEnrollment.contract');
 const {fromEnrollment}=require('../../services/platform-audit/src/meta-enrollment-event');
+const {isCertified}=require('./metaMarketingFirstEnrollmentAuthority.service');
 const plain=v=>v?.get?v.get({plain:true}):v;
 const fail=(code='meta_enrollment_scope_changed')=>C.fail(code,409);
 const scopeOf=row=>{const [assignmentScope,id]=row.scope_key.split(':');return {assignmentScope,clinicId:assignmentScope==='clinic'?Number(id):null,groupId:assignmentScope==='group'?Number(id):null};};
@@ -58,6 +59,9 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
     // Business handover has its own confirmed authority and immutable lineage.
     // It never masquerades as a Root recovery claim or changes that snapshot.
     const proof=businessSource?.authority||await recovery.assertActive({flow,enrollmentId:id,allowExpiredCredential},transaction);
+    // The enrollment authorizes Marketing mappings. The generic grant remains a separate authority.
+    const marketingOnly=isCertified(row);
+    if(marketingOnly&&(businessSource||proof))fail();
     if(proof&&(proof.enrollmentId!==id||proof.flowId!==row.flow_id||Number(proof.canonicalConnectionId)!==Number(row.meta_connection_id)
       ||proof.scopeKey!==row.scope_key||proof.subjectId!==row.meta_user_id||proof.appId!==row.app_id
       ||JSON.stringify(proof.clinicIds)!==row.clinic_ids||JSON.stringify(proof.mappingIds)!==row.mapping_ids))fail();
@@ -105,15 +109,16 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
     if(physicalBindings.length!==bindings.length||physicalBindings.some(v=>v.enrollment_id!==id||!row.mappingIds.includes(Number(v.mapping_id))))fail('meta_enrollment_asset_in_use');
     const clinics=await models.Clinica.findAll({...o,attributes:['id_clinica','grupoClinicaId'],where:{id_clinica:{[Op.in]:row.clinicIds}},order:[['id_clinica','ASC']],limit:1001});
     if(clinics.length!==row.clinicIds.length||scope.assignmentScope==='group'&&clinics.some(value=>Number(value.grupoClinicaId)!==scope.groupId))fail();
+    if(marketingOnly&&clinics.some(value=>value.grupoClinicaId!==null))fail('meta_enrollment_assignment_review');
     const groups=[...new Set(clinics.map(v=>v.grupoClinicaId).filter(v=>v!==null))];
-    const grants=proof?[]:await models.MetaConnectionAssignment.findAll({...o,attributes:['id','scopeKey','assignmentScope','clinicaId','grupoClinicaId','metaConnectionId','status'],
+    const grants=proof||marketingOnly?[]:await models.MetaConnectionAssignment.findAll({...o,attributes:['id','scopeKey','assignmentScope','clinicaId','grupoClinicaId','metaConnectionId','status'],
       where:{[Op.or]:[{assignmentScope:'clinic',clinicaId:{[Op.in]:row.clinicIds}},{assignmentScope:'group',grupoClinicaId:{[Op.in]:groups}}]},limit:2001});
     if(grants.length>2000)fail();
     const match=(kind,id)=>grants.filter(v=>v.assignmentScope===kind&&Number(kind==='clinic'?v.clinicaId:v.grupoClinicaId)===id);
     const check=rows=>{if(rows.length!==1)fail();const g=rows[0];if(g.status!=='active'||Number(g.metaConnectionId)!==Number(row.meta_connection_id)
       ||g.scopeKey!==g.assignmentScope+':'+(g.assignmentScope==='clinic'?g.clinicaId:g.grupoClinicaId)
       ||(g.assignmentScope==='clinic'?g.grupoClinicaId!==null:g.clinicaId!==null))fail('meta_enrollment_assignment_review');};
-    if(!proof){
+    if(!proof&&!marketingOnly){
       if(scope.assignmentScope==='group')check(match('group',scope.groupId));
       for(const clinic of clinics){const direct=match('clinic',Number(clinic.id_clinica));check(direct.length?direct:match('group',Number(clinic.grupoClinicaId)));}
     }
@@ -122,7 +127,9 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
     if(identityDigest)pieces.push('canonicalIdentity',identityDigest);
     if(businessSource)pieces.push('business',proof.immutableDigest,proof.handoverId,proof.canonicalConnectionId);
     else if(proof)pieces.push(proof.snapshotDigest,proof.recoveryId,proof.canonicalConnectionId);
+    if(marketingOnly)pieces.push('marketingOnly',row.assignment_digest);
     return {enrollmentId:id,flowId:row.flow_id,clinicIds:row.clinicIds,mappingIds:row.mappingIds,recovery:businessSource?null:proof,business:businessSource?proof:null,
+      ...(marketingOnly?{marketingOnly:true}:{}),
       credential:{epoch:effective.epoch,versionId:effective.versionId,expiresAt:effective.metadata.expiresAt,dataAccessExpiresAt:effective.metadata.dataAccessExpiresAt},
       digest:C.hash(JSON.stringify(pieces))};
   }
@@ -141,9 +148,11 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
     const receipt=C.receipt(remote,row,{states:['active']});if(receipt.accessBlocked!==false)fail('meta_enrollment_asset_revoked');
     await authority.assertPending(row,transaction);
     const flow=await models.MetaMarketingOAuthRequest.findByPk(row.flow_id,o),proof=await recovery.forFlow(flow,transaction,{phase:'pending'});
+    const marketingOnly=isCertified(row);
+    if(marketingOnly&&proof)fail();
     if(proof&&(proof.enrollmentId!==row.enrollment_id||Number(proof.canonicalConnectionId)!==Number(row.meta_connection_id)))fail();
-    const scope=scopeOf(row),grant=await models.MetaConnectionAssignment.findOne({...o,where:{scopeKey:row.scope_key}});
-    if(!grant&&!proof){
+    const scope=scopeOf(row),grant=marketingOnly?null:await models.MetaConnectionAssignment.findOne({...o,where:{scopeKey:row.scope_key}});
+    if(!grant&&!proof&&!marketingOnly){
       // Generic connection grants are shared with WhatsApp. Never broaden that
       // access as a side effect of assigning new non-WhatsApp assets.
       if(await models.ClinicMetaAsset.findOne({...o,attributes:['id'],where:{metaConnectionId:row.meta_connection_id,

@@ -56,7 +56,8 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
       if(enrollment?.enrollmentId!==selected.enrollment_id||!Array.isArray(enrollment.mappingIds)||!enrollment.mappingIds.includes(Number(mappingId)))fail();
     }
     const recovery=enrollment?.recovery||null,business=enrollment?.business||null,authority=recovery||business;
-    if(recovery&&business)fail('scope_denied');
+    const marketingOnly=enrollment?.marketingOnly===true;
+    if((recovery&&business)||(marketingOnly&&(authority||!selected.scope_key.startsWith('clinic:'))))fail('scope_denied');
     if(authority&&(authority.enrollmentId!==selected.enrollment_id||authority.flowId!==enrollment.flowId
       ||Number(authority.canonicalConnectionId)!==selected.meta_connection_id||authority.appId!==selected.app_id
       ||authority.subjectId!==selected.meta_user_id||authority.scopeKey!==selected.scope_key
@@ -70,6 +71,7 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
     if (!clinicIds.length || clinics.length !== clinicIds.length || !clinicIds.includes(selected.tenant_clinic_id)
       || scopeType === 'clinic' && (clinicIds.length !== 1 || clinicIds[0] !== scopeId)
       || scopeType === 'group' && clinics.some(row => Number(row.grupoClinicaId) !== scopeId)) fail();
+    if(marketingOnly&&clinics.some(row=>row.grupoClinicaId!==null))fail('scope_denied');
     if(enrollment&&JSON.stringify(enrollment.clinicIds)!==JSON.stringify(clinicIds))fail('scope_denied');
     if(authority&&JSON.stringify(authority.clinicIds)!==JSON.stringify(clinicIds))fail('scope_denied');
     if (await blocked(scope)&&!authority) fail('asset_revoked');
@@ -109,10 +111,10 @@ function createMetaMarketingBrokerScope({ loadMapping, loadBindings, loadRevocat
         || scopeType === 'group' && Number(group.id_grupo) !== scopeId) fail('scope_denied');
     }
     const groupIds = ids(clinics.map(row => row.grupoClinicaId).filter(value => value !== null));
-    const grants = authority?[]:bounded(await loadGrants(clinicIds, groupIds));
+    const grants = authority||marketingOnly?[]:bounded(await loadGrants(clinicIds, groupIds));
     const match = (type,id) => grants.filter(row => row.assignmentScope === type && Number(type === 'clinic' ? row.clinicaId : row.grupoClinicaId) === id);
     const assertGrant = rows => { if (rows.length !== 1 || rows[0].status !== 'active' || Number(rows[0].metaConnectionId) !== requested.connectionId) fail('scope_denied'); };
-    if(!authority){
+    if(!authority&&!marketingOnly){
       if (scopeType === 'group') assertGrant(match('group',scopeId));
       for (const id of clinicIds) {
         const direct = match('clinic',id);

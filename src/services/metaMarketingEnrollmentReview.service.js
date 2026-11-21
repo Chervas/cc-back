@@ -3,6 +3,7 @@
 const {Op}=require('sequelize');
 const C=require('./metaMarketingOAuth.contract');
 const D=require('../../services/integrations-broker/src/meta-marketing-discovery-contract');
+const firstEnrollment=require('./metaMarketingFirstEnrollmentAuthority.service');
 const REASONS=Object.freeze(['identity_review','scope_assignment_review','scope_blocked','asset_assigned','asset_registered','asset_revoked','recovery_not_selected']);
 const fail=()=>C.fail('meta_oauth_unavailable');
 function createReview({models,sessions,now=()=>new Date(),recoveryGuard}) {
@@ -49,7 +50,12 @@ function createReview({models,sessions,now=()=>new Date(),recoveryGuard}) {
       const direct=grants.filter(v=>v.scopeKey==='clinic:'+clinic.id_clinica);
       check(direct.length?direct:grants.filter(v=>v.scopeKey==='group:'+clinic.grupoClinicaId));
     }
-    if(invalid&&!proof)scopeReasons.push('scope_assignment_review');
+    let coexistence=null;
+    if(!proof&&firstEnrollment.configuredFor(row)){
+      const permit=firstEnrollment.permitFor({flow:row,clinics,grants,connectionId:connection?.id});
+      if(!permit||!await firstEnrollment.legacyScopeIntact({models,flow:row,permit,options}))scopeReasons.push('scope_assignment_review');
+      else coexistence=permit;
+    }else if(invalid&&!proof)scopeReasons.push('scope_assignment_review');
 
     // Group selected identities and IG parents. No N queries per asset and no
     // token/additionalData column, even when an alias belongs to another clinic.
@@ -96,6 +102,7 @@ function createReview({models,sessions,now=()=>new Date(),recoveryGuard}) {
             &&alias.assetType==='ad_account'&&'meta-ad_account:'+String(alias.metaAssetId).replace(/^act_/,'')===asset.assetRef&&Number(alias.credentials_absent)===1));
         if(identities.some(ref=>assigned.has(ref))&&!adopted)reasons.push('asset_assigned');
         if(proof&&!adopted&&!reviewed)reasons.push('recovery_not_selected');
+        if(coexistence&&!coexistence.assetRefs.includes(asset.assetRef))reasons.push('scope_assignment_review');
         if(identities.some(ref=>registered.has(ref)))reasons.push('asset_registered');
         if(identities.some(ref=>revoked.has(ref)))reasons.push('asset_revoked');
         return {assetRef:asset.assetRef,status:scopeReasons.length||reasons.length?'review_required':'clear',reasons};

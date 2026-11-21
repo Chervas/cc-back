@@ -1,6 +1,7 @@
 'use strict';
 const {randomUUID}=require('node:crypto'),{Op,literal}=require('sequelize');
 const C=require('./metaMarketingEnrollment.contract'),D=require('../../services/integrations-broker/src/meta-marketing-discovery-contract');
+const firstEnrollment=require('./metaMarketingFirstEnrollmentAuthority.service');
 const {fromEnrollment}=require('../../services/platform-audit/src/meta-enrollment-event');
 const plain=v=>v?.get?v.get({plain:true}):v;
 const conflict=(code='meta_enrollment_scope_changed')=>C.fail(code,409);
@@ -102,7 +103,8 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
       return {connectionId:Number(canonical.id),provenanceDigest:null};
     }
   }
-  async function assignments(row,connectionId,transaction,proof=null,identityDigest=null){
+  async function assignments(row,enrollment,transaction,proof=null,identityDigest=null){
+    const connectionId=Number(enrollment.meta_connection_id);
     const opts=options(transaction),scope=scopeValue(row.scope_key),ids=C.clinics(row.clinic_ids);
     const clinics=await models.Clinica.findAll({...opts,attributes:['id_clinica','grupoClinicaId'],
       where:scope.assignmentScope==='group'?{grupoClinicaId:scope.groupId}:{id_clinica:scope.clinicId},order:[['id_clinica','ASC']],limit:1001});
@@ -133,6 +135,11 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
       // grants, including a disconnected clinic grant used by WhatsApp, remain
       // exactly as pinned by the recovery guard and are never broadened here.
       if(proof.scopeKey!==row.scope_key||JSON.stringify(proof.clinicIds)!==row.clinic_ids)conflict('meta_enrollment_assignment_review');
+    }else if(firstEnrollment.configuredFor(row)){
+      const permit=firstEnrollment.permitFor({flow:row,clinics,grants,connectionId});
+      if(!permit||!firstEnrollment.eligibleAssets(permit,JSON.parse(enrollment.assets))
+        ||!await firstEnrollment.legacyScopeIntact({models,flow:row,permit,options:opts}))conflict('meta_enrollment_assignment_review');
+      return firstEnrollment.certificate(enrollment);
     }else{
       if(scope.assignmentScope==='group')check(matching(row.scope_key));
       for(const clinic of clinics){const direct=matching('clinic:'+clinic.id_clinica);check(direct.length?direct:matching('group:'+clinic.grupoClinicaId));}
@@ -190,7 +197,7 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
     if(C.sourceDigest(row)!==saved.flow_digest||metadata.digest!==saved.candidate_digest||metadata.subjectId!==saved.meta_user_id||metadata.appId!==saved.app_id
       ||row.scope_digest!==saved.scope_digest||row.connection_ref!==saved.connection_ref||row.clinic_ids!==saved.clinic_ids)conflict();
     const selectedIdentity=await identity(row,metadata,transaction,{expectedId:Number(saved.meta_connection_id),recovery:proof});
-    if(await assignments(row,Number(saved.meta_connection_id),transaction,proof,selectedIdentity.provenanceDigest)!==saved.assignment_digest)conflict();
+    if(await assignments(row,saved,transaction,proof,selectedIdentity.provenanceDigest)!==saved.assignment_digest)conflict();
     await physical(saved.selected,transaction,saved.enrollment_id,proof);gate();return saved;
   }
   async function reserve(input,flowId,assetRefs){
@@ -217,13 +224,15 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
       }
       phase='physical';const physicalRefs=await physical(selected,transaction,null,proof);
       phase='identity';const {connectionId,provenanceDigest}=await identity(row,metadata,transaction,{create:true,recovery:proof});
-      phase='assignments';const assignmentDigest=await assignments(row,connectionId,transaction,proof,provenanceDigest),date=now();
-      phase='request';
-      const value=C.request({enrollment_id:randomUUID(),flow_id:flowId,scope_key:row.scope_key,clinic_ids:row.clinic_ids,connection_ref:row.connection_ref,scope_digest:row.scope_digest,
-        flow_digest:C.sourceDigest(row),candidate_digest:metadata.digest,meta_user_id:metadata.subjectId,app_id:metadata.appId,meta_connection_id:connectionId,assignment_digest:assignmentDigest,
+      const draft={enrollment_id:randomUUID(),flow_id:flowId,scope_key:row.scope_key,clinic_ids:row.clinic_ids,connection_ref:row.connection_ref,scope_digest:row.scope_digest,
+        flow_digest:C.sourceDigest(row),candidate_digest:metadata.digest,meta_user_id:metadata.subjectId,app_id:metadata.appId,meta_connection_id:connectionId,
         assets:JSON.stringify(selected),mapping_ids:'[]',actor_user_id:Number(row.actor_user_id),session_ref:row.session_ref,session_expires_at:row.session_expires_at,
-        prepare_request_id:randomUUID(),activate_request_id:randomUUID(),revoke_request_id:randomUUID(),selection_digest:null,state:'prepare_pending',requested_at:date,updated_at:date,
-        prepared_at:null,activated_at:null,revoked_at:null,attempts:0,next_attempt_at:date,lease_token:null,lease_until:null,last_error:null});
+      };
+      phase='assignments';const assignmentDigest=await assignments(row,draft,transaction,proof,provenanceDigest),date=now();
+      phase='request';
+      const value=C.request({...draft,assignment_digest:assignmentDigest,prepare_request_id:randomUUID(),activate_request_id:randomUUID(),revoke_request_id:randomUUID(),
+        selection_digest:null,state:'prepare_pending',requested_at:date,updated_at:date,prepared_at:null,activated_at:null,revoked_at:null,attempts:0,next_attempt_at:date,
+        lease_token:null,lease_until:null,last_error:null});
       await models.MetaMarketingEnrollmentRequest.create(value,{transaction,logging:false});
       phase='claims';await models.MetaMarketingEnrollmentClaim.bulkCreate(physicalRefs.map(asset_ref=>({asset_ref,enrollment_id:value.enrollment_id,created_at:date})),{transaction,logging:false});
       phase='attach';if(proof)await recovery.attachEnrollment({flow:row,enrollmentId:value.enrollment_id},transaction);
