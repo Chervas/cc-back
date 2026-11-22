@@ -2,6 +2,7 @@
 const {randomUUID}=require('node:crypto'),{Op,literal}=require('sequelize');
 const C=require('./metaMarketingEnrollment.contract'),D=require('../../services/integrations-broker/src/meta-marketing-discovery-contract');
 const firstEnrollment=require('./metaMarketingFirstEnrollmentAuthority.service');
+const {createDestinations,assignmentDigest:withDestinations}=require('./metaMarketingEnrollmentDestinations.service');
 const {fromEnrollment}=require('../../services/platform-audit/src/meta-enrollment-event');
 const plain=v=>v?.get?v.get({plain:true}):v;
 const conflict=(code='meta_enrollment_scope_changed')=>C.fail(code,409);
@@ -28,7 +29,8 @@ function reservationRejected(phase,reason,refs,proof){
     process.stderr.write(JSON.stringify(data)+'\n');
   }catch{}
 }
-function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_ENROLLMENT_ENABLED==='true',recoveryGuard}){
+function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_ENROLLMENT_ENABLED==='true',recoveryGuard,
+  destinations=createDestinations({models})}){
   const recovery=recoveryGuard||require('./metaMarketingLegacyRecovery.service').createRecovery({models,sessions,now});
   const S=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now,recoveryGuard:recovery});
   const audit=require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
@@ -197,13 +199,21 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
     if(C.sourceDigest(row)!==saved.flow_digest||metadata.digest!==saved.candidate_digest||metadata.subjectId!==saved.meta_user_id||metadata.appId!==saved.app_id
       ||row.scope_digest!==saved.scope_digest||row.connection_ref!==saved.connection_ref||row.clinic_ids!==saved.clinic_ids)conflict();
     const selectedIdentity=await identity(row,metadata,transaction,{expectedId:Number(saved.meta_connection_id),recovery:proof});
-    if(await assignments(row,saved,transaction,proof,selectedIdentity.provenanceDigest)!==saved.assignment_digest)conflict();
-    await physical(saved.selected,transaction,saved.enrollment_id,proof);gate();return saved;
+    const base=await assignments(row,saved,transaction,proof,selectedIdentity.provenanceDigest);
+    const proposed=await destinations.read(saved,transaction);
+    if(withDestinations(base,proposed)!==saved.assignment_digest)conflict();
+    if(proposed){
+      if(proof)conflict('meta_enrollment_assignment_review');
+      await destinations.assertClean(saved,transaction);
+    }
+    await physical(saved.selected,transaction,saved.enrollment_id,proof);gate();
+    return proposed?{...saved,destinations:proposed}:saved;
   }
-  async function reserve(input,flowId,assetRefs){
+  async function reserve(input,flowId,assetRefs,destinationPlan){
     input=require('./metaMarketingTransactionOrder.service').pinInput(input);
     let phase='source',proof=null,refs;
-    try{gate();refs=selectedRefs(assetRefs);if(!C.UUID.test(flowId)||typeof oauth?.assets!=='function')C.fail('meta_enrollment_invalid',400);}
+    try{gate();refs=selectedRefs(assetRefs);if(!C.UUID.test(flowId)||typeof oauth?.assets!=='function'
+      ||destinationPlan!==undefined&&(!input?.scopeKey?.startsWith('group:')||!C.exact(destinationPlan,'version,rows')))C.fail('meta_enrollment_invalid',400);}
     catch(error){reservationRejected(phase,error?.code,assetRefs,proof);throw error;}
     // Inventory can only enter through the authenticated OAuth consumer. The
     // caller supplies selected typed IDs, never parent/name/candidate metadata.
@@ -220,27 +230,35 @@ function createAuthority({models,sessions,oauth,now=()=>new Date(),enabled=()=>p
       phase='request';const existing=await models.MetaMarketingEnrollmentRequest.findOne({...options(transaction),where:{flow_id:flowId}});
       if(existing){
         const saved=C.request(existing);if(saved.assets!==JSON.stringify(selected))conflict('meta_enrollment_selection_fixed');
-        phase='assert_pending';await assertPending(saved,transaction);return saved;
+        phase='assert_pending';const pending=await assertPending(saved,transaction);
+        if(pending.destinations?.digest!==(destinationPlan===undefined?undefined:destinations.prepare(saved,destinationPlan).digest))
+          conflict('meta_enrollment_selection_fixed');
+        return pending;
       }
+      const requirePlan=!proof&&await destinations.available(row.scope_key,transaction,row.connection_ref);
+      if(requirePlan!==(destinationPlan!==undefined))C.fail('meta_enrollment_invalid',400);
       phase='physical';const physicalRefs=await physical(selected,transaction,null,proof);
       phase='identity';const {connectionId,provenanceDigest}=await identity(row,metadata,transaction,{create:true,recovery:proof});
       const draft={enrollment_id:randomUUID(),flow_id:flowId,scope_key:row.scope_key,clinic_ids:row.clinic_ids,connection_ref:row.connection_ref,scope_digest:row.scope_digest,
         flow_digest:C.sourceDigest(row),candidate_digest:metadata.digest,meta_user_id:metadata.subjectId,app_id:metadata.appId,meta_connection_id:connectionId,
         assets:JSON.stringify(selected),mapping_ids:'[]',actor_user_id:Number(row.actor_user_id),session_ref:row.session_ref,session_expires_at:row.session_expires_at,
       };
-      phase='assignments';const assignmentDigest=await assignments(row,draft,transaction,proof,provenanceDigest),date=now();
+      phase='assignments';const base=await assignments(row,draft,transaction,proof,provenanceDigest),date=now();
+      const proposed=requirePlan?destinations.prepare(draft,destinationPlan):null;
+      if(proposed)await destinations.assertClean(draft,transaction);
       phase='request';
-      const value=C.request({...draft,assignment_digest:assignmentDigest,prepare_request_id:randomUUID(),activate_request_id:randomUUID(),revoke_request_id:randomUUID(),
+      const value=C.request({...draft,assignment_digest:withDestinations(base,proposed),prepare_request_id:randomUUID(),activate_request_id:randomUUID(),revoke_request_id:randomUUID(),
         selection_digest:null,state:'prepare_pending',requested_at:date,updated_at:date,prepared_at:null,activated_at:null,revoked_at:null,attempts:0,next_attempt_at:date,
         lease_token:null,lease_until:null,last_error:null});
       await models.MetaMarketingEnrollmentRequest.create(value,{transaction,logging:false});
+      if(proposed)await destinations.create(value,proposed,chosen,transaction);
       phase='claims';await models.MetaMarketingEnrollmentClaim.bulkCreate(physicalRefs.map(asset_ref=>({asset_ref,enrollment_id:value.enrollment_id,created_at:date})),{transaction,logging:false});
       phase='attach';if(proof)await recovery.attachEnrollment({flow:row,enrollmentId:value.enrollment_id},transaction);
       phase='audit';
       const health=await audit.health(date,{includeUnresolved:false,transaction});
       if(!Number.isSafeInteger(health.pending)||health.pending>=10000||!Number.isFinite(health.oldestAgeSeconds)||health.oldestAgeSeconds>=3600)C.fail('audit_unavailable');
       await audit.append(fromEnrollment(value,'meta_enrollment_requested',{now:date}),{transaction});
-      phase='assert_pending';await assertPending(value,transaction);return value;
+      phase='assert_pending';return assertPending(value,transaction);
     });}catch(error){
       const normalize=error?.name==='SequelizeUniqueConstraintError'||['ER_LOCK_DEADLOCK','ER_LOCK_WAIT_TIMEOUT'].includes(error?.original?.code);
       reservationRejected(phase,normalize?'meta_enrollment_conflict':error?.code,refs,proof);
