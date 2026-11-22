@@ -6,6 +6,21 @@ const axios = require('axios');
 const metaHttp = require('../lib/metaQuarantineHttp');
 const router = express.Router();
 const authMiddleware = require('./auth.middleware');
+let googleAdmissionHttp;
+let disabledGoogleAdmissionRouter;
+function googleAdmissionRouter() {
+    if (googleAdmissionHttp) return googleAdmissionHttp.router;
+    // Ordinary OAuth requests continue without loading the first admission adapter.
+    disabledGoogleAdmissionRouter ??= require('./googleOAuthAdmission.http')
+        .createGoogleOAuthAdmissionHttpAdapter({ authenticate: authMiddleware }).router;
+    return disabledGoogleAdmissionRouter;
+}
+Object.defineProperty(router, 'installGoogleOAuthAdmissionHttp', { value: adapter => {
+    if (googleAdmissionHttp || typeof adapter?.router !== 'function' || typeof adapter?.callback !== 'function') {
+        throw Object.assign(Error('google_oauth_admission_attempt_unavailable'), { code: 'google_oauth_admission_attempt_unavailable', status: 503 });
+    }
+    googleAdmissionHttp = Object.freeze({ router: adapter.router, callback: adapter.callback });
+} });
 const { Op } = require('sequelize');
 const db = require('../../models'); // <-- Importa el objeto db de models/index.js
 const MetaConnection = db.MetaConnection; // <-- Accede al modelo MetaConnection
@@ -1354,6 +1369,9 @@ const PUBLIC_OAUTH_PATHS = new Set([
 // Los callbacks se autentican con state opaco de un solo uso. El resto de la
 // superficie usa el middleware JWT canónico, incluido el bloqueo de usuarios
 // revocados, antes de consultar grants o mappings centrales.
+// The new prefix carries its own normal auth middleware exactly once. Existing
+// OAuth paths keep the middleware and behavior below.
+router.use('/google/admission', (req, res, next) => googleAdmissionRouter()(req, res, next));
 router.use((req, res, next) => {
     const normalizedPath = req.path.replace(/\/+$/, '') || '/';
     if (PUBLIC_OAUTH_PATHS.has(normalizedPath)) return next();
@@ -1760,6 +1778,7 @@ router.get('/google/callback', async (req, res) => {
     try {
   return await googleCutoverAdmission.run('oauth_callback', async () => {
 
+        if (googleAdmissionHttp && await googleAdmissionHttp.callback(req, res)) return;
         const { code, state, error } = req.query;
         const managed = await googleOAuthBroker.callback({ state, code, denied: Boolean(error) });
         if (managed) return res.redirect(buildFrontendSettingsRedirect(normalizeFrontendReturnTo(managed.returnTo),

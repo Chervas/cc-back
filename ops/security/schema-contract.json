@@ -2,6 +2,7 @@
   "version": 1,
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
   "featureGroups": {
+    "google_first_admission": {"enabledWhenAll":{"GOOGLE_OAUTH_FIRST_ADMISSION_INSTALLED":"true"},"tables":["GoogleOAuthAdmissionAttempts","GoogleOAuthAdmissionReturns","GoogleOAuthAdmissionPublications"],"migrations":["20261122223000-create-google-oauth-admission-attempts.js","20261122224500-create-google-oauth-admission-returns.js","20261122225000-create-google-oauth-admission-publications.js"]},
     "meta_marketing_group_destinations": {"enabledWhenAll":{"META_MARKETING_GROUP_DESTINATION_PLAN_ENABLED":"true"},"tables":["MetaMarketingEnrollmentDestinationPlans"],"migrations":["20261122213000-create-meta-marketing-enrollment-destination-plans.js"]},
     "meta_ad_account_assignment": {"required": true, "tables": ["GruposClinicas"], "migrations": ["20261122145500-add-meta-ad-account-assignment-marker.js"]},
     "meta_marketing_instagram_extension": {"enabledWhenAll":{"META_MARKETING_INSTAGRAM_EXTENSION_ENABLED":"true"},"tables":["MetaMarketingInstagramExtensions"],"migrations":["20261122200000-create-meta-marketing-instagram-extensions.js"]},
@@ -89,6 +90,91 @@
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
+    "GoogleOAuthAdmissionAttempts": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME":"attempt_id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"actor_user_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"session_ref_hash","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"session_expires_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"scope_key","COLUMN_TYPE":"varchar(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"clinic_ids","COLUMN_TYPE":"text","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"clinic_count","COLUMN_TYPE":"int unsigned","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"clinic_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"service","COLUMN_TYPE":"enum('business_profile','search_console','analytics','ads')","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"binding_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"state","COLUMN_TYPE":"enum('prepared','cancelled','expired')","IS_NULLABLE":"NO","COLUMN_DEFAULT":"prepared","EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"revision","COLUMN_TYPE":"int unsigned","IS_NULLABLE":"NO","COLUMN_DEFAULT":"0","EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"requested_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"expires_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"updated_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"completed_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}
+      ],
+      "indexes": [
+        {"name":"cc_google_admission_expiry","columns":[{"INDEX_NAME":"cc_google_admission_expiry","NON_UNIQUE":1,"SEQ_IN_INDEX":1,"COLUMN_NAME":"state","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"cc_google_admission_expiry","NON_UNIQUE":1,"SEQ_IN_INDEX":2,"COLUMN_NAME":"expires_at","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"cc_google_admission_scope_service","columns":[{"INDEX_NAME":"cc_google_admission_scope_service","NON_UNIQUE":1,"SEQ_IN_INDEX":1,"COLUMN_NAME":"scope_key","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"cc_google_admission_scope_service","NON_UNIQUE":1,"SEQ_IN_INDEX":2,"COLUMN_NAME":"service","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"cc_google_admission_scope_service","NON_UNIQUE":1,"SEQ_IN_INDEX":3,"COLUMN_NAME":"requested_at","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"attempt_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME":"cc_google_admission_actor","ENFORCED":"YES","CHECK_CLAUSE":"(`actor_user_id` between 1 and 2147483647)"},
+        {"CONSTRAINT_NAME":"cc_google_admission_clinics","ENFORCED":"YES","CHECK_CLAUSE":"((`clinic_count` between 1 and 1000) and json_valid(`clinic_ids`) and (json_type(`clinic_ids`) = _utf8mb4\\'ARRAY\\') and (json_length(`clinic_ids`) = `clinic_count`))"},
+        {"CONSTRAINT_NAME":"cc_google_admission_terminal","ENFORCED":"YES","CHECK_CLAUSE":"(((`state` = _utf8mb4\\'prepared\\') and (`revision` = 0) and (`completed_at` is null) and (`updated_at` = `requested_at`)) or ((`state` = _utf8mb4\\'cancelled\\') and (`revision` = 1) and (`completed_at` is not null) and (`completed_at` = `updated_at`) and (`completed_at` >= `requested_at`) and (`completed_at` < `expires_at`)) or ((`state` = _utf8mb4\\'expired\\') and (`revision` = 1) and (`completed_at` is not null) and (`completed_at` = `updated_at`) and (`completed_at` >= `expires_at`)))"},
+        {"CONSTRAINT_NAME":"cc_google_admission_ttl","ENFORCED":"YES","CHECK_CLAUSE":"((`expires_at` > `requested_at`) and (`expires_at` <= `session_expires_at`) and (`expires_at` <= (`requested_at` + interval 600000000 microsecond)))"}
+      ],
+      "foreignKeys": []
+    },
+    "GoogleOAuthAdmissionReturns": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME":"state_hash","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"attempt_id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"binding_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"session_ref_hash","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"actor_user_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"scope_key","COLUMN_TYPE":"varchar(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"service","COLUMN_TYPE":"enum('business_profile','search_console','analytics','ads')","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"clinic_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"return_path","COLUMN_TYPE":"varchar(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"session_expires_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"created_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"expires_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}
+      ],
+      "indexes": [
+        {"name":"cc_google_admission_return_attempt","columns":[{"INDEX_NAME":"cc_google_admission_return_attempt","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"attempt_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"state_hash","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME":"cc_google_admission_return_actor","ENFORCED":"YES","CHECK_CLAUSE":"(`actor_user_id` between 1 and 2147483647)"},
+        {"CONSTRAINT_NAME":"cc_google_admission_return_path","ENFORCED":"YES","CHECK_CLAUSE":"(`return_path` = _utf8mb4\\'/pages/settings\\')"},
+        {"CONSTRAINT_NAME":"cc_google_admission_return_ttl","ENFORCED":"YES","CHECK_CLAUSE":"((`expires_at` > `created_at`) and (`expires_at` <= `session_expires_at`) and (`expires_at` <= (`created_at` + interval 600000000 microsecond)))"}
+      ],
+      "foreignKeys": []
+    },
+    "GoogleOAuthAdmissionPublications": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME":"attempt_id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"receipt_id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"receipt_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"google_connection_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"scope_key","COLUMN_TYPE":"varchar(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"service","COLUMN_TYPE":"enum('business_profile','search_console','analytics','ads')","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"clinic_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"asset_ref","COLUMN_TYPE":"varchar(128)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"published_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}
+      ],
+      "indexes": [
+        {"name":"cc_google_publication_receipt","columns":[{"INDEX_NAME":"cc_google_publication_receipt","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"receipt_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"attempt_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME":"cc_google_publication_ids_positive","ENFORCED":"YES","CHECK_CLAUSE":"((`google_connection_id` > 0) and (`clinic_id` > 0))"}
+      ],
+      "foreignKeys": []
+    },
     "MetaMarketingEnrollmentDestinationPlans": {
       "ENGINE": "InnoDB",
       "TABLE_COLLATION": "ascii_bin",
@@ -6990,6 +7076,9 @@
     }
   },
   "migrations": [
+    {"name":"20261122223000-create-google-oauth-admission-attempts.js","sha256":"46cb281bb26de3f5506ac128f6da6d221ec6dfac8749a260f9d22d12afdad139"},
+    {"name":"20261122224500-create-google-oauth-admission-returns.js","sha256":"02e624cc5f79861a37e2cc2bdf570b664cfe49993803dd6a309a7453af48b926"},
+    {"name":"20261122225000-create-google-oauth-admission-publications.js","sha256":"39d364c385d24ee884a0302e3a48ecb8a964975610787f458aa589834e731fec"},
     {
       "name": "20261122213000-create-meta-marketing-enrollment-destination-plans.js",
       "sha256": "c716e5f1466648b69cba0a6aa299bd2f149d836a759676d6c02458e06d5de655"

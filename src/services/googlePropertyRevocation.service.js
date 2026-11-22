@@ -171,8 +171,13 @@ function privateFile(filename) {
   } catch { throw Object.assign(Error('broker_configuration_invalid'), { code: 'broker_configuration_invalid' }); }
 }
 const clients = Object.fromEntries(Object.keys(KINDS).map(kind => {
-  let cached; const prefix = kind === 'search_console' ? 'GOOGLE_SEARCH_CONSOLE_BROKER_' : 'GOOGLE_ANALYTICS_BROKER_';
+  let cached; let first;
+  const prefix = kind === 'search_console' ? 'GOOGLE_SEARCH_CONSOLE_BROKER_' : 'GOOGLE_ANALYTICS_BROKER_';
   return [kind, { execute(command, budget) {
+    if (kind === 'search_console' && command.connectionRef.startsWith('google-first:')) {
+      first ||= require('./googleOAuthAdmissionRuntime.service').createFirstSearchConsoleRevoker();
+      return first.execute(command,budget);
+    }
     cached ||= createIntegrationsBrokerClient({ origin: process.env[prefix + 'ORIGIN'], audience: process.env[prefix + 'AUDIENCE'],
       keyId: process.env[prefix + 'CONTROL_KEY_ID'], privateKey: privateFile(process.env[prefix + 'CONTROL_KEY_FILE']),
       ca: privateFile(process.env[prefix + 'CA_FILE']), timeoutMs: 10000 });
