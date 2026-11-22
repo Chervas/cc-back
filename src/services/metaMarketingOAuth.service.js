@@ -179,6 +179,9 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       let row=await R.findOne({where:{state_hash:C.hash(state)},raw:true,logging:false});
       if(!row&&models.MetaMarketingBusinessHandover&&await models.MetaMarketingBusinessHandover.findOne({where:{state_hash:C.hash(state)},attributes:['handover_id'],raw:true,logging:false}))return require('./metaMarketingBusiness.service')
         .createService({models,sessions,client,now,returnOrigin}).callback({state,code,denied});
+      if(!row&&process.env.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED==='true'&&models.MetaMarketingInstagramExtension
+        &&await models.MetaMarketingInstagramExtension.findOne({where:{state_hash:C.hash(state)},attributes:['flow_id'],raw:true,logging:false}))return require('./metaMarketingInstagramExtension.service')
+        .createService({models,sessions,client,now,returnOrigin}).callback({state,code,denied});
       if(!row&&models.MetaMarketingCredentialRenewal)return require('./metaMarketingCredentialRenewal.service')
         .createService({models,sessions,client,now,returnOrigin}).callback({state,code,denied});
       if(!row)C.fail('meta_oauth_state_invalid',400);

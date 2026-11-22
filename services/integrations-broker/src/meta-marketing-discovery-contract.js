@@ -24,6 +24,15 @@ function project(raw,kind,parentPageId=null){
   const asset={assetRef:`meta-${kind}:${id}`,kind,id,parentPageId};
   return {...M.projectAsset(raw,asset),id,parentPageId};
 }
+function assetAvatarUrl(value){
+  if(typeof value!=='string'||value.length>2048||/[\x00-\x20\x7f]/.test(value))return undefined;
+  try{
+    const url=new URL(value);
+    if(url.protocol!=='https:'||url.port||url.username||url.password||url.hash||!/(^|\.)(fbcdn\.net|cdninstagram\.com)$/.test(url.hostname)
+      ||[...url.searchParams.keys()].some(key=>/token|secret|proof|authorization/i.test(key)))return undefined;
+    return value;
+  }catch{return undefined;}
+}
 function checkAssets(assets,metadata){
   const availableKinds=kinds(metadata),seen=new Set();
   if(!Array.isArray(assets)||assets.length>MAX_ASSETS)fail('provider_failed');
@@ -57,4 +66,4 @@ function validateResult(value,{flowId,candidateDigest,scopeDigest,scopeKey,clini
     ||JSON.stringify(value.availableKinds)!==JSON.stringify(checkAssets(value.assets,metadata))||Buffer.byteLength(JSON.stringify(value))>MAX_RESULT_BYTES)fail('provider_failed');
   return structuredClone(value);
 }
-module.exports={OPERATION,validate,MAX_ASSETS,MAX_PAGES,MAX_BYTES,MAX_RESULT_BYTES,kinds,fresh,project,checkAssets,result,validateResult};
+module.exports={OPERATION,validate,MAX_ASSETS,MAX_PAGES,MAX_BYTES,MAX_RESULT_BYTES,kinds,fresh,project,assetAvatarUrl,checkAssets,result,validateResult};
