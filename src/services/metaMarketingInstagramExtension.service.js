@@ -18,6 +18,11 @@ const actor = row => ({ scopeKey: row.scope_key, actorId: Number(row.actor_user_
 const ownedBy = (row, input) => Number(row.actor_user_id) === input.actorId && row.session_ref === input.sessionRef;
 const safeName = (value, length) => typeof value === 'string' && !!value.trim() && value.length <= length && !/[\u0000-\u001f\u007f]/.test(value);
 
+function credentialFailure(error) {
+  if (error?.code === 'meta_credential_renewal_required') fail('meta_instagram_expired', 409);
+  throw error;
+}
+
 function configuration(environment = process.env) {
   if (environment.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED !== 'true') return null;
   const scopeKey = environment.META_MARKETING_INSTAGRAM_EXTENSION_SCOPE;
@@ -79,9 +84,9 @@ function createService({ models, sessions, client, now = () => new Date(), retur
     const target = configured(input);
     if (!target || !enrollment) fail('meta_instagram_connection_required', 409);
     const row = E.request(plain(await models.MetaMarketingEnrollmentRequest.findByPk(enrollment.enrollment_id, lock(transaction))));
-    const binding = await bindings.committed(row.enrollment_id, transaction);
+    const binding = await bindings.committed(row.enrollment_id, transaction).catch(credentialFailure);
     const source = plain(await models.MetaMarketingOAuthRequest.findByPk(row.flow_id, lock(transaction)));
-    const credential = await credentials.resolve(row, source, transaction);
+    const credential = await credentials.resolve(row, source, transaction).catch(credentialFailure);
     if (row.scope_key !== target.scopeKey || row.clinicIds.length !== 1 || source.app_id !== row.app_id
         || credential.metadata.tokenType !== 'USER' || !row.selected.some(asset => asset.kind === 'facebook_page' && asset.id === target.parentPageId)
         || row.selected.some(asset => asset.kind === 'instagram_business' && asset.parentPageId === target.parentPageId)) {
@@ -90,7 +95,8 @@ function createService({ models, sessions, client, now = () => new Date(), retur
     const payload = { enrollmentId: row.enrollment_id, parentPageId: target.parentPageId, assetSetDigest: F.assetSetDigest(row.selected),
       epoch: credential.epoch, versionId: credential.versionId, credentialDigest: credential.digest };
     const structureHash = C.hash(JSON.stringify([binding.digest, target.parentPageId, payload.assetSetDigest, row.meta_user_id]));
-    return { source, row, payload, structureHash, authorityHash: C.hash(JSON.stringify([structureHash, payload])) };
+    return { source, row, payload, credentialExpiresAt: F.expiry(credential.metadata),
+      structureHash, authorityHash: C.hash(JSON.stringify([structureHash, payload])) };
   }
 
   function matches(journal, authority) {
@@ -202,13 +208,18 @@ function createService({ models, sessions, client, now = () => new Date(), retur
       const captured = await inScope(input, async ({ transaction, enrollment }) => {
         const authority = await capture(input, enrollment, transaction);
         if (await current(input, transaction)) fail('meta_instagram_attempt_in_progress', 409);
-        const expires = Math.min(+now() + 600000, +input.sessionExpiresAt, +authority.source.expires_at);
-        if (!Number.isSafeInteger(expires) || expires <= +now()) fail('meta_instagram_session_required', 401);
+        const startedAt = now();
+        const sessionExpiry = +input.sessionExpiresAt;
+        if (!Number.isSafeInteger(sessionExpiry) || sessionExpiry <= +startedAt) fail('meta_instagram_session_required', 401);
+        // The original flow supplies the app and redirect, while the active credential
+        // supplies its current lifetime. The Owner also enforces its own slot deadline.
+        const expires = Math.min(+startedAt + 600000, sessionExpiry, authority.credentialExpiresAt ?? Infinity);
+        if (!Number.isSafeInteger(expires) || expires <= +startedAt) fail('meta_instagram_expired', 409);
         const row = await Rows.create({ flow_id: randomUUID(), scope_key: input.scopeKey, reserved_scope: input.scopeKey,
           enrollment_id: authority.payload.enrollmentId, authority_hash: authority.authorityHash, structure_hash: authority.structureHash,
           connection_ref: authority.row.connection_ref,
           state_hash: C.hash(state), actor_user_id: input.actorId, session_ref: input.sessionRef, session_expires_at: input.sessionExpiresAt,
-          requested_at: now(), expires_at: new Date(expires), status: 'starting' }, { transaction, logging: false });
+          requested_at: startedAt, expires_at: new Date(expires), status: 'starting' }, { transaction, logging: false });
         return { row: plain(row), authority };
       });
       const { row, authority } = captured;
