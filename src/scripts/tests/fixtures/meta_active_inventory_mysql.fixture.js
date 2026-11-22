@@ -11,7 +11,8 @@ module.exports=async({models,sql,sessions,service,enrollment,flow,api,request,to
  await api('POST','/'+id+'/confirmation',{selectionDigest:prepared.selection_digest});assert.equal((await run()).failed,0);assert.equal((await current()).state,'active');
  const originalClaims=await sessions.verify(token());assert.equal(originalClaims.userId,225);
  const originalFlow=JSON.stringify(await models.MetaMarketingOAuthRequest.findByPk(flow.requestId,{raw:true}));
- const baseline=async()=>JSON.stringify({enrollment:await current(),mappings:await models.ClinicMetaAsset.findAll({raw:true,order:[['id','ASC']]}),
+ const baseline=async()=>JSON.stringify({enrollment:await current(),mappings:(await models.ClinicMetaAsset.findAll({raw:true,order:[['id','ASC']]}))
+  .map(({metaAssetName,assetAvatarUrl,updatedAt,...assignment})=>assignment),
   grants:await models.MetaConnectionAssignment.findAll({raw:true,order:[['id','ASC']]}),claims:await models.MetaMarketingEnrollmentClaim.findAll({raw:true,order:[['asset_ref','ASC']]})});
  const enrolledBefore=await baseline();
  await models.AuthSession.update({state:'expired',ended_at:now()},{where:{session_id:originalClaims.jti}});await mfa();
@@ -61,6 +62,6 @@ module.exports=async({models,sql,sessions,service,enrollment,flow,api,request,to
  assert(events.some(v=>v.reason==='access_changed'));assert.equal(events.filter(v=>v.reason==='inventory_verified').length,1);
  await models.AuthSession.update({state:'expired',ended_at:now()},{where:{session_id:fresh.jti}});
  before=f.state.awsCalls.length;assert.equal((await request('POST',assetsUrl,{})).status,401);assert.equal(f.state.awsCalls.length,before);
- report.checks.push('Old candidate URL returns409 without logout or provider I/O; current expired session remains401; foreign scope/WRITE/withdrawal deny before I/O and a post-I/O epoch change discards all results; original flow, grants, mappings and claims remain exact');
+ report.checks.push('Old candidate URL returns409 without logout or provider I/O; current expired session remains401; foreign scope/WRITE/withdrawal deny before I/O and a post-I/O epoch change discards all results; original flow, grants, mapping identities and claims remain exact');
  report.activeInventory={actorId:225,epoch:2,assets:2,originalSessionExpired:true,currentSessionPreservedUntilExplicitTestExpiry:true,originalCredentialReads:0,providerNetworkCalls:0};
 };

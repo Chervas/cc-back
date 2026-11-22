@@ -137,17 +137,21 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
     async overview(input){return order.scope(input,{},async({transaction,enrollment,input})=>{
       if(!enrollment)return {enabled:enabled(),canSelect:enabled(),selection:null,discovery:{mode:'pending'}};
       const row=await current(enrollment.enrollment_id,transaction);let selection=project(row),discovery={mode:row.state==='active'?'unavailable':'pending'};
-      let instagramExtensionAvailable=false;
+      let instagramExtensionAvailable=false,displayAssets;
       if(row.state==='active')try{
         const committed=await bindings.committed(row.enrollment_id,transaction);
-        if(enabled()&&discoveryEnabled())discovery=await inventory().describe(input,row,transaction);
+        if(enabled()&&discoveryEnabled()){
+          const {displayAssets:cached,...capability}=await inventory().describe(input,row,transaction)||{mode:'unavailable'};
+          discovery=capability;displayAssets=cached;
+        }
         instagramExtensionAvailable=discovery?.mode==='active'&&process.env.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED==='true'
           &&require('./metaMarketingInstagramExtension.service').availableFor(row,committed.business);
       }
       catch(error){if([401,403].includes(error.httpStatus))throw error;selection={...selection,connected:false,attentionRequired:true,lastError:safe(error)};}
       return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',discovery,...(instagramExtensionAvailable?{instagramExtensionAvailable:true}:{}),selection:{...selection,
         canConfirm:enabled()&&row.state==='prepared'&&Number(row.actor_user_id)===input.actorId&&row.session_ref===input.sessionRef
-          &&+row.session_expires_at===+input.sessionExpiresAt&&+row.session_expires_at>+now(),canCancel:!['revoke_pending','revoked'].includes(row.state)}};
+          &&+row.session_expires_at===+input.sessionExpiresAt&&+row.session_expires_at>+now(),canCancel:!['revoke_pending','revoked'].includes(row.state)},
+        ...(displayAssets&&selection.connected?{displayAssets}:{})};
     });},
     async assets(input,id,includeAvatars=false){return inventory().assets(input,id,includeAvatars);},
     async cancelFromOAuth(flowId,transaction,actor){
