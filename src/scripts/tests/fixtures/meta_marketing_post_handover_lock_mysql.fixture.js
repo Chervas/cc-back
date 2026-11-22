@@ -18,7 +18,7 @@ module.exports=async({models,sql,now,report,initial,currentIds,baseline,untouche
   const options={META_MARKETING_LEADGEN_ENABLED:process.env.META_MARKETING_LEADGEN_ENABLED,META_MARKETING_BROKER_ENABLED:process.env.META_MARKETING_BROKER_ENABLED};
   process.env.META_MARKETING_LEADGEN_ENABLED='true';process.env.META_MARKETING_BROKER_ENABLED='true';
   await models.UsuarioClinica.bulkCreate([1,70,66,72].map(id_clinica=>({id_usuario:1,id_clinica,rol_clinica:'agencia',estado_invitacion:'aceptada'})));
-  const sessions={verifyReference:async(reference,options)=>{assert([1,99].includes(reference.userId));assert.equal(options.requireEmail,true);assert(options.transaction);if(+reference.expiresAt<=+now())throw Object.assign(Error('auth_invalid'),{code:'auth_invalid'});}};
+  const sessions={verifyNormalReference:async(reference,options)=>{assert([1,99].includes(reference.userId));assert.equal(Object.hasOwn(options, 'requireEmail'), false);assert(options.transaction);if(+reference.expiresAt<=+now())throw Object.assign(Error('auth_invalid'),{code:'auth_invalid'});}};
   const client={execute:async()=>{trace.providerRequests++;throw Error('POST_HANDOVER_PROVIDER_FORBIDDEN');}};
   const snapshot=async()=>JSON.stringify({flows:await models.MetaMarketingOAuthRequest.findAll({raw:true,order:[['flow_id','ASC']]}),
     enrollments:await models.MetaMarketingEnrollmentRequest.findAll({raw:true,order:[['enrollment_id','ASC']]}),

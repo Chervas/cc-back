@@ -12,7 +12,7 @@ module.exports=async({models,sql,now,advance,report,baseline,untouched})=>{
   await models.UsuarioClinica.bulkCreate([1,70,66,72].map(id_clinica=>({id_usuario:99,id_clinica,rol_clinica:id_clinica===72?'agencia':'propietario',estado_invitacion:'aceptada'})));
   models.JobRequest=require('../../../../models/jobrequest')(sql,D);for(const field of Object.values(models.JobRequest.rawAttributes))delete field.references;models.JobRequest.refreshAttributes();await models.JobRequest.sync();
   models.LeadIntake=sql.define('BusinessTestLead',{id:{type:D.INTEGER,primaryKey:true},clinica_id:D.INTEGER,external_source:D.STRING,external_id:D.STRING},{timestamps:false});await models.LeadIntake.sync();
-  const sessions={verifyReference:async(reference,options)=>{assert.equal(reference.userId,99);assert.equal(options.requireEmail,true);assert(options.transaction);if(+reference.expiresAt<=+now())throw Object.assign(Error('auth_invalid'),{code:'auth_invalid'});}};
+  const sessions={verifyNormalReference:async(reference,options)=>{assert.equal(reference.userId,99);assert.equal(Object.hasOwn(options, 'requireEmail'), false);assert(options.transaction);if(+reference.expiresAt<=+now())throw Object.assign(Error('auth_invalid'),{code:'auth_invalid'});}};
   const actor=group=>({scopeKey:'group:'+group,actorId:99,sessionRef:randomUUID(),sessionExpiresAt:new Date(+now()+10800000)});
   const inputs=[actor(28),actor(29)],credentials=F.createEffectiveCredentials({models,now}),grants=new Map(),handovers=new Map(),maintenances=new Map(),calls=[],previousStatus=new Map(),previousAlerts=new Map();
   const initial=await models.MetaMarketingEnrollmentRequest.findAll({where:{state:'active'},order:[['scope_key','ASC']],raw:true});assert.equal(initial.length,2);
@@ -94,7 +94,7 @@ module.exports=async({models,sql,now,advance,report,baseline,untouched})=>{
   const confirmation=confirmationFrom(probe.pending);
   await assert.rejects(service.confirm({...refreshed,sessionRef:randomUUID()},sessionProbe.requestId,confirmation),{code:'meta_business_session_required',httpStatus:409});
   await assert.rejects(service.confirm({...refreshed,sessionExpiresAt:new Date(+inputs[0].sessionExpiresAt-1000)},sessionProbe.requestId,confirmation),{code:'meta_business_session_required',httpStatus:409});
-  const future=()=>new Date(+inputs[0].sessionExpiresAt+1),futureSessions={verifyReference:async(reference,options)=>{if(+reference.expiresAt<=+future())throw Object.assign(Error('auth_invalid'),{code:'auth_invalid'});return sessions.verifyReference(reference,options);}};
+  const future=()=>new Date(+inputs[0].sessionExpiresAt+1),futureSessions={verifyNormalReference:async(reference,options)=>{if(+reference.expiresAt<=+future())throw Object.assign(Error('auth_invalid'),{code:'auth_invalid'});return sessions.verifyNormalReference(reference,options);}};
   const futureService=require('../../../services/metaMarketingBusiness.service').createService({models,sessions:futureSessions,client,now:future,enabled:()=>true,configuration,returnOrigin:'https://app.example.invalid'});
   await assert.rejects(futureService.confirm(refreshed,sessionProbe.requestId,confirmation),{code:'meta_business_session_required',httpStatus:409});
   await service.cancel(refreshed,sessionProbe.requestId);

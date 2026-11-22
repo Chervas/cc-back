@@ -68,10 +68,10 @@ module.exports = async ({ models, sql, now, advance, report, baseline, untouched
   C.slot(slot); await models.MetaMarketingOAuthSlot.create(slot);
 
   let sessionValid = true, emailVerified = true, revokeWriteAfterInventory = false, authorizationChecks = 0;
-  const sessions = { async verifyReference(reference, options) {
+  const sessions = { async verifyNormalReference(reference, options) {
     authorizationChecks++;
     assert(options.transaction && !options.transaction.finished);
-    assert.equal(options.requireEmail, true);
+    assert.equal(Object.hasOwn(options, 'requireEmail'), false);
     if (!sessionValid || reference.userId !== actorId || reference.sessionRef !== input.sessionRef
       || +reference.expiresAt !== +input.sessionExpiresAt || +reference.expiresAt <= +at()) {
       throw Object.assign(Error('auth_invalid'), { code: 'auth_invalid' });

@@ -52,8 +52,8 @@ module.exports = async context => {
   }
   const load = (name, red) => red ? old(name) : require(path.join(services, name));
   const closedClient = { execute: async () => { trace.providerRequests++; throw Error('ENTERPRISE_PROVIDER_FORBIDDEN'); } };
-  const sessions = { verifyReference: async (reference, options) => {
-    assert.equal(reference.userId, 99); assert(options.transaction); assert.equal(options.requireEmail, true);
+  const sessions = { verifyNormalReference: async (reference, options) => {
+    assert.equal(reference.userId, 99); assert(options.transaction); assert.equal(Object.hasOwn(options, 'requireEmail'), false);
     if (+reference.expiresAt <= +now()) throw Object.assign(Error('auth_invalid'), { code: 'auth_invalid' });
   } };
   const actor = scopeKey => ({ scopeKey, actorId: 99, sessionRef: randomUUID(), sessionExpiresAt: new Date(+now() + 10800000) });

@@ -19,7 +19,7 @@ for(const family of ['Business','CredentialRenewal']){
       MetaMarketingOAuthRequest:{},MetaMarketingBusinessHandover:{findByPk:async(id,options)=>{if(id===UUID(2))return null;if(options.lock){state.hydrations++;state.trace.push('journal');}else state.hints++;return id===UUID(3)?{...journal}:null;}}};
     if(family==='CredentialRenewal')models.MetaMarketingCredentialRenewal={findByPk:models.MetaMarketingBusinessHandover.findByPk};
     models.PlatformAuditEvent={sequelize:models.sequelize};
-    const sessions={verifyReference:async(_reference,options)=>{assert.equal(options.requireEmail,true);assert(options.transaction);state.sessions++;state.trace.push('session');if(state.sessions===state.denyAt)throw Object.assign(Error('auth_invalid'),{code:'auth_invalid'});}};
+    const sessions={verifyNormalReference:async(_reference,options)=>{assert.equal(Object.hasOwn(options, 'requireEmail'), false);assert(options.transaction);state.sessions++;state.trace.push('session');if(state.sessions===state.denyAt)throw Object.assign(Error('auth_invalid'),{code:'auth_invalid'});}};
     const service=require('../../services/metaMarketing'+family+'.service').createService({models,sessions,client:{execute:async()=>{state.provider++;closed();}},audit:{},drain:{},enabled:()=>true});
     return{state,service,input:{scopeKey:'clinic:95',actorId:225,sessionRef:UUID(4),sessionExpiresAt:new Date('2030-01-01')}};
   }
