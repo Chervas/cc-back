@@ -26,6 +26,7 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
     const { binding, scope: s } = scope(request, policy); const p = request.payload;
     if (!ads.customer(p.customerId) || p.customerId === s.rootCustomerId
       || s.assetRef.startsWith('ads-enroll:clinic:') && p.clinicCount !== 1) fail('invalid_request');
+    if (!contract.allowsCustomer(s, p.customerId)) fail('scope_denied');
     const asset = 'ads:' + p.customerId;
     if (get('SELECT 1 FROM google_ads_enrollment_cancellations WHERE tenant=? AND connection=? AND customer=?', request.tenantRef, request.connectionRef, p.customerId)) fail('asset_revoked');
     if (revoked(asset)) fail('asset_revoked');
@@ -68,6 +69,7 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
     if (!control) {
       if (principal.id !== s.readPrincipalId || !s.readOperations.includes(request.operation)
         || row.state === 'prepared' && request.operation !== 'google.ads.discovery.read.v1'
+        || !contract.allowsCustomer(s, row.customer)
         || row.config_digest !== contract.digestFor(binding, s)
         || policy.connections.some(c => c.googleAdsAccounts?.some(a => a.customerId === row.customer))) fail('scope_denied');
       store.assertAssetActive({ tenantRef: row.tenant, connectionRef: row.connection, assetRef: row.scope });
@@ -98,7 +100,7 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
     const raw = await http({ hostname: 'googleads.googleapis.com',
       path: `/${ads.API_VERSION}/customers/${s.rootCustomerId}/googleAds:search`,
       token: context.secret, developerToken, loginCustomerId: s.loginCustomerId, signal: context.signal,
-      json: { query: contract.query(customerId) } });
+      json: { query: contract.query(customerId, s.allowedCustomerIds) } });
     if (context.signal.aborted) fail('provider_timeout');
     const result = contract.project(raw, customerId);
     if (result.some(c => c.id === s.rootCustomerId) || customerId && result.length !== 1) fail('provider_failed');
@@ -119,7 +121,8 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
         const row = owned(request, principal); if (!row) fail('scope_denied');
         let accessBlocked = true;
         try { store.connection(binding.connectionRef, now()); store.assertAssetActive(request);
-          accessBlocked = revoked(row.asset) || row.state !== 'active' || row.config_digest !== contract.digestFor(binding, s); } catch {}
+          accessBlocked = revoked(row.asset) || row.state !== 'active' || !contract.allowsCustomer(s, row.customer)
+            || row.config_digest !== contract.digestFor(binding, s); } catch {}
         return { enrollmentId: row.id, assetRef: row.asset, scopeRef: row.scope, clinicCount: row.clinic_count,
           clinicSetDigest: row.clinic_digest, state: revoked(row.asset) ? 'revoked' : row.state, accessBlocked };
       }
@@ -133,7 +136,8 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
         }
         for (const [id, p] of pages) if (p.expiresAt <= now()) drop(id);
         const epoch = createHash('sha256').update(context.secret).update(Buffer.from([0])).update(developerToken).digest('hex');
-        const key = JSON.stringify([principalId, tenantRef, binding.connectionRef, assetRef, context.policyVersion, contract.digestFor(binding, s)]);
+        const allowed = s.allowedCustomerIds ? [...s.allowedCustomerIds].sort() : null;
+        const key = JSON.stringify([principalId, tenantRef, binding.connectionRef, assetRef, context.policyVersion, contract.digestFor(binding, s), allowed]);
         const cursorScope = { ...context, operation }; let entry; let offset = 0;
         if (payload.pageToken !== null) {
           let page; try { page = JSON.parse(cursor.open(payload.pageToken, cursorScope)); } catch { fail('invalid_request'); }
@@ -142,7 +146,7 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
           entry = pages.get(page.id); offset = page.offset;
           if (!entry || entry.key !== key || entry.epoch !== epoch || offset >= entry.rows.length) fail('invalid_request');
         } else {
-          const rows = await provider(context, s, null, developerToken);
+          const rows = (await provider(context, s, null, developerToken)).filter(account => contract.allowsCustomer(s, account.id));
           const size = Buffer.byteLength(JSON.stringify(rows)); if (size > 16 * 1024 * 1024) fail('provider_failed');
           while (pages.size && (pages.size >= 16 || bytes + size > 16 * 1024 * 1024)) drop(pages.keys().next().value);
           entry = { id: randomUUID(), key, epoch, connectionRef: binding.connectionRef, rows, bytes: size, expiresAt: now() + 600000 };

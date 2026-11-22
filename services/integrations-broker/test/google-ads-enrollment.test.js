@@ -8,6 +8,7 @@ const { BrokerStore } = require('../src/store'); const { signRequest } = require
 const contract = require('../src/google-ads-enrollment-contract'); const ads = require('../src/google-ads-contract');
 const { validateConfig } = require('../src/google-main');
 const NEW = '2222222222'; const SCOPE = 'ads-enroll:group:5';
+const OTHER = '3333333333'; const OTHER_SCOPE = 'ads-enroll:clinic:999';
 function candidate(id = NEW) {
   return { customerClient: { id, clientCustomer: 'customers/' + id, level: '1',
     manager: false, descriptiveName: 'FICTITIOUS_ACCOUNT', currencyCode: 'EUR', timeZone: 'Europe/Madrid', status: 'ENABLED' } };
@@ -50,6 +51,15 @@ function enrollmentFixture(t) {
   const initialResponse = { results: [candidate()] }; f.state.response = initialResponse;
   t.after(() => engines.forEach(e => e.close()));
   return { ...f, enrollmentKeys: keys, config, broker, engine, make, intent, execute, read, revoke, initialResponse, advance: ms => { at += ms; } };
+}
+function addOtherScope(policy, overrides = {}) {
+  const first = policy.connections[0].googleAdsEnrollmentScopes[0];
+  const second = { ...first, assetRef: OTHER_SCOPE, tenantRef: 'clinic:999', ...overrides };
+  policy.connections[0].googleAdsEnrollmentScopes.push(second);
+  for (const grant of policy.grants.filter(g => g.assetRef === SCOPE)) {
+    policy.grants.push({ ...grant, assetRef: second.assetRef, tenantRef: second.tenantRef });
+  }
+  return second;
 }
 test('enrollment discovers unregistered children from a pinned root without exporting secrets or provider payloads', async t => {
   const f = enrollmentFixture(t); f.state.response.results[0].customerClient.ignored = ACCESS;
@@ -130,6 +140,107 @@ test('enrollment policy requires distinct cryptographic roles, explicit scopes a
   }
   const empty = structuredClone(f.config); delete empty.policy.connections[0].googleAdsAccounts;
   empty.policy.grants = empty.policy.grants.filter(g => g.assetRef === SCOPE); assert.equal(validateConfig(empty), empty);
+});
+test('shared managers require nonempty, disjoint canonical allowlists for every configured enrollment scope', t => {
+  const f = enrollmentFixture(t);
+  for (const list of [undefined, [], [NEW, NEW], [MANAGER], ['0000000000'], ['222-222-2222']]) {
+    const config = structuredClone(f.config);
+    const scope = config.policy.connections[0].googleAdsEnrollmentScopes[0];
+    scope.managerAccess = 'shared';
+    if (list !== undefined) scope.allowedCustomerIds = list;
+    assert.throws(() => validateConfig(config));
+  }
+  const config = structuredClone(f.config);
+  const first = config.policy.connections[0].googleAdsEnrollmentScopes[0];
+  const other = addOtherScope(config.policy);
+  assert.throws(() => validateConfig(config));
+  Object.assign(first, { managerAccess: 'shared', allowedCustomerIds: [NEW] });
+  assert.throws(() => validateConfig(config));
+  Object.assign(other, { managerAccess: 'shared', allowedCustomerIds: [NEW] });
+  assert.throws(() => validateConfig(config));
+  other.allowedCustomerIds = [OTHER];
+  assert.equal(validateConfig(config), config);
+  other.managerAccess = 'exclusive';
+  assert.throws(() => validateConfig(config));
+});
+test('scopes under one MCC only discover their own accounts and cannot forge another scope’s preparation or activation', async t => {
+  const f = enrollmentFixture(t);
+  const policy = structuredClone(f.policy);
+  Object.assign(policy.connections[0].googleAdsEnrollmentScopes[0], { managerAccess: 'shared', allowedCustomerIds: [NEW] });
+  const otherScope = addOtherScope(policy, { allowedCustomerIds: [OTHER] });
+  validateConfig({ ...f.config, policy });
+  const { broker } = f.make(f.store, policy);
+  const other = { assetRef: otherScope.assetRef, tenantRef: otherScope.tenantRef };
+  f.state.response = { results: [candidate(NEW), candidate(OTHER)] };
+  const a = await f.execute('discover', { pageToken: null }, {}, broker);
+  const b = await f.execute('discover', { pageToken: null }, other, broker);
+  assert.deepEqual(a.data.accounts.map(row => row.id), [NEW]);
+  assert.deepEqual(b.data.accounts.map(row => row.id), [OTHER]);
+  assert.equal(a.data.nextPageToken, null);
+  assert.equal(b.data.nextPageToken, null);
+  assert.equal(f.state.calls[0].json.query, contract.query(null, [NEW]));
+  assert.equal(f.state.calls[1].json.query, contract.query(null, [OTHER]));
+  assert.doesNotMatch(JSON.stringify(a), new RegExp(OTHER));
+  const firstIntent = f.intent();
+  const secondIntent = { ...f.intent(), clinicCount: 1, customerId: OTHER };
+  const calls = f.state.calls.length;
+  await assert.rejects(f.execute('prepare', { ...firstIntent, customerId: OTHER }, {}, broker), { code: 'scope_denied' });
+  await assert.rejects(f.execute('activate', { ...secondIntent, customerId: NEW }, other, broker), { code: 'scope_denied' });
+  assert.equal(f.state.calls.length, calls);
+  f.state.response = { results: [candidate(OTHER)] };
+  await f.execute('prepare', secondIntent, other, broker);
+  await assert.rejects(f.execute('activate', secondIntent, {}, broker), { code: 'scope_denied' });
+  assert.equal((await f.execute('activate', secondIntent, other, broker)).data.state, 'active');
+  assert.deepEqual(f.store.db.prepare('SELECT customer,tenant,state FROM google_ads_enrollments').all().map(row => ({ ...row })),
+    [{ customer: OTHER, tenant: otherScope.tenantRef, state: 'active' }]);
+});
+test('removing an allowed customer blocks activation and existing reads only for that customer', async t => {
+  const f = enrollmentFixture(t);
+  const policy = structuredClone(f.policy);
+  const details = policy.connections[0].googleAdsEnrollmentScopes[0];
+  Object.assign(details, { managerAccess: 'shared', allowedCustomerIds: [NEW, OTHER] });
+  const initial = f.make(f.store, policy);
+  const active = f.intent();
+  await f.execute('prepare', active, {}, initial.broker);
+  await f.execute('activate', active, {}, initial.broker);
+  const pending = { ...f.intent(), customerId: OTHER };
+  f.state.response = { results: [candidate(OTHER)] };
+  await f.execute('prepare', pending, {}, initial.broker);
+  details.allowedCustomerIds = [NEW];
+  const narrow = f.make(f.store, policy);
+  await assert.rejects(f.execute('activate', pending, {}, narrow.broker), { code: 'scope_denied' });
+  assert.equal(f.store.db.prepare('SELECT state FROM google_ads_enrollments WHERE customer = ?').get(OTHER).state, 'prepared');
+  assert.equal((await f.execute('status', { enrollmentId: active.enrollmentId }, {}, narrow.broker)).data.accessBlocked, false);
+  details.allowedCustomerIds = [OTHER];
+  const otherOnly = f.make(f.store, policy);
+  await assert.rejects(f.read('account', NEW, otherOnly.broker), { code: 'scope_denied' });
+  assert.equal((await f.execute('status', { enrollmentId: active.enrollmentId }, {}, otherOnly.broker)).data.accessBlocked, true);
+  assert.equal((await f.execute(contract.REVOKE_OPERATION, active, {}, otherOnly.broker, 'control')).data.state, 'revoked');
+});
+test('authorization is checked again before commit if a candidate is removed during the provider read', async t => {
+  const f = enrollmentFixture(t);
+  const policy = structuredClone(f.policy);
+  Object.assign(policy.connections[0].googleAdsEnrollmentScopes[0], { managerAccess: 'shared', allowedCustomerIds: [NEW, OTHER] });
+  const { broker } = f.make(f.store, policy);
+  const intent = f.intent();
+  await f.execute('prepare', intent, {}, broker);
+  f.state.onRead = () => { broker.policy.connections[0].googleAdsEnrollmentScopes[0].allowedCustomerIds = [OTHER]; };
+  await assert.rejects(f.execute('activate', intent, {}, broker), { code: 'scope_denied' });
+  assert.equal(f.store.db.prepare('SELECT state FROM google_ads_enrollments WHERE customer = ?').get(NEW).state, 'prepared');
+});
+test('an allowlist change invalidates previously issued discovery cursors', async t => {
+  const f = enrollmentFixture(t);
+  const policy = structuredClone(f.policy);
+  const allowed = Array.from({ length: 251 }, (_, index) => String(2000000000 + index));
+  Object.assign(policy.connections[0].googleAdsEnrollmentScopes[0], { managerAccess: 'shared', allowedCustomerIds: allowed });
+  const { broker } = f.make(f.store, policy);
+  f.state.response = { results: allowed.map(candidate) };
+  const first = await f.execute('discover', { pageToken: null }, {}, broker);
+  assert.equal(first.data.accounts.length, 250);
+  assert(first.data.nextPageToken);
+  broker.policy.connections[0].googleAdsEnrollmentScopes[0].allowedCustomerIds = allowed.slice(0, -1);
+  await assert.rejects(f.execute('discover', { pageToken: first.data.nextPageToken }, {}, broker), { code: 'invalid_request' });
+  assert.equal(f.state.calls.length, 1);
 });
 test('discovery paginates the bounded snapshot, validates all rows first and filters newly registered/revoked assets', async t => {
   const f = enrollmentFixture(t); f.state.response = { results: Array.from({ length: 301 }, (_, i) => candidate(String(2000000000 + i))) };
@@ -264,9 +375,7 @@ test('cancelling an unverified candidate does not reserve or revoke that custome
   assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM google_ads_enrollments').get().n, 0);
   assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM asset_revocations').get().n, 0);
   assert.equal((await f.execute('discover', { pageToken: null })).data.accounts.length, 0);
-  const policy = structuredClone(f.policy); const s = { ...policy.connections[0].googleAdsEnrollmentScopes[0], assetRef: 'ads-enroll:clinic:999', tenantRef: 'clinic:999' };
-  policy.connections[0].googleAdsEnrollmentScopes.push(s);
-  for (const grant of policy.grants.filter(g => g.assetRef === SCOPE)) policy.grants.push({ ...grant, assetRef: s.assetRef, tenantRef: s.tenantRef });
+  const policy = structuredClone(f.policy); const s = addOtherScope(policy, { rootCustomerId: '4444444444' });
   validateConfig({ ...f.config, policy }); const other = f.make(f.store, policy);
   const q = { ...f.intent(), clinicCount: 1 };
   assert.equal((await f.execute('prepare', q, { assetRef: s.assetRef, tenantRef: s.tenantRef }, other.broker)).data.state, 'prepared');
