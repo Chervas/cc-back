@@ -4,11 +4,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { randomUUID, randomBytes } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const { BrokerError } = require('../src/errors');
 const C = require('../src/meta-marketing-oauth-contract');
 const I = require('../src/meta-marketing-instagram-extension-contract');
 const E = require('../src/meta-marketing-enrollment-contract');
 const { assetSetDigest } = require('../src/meta-marketing-credential-renewal-contract');
 const { createMetaMarketingOAuth } = require('../src/meta-marketing-oauth');
+const { createMetaMarketingOAuthSecrets } = require('../src/meta-marketing-oauth-secrets');
 const { createInstagramExtension } = require('../src/meta-marketing-instagram-extension');
 
 function fixture(t) {
@@ -34,7 +36,10 @@ function fixture(t) {
   store.db.exec('CREATE TABLE asset_revocations(asset TEXT); CREATE TABLE meta_marketing_enrollment_claims(asset TEXT);');
   t.after(() => store.db.close());
   const environment = 'staging';
-  const prefix = 'arn:aws:secretsmanager:eu-west-3:000000000001:secret:/clinicaclick/integrations/prod/meta-marketing/staging/';
+  const accountId = '000000000001';
+  const secretPath = '/clinicaclick/integrations/prod/meta-marketing/staging/';
+  const prefix = 'arn:aws:secretsmanager:eu-west-3:' + accountId + ':secret:' + secretPath;
+  const kmsKeyArn = 'arn:aws:kms:eu-west-3:' + accountId + ':key/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const settings = I.config({ scopeKey: 'clinic:10', parentPageId: '30', secretArn: prefix + 'instagram-extension/clinic-10/candidate-abcdef',
     slotVersionId: 'a'.repeat(32), expiresAt: now + 86400000 }, environment, '000000000001');
   const binding = { provider: C.PROVIDER, connectionRef: 'connection:test', secretArn: prefix + 'candidate-abcdef',
@@ -57,36 +62,49 @@ function fixture(t) {
   const row = { id: randomUUID(), tenant: settings.scopeKey, scope: requestFields.assetRef, connection: binding.connectionRef,
     flow: credential.versionId, state: 'active' };
   const retained = [];
-  const secrets = {
-    async preflight(value) { assert([settings.secretArn, binding.secretArn].includes(value.secretArn)); },
-    async withApplication(value, work) {
-      assert.equal(value.secretArn, settings.secretArn);
-      return work(Buffer.from('d'.repeat(32)));
-    },
-    async stage(value, flow, encoded) {
-      assert.equal(value.secretArn, settings.secretArn);
-      return { versionId: flow.id, digest: encoded.digest, metadata };
-    },
-    encode(value, flow, candidate, token) {
-      const body = Buffer.from(token);
-      return { body, digest: C.hash(body) };
-    },
-    async candidate(value, flow, digest) {
-      assert.equal(value.secretArn, settings.secretArn);
-      return { versionId: flow.id, digest, metadata };
-    },
-    async withCandidate(value, flow, digest, work, signal, options) {
-      assert.equal(value.secretArn, settings.secretArn);
-      assert.equal(digest, flow.secret_digest);
-      assert(options.requirePending || retained.includes(options.retentionStage));
-      return work({ metadata });
-    },
-    async retainCandidate(value, flow, digest, label) {
-      assert.equal(value.secretArn, settings.secretArn);
-      assert.equal(digest, flow.secret_digest);
-      retained.push(label);
-    },
-  };
+  const versionsByArn = new Map();
+  const seed = (arn, versionId, body) => versionsByArn.set(arn, new Map([[versionId, { body: JSON.stringify(body), stages: ['AWSCURRENT'] }]]));
+  for (const slot of [binding, candidateBinding]) {
+    const config = slot.metaMarketingOAuth;
+    seed(slot.secretArn, config.slotVersionId, { version: 1, provider: 'meta-marketing-oauth-slot', connectionRef: slot.connectionRef,
+      scopeKey: config.scopeKey, clinicSetDigest: C.clinicDigest(config), appId: config.appId });
+  }
+  seed(binding.clientSecretArn, binding.metaMarketingOAuth.appVersionId, { version: 1, provider: 'meta-app', appId: '20', appSecret: '0123456789abcdef'.repeat(2) });
+  let afterRetainDescribe;
+  const client = { async send(command) {
+    const { SecretId: arn, VersionId, VersionStage, MoveToVersionId, SecretString, ClientRequestToken, VersionStages } = command.input;
+    const versions = versionsByArn.get(arn);
+    assert(versions);
+    switch (command.constructor.name) {
+      case 'DescribeSecretCommand': {
+        const stages = Object.fromEntries([...versions].map(([id, version]) => [id, [...version.stages]]));
+        if (arn === settings.secretArn && retained.length) afterRetainDescribe?.(stages, retained.at(-1));
+        return { ARN: arn, KmsKeyId: kmsKeyArn, VersionIdsToStages: stages };
+      }
+      case 'GetSecretValueCommand': {
+        const version = versions.get(VersionId);
+        assert(version && (!VersionStage || version.stages.includes(VersionStage)));
+        return { ARN: arn, VersionId, VersionStages: [...version.stages], SecretString: version.body };
+      }
+      case 'PutSecretValueCommand':
+        assert.equal(arn, settings.secretArn);
+        assert.deepEqual(VersionStages, ['AWSPENDING']);
+        versions.set(ClientRequestToken, { body: SecretString, stages: [...VersionStages] });
+        return { ARN: arn, VersionId: ClientRequestToken, VersionStages };
+      case 'ListSecretVersionIdsCommand':
+        return { ARN: arn, Versions: [...versions.keys()].map(VersionId => ({ VersionId })) };
+      case 'UpdateSecretVersionStageCommand':
+        assert.equal(arn, settings.secretArn);
+        assert.equal(command.input.RemoveFromVersionId, undefined);
+        assert.match(VersionStage, /^CC_META_CREDENTIAL_[a-f0-9]{32}$/);
+        versions.get(MoveToVersionId).stages.push(VersionStage);
+        retained.push(VersionStage);
+        return { ARN: arn };
+      default:
+        assert.fail('Unexpected Secrets Manager operation');
+    }
+  } };
+  const secrets = createMetaMarketingOAuthSecrets({ client, accountId, prefix: secretPath, kmsKeyArn });
   let exchanges = 0, rejection = null;
   const http = { async withExchangedToken({ authorize, signal }, work) {
     exchanges++;
@@ -124,7 +142,7 @@ function fixture(t) {
     operation: C.OPERATIONS.begin, payload: { state: randomBytes(32).toString('base64url'), scopeDigest: 'f'.repeat(64),
       clinicSetDigest: C.clinicDigest(binding.metaMarketingOAuth), expiresAt: now + 600000 } } });
   return { attempt, binding, credential, store, get exchanges() { return exchanges; }, retain: retained, exec, ordinaryBegin,
-    set rejection(value) { rejection = value; } };
+    set rejection(value) { rejection = value; }, set afterRetainDescribe(value) { afterRetainDescribe = value; } };
 }
 
 test('Instagram is jointly validated and persisted only after explicit confirmation under a separate candidate slot', async t => {
@@ -174,7 +192,7 @@ test('a missing provider permission and a changed live credential fail closed wi
   const f = fixture(t);
   const rejected = f.attempt();
   await rejected.begin();
-  f.rejection = Object.assign(Error('fixture provider denied'), { code: 'oauth_credentials_incomplete' });
+  f.rejection = new BrokerError('oauth_credentials_incomplete');
   await assert.rejects(rejected.finish(), { code: 'oauth_credentials_incomplete' });
   assert.equal((await rejected.abort()).status, 'aborted');
   f.rejection = null;
@@ -185,4 +203,63 @@ test('a missing provider permission and a changed live credential fail closed wi
   await assert.rejects(rotated.confirm(staged.candidate.digest), { code: 'scope_denied' });
   assert.equal((await rotated.abort()).status, 'aborted');
   assert.equal(f.retain.length, 0);
+});
+
+test('Instagram confirmation waits for the new retention label without writing it twice', async t => {
+  const f = fixture(t);
+  const a = f.attempt();
+  await a.begin();
+  const staged = await a.finish();
+  let observations = 0;
+  f.afterRetainDescribe = (stages, label) => {
+    observations++;
+    if (observations <= 2 || observations === 5) stages[a.flowId] = stages[a.flowId].filter(value => value !== label);
+  };
+  assert.equal((await a.confirm(staged.candidate.digest)).status, 'active');
+  assert.equal(observations, 6);
+  assert.equal((await a.status()).status, 'active');
+  assert.equal(f.retain.length, 1);
+  assert.equal(f.exchanges, 1);
+});
+
+test('an indefinitely absent retention label exhausts only the bounded read budget', async t => {
+  const f = fixture(t);
+  const a = f.attempt();
+  await a.begin();
+  const staged = await a.finish();
+  let observations = 0;
+  f.afterRetainDescribe = (stages, label) => {
+    observations++;
+    stages[a.flowId] = stages[a.flowId].filter(value => value !== label);
+  };
+  await assert.rejects(a.confirm(staged.candidate.digest), { code: 'secret_version_changed' });
+  assert.equal(observations, 5);
+  assert.equal(f.retain.length, 1);
+  assert.equal(f.store.db.prepare('SELECT state FROM meta_marketing_instagram_extensions WHERE id=?').get(a.flowId).state, 'staged');
+  f.afterRetainDescribe = undefined;
+  assert.equal((await a.confirm(staged.candidate.digest)).status, 'active');
+  assert.equal(f.retain.length, 1);
+  assert.equal(f.exchanges, 1);
+});
+
+test('explicit retention conflicts are rejected immediately after observing the candidate', async t => {
+  for (const change of [
+    (stages, id, label) => { stages[id] = ['AWSPENDING']; stages[randomUUID()] = [label]; },
+    (stages, id) => { delete stages[id]; },
+    (stages, id, label) => { stages[id] = [label, 'AWSCURRENT']; },
+  ]) {
+    const f = fixture(t);
+    const a = f.attempt();
+    await a.begin();
+    const staged = await a.finish();
+    let observations = 0;
+    f.afterRetainDescribe = (stages, label) => {
+      observations++;
+      if (observations >= 2) change(stages, a.flowId, label);
+    };
+    await assert.rejects(a.confirm(staged.candidate.digest), { code: 'secret_version_changed' });
+    assert.equal(observations, 2);
+    assert.equal(f.retain.length, 1);
+    assert.equal(f.store.db.prepare('SELECT state FROM meta_marketing_instagram_extensions WHERE id=?').get(a.flowId).state, 'staged');
+  }
 });

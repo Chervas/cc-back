@@ -1,8 +1,10 @@
 'use strict';
+const { setTimeout: delay } = require('node:timers/promises');
 const K=require('./meta-marketing-credential-shape');
 const { DescribeSecretCommand, GetSecretValueCommand, PutSecretValueCommand, ListSecretVersionIdsCommand, UpdateSecretVersionStageCommand } = require('@aws-sdk/client-secrets-manager');
 const { BrokerError, fail } = require('./errors'); const C = require('./meta-marketing-oauth-contract');
 const { tokenText } = require('./whatsapp-secrets');
+const RETENTION_VISIBILITY_DELAYS = [75, 150, 300];
 function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn }) {
   if (!/^\d{12}$/.test(accountId) || !/^\/clinicaclick\/integrations\/prod\/meta-marketing\/(dev|staging)\/$/.test(prefix)
     || !new RegExp(`^arn:aws:kms:eu-west-3:${accountId}:key/[a-f0-9-]+$`).test(kmsKeyArn)) fail('invalid_request');
@@ -20,9 +22,28 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
     if (value.ARN !== id || value.KmsKeyId !== kmsKeyArn || value.DeletedDate || !value.VersionIdsToStages) fail('secret_unavailable');
     return value;
   }
-  async function read(id, version, stage, signal) {
-    const info = await describe(id, signal);
-    if (stage && !info.VersionIdsToStages[version]?.includes(stage)) fail('secret_version_changed');
+  function hasRetentionStage(info, version, stage) {
+    const stages = info.VersionIdsToStages[version];
+    if (!Array.isArray(stages) || stages.includes('AWSCURRENT') || stages.includes('AWSPREVIOUS')
+        || Object.entries(info.VersionIdsToStages).some(([owner, labels]) => owner !== version && labels.includes(stage))) {
+      fail('secret_version_changed');
+    }
+    return stages.includes(stage);
+  }
+  async function verifyStage(id, version, stage, signal, visibilityDelays = null) {
+    for (;;) {
+      const info = await describe(id, signal);
+      const visible = visibilityDelays
+        ? hasRetentionStage(info, version, stage)
+        : !stage || info.VersionIdsToStages[version]?.includes(stage);
+      if (visible) return;
+      if (!visibilityDelays?.length) fail('secret_version_changed');
+      try { await delay(visibilityDelays.shift(), undefined, { signal }); }
+      catch (error) { check(signal); throw error; }
+    }
+  }
+  async function read(id, version, stage, signal, visibilityDelays) {
+    await verifyStage(id, version, stage, signal, visibilityDelays);
     const value = await client.send(new GetSecretValueCommand({ SecretId: id, VersionId: version, ...(stage ? { VersionStage: stage } : {}) }), { abortSignal: signal }); check(signal);
     const stages = value.VersionStages === undefined ? [] : value.VersionStages;
     if (value.ARN !== id || value.VersionId !== version || !Array.isArray(stages) || stage && !stages.includes(stage)
@@ -60,14 +81,14 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
       try { if (!body.equals(encoded.body)) fail('secret_unavailable'); return encoded.metadata; } finally { encoded.body.fill(0); }
     } finally { token?.fill(0); if (parsed && typeof parsed === 'object') delete parsed.accessToken; }
   }
-  async function candidate(binding, flow, expectedDigest, signal, work, {requirePending=false,retentionStage=null}={}) {
+  async function candidate(binding, flow, expectedDigest, signal, work, {requirePending=false,retentionStage=null,visibilityDelays=null}={}) {
     if(typeof requirePending!=='boolean'||retentionStage!==null&&!/^CC_META_CREDENTIAL_[a-f0-9]{32}$/.test(retentionStage)
-      ||requirePending&&retentionStage!==null)fail('invalid_request');
+      ||requirePending&&retentionStage!==null||visibilityDelays!==null&&retentionStage===null)fail('invalid_request');
     const b = await slot(binding, signal);
     const app = await describe(binding.clientSecretArn, signal);
     if (!app.VersionIdsToStages[b.appVersionId]?.includes('AWSCURRENT')) fail('secret_version_changed');
     const requiredStage=retentionStage||(requirePending?'AWSPENDING':null);
-    const r = await read(binding.secretArn, flow.id, requiredStage, signal);
+    const r = await read(binding.secretArn, flow.id, requiredStage, signal, visibilityDelays);
     // AWSPENDING is a convenience label, never the candidate identity: another
     // attempt may move it. Only the immutable version, digest and flow count.
     if (r.VersionStages.includes('AWSCURRENT') || r.VersionStages.includes('AWSPREVIOUS')) fail('secret_version_changed');
@@ -87,8 +108,7 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
       // An active enrollment must not depend on an unlabelled version which AWS
       // may garbage-collect. Version/digest remain its identity; this label pins
       // retention and is never moved by enrollment.
-      if(requiredStage){const current=await describe(binding.secretArn,signal);
-        if(!current.VersionIdsToStages[flow.id]?.includes(requiredStage))fail('secret_version_changed');}
+      if(requiredStage)await verifyStage(binding.secretArn,flow.id,requiredStage,signal,visibilityDelays);
       return work ? result : { versionId: flow.id, digest: expectedDigest, metadata };
     } finally { if (abort) signal?.removeEventListener('abort', abort); borrowed?.fill(0); body.fill(0); }
   }
@@ -150,14 +170,18 @@ function createMetaMarketingOAuthSecrets({ client, accountId, prefix, kmsKeyArn 
         await candidate(binding,flow,digest,signal);
         const before=await describe(binding.secretArn,signal),owners=Object.entries(before.VersionIdsToStages).filter(([,stages])=>stages.includes(label));
         if(owners.length&&!(owners.length===1&&owners[0][0]===flow.id))fail('secret_version_changed');
-        if(!owners.length){
+        const retained=owners.length===1;
+        if(!retained){
           if(new Set(Object.values(before.VersionIdsToStages).flat()).size>=20)fail('rate_limited');
           // Only the token slot, one immutable candidate version and our custom
           // label. Never move AWSCURRENT/AWSPREVIOUS or touch the app secret.
           const result=await client.send(new UpdateSecretVersionStageCommand({SecretId:binding.secretArn,VersionStage:label,MoveToVersionId:flow.id}),{abortSignal:signal});check(signal);
           if(result.ARN!==binding.secretArn)fail('secret_unavailable');
         }
-        await candidate(binding,flow,digest,signal,undefined,{retentionStage:label});
+        // Only a successful stage update permits brief retries for its missing
+        // label. Both candidate observations share the same read budget.
+        const visibilityDelays=retained?[]:[...RETENTION_VISIBILITY_DELAYS];
+        await candidate(binding,flow,digest,signal,undefined,{retentionStage:label,visibilityDelays});
       }catch(e){throw cleanError(e);}
     },
     async stage(binding, flow, encoded, signal) {
