@@ -4,13 +4,15 @@ const {schema}=require('./contracts'),{fail}=require('./errors'),C=require('./me
 const OPERATIONS=Object.freeze(Object.fromEntries(['prepare','activate','status','revoke','assets'].map(k=>[k,`meta.marketing.enrollment.${k}.v1`])));
 const uuid={type:'string',pattern:'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$'},digest={type:'string',pattern:'^[a-f0-9]{64}$'};
 const assetPattern='^meta-(ad_account|facebook_page|instagram_business):[1-9][0-9]{0,29}$';
+const inventoryFields={enrollmentId:uuid,scopeDigest:digest,selectionDigest:digest,clinicSetDigest:digest,assetSetDigest:digest,
+  expectedEpoch:{type:'integer',minimum:0,maximum:Number.MAX_SAFE_INTEGER-1},expectedVersionId:uuid,expectedCandidateDigest:digest};
+const basicInventory=schema(inventoryFields),inventoryWithAvatars=schema({...inventoryFields,includeAvatars:{const:true}});
 const validators={
   prepare:schema({enrollmentId:uuid,flowId:uuid,scopeDigest:digest,candidateDigest:digest,
     assetRefs:{type:'array',minItems:1,maxItems:100,uniqueItems:true,items:{type:'string',pattern:assetPattern}}}),
   activate:schema({enrollmentId:uuid,scopeDigest:digest,selectionDigest:digest}),
   status:schema({enrollmentId:uuid}),revoke:schema({enrollmentId:uuid}),
-  assets:schema({enrollmentId:uuid,scopeDigest:digest,selectionDigest:digest,clinicSetDigest:digest,assetSetDigest:digest,
-    expectedEpoch:{type:'integer',minimum:0,maximum:Number.MAX_SAFE_INTEGER-1},expectedVersionId:uuid,expectedCandidateDigest:digest}),
+  assets:value=>(value && Object.hasOwn(value,'includeAvatars') ? inventoryWithAvatars : basicInventory)(value),
 };
 function roles(environment){
   if(!['dev','staging'].includes(environment))fail('invalid_request');

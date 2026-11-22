@@ -49,11 +49,12 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
       }catch{finish(new BrokerError('provider_failed'));req?.destroy();}
     }),authorize);
   }
-  return async({binding,metadata,token,appSecret,signal,authorize,assetRefs})=>{
+  return async({binding,metadata,token,appSecret,signal,authorize,assetRefs,includeAvatars=false})=>{
     if(!Buffer.isBuffer(token)||!tokenText(token.toString('utf8'))||!Buffer.isBuffer(appSecret)||!/^[a-f0-9]{32}$/.test(appSecret.toString('ascii'))||!(signal instanceof AbortSignal))fail('invalid_request');
     if(typeof authorize!=='function')fail('invalid_request');
     if(assetRefs!==undefined&&(!Array.isArray(assetRefs)||!assetRefs.length||assetRefs.length>100||new Set(assetRefs).size!==assetRefs.length
       ||assetRefs.some(ref=>typeof ref!=='string'||!/^meta-(ad_account|facebook_page|instagram_business):[1-9][0-9]{0,29}$/.test(ref))))fail('invalid_request');
+    if(includeAvatars&&!assetRefs)fail('invalid_request');
     const wanted=assetRefs===undefined?null:new Set(assetRefs),included=(kind,id)=>!wanted||wanted.has(`meta-${kind}:${id}`);
     K.metadata(metadata,binding);const ownToken=Buffer.from(token),ownApp=Buffer.from(appSecret),appToken=Buffer.concat([Buffer.from(metadata.appId+'|'),ownApp]);
     const inspect=require('./meta-marketing-http').createMetaMarketingHttp({request,timeoutMs,pacer,appId:metadata.appId,now,authorize,graphVersion:metadata.graphVersion});
@@ -68,11 +69,21 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
       const includeInstagram=available.includes('instagram_business')&&(!wanted||assetRefs.some(ref=>ref.startsWith('meta-instagram_business:')));
       if(available.includes('facebook_page')&&(!wanted||includeInstagram||assetRefs.some(ref=>ref.startsWith('meta-facebook_page:'))))edges.push([K.business(binding)?'assigned_pages':'accounts','id,name'+(includeInstagram?',instagram_business_account{id,name,username}':'')]);
       if(!edges.length)fail('scope_denied');
+      const project=(raw,kind,parent,avatar)=>{
+        const image=D.assetAvatarUrl(avatar),asset=D.project(raw,kind,parent);
+        return image?{...asset,avatarUrl:image}:asset;
+      };
       for(const [edge,fields]of edges){
         let after=null;const cursors=new Set();
+        let photos=includeAvatars&&['accounts','assigned_pages'].includes(edge);
+        const fieldsWithPhotos='id,name,picture.width(120).height(120)'+(includeInstagram?',instagram_business_account{id,name,username,profile_picture_url}':'');
         do{
           authorize();
-          const r=await page({subjectId:metadata.subjectId,edge,fields,after,token:ownToken,proof,signal,budget,appId:metadata.appId,authorize,graphVersion:K.graphVersion(binding)});if(signal.aborted)fail('provider_timeout');
+          const requestPage=fields=>page({subjectId:metadata.subjectId,edge,fields,after,token:ownToken,proof,signal,budget,appId:metadata.appId,authorize,graphVersion:K.graphVersion(binding)});
+          let r;
+          try{r=await requestPage(photos?fieldsWithPhotos:fields);}
+          catch(error){if(!photos||error?.code!=='provider_failed')throw error;photos=false;authorize();r=await requestPage(fields);}
+          if(signal.aborted)fail('provider_timeout');
           authorize();
           for(const raw of r.rows){
             if(['adaccounts','assigned_ad_accounts'].includes(edge)){
@@ -80,9 +91,14 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
               if(!C.exact(raw,'id,account_id,name,account_status,currency,timezone_name'))fail('provider_failed');push(D.project(raw,'ad_account'));
             }else{
               if(!included('facebook_page',raw?.id)&&!included('instagram_business',raw?.instagram_business_account?.id))continue;
-              if(!raw||Object.getPrototypeOf(raw)!==Object.prototype||Object.keys(raw).some(k=>!['id','name',...(available.includes('instagram_business')?['instagram_business_account']:[])].includes(k)))fail('provider_failed');
-              if(included('facebook_page',raw.id))push(D.project(raw,'facebook_page'));
-              if(raw.instagram_business_account!=null&&included('instagram_business',raw.instagram_business_account.id)){const ig=raw.instagram_business_account;if(!C.exact(ig,'id,name,username'))fail('provider_failed');push(D.project(ig,'instagram_business',raw.id));}
+              if(!raw||Object.getPrototypeOf(raw)!==Object.prototype||Object.keys(raw).some(k=>!['id','name',...(photos?['picture']:[]),...(available.includes('instagram_business')?['instagram_business_account']:[])].includes(k)))fail('provider_failed');
+              const picture=photos&&raw.picture?.data?.is_silhouette!==true ? raw.picture?.data?.url : undefined;
+              if(included('facebook_page',raw.id))push(project(raw,'facebook_page',null,picture));
+              if(raw.instagram_business_account!=null&&included('instagram_business',raw.instagram_business_account.id)){
+                const ig=raw.instagram_business_account,avatar=photos&&Object.hasOwn(ig,'profile_picture_url');
+                if(!C.exact(ig,'id,name,username'+(avatar?',profile_picture_url':'')))fail('provider_failed');
+                push(project(ig,'instagram_business',raw.id,avatar?ig.profile_picture_url:undefined));
+              }
             }
           }
           after=r.next;if(after){if(cursors.has(after))fail('provider_failed');cursors.add(after);}

@@ -143,7 +143,7 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
         canConfirm:enabled()&&row.state==='prepared'&&Number(row.actor_user_id)===input.actorId&&row.session_ref===input.sessionRef
           &&+row.session_expires_at===+input.sessionExpiresAt&&+row.session_expires_at>+now(),canCancel:!['revoke_pending','revoked'].includes(row.state)}};
     });},
-    async assets(input,id){return inventory().assets(input,id);},
+    async assets(input,id,includeAvatars=false){return inventory().assets(input,id,includeAvatars);},
     async cancelFromOAuth(flowId,transaction,actor){
       if(!transaction||!C.UUID.test(flowId))C.fail();
       const row=await R.findOne({...lock(transaction),where:{flow_id:flowId}});

@@ -11,7 +11,8 @@ function createRouter({service=require('../services/metaMarketingEnrollment.serv
       const type=req.query.assignment_scope||(!req.query.clinic_id&&req.query.group_id?'group':'clinic'),id=type==='group'?req.query.group_id:req.query.clinic_id;
       if(!['clinic','group'].includes(type)||typeof id!=='string'||!/^[1-9][0-9]{0,9}$/.test(id)||!C.positive(Number(id))
         ||type==='clinic'&&req.query.group_id!==undefined||type==='group'&&req.query.clinic_id!==undefined)C.fail('meta_enrollment_invalid',400);
-      const body=req.body===undefined?{}:req.body,keys=name==='reserve'?'flowId,assetRefs':name==='confirm'?'selectionDigest':'';
+      const body=req.body===undefined?{}:req.body,includeAvatars=name==='assets'&&body?.includeAvatars===true;
+      const keys=name==='reserve'?'flowId,assetRefs':name==='confirm'?'selectionDigest':includeAvatars?'includeAvatars':'';
       if(!body||Object.getPrototypeOf(body)!==Object.prototype||Object.keys(body).sort().join(',')!==keys.split(',').filter(Boolean).sort().join(','))C.fail('meta_enrollment_invalid',400);
       if(['confirm','cancel','assets'].includes(name)&&!C.UUID.test(req.params.id))C.fail('meta_enrollment_invalid',400);
       if(name==='reserve'&&(typeof body.flowId!=='string'||!C.UUID.test(body.flowId)||!Array.isArray(body.assetRefs)||!body.assetRefs.length||body.assetRefs.length>100
@@ -19,7 +20,7 @@ function createRouter({service=require('../services/metaMarketingEnrollment.serv
       if(name==='confirm'&&(typeof body.selectionDigest!=='string'||!C.HASH.test(body.selectionDigest)))C.fail('meta_enrollment_invalid',400);
       const input={scopeKey:type+':'+id,actorId:claims.userId,sessionRef:claims.jti,sessionExpiresAt:new Date(claims.exp*1000)};
       const result=name==='reserve'?await service.reserve(input,body.flowId,body.assetRefs):name==='confirm'?await service.confirm(input,req.params.id,body.selectionDigest):
-        name==='cancel'?await service.cancel(input,req.params.id):name==='assets'?await service.assets(input,req.params.id):await service.overview(input);
+        name==='cancel'?await service.cancel(input,req.params.id):name==='assets'?await service.assets(input,req.params.id,includeAvatars):await service.overview(input);
       return res.json(result);
     }catch(error){
       const status=['JsonWebTokenError','TokenExpiredError'].includes(error?.name)?401:[400,401,403,409,429].includes(error?.httpStatus)?error.httpStatus:503;

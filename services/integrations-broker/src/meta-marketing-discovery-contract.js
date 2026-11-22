@@ -27,13 +27,23 @@ function project(raw,kind,parentPageId=null){
   const asset={assetRef:`meta-${kind}:${id}`,kind,id,parentPageId};
   return {...M.projectAsset(raw,asset),id,parentPageId};
 }
-function checkAssets(assets,metadata){
+function assetAvatarUrl(value){
+  if(typeof value!=='string'||value.length>2048||/[\x00-\x20\x7f]/.test(value))return undefined;
+  try{
+    const url=new URL(value);
+    if(url.protocol!=='https:'||url.port||url.username||url.password||url.hash||!/(^|\.)(fbcdn\.net|cdninstagram\.com)$/.test(url.hostname)
+      ||[...url.searchParams.keys()].some(key=>/token|secret|proof|authorization/i.test(key)))return undefined;
+    return value;
+  }catch{return undefined;}
+}
+function checkAssets(assets,metadata,{includeAvatars=false}={}){
   const availableKinds=kinds(metadata),seen=new Set();
   if(!Array.isArray(assets)||assets.length>MAX_ASSETS)fail('provider_failed');
   for(const a of assets){
-    const keys='assetRef,kind,id,name,parentPageId'+(a.kind==='ad_account'?',accountStatus,currency,timezone':a.kind==='instagram_business'?',username':'');
+    const avatar=includeAvatars&&a?.kind!=='ad_account'&&a&&Object.hasOwn(a,'avatarUrl');
+    const keys='assetRef,kind,id,name,parentPageId'+(a.kind==='ad_account'?',accountStatus,currency,timezone':a.kind==='instagram_business'?',username':'')+(avatar?',avatarUrl':'');
     if(!C.exact(a,keys)||!availableKinds.includes(a.kind)||!M.graphId(a.id)||a.assetRef!==`meta-${a.kind}:${a.id}`||seen.has(a.assetRef)
-      ||(a.kind==='instagram_business'?!M.graphId(a.parentPageId):a.parentPageId!==null))fail('provider_failed');
+      ||(a.kind==='instagram_business'?!M.graphId(a.parentPageId):a.parentPageId!==null)||avatar&&!assetAvatarUrl(a.avatarUrl))fail('provider_failed');
     M.assertAssetCredential(metadata,a);seen.add(a.assetRef);
     const raw={id:a.kind==='ad_account'?'act_'+a.id:a.id,name:a.name,
       ...(a.kind==='ad_account'?{account_id:a.id,account_status:a.accountStatus,currency:a.currency,timezone_name:a.timezone}:a.kind==='instagram_business'?{username:a.username}:{})};
@@ -60,4 +70,4 @@ function validateResult(value,{flowId,candidateDigest,scopeDigest,scopeKey,clini
     ||JSON.stringify(value.availableKinds)!==JSON.stringify(checkAssets(value.assets,metadata))||Buffer.byteLength(JSON.stringify(value))>MAX_RESULT_BYTES)fail('provider_failed');
   return structuredClone(value);
 }
-module.exports={OPERATION,validate,MAX_ASSETS,MAX_PAGES,MAX_BYTES,MAX_RESULT_BYTES,kinds,fresh,project,checkAssets,result,validateResult};
+module.exports={OPERATION,validate,MAX_ASSETS,MAX_PAGES,MAX_BYTES,MAX_RESULT_BYTES,kinds,fresh,project,assetAvatarUrl,checkAssets,result,validateResult};

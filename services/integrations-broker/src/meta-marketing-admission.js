@@ -8,7 +8,7 @@ const D=require('./meta-marketing-discovery-contract');
 const E=require('./meta-marketing-enrollment-contract');
 const A=require('./meta-marketing-ads-contract');
 const L=require('./meta-marketing-leads-contract'),X=require('./meta-marketing-enrolled-asset-access-contract');
-const enrollmentOperations=[E.OPERATIONS.prepare,E.OPERATIONS.activate,E.OPERATIONS.status,E.OPERATIONS.revoke];
+const enrollmentOperations=[E.OPERATIONS.prepare,E.OPERATIONS.activate,E.OPERATIONS.status,E.OPERATIONS.revoke,E.OPERATIONS.assets];
 const {authenticate}=require('./auth'),{request:validateRequest}=require('./contracts');
 const {validatePolicy}=require('./policy'),{canonical}=require('./canonical');
 const {eventFor}=require('./audit'),{BrokerError,fail}=require('./errors');

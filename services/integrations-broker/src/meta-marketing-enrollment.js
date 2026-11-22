@@ -226,8 +226,9 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     let revision,grantPin,metadataPin;
     const check=()=>{
       if(closed)fail('connection_blocked');if(signal.aborted)fail('provider_timeout');
-      const key=currentPrincipal(principal,policy,authPin),live=source(policy,request.connectionRef);
-      if(K.fingerprint(live)!==basePin)fail('scope_denied');require('./auth').authorize(key,request,policy);
+      const current=resolvePolicy?resolvePolicy(request,principal,policy):policy;
+      const key=currentPrincipal(principal,current,authPin),live=source(current,request.connectionRef);
+      if(K.fingerprint(live)!==basePin)fail('scope_denied');require('./auth').authorize(key,request,current);
       const connection=store.connection(request.connectionRef,now());store.assertAssetActive(request);
       if(revision!==undefined&&connection.revision!==revision)fail('connection_blocked');revision=connection.revision;
       const v=renewalAuthority(id,live);owned(request,v.row);E.authorize({request,principal:key,binding:v.binding},environment);
@@ -239,15 +240,15 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       if(metadataPin!==undefined&&metadataPin!==nextMetadata)fail('secret_version_changed');metadataPin=nextMetadata;
       if([v.credential.metadata.expiresAt,v.credential.metadata.dataAccessExpiresAt].some(value=>value!==null&&value<=now()))fail('credential_revoked');
       for(const asset of v.assets)M.assertAssetCredential(v.credential.metadata,asset);
-      task.flowId=v.row.flow;task.assets=v.assets;return v;
+      task.flowId=v.row.flow;task.assets=v.assets;return {...v,policy:current};
     };
-    const log=(action,result,reason)=>{if(store.backlog().pending>=policy.maxBacklog)fail('audit_unavailable');store.appendAudit(eventFor(request,principal,policy,action,result,reason,now()));};
+    const log=(authorized,action,result,reason)=>{if(store.backlog().pending>=authorized.maxBacklog)fail('audit_unavailable');store.appendAudit(eventFor(request,principal,authorized,action,result,reason,now()));};
     try{
       const v=check();if(store.backlog().pending+2>policy.maxBacklog)fail('audit_unavailable');
-      log('integration.requested','accepted','meta_enrollment_assets_requested');
+      log(v.policy,'integration.requested','accepted','meta_enrollment_assets_requested');
       const response=await secrets.withCandidate(v.binding,v.credential.flow,v.credential.digest,async borrowed=>{
         let current=check();if(JSON.stringify(borrowed.metadata)!==current.credential.flow.credential_metadata)fail('secret_unavailable');
-        const discovered=await http.discover({binding:current.binding,...borrowed,signal,authorize:check,assetRefs:current.assets.map(asset=>asset.assetRef)});
+        const discovered=await http.discover({binding:current.binding,...borrowed,signal,authorize:check,assetRefs:current.assets.map(asset=>asset.assetRef),includeAvatars:p.includeAvatars===true});
         current=check();
         const data=V.result({assets:discovered,selected:current.assets,metadata:current.credential.metadata,request,binding:current.binding,row:current.row,credential:current.credential,now:now()});
         let serialized=JSON.stringify(data);
@@ -258,7 +259,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
         check();
         return {requestId:request.requestId,data,replayed:false};
       },signal,{retentionStage:v.credential.retentionStage});
-      check();log('integration.completed','success','meta_enrollment_assets_verified');return response;
+      const finished=check();log(finished.policy,'integration.completed','success','meta_enrollment_assets_verified');return response;
     }catch(error){
       const safe=error instanceof BrokerError?error:new BrokerError('internal_error');
       if(safe.code==='rate_limited'&&Number.isSafeInteger(error.retryAfterMs)&&error.retryAfterMs>0)safe.retryAfterMs=error.retryAfterMs;
