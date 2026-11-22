@@ -36,13 +36,13 @@ function fixture({ sessionError, allowed = true } = {}) {
       return allowed;
     } },
   }, { logs: state.logs });
-  const scope = createScope({ models, recoveryGuard: {}, sessions: { verifyReference: async (reference, options) => {
+  const scope = createScope({ models, recoveryGuard: {}, sessions: { verifyNormalReference: async (reference, options) => {
     state.sessionChecks++;
     assert.equal(reference.userId, actor.actorId);
     assert.equal(reference.sessionRef, actor.sessionRef);
     assert.equal(reference.expiresAt, actor.sessionExpiresAt);
     assert.equal(options.transaction, transaction);
-    assert.equal(options.requireEmail, true);
+    assert.equal(Object.hasOwn(options, 'requireEmail'), false);
     if (sessionError !== undefined) throw sessionError;
     return { userId: actor.actorId, sessionRef: actor.sessionRef };
   } } });
@@ -78,11 +78,11 @@ test('a verified email session still requires the locked clinic write ACL before
     { sessionChecks: 1, clinicReads: 1, aclChecks: 1 });
 });
 
-test('email MFA step-up remains 403 even when a caller supplies an old 401 status', async t => {
+test('unexpected legacy email errors fail closed without advertising a new Meta step-up', async t => {
   for (const status of [403, 401, undefined]) {
     await t.test(String(status), async () => {
       const error = Object.assign(Error('PRIVATE_MFA_DETAIL'), { code: 'auth_email_verification_required', status });
-      await denied(fixture({ sessionError: error }), 'auth_email_verification_required', 403);
+      await denied(fixture({ sessionError: error }), status === 403 ? 'meta_oauth_scope_forbidden' : 'meta_oauth_unavailable', status === 403 ? 403 : 503);
     });
   }
 });

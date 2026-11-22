@@ -11,7 +11,7 @@ function fixture({ actualAuthorization = false } = {}) {
   const assets = C.assets([{ kind: 'ad_account', id: '101', assetRef: 'meta-ad_account:101', parentPageId: null },
     { kind: 'facebook_page', id: '201', assetRef: 'meta-facebook_page:201', parentPageId: null }]);
   const now = new Date('2026-01-01');
-  const state = { allowed: true, verified: true, structural: 1, subscription: false, revision: HASH, reads: [], prepares: [], authorizeCalls: 0,
+  const state = { allowed: true, sessionValid: true, structural: 1, subscription: false, revision: HASH, reads: [], prepares: [], authorizeCalls: 0,
     state: 'active', sessionAllowed: true, onRead: null, route: null, scopes: 'clinic:11', enrollmentId: UUID(1),
     mappings: [{ id: 31, assetType: 'ad_account', metaAssetId: '101', metaConnectionId: 41, assignmentScope: 'clinic', clinicaId: 11, grupoClinicaId: null, isActive: true },
       { id: 32, assetType: 'facebook_page', metaAssetId: '201', metaConnectionId: 41, assignmentScope: 'clinic', clinicaId: 11, grupoClinicaId: null, isActive: true }] };
@@ -35,9 +35,9 @@ function fixture({ actualAuthorization = false } = {}) {
       return state.mappings.filter(row => row.assignmentScope === 'clinic' && row.clinicaId === 11 && row.grupoClinicaId === null && row.isActive);
     } },
   };
-  const sessions = { verifyReference: async (_input, options) => {
-    assert.equal(options.requireEmail, true);
-    if (!state.verified) throw Object.assign(Error('email'), { code: 'auth_email_verification_required' });
+  const sessions = { verifyNormalReference: async (_input, options) => {
+    assert.equal(Object.hasOwn(options, 'requireEmail'), false);
+    if (!state.sessionValid) throw Object.assign(Error('session'), { code: 'auth_invalid', status: 401 });
     if (!state.sessionAllowed) throw Object.assign(Error('auth'), { code: 'auth_invalid' });
   } };
   const authority = () => ({
@@ -97,9 +97,9 @@ test('an explicit empty or administrative routing registry cannot be enabled thr
     assert.equal(f.state.prepares.length, 0);assert.equal(f.state.reads.length, 0);
   }
 });
-test('managed session, email and marketing WRITE admit agencia without Settings edit', async () => {
+test('own managed session and marketing WRITE admit agencia without Settings edit', async () => {
   const f = fixture({ actualAuthorization: true });assert.equal((await f.service.overview(f.input)).pages.length, 1);
-  for (const change of [f => { f.state.allowed = false; }, f => { f.state.verified = false; }, f => { f.state.sessionAllowed = false; }]) {
+  for (const change of [f => { f.state.allowed = false; }, f => { f.state.sessionValid = false; }, f => { f.state.sessionAllowed = false; }]) {
     const f = fixture({ actualAuthorization: true });change(f);await assert.rejects(f.service.overview(f.input));assert.equal(f.state.prepares.length, 0);
   }
 });
@@ -167,8 +167,8 @@ test('fresh authorization precedes all enrollment inspection and is repeated eve
   assert.equal(enrollmentReads, 0);assert.equal(denied.state.prepares.length, 0);
   for (const latest of [null, 'active']) {
     const f = fixture({ actualAuthorization: true });let transactions = 0;let sessionChecks = 0;
-    const transact = f.models.sequelize.transaction, verify = f.sessions.verifyReference;
-    f.sessions.verifyReference = async (...args) => { sessionChecks++;return verify(...args); };
+    const transact = f.models.sequelize.transaction, verify = f.sessions.verifyNormalReference;
+    f.sessions.verifyNormalReference = async (...args) => { sessionChecks++;return verify(...args); };
     f.models.sequelize.transaction = async (...args) => {
       const result = await transact(...args);
       if (++transactions === 1) { f.state.allowed = false;f.state.state = latest; }

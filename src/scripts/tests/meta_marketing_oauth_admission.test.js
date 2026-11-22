@@ -60,7 +60,7 @@ function fixture({scopeKey='clinic:71',admitted=false,flowState,foreign=false,to
     './platformAudit.repository':{createRepository:()=>({health:reject('audit_health'),append:reject('audit_append')})},
     './metaMarketingEnrollmentReview.service':{createReview:()=>reject('assignment_review')}
   });
-  const sessions={verifyReference:async(_reference,options)=>{checkTx({...options,lock:transaction.LOCK.UPDATE});events.push('session');if(sessionError)throw sessionError;}};
+  const sessions={verifyNormalReference:async(_reference,options)=>{assert.equal(Object.hasOwn(options,'requireEmail'),false);checkTx({...options,lock:transaction.LOCK.UPDATE});events.push('session');if(sessionError)throw sessionError;}};
   const admission=prepareSlot?{enabled:()=>true,async prepare(snapshot){
     assert.equal(inTransaction,false);
     events.push('prepare');
@@ -99,9 +99,9 @@ test('failed tombstone read fails closed and authority is checked before admissi
   const unavailable=fixture({blockError:Error('PRIVATE_STORAGE_DETAIL')});
   for(const method of ['status','begin'])await errorCode(()=>unavailable.service[method](unavailable.actor),'meta_security_state_unavailable',503);
   assert.equal(unavailable.safe({code:'meta_security_state_unavailable'}),'meta_oauth_unavailable');
-  for(const options of [{allowed:false},{sessionError:{code:'auth_email_verification_required'}}]){
+  for(const options of [{allowed:false},{sessionError:{code:'auth_invalid',status:401}}]){
     const f=fixture(options);
-    for(const method of ['status','begin'])await errorCode(()=>f.service[method](f.actor),options.allowed===false?'meta_oauth_scope_forbidden':'auth_email_verification_required',403);
+    for(const method of ['status','begin'])await errorCode(()=>f.service[method](f.actor),options.allowed===false?'meta_oauth_scope_forbidden':'meta_oauth_session_required',options.allowed===false?403:401);
     assert.equal(f.events.includes('slot'),false);assert.equal(f.events.includes('tombstones'),false);assert.deepEqual(f.effects,[]);
   }
 });

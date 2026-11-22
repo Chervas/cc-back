@@ -12,7 +12,7 @@ function fixture(scopeKey,{active=false,allowed=true}={}){
   const at=new Date('2030-01-01T12:00:00Z'),clinics=scopeKey==='group:28'?[1,70]:scopeKey==='group:29'?[66,72]:[95];
   const input={scopeKey,actorId:225,sessionRef:randomUUID(),sessionExpiresAt:new Date(+at+3600000)};
   const flow={flow_id:randomUUID(),scope_key:scopeKey,app_id:'401'},enrollment={enrollment_id:randomUUID(),...flow,state:'active'};
-  const state={allowed,verified:true,transactions:0,authorizations:0,enrollmentReads:0,journalReads:0,assetReads:0,brokerCalls:0};
+  const state={allowed,sessionValid:true,transactions:0,authorizations:0,enrollmentReads:0,journalReads:0,assetReads:0,brokerCalls:0};
   const env={META_MARKETING_BUSINESS_SCOPE_MODES:'{"group:28":"BISU"}',META_MARKETING_BUSINESS_CONFIG_ID:'501',
     META_MARKETING_BUSINESS_GRAPH_VERSION:'v24.0',META_MARKETING_BUSINESS_PERMISSION_PROFILE:'paid-leads-v2'};
   const models={
@@ -33,9 +33,9 @@ function fixture(scopeKey,{active=false,allowed=true}={}){
     MetaMarketingBrokerBinding:{findAll:async()=>{state.assetReads++;assert.fail('Unconfigured scopes must not inspect asset authority');}},
     PlatformAuditEvent:{},
   };
-  const sessions={verifyReference:async(value,options)=>{
-    state.authorizations++;assert.equal(value.userId,225);assert.equal(options.requireEmail,true);
-    if(!state.verified)throw Object.assign(Error('email'),{code:'auth_email_verification_required'});
+  const sessions={verifyNormalReference:async(value,options)=>{
+    state.authorizations++;assert.equal(value.userId,225);assert.equal(Object.hasOwn(options, 'requireEmail'), false);
+    if(!state.sessionValid)throw Object.assign(Error('session'),{code:'auth_invalid',status:401});
   }};
   const service=createService({models,sessions,now:()=>at,enabled:()=>true,configuration:key=>configurationFrom(env,key),
     audit:{health:async()=>assert.fail('No audit writes'),append:async()=>assert.fail('No audit writes')},drain:{},
@@ -56,10 +56,10 @@ test('configured group28 exposes the BISU panel while requiring an active connec
   assert.equal(f.state.authorizations,2);assert.equal(f.state.brokerCalls,0);
 });
 
-test('unconfigured scopes retain current session/email and entire-scope WRITE guards',async()=>{
-  for(const scopeKey of ['clinic:95','group:29'])for(const denial of ['allowed','verified']){
+test('unconfigured scopes retain current own session and entire-scope WRITE guards',async()=>{
+  for(const scopeKey of ['clinic:95','group:29'])for(const denial of ['allowed','sessionValid']){
     const f=fixture(scopeKey,{active:true});f.state[denial]=false;
-    await assert.rejects(f.service.overview(f.input),{code:denial==='allowed'?'meta_oauth_scope_forbidden':'auth_email_verification_required'});
+    await assert.rejects(f.service.overview(f.input),{code:denial==='allowed'?'meta_oauth_scope_forbidden':'meta_oauth_session_required'});
     assert.equal(f.state.enrollmentReads,0);assert.equal(f.state.journalReads,0);assert.equal(f.state.brokerCalls,0);
   }
 });

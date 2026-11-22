@@ -7,7 +7,7 @@ const {withIsolatedCampaignMysql}=require('./fixtures/isolated_campaign_mysql.fi
 withIsolatedCampaignMysql(async({sql,models,report})=>{
   const C=require('../../services/metaMarketingOAuth.contract'),E=require('../../services/metaMarketingEnrollment.contract');
   const G=require('../../services/metaMarketingLegacyRecovery.service'),Discovery=require('../../../services/integrations-broker/src/meta-marketing-discovery-contract');
-  let clock=Date.parse('2030-01-01T12:00:00Z'),mfa=true;const now=()=>new Date(clock);
+  let clock=Date.parse('2030-01-01T12:00:00Z'),sessionValid=true;const now=()=>new Date(clock);
   for(const [name,file]of[['Clinica','clinica'],['GrupoClinica','grupoclinica'],['MetaScopeBlock','metascopeblock'],['MetaConnection','MetaConecction'],
     ['MetaConnectionAssignment','metaconnectionassignment'],['ClinicMetaAsset','ClinicMetaAsset'],['GroupAssetClinicAssignment','groupassetclinicassignment'],
     ['MetaMarketingBrokerBinding','metamarketingbrokerbinding'],['MetaMarketingBrokerRevocation','metamarketingbrokerrevocation'],['PlatformAuditEvent','platformauditevent'],
@@ -41,9 +41,9 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   const baseline=async()=>G.encode({source:await models.MetaConnection.findByPk(158,{raw:true}),wa:await models.ClinicMetaAsset.findByPk(392,{raw:true}),
     grants:await models.MetaConnectionAssignment.findAll({raw:true,order:[['id','ASC']]}),groups:await models.GrupoClinica.findAll({raw:true,order:[['id_grupo','ASC']]}),
     blocks:await models.MetaScopeBlock.findAll({raw:true}),shares:await models.GroupAssetClinicAssignment.findAll({raw:true})});
-  const untouched=await baseline(),sessions={verifyReference:async(reference,options)=>{
-    assert.equal(reference.userId,1);assert.equal(options.requireEmail,true);assert(options.transaction);
-    if(!mfa)throw Object.assign(Error('auth_email_verification_required'),{code:'auth_email_verification_required',status:403});
+  const untouched=await baseline(),sessions={verifyNormalReference:async(reference,options)=>{
+    assert.equal(reference.userId,1);assert.equal(Object.hasOwn(options, 'requireEmail'), false);assert(options.transaction);
+    if(!sessionValid)throw Object.assign(Error('auth_invalid'),{code:'auth_invalid',status:401});
   }};
   const guard=G.createRecovery({models,sessions,now,enabled:()=>true}),scope=require('../../services/metaMarketingOAuthScope.service').createScope({models,sessions,now,recoveryGuard:guard});
   const actors=[28,29].map(group=>({scopeKey:'group:'+group,actorId:1,sessionRef:randomUUID(),sessionExpiresAt:new Date(clock+7200000)}));
@@ -92,7 +92,7 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   const bindings=require('../../services/metaMarketingEnrollmentBinding.service').createBindings({models,sessions,authority,now,recoveryGuard:guard});
   const review=require('../../services/metaMarketingEnrollmentReview.service').createReview({models,sessions,now,recoveryGuard:guard});
   const refs=i=>inventories.get(flows[i].flow_id).assets.filter(asset=>i===1||asset.id!=='303').map(asset=>asset.assetRef);
-  mfa=false;await assert.rejects(authority.reserve(actors[0],flows[0].flow_id,refs(0)),{code:'auth_email_verification_required'});mfa=true;
+  sessionValid=false;await assert.rejects(authority.reserve(actors[0],flows[0].flow_id,refs(0)),{code:'meta_oauth_session_required'});sessionValid=true;
   await assert.rejects(authority.reserve(actors[0],flows[0].flow_id,['meta-ad_account:301']),{code:'meta_recovery_selection_changed'});
   for(let i=0;i<2;i++){
     const r=await sql.transaction(t=>review({row:flows[i].get({plain:true}),inventory:inventories.get(flows[i].flow_id)},t));
@@ -142,7 +142,7 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   assert.equal(delivered.failed,0);assert.equal(delivered.pending,0);
   clock+=3600001;
   for(const inventory of inventories.values()){inventory.observedAt=clock;inventory.expiresAt=clock+300000;}
-  mfa=false;await assert.rejects(authority.reserve(actors[1],flows[1].flow_id,refs(1)),{code:'auth_email_verification_required'});mfa=true;
+  sessionValid=false;await assert.rejects(authority.reserve(actors[1],flows[1].flow_id,refs(1)),{code:'meta_oauth_session_required'});sessionValid=true;
   const originalCandidate=flows[1].candidate_metadata,expiredCandidate=JSON.parse(originalCandidate);expiredCandidate.expiresAt=clock-1;
   await flows[1].update({candidate_metadata:JSON.stringify(expiredCandidate)});
   try{await assert.rejects(authority.reserve(actors[1],flows[1].flow_id,refs(1)));}finally{await flows[1].update({candidate_metadata:originalCandidate});}

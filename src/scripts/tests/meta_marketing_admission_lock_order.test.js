@@ -52,7 +52,7 @@ function fixture(family, group = null) {
     revoked_at: null, attempts: 0, selection_digest: HASH, last_error: null, lease_token: null, lease_until: null, state: 'active' };
   const mappings = [{ id: 31, assetType: 'ad_account', metaAssetId: '101' }, { id: 32, assetType: 'facebook_page', metaAssetId: '201' }]
     .map(row => ({ ...row, metaConnectionId: 41, assignmentScope: group ? 'group' : 'clinic', clinicaId: group ? null : 11, grupoClinicaId: group, isActive: true, credentials_absent: 1 }));
-  const locks = lockScheduler(), state = { allowed: true, verified: true, sessionAllowed: true, enrollment, transactions: 0, sessions: 0,
+  const locks = lockScheduler(), state = { allowed: true, sessionValid: true, sessionAllowed: true, enrollment, transactions: 0, sessions: 0,
     enrollmentReads: 0, flowReads: 0, providerCalls: 0, writes: 0, clinicReads: new Map(), afterPreauthorization: null, clinicHook: null, enrollmentHook: null,
     stopRecoveryEnrollment: false, recoveryEnrollmentAttempts: 0, maximumHumanClinicReads: 2, auditBoundary: 0, references: [] };
   const models = {
@@ -138,11 +138,11 @@ function fixture(family, group = null) {
     models.MetaMarketingRecovery = { findAll: async () => [state.recovery] };
     models.MetaMarketingOAuthSlot = { findByPk: async () => slot };
   }
-  const sessions = { verifyReference: async (_input, options) => {
-    state.sessions++;assert.equal(options.requireEmail, true);
+  const sessions = { verifyNormalReference: async (_input, options) => {
+    state.sessions++;assert.equal(Object.hasOwn(options, 'requireEmail'), false);
     state.references.push(+_input.expiresAt);
     await locks.acquire(options.transaction, 'user:22');await locks.acquire(options.transaction, 'session:' + UUID(7));
-    if (!state.verified) throw Object.assign(Error('email'), { code: 'auth_email_verification_required' });
+    if (!state.sessionValid) throw Object.assign(Error('session'), { code: 'auth_invalid', status: 401 });
     if (!state.sessionAllowed) throw Object.assign(Error('session'), { code: 'auth_invalid' });
   } };
   const service = require('../../services/' + (family === 'renewal' ? 'metaMarketingCredentialRenewal' : family === 'oauth' ? 'metaMarketingOAuth' : family === 'enrollment' ? 'metaMarketingEnrollment' : 'metaMarketingBusiness') + '.service').createService({
@@ -184,12 +184,12 @@ for (const family of ['renewal', 'business']) {
     });
 
     test(`${family} ${action} denies before enrollment inspection and repeats current authorization before hydration`, async () => {
-      for (const denial of ['allowed', 'verified', 'sessionAllowed']) {
+      for (const denial of ['allowed', 'sessionValid', 'sessionAllowed']) {
         const first = fixture(family);first.state[denial] = false;
         await assert.rejects(first.service[action](first.input));assert.equal(first.state.enrollmentReads, 0);assert.equal(first.state.flowReads, 0);assert.equal(first.state.providerCalls, 0);
         for (const absent of [false, true]) {
           const changed = fixture(family);changed.state.afterPreauthorization = () => { changed.state[denial] = false;if (absent) changed.state.enrollment = null; };
-          const expected = denial === 'allowed' ? 'meta_oauth_scope_forbidden' : denial === 'verified' ? 'auth_email_verification_required' : 'meta_oauth_session_required';
+          const expected = denial === 'allowed' ? 'meta_oauth_scope_forbidden' : 'meta_oauth_session_required';
           await assert.rejects(changed.service[action](changed.input), { code: expected });
           assert.equal(changed.state.sessions, 2);assert(changed.state.enrollmentReads > 0);assert.equal(changed.state.flowReads, 0);assert.equal(changed.state.providerCalls, 0);assert.equal(changed.state.writes, 0);
         }
@@ -264,8 +264,8 @@ for (const action of ['overview', 'status', 'confirm', 'cancel']) {
       for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key];else process.env[key] = value; }
     }
   });
-  test(`Enrollment ${action} rechecks permission/session/email before flow hydration; absent IDs do not lock a PK gap`, async () => {
-    for (const denial of ['allowed', 'verified', 'sessionAllowed']) {
+  test(`Enrollment ${action} rechecks permission/own session before flow hydration; absent IDs do not lock a PK gap`, async () => {
+    for (const denial of ['allowed', 'sessionValid', 'sessionAllowed']) {
       const f = fixture('enrollment');f.state.afterPreauthorization = () => { f.state[denial] = false; };
       await assert.rejects(invoke(f));assert.equal(f.state.sessions, 2);assert.equal(f.state.flowReads, 0);assert.equal(f.state.providerCalls, 0);assert.equal(f.state.auditBoundary, 0);
     }

@@ -5,9 +5,10 @@ function createScope({models,sessions,now=()=>new Date(),recoveryGuard}){
   const recovery=recoveryGuard||require('./metaMarketingLegacyRecovery.service').createRecovery({models,sessions,now});
   async function authorize({scopeKey,actorId,sessionRef,sessionExpiresAt},transaction){
     if(!transaction||typeof scopeKey!=='string'||!/^(clinic|group):[1-9][0-9]{0,9}$/.test(scopeKey)||!C.positive(actorId))C.fail('meta_oauth_scope_invalid',400);
-    try{await sessions.verifyReference({userId:actorId,sessionRef,expiresAt:sessionExpiresAt},{transaction,requireEmail:true});}
+    // Check the original, non-delegated CRM session, including any trusted
+    // device binding. A separate email challenge is not part of Meta Marketing.
+    try{await sessions.verifyNormalReference({userId:actorId,sessionRef,expiresAt:sessionExpiresAt},{transaction});}
     catch(e){
-      if(e?.code==='auth_email_verification_required')C.fail(e.code,403);
       // Storage/audit failure denies the operation without invalidating login.
       const invalid=['JsonWebTokenError','TokenExpiredError','NotBeforeError'].includes(e?.name)||e?.code==='auth_invalid';
       const denied=e?.status===403||e?.httpStatus===403;

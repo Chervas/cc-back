@@ -92,13 +92,13 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
 
   const started = Date.now();
   const now = () => new Date(started);
-  let emailVerified = true;
+  let sessionValid = true;
   const sessions = {
-    async verifyReference(reference, options) {
+    async verifyNormalReference(reference, options) {
       assert.equal(reference.userId, ACTOR);
-      assert.equal(options.requireEmail, true);
+      assert.equal(Object.hasOwn(options, 'requireEmail'), false);
       assert.ok(options.transaction);
-      if (!emailVerified) throw Object.assign(new Error('Unverified fixture session'), { code: 'auth_email_verification_required', status: 403 });
+      if (!sessionValid) throw Object.assign(new Error('Invalid own fixture session'), { code: 'auth_invalid', status: 401 });
     },
   };
   const input = { scopeKey: SCOPE, actorId: ACTOR, sessionRef: randomUUID(), sessionExpiresAt: new Date(started + 3600000) };
@@ -149,9 +149,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     adAccountId: ACCOUNT.split(':')[1], pageId: PAGE.split(':')[1],
   });
 
-  emailVerified = false;
-  await assert.rejects(reserve(SELECTED), { code: 'auth_email_verification_required' });
-  emailVerified = true;
+  sessionValid = false;
+  await assert.rejects(reserve(SELECTED), { code: 'meta_oauth_session_required' });
+  sessionValid = true;
   const observed = await observe();
   assert.equal(observed.scopeStatus, 'clear');
   assert.equal(observed.reservationMade, false);

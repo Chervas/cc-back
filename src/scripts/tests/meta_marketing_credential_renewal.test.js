@@ -47,7 +47,7 @@ test('a verified clinic owner or agency can authorize its entire group without g
   let permitted=[66,72],verified=0;
   const models={Clinica:{findAll:async options=>{assert.deepEqual(options.where,{grupoClinicaId:29});return [{id_clinica:66},{id_clinica:72}];}},
     UsuarioClinica:{findAll:async options=>{assert.equal(options.where.id_usuario,99);assert.deepEqual(options.where.rol_clinica[Op.in],['propietario','agencia']);return permitted.map(id_clinica=>({id_clinica}));}}};
-  const sessions={verifyReference:async(input,options)=>{assert.equal(input.userId,99);assert.equal(options.requireEmail,true);verified++;}};
+  const sessions={verifyNormalReference:async(input,options)=>{assert.equal(input.userId,99);assert.equal(Object.hasOwn(options, 'requireEmail'), false);verified++;}};
   const scope=createScope({models,sessions,recoveryGuard:{}}),transaction={LOCK:{UPDATE:'UPDATE'}};
   const input={scopeKey:'group:29',actorId:99,sessionRef:randomUUID(),sessionExpiresAt:new Date(Date.now()+60000)};
   assert.deepEqual((await scope.authorize(input,transaction)).clinicIds,[66,72]);

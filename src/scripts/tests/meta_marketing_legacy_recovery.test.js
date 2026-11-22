@@ -7,7 +7,7 @@ const { createRecovery, encode, hash, ALIAS_ATTRIBUTES, CONNECTION_ATTRIBUTES } 
 const APP = '1807844546609897', SUBJECT = '24532330033025968';
 function fixture({ version = 1 } = {}) {
   const preparedAt = new Date('2026-11-04T12:00:00Z'); let clock = +preparedAt + 5000;
-  const state = { enabled: true, mfa: true, updates: 0, bindings: [], selections: [], connections: [{ id: 158, userId: 1, metaUserId: SUBJECT, broker_app_id: null,
+  const state = { enabled: true, sessionValid: true, updates: 0, bindings: [], selections: [], connections: [{ id: 158, userId: 1, metaUserId: SUBJECT, broker_app_id: null,
     credentials_external: 0, credential_present: 1, credential_sha256: 'a'.repeat(64) }],
   aliases: [], recovery: null, flow: null, enrollment: null };
   const alias = (id, type, extra = {}) => ({ id, metaConnectionId: 158, assetType: type, metaAssetId: String(180000000000000 + id),
@@ -48,7 +48,7 @@ function fixture({ version = 1 } = {}) {
       },
     },
   };
-  const sessions = { verifyReference: async (_actor, options) => { assert.equal(options.requireEmail, true); if (!state.mfa) throw Error('mfa_required'); } };
+  const sessions = { verifyNormalReference: async (_actor, options) => { assert.equal(Object.hasOwn(options, 'requireEmail'), false); if (!state.sessionValid) throw Object.assign(Error('auth_invalid'), { code: 'auth_invalid', status: 401 }); } };
   const guard = createRecovery({ models, sessions, enabled: () => state.enabled, now: () => new Date(clock) });
   const input = { scopeKey: 'group:28', clinicIds: [1, 70], sourceConnectionId: 158, appId: APP, subjectId: SUBJECT, actorId: 1, mappingIds: [359] };
   if (version === 2) {
@@ -121,7 +121,7 @@ test('fresh consent binds once, creates a separate empty canonical identity, and
   const active = await f.activate(); assert.equal(active.canonicalConnectionId, 159); assert.equal(active.sourceConnectionId, 158);
   assert.deepEqual(active.mappingIds, [359]); assert.equal(active.aliases[0].credentials_absent, 1);
   assert.equal(encode([f.state.connections[0], f.state.aliases.slice(1), f.blocks, f.assignments]), legacy);
-  f.tick(3600001); f.state.mfa = false;
+  f.tick(3600001); f.state.sessionValid = false;
   assert.equal((await f.guard.assertActive({ enrollmentId: active.enrollmentId }, f.tx)).recoveryId, active.recoveryId);
 });
 
@@ -139,7 +139,7 @@ test('awaiting callbacks retain the prepared digest without binding or granting 
   const f = fixture(); await f.prepare(); f.flow('awaiting');
   const proof = await f.guard.forFlow(f.state.flow, f.tx); assert.equal(proof.flowId, null); assert.equal(f.state.updates, 0);
   await assert.rejects(() => f.guard.forFlow(f.state.flow, f.tx, { phase: 'active' }));
-  f.state.mfa = false; await assert.rejects(() => f.guard.forFlow(f.state.flow, f.tx), { code: 'meta_recovery_actor_required' });
+  f.state.sessionValid = false; await assert.rejects(() => f.guard.forFlow(f.state.flow, f.tx), { code: 'meta_recovery_actor_required' });
 });
 
 test('a second flow, changed subject or expired initial claim cannot acquire the generation', async () => {
@@ -162,7 +162,7 @@ test('continuity does not admit unbound, V1, late or invalid bindings, another f
   const old=fixture();await old.prepare();old.flow();await old.guard.forFlow(old.state.flow,old.tx);old.tick(3600001);
   await assert.rejects(old.guard.forFlow(old.state.flow,old.tx),{code:'meta_recovery_expired'});
   for(const mutate of [f=>f.state.recovery.bound_at=new Date(+f.state.recovery.prepared_at-1),f=>f.state.recovery.bound_at=new Date(+f.state.recovery.expires_at),
-    f=>f.state.recovery.bound_at=new Date(NaN),f=>f.state.mfa=false,f=>f.state.flow.session_expires_at=new Date(0),
+    f=>f.state.recovery.bound_at=new Date(NaN),f=>f.state.sessionValid=false,f=>f.state.flow.session_expires_at=new Date(0),
     f=>{const value=JSON.parse(f.state.flow.candidate_metadata);value.expiresAt=+f.state.recovery.expires_at;f.state.flow.candidate_metadata=JSON.stringify(value);},
     f=>f.flow(),f=>f.state.connections[0].credential_sha256='f'.repeat(64)]){
     const f=fixture({version:2});await f.prepare();f.flow();await f.guard.forFlow(f.state.flow,f.tx);f.tick(3600001);mutate(f);
