@@ -4,7 +4,8 @@ const { BrokerError, fail } = require('./errors');
 const { tokenText } = require('./whatsapp-secrets');
 const C = require('./meta-marketing-contract');
 const FIELDS = Object.freeze({ ad_account: 'id,account_id,name,account_status,currency,timezone_name',
-  facebook_page: 'id,name', instagram_business: 'id,name,username', instagram_parent: 'id,instagram_business_account' });
+  facebook_page: 'id,name', instagram_business: 'id,name,username', instagram_parent: 'id,instagram_business_account',
+  instagram_profile: 'id,name,username,profile_picture_url' });
 function createMetaMarketingHttp({ request = https.request, timeoutMs = 8000,pacer,appId,now=Date.now,authorize=()=>{},graphVersion } = {}) {
   if(graphVersion!==undefined&&!/^v(?:24|25|26|27)\.0$/.test(graphVersion))fail('invalid_request');
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000) fail('invalid_request');
