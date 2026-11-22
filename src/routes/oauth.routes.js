@@ -1366,6 +1366,7 @@ let adsEnrollmentRoutes;
 let metaMarketingOAuthRoutes;
 let metaMarketingEnrollmentRoutes;
 let metaMarketingCredentialRenewalRoutes;
+let metaMarketingInstagramExtensionRoutes;
 let metaMarketingBusinessRoutes;
 let metaLeadReceptionSetupRoutes;
 router.use('/meta/marketing', (req, res, next) => {
@@ -1379,6 +1380,10 @@ router.use('/meta/marketing', (req, res, next) => {
 router.use('/meta/marketing', (req, res, next) => {
     metaMarketingCredentialRenewalRoutes ||= require('./metaMarketingCredentialRenewal.routes').createRouter({ sessions: accessSessions });
     return metaMarketingCredentialRenewalRoutes(req, res, next);
+});
+router.use('/meta/marketing', (req, res, next) => {
+    metaMarketingInstagramExtensionRoutes ||= require('./metaMarketingInstagramExtension.routes').createRouter({ sessions: accessSessions });
+    return metaMarketingInstagramExtensionRoutes(req, res, next);
 });
 router.use('/meta/marketing', (req, res, next) => {
     metaMarketingOAuthRoutes ||= require('./metaMarketingOAuth.routes').createRouter({ sessions: accessSessions });

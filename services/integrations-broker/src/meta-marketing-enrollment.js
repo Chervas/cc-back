@@ -68,6 +68,9 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   function exclusions(assets,id,requireClaims=false){
     const refs=[...new Set(assets.flatMap(physical))],marks=refs.map(()=>'?').join(',');
     if(get(`SELECT 1 FROM asset_revocations WHERE asset IN (${marks}) LIMIT 1`,...refs))fail('asset_revoked');
+    const instagramIds=assets.filter(asset=>asset.kind==='instagram_business').map(asset=>asset.id);
+    if(instagramIds.length&&get("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='meta_marketing_instagram_extensions'")
+      &&get(`SELECT 1 FROM meta_marketing_instagram_extensions WHERE state='active' AND instagram_id IN (${instagramIds.map(()=>'?').join(',')})`,...instagramIds))fail('scope_denied');
     const claims=store.db.prepare(`SELECT asset,enrollment FROM meta_marketing_enrollment_claims WHERE asset IN (${marks})`).all(...refs);
     if(claims.some(c=>c.enrollment!==id)||requireClaims&&claims.length!==refs.length)fail('scope_denied');
     if(requireClaims){
