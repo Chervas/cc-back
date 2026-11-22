@@ -19,6 +19,7 @@ const {createMetaMarketingEnrollment}=require('./meta-marketing-enrollment');
 const {createMetaMarketingOAuthSecrets}=require('./meta-marketing-oauth-secrets');
 const {createMetaMarketingOAuthHttp}=require('./meta-marketing-oauth-http');
 const {createMetaMarketingOAuth,createMetaMarketingOAuthOperations}=require('./meta-marketing-oauth');
+const Instagram=require('./meta-marketing-instagram-extension-contract');
 const admissionContract=require('./meta-marketing-admission-contract');
 const {createMetaMarketingAdmission,validateAdmissionPolicy}=require('./meta-marketing-admission');
 const prefix=environment=>`/clinicaclick/integrations/prod/meta-marketing/${environment}/`;
@@ -35,6 +36,10 @@ function validateConfig(config) {
   if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetEnrollment')) { fields.push('assetEnrollment'); if(typeof config.assetEnrollment!=='boolean'||config.assetEnrollment&&!config.assetDiscovery)fail('invalid_request'); }
   if (config && Object.hasOwn(config,'credentialRenewal')) {fields.push('credentialRenewal');if(typeof config.credentialRenewal!=='boolean'||config.credentialRenewal&&config.assetEnrollment!==true)fail('invalid_request');}
+  if(config&&Object.hasOwn(config,'instagramExtension')){
+    fields.push('instagramExtension');Instagram.config(config.instagramExtension,config.environment,ACCOUNT);
+    if(config.credentialRenewal!==true||config.assetEnrollment!==true||config.standby===true)fail('invalid_request');
+  }
   if(config&&Object.hasOwn(config,'userCredentialHealth')){fields.push('userCredentialHealth');const v=config.userCredentialHealth;
     if(!C.exact(v,'scopeKeys')||!Array.isArray(v.scopeKeys)||!v.scopeKeys.length||v.scopeKeys.length>64||new Set(v.scopeKeys).size!==v.scopeKeys.length
       ||v.scopeKeys.some(key=>typeof key!=='string'||!/^(clinic|group):[1-9][0-9]{0,9}$/.test(key))||config.credentialRenewal!==true||config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
@@ -101,6 +106,13 @@ function validateConfig(config) {
     const b=C.bindingFor(bindings[0]);if(b.clinicIds.length!==1||scope!=='clinic:'+b.clinicIds[0]||!X.REQUIRED_SCOPES.every(s=>b.scopes.includes(s)))fail('invalid_request');
   }
   if ([...slots].some(arn=>apps.has(arn))) fail('invalid_request');
+  if(config.instagramExtension){
+    const settings=config.instagramExtension;
+    if(slots.has(settings.secretArn)||apps.has(settings.secretArn)||settings.secretArn===config.leadAds?.verifyTokenRef.secretArn)fail('invalid_request');
+    const binding=policy.connections.find(value=>C.bindingFor(value).scopeKey===settings.scopeKey);
+    if(binding)Instagram.derive(binding,settings);
+    else if(config.admission?.enabled!==true||!config.admission.enrollmentScopeKeys?.includes(settings.scopeKey))fail('invalid_request');
+  }
   if(config.leadAds){
     const ref=config.leadAds.verifyTokenRef;if(!ref.secretArn.startsWith(`arn:aws:secretsmanager:eu-west-3:${ACCOUNT}:secret:${prefix(config.environment)}`)||slots.has(ref.secretArn)||apps.has(ref.secretArn))fail('invalid_request');
     const enabled=policy.connections.filter(binding=>L.REQUIRED_SCOPES.every(s=>C.bindingFor(binding).scopes.includes(s)));
@@ -110,7 +122,7 @@ function validateConfig(config) {
 }
 async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest,leadsRequest,adsNow=Date.now,adsWait}={}) {
   const config=validateConfig(JSON.parse(privateFile(filename))),cert=privateFile(config.tlsCertFile,65536),key=privateFile(config.tlsKeyFile,65536);
-  const store=new BrokerStore(config.stateFile);let aws,oauth,enrollment,renewal,business,maintenance,server,timer,draining,adsHttp,leadsHttp,cursorKey;
+  const store=new BrokerStore(config.stateFile);let aws,oauth,enrollment,renewal,instagram,business,maintenance,server,timer,draining,adsHttp,leadsHttp,cursorKey;
   try {
     if(!config.credentialRenewal&&store.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='meta_marketing_credential_renewals'").get()
       &&store.db.prepare('SELECT 1 FROM meta_marketing_credential_renewals LIMIT 1').get())fail('invalid_request');
@@ -147,6 +159,21 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
       ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base),
         ...(config.admission.adsReadScopeKeys?{admissionAdsReadScopeKeys:config.admission.adsReadScopeKeys}:{})}:{})});
     if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment});
+    const resolveInstagramBinding=ref=>config.policy.connections.find(value=>value.connectionRef===ref)||admission?.resolveBinding(ref);
+    const resolveInstagramPolicy=(request,principal,base)=>{
+      const settings=config.instagramExtension,binding=resolveInstagramBinding(request.connectionRef);
+      if(!settings||!binding)fail('scope_denied');
+      Instagram.authorize({request,principal,binding},config.environment,settings);
+      const grant={principalId:principal.id,tenantRef:request.tenantRef,connectionRef:request.connectionRef,
+        assetRef:request.assetRef,operations:[request.operation]};
+      return {...base,connections:base.connections.some(value=>value.connectionRef===binding.connectionRef)
+        ?base.connections:[...base.connections,binding],grants:[...base.grants,grant]};
+    };
+    if(config.instagramExtension){
+      const readCandidate=require('./meta-marketing-instagram-candidate-read-http').createMetaMarketingInstagramCandidateReadHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
+      instagram=require('./meta-marketing-instagram-extension').createInstagramExtension({store,enrollment,oauth,secrets,
+        settings:config.instagramExtension,environment:config.environment,readCandidate,resolveBinding:resolveInstagramBinding,resolvePolicy:resolveInstagramPolicy,now:adsNow});
+    }
     if(businessConfigs(config).length||config.userCredentialHealth){const businessHttp=businessConfigs(config).length?require('./meta-marketing-business-issuer-http').createIssuerHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})}):null;
       if(businessConfigs(config).length)business=require('./meta-marketing-business').createMetaMarketingBusiness({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,config:businessRegistry(config)});
       const userHealthHttp=require('./meta-marketing-user-health-http').createUserHealthHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
@@ -154,11 +181,12 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     if(businessConfigs(config).length)store.setConnectionAuthorityResolver(ref=>enrollment.connectionAuthority(ref,config.policy));
     // Discovery is separately scoped and derives no enrollment/reader grant.
     // Existing static sources retain their original authority and guards.
-    const policyResolver=admission?{resolve(request,principal,base){
-      const prepared=admission.resolve(request,principal,base);
+    const policyResolver=admission||instagram?{resolve(request,principal,base){
+      if(instagram&&Object.values(Instagram.OPERATIONS).includes(request.operation))return resolveInstagramPolicy(request,principal,base);
+      const prepared=admission?.resolve(request,principal,base)||base;
       return enrollment?.resolve(request,principal,prepared)||prepared;
     }}:enrollment;
-    const broker=new Broker({store,policy:config.policy,secrets,policyResolver,...(config.leadAds?{transportProfile:'meta-marketing'}:{}),operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations,...renewal?.operations,...business?.operations,...maintenance?.operations}});
+    const broker=new Broker({store,policy:config.policy,secrets,policyResolver,...(config.leadAds?{transportProfile:'meta-marketing'}:{}),operations:{...createMetaMarketingOAuthOperations(oauth,{assetDiscovery:config.assetDiscovery===true}),...enrollment?.operations,...renewal?.operations,...instagram?.operations,...business?.operations,...maintenance?.operations}});
     const controlKeys=new Set(config.policy.principals.filter(p=>p.id.startsWith('control:')).map(p=>p.keyId));
     let ordinary=0,controls=0;
     server=createServer({async execute(...args) {
@@ -174,9 +202,9 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(config.port,config.listenAddress,resolve);});
     const tick=()=>{if(!draining)draining=drainAudit(store,aws.sink,{limit:20}).catch(()=>null).finally(()=>{draining=null;});};
     tick();timer=setInterval(tick,1000);timer.unref();let closing;
-    const close=()=>closing||=(async()=>{clearInterval(timer);maintenance?.close();business?.close();renewal?.close();enrollment?.close();oauth.close();await new Promise(resolve=>{server.close(resolve);server.closeIdleConnections?.();});await draining;aws.close();key.fill(0);cursorKey?.fill(0);store.close();})();
+    const close=()=>closing||=(async()=>{clearInterval(timer);maintenance?.close();business?.close();instagram?.close();renewal?.close();enrollment?.close();oauth.close();await new Promise(resolve=>{server.close(resolve);server.closeIdleConnections?.();});await draining;aws.close();key.fill(0);cursorKey?.fill(0);store.close();})();
     return {server,store,broker,close};
-  } catch(error) {clearInterval(timer);maintenance?.close();business?.close();renewal?.close();enrollment?.close();oauth?.close();server?.close();aws?.close();key.fill(0);cursorKey?.fill(0);store.close();throw error;}
+  } catch(error) {clearInterval(timer);maintenance?.close();business?.close();instagram?.close();renewal?.close();enrollment?.close();oauth?.close();server?.close();aws?.close();key.fill(0);cursorKey?.fill(0);store.close();throw error;}
 }
 if(require.main===module)main(process.argv[2]).then(runtime=>{
   const stop=()=>runtime.close().catch(()=>{process.exitCode=1;});process.once('SIGTERM',stop);process.once('SIGINT',stop);

@@ -68,9 +68,11 @@ function createMetaMarketingInstagramCandidateReadHttp({ request, timeoutMs, now
         check();
         const raw = await graph({ action: 'inspect', id: candidate.appId, token: appToken, candidate: ownedToken, signal });
         check();
-        M.assertAssetCredential(D.fresh(raw, binding, candidate, now()), parent);
+        const fresh = D.fresh(raw, binding, candidate, now());
+        M.assertAssetCredential(fresh, parent);
+        return fresh;
       };
-      await verify();
+      const observedBefore = await verify();
       const proof = createHmac('sha256', ownedApp).update(ownedToken).digest('hex');
       const fetch = (action, id) => graph({ action, id, token: ownedToken, proof, signal });
       const page = await fetch('instagram_parent', parentPageId);
@@ -89,8 +91,11 @@ function createMetaMarketingInstagramCandidateReadHttp({ request, timeoutMs, now
       const profile = M.projectAsset(raw, proposal.asset);
       const avatarUrl = D.assetAvatarUrl(raw.profile_picture_url);
       if (avatarUrl) profile.avatarUrl = avatarUrl;
-      await verify();
-      const result = { ...proposal, profile };
+      const observedAfter = await verify();
+      const expiry = Math.min(binding.expiresAt, ...[observedBefore, observedAfter]
+        .flatMap(observation => [observation.expiresAt, observation.dataAccessExpiresAt]).filter(deadline => deadline !== null));
+      if (expiry <= now()) fail('credential_revoked');
+      const result = { ...proposal, profile, expiry };
       let serialized = JSON.stringify(result);
       for (;;) {
         if ([ownedToken.toString('utf8'), ownedApp.toString('ascii'), proof].some(secret => serialized.includes(secret))) fail('provider_failed');
