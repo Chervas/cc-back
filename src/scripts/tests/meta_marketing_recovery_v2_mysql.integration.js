@@ -149,6 +149,10 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   const continued=await sql.transaction(t=>guard.forFlow(flows[1].get({plain:true}),t));
   assert.equal(continued.recoveryId,boundBS.recovery_id);
   assert.equal((await sql.transaction(t=>scope.revalidate(flows[1].get({plain:true}),t))).scopeDigest,flows[1].scope_digest);
+  await assert.rejects(sql.transaction(async transaction => {
+    await models.GroupAssetClinicAssignment.create({grupoClinicaId:29,assetType:'meta.ad_account',assetId:391,clinicaId:66},{transaction});
+    await guard.forFlow(flows[1].get({plain:true}),transaction);
+  }),{code:'meta_recovery_changed'});
   const bs=await ready(await reserve(1));assert.equal(bs.meta_connection_id,159);assert.equal(await models.MetaMarketingEnrollmentIdentity.count(),1);
   await models.ClinicMetaAsset.update({additionalData:{...metadata,currency:'USD'}},{where:{id:391},silent:true});
   await assert.rejects(activate(bs));assert.equal(await models.MetaMarketingBrokerBinding.count(),2);
@@ -170,6 +174,43 @@ withIsolatedCampaignMysql(async({sql,models,report})=>{
   for(const id of[arriaga.enrollment_id,bs.enrollment_id]){const proof=await committed(id);assert.equal(proof.recovery.canonicalConnectionId,159);assert.equal(proof.recovery.version,2);}
   assert.equal(await models.MetaMarketingRecovery.count({where:{canonical_connection_id:null,state:'active'}}),2);assert.equal(await baseline(),untouched);
   report.checks.push('BS bound before claim expiry completes reservation/activation after deadline; original MFA and candidate expiry remain enforced; freshAd303 plus exact2Pages have no credentials; ScopeDigest/snapshots/TTL and Arriaga/WA unchanged');
+  const {prepareGroupAssetSelectionGuard}=require('../../services/groupAssetSelectionGuard.service');
+  const payload={adsAccounts:{meta:{mode:'clinic',clinicAssignments:{66:freshAd.id,72:391}}},
+    meta:{facebook:{mode:'clinic',clinicAssignments:{66:fresh[0].id,72:fresh[1].id}}}};
+  const rows=[['meta.ad_account',freshAd.id,66],['meta.ad_account',391,72],
+    ['meta.facebook_page',fresh[0].id,66],['meta.facebook_page',fresh[1].id,72]]
+    .map(([assetType,assetId,clinicaId])=>({grupoClinicaId:29,assetType,assetId,clinicaId}));
+  const providerMappings=()=>models.ClinicMetaAsset.findAll({where:{id:JSON.parse(activeBS.mapping_ids)},
+    attributes:['id','metaConnectionId','assetType','metaAssetId','assignmentScope','clinicaId','grupoClinicaId','isActive'],raw:true,order:[['id','ASC']]});
+  const providerBindings=()=>models.MetaMarketingBrokerBinding.findAll({where:{enrollment_id:bs.enrollment_id},raw:true,order:[['mapping_id','ASC']]});
+  const [mappingsBefore,bindingsBefore]=await Promise.all([providerMappings(),providerBindings()]);
+  async function saveSelections(extra=[]) {
+    const guard=await prepareGroupAssetSelectionGuard({models,payload,groupId:29,clinicIds:[66,72]});
+    return sql.transaction(async transaction=>{
+      await guard.lock(transaction);
+      assert.equal(guard.managed('metaAds',391),true);
+      await models.GroupAssetClinicAssignment.destroy({where:{grupoClinicaId:29,assetType:{[Op.in]:['meta.ad_account','meta.facebook_page']}},transaction});
+      await models.GroupAssetClinicAssignment.bulkCreate([...rows,...extra],{transaction});
+      await guard.assertFinal();
+    });
+  }
+  await assert.rejects(saveSelections([{...rows[0],grupoClinicaId:28,clinicaId:70}]),{code:'group_asset_authority_conflict'});
+  await assert.rejects(saveSelections([{...rows[0],assetType:'meta.facebook_page'}]),{code:'group_asset_authority_conflict'});
+  assert.equal(await models.GroupAssetClinicAssignment.count(),0);
+  await saveSelections();
+  const beforeReplay=await models.GroupAssetClinicAssignment.findAll({raw:true,order:[['id','ASC']]});
+  assert.deepEqual(beforeReplay.map(({grupoClinicaId,assetType,assetId,clinicaId})=>({grupoClinicaId,assetType,assetId,clinicaId})),rows);
+  await saveSelections();
+  assert.notDeepEqual((await models.GroupAssetClinicAssignment.findAll({raw:true,order:[['id','ASC']]})).map(row=>row.id),beforeReplay.map(row=>row.id));
+  await committed(bs.enrollment_id);
+  assert.deepEqual(await providerMappings(),mappingsBefore);
+  assert.deepEqual(await providerBindings(),bindingsBefore);
+  const recoveryBefore=await models.MetaMarketingRecovery.findByPk(records[1].recovery_id,{raw:true});
+  assert.equal(recoveryBefore.snapshot,records[1].snapshot);
+  assert.equal(recoveryBefore.snapshot_digest,records[1].snapshot_digest);
+  await models.GroupAssetClinicAssignment.destroy({where:{grupoClinicaId:29}});
+  assert.equal(await baseline(),untouched);
+  report.checks.push('Active BS v2 recovery permits guarded Ads/Page choices only for the exact two authorized clinics; replay, proof preservation, pending snapshot, wrong type and foreign scope checked');
   const renewalProbe=await require('./fixtures/meta_credential_renewal_mysql.fixture')({models,sql,actors,flows,now,advance:value=>{clock+=value;},report,baseline,untouched,sessions});
   if(process.env.META_MARKETING_USER_HEALTH_SQL_TEST==='1'){
     await require('./fixtures/meta_user_credential_health_mysql.fixture')({models,sql,now,advance:value=>{clock+=value;},report,baseline,untouched,renewalProbe});return;
