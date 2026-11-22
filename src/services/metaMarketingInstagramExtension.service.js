@@ -19,11 +19,20 @@ const ownedBy = (row, input) => Number(row.actor_user_id) === input.actorId && r
 const safeName = (value, length) => typeof value === 'string' && !!value.trim() && value.length <= length && !/[\u0000-\u001f\u007f]/.test(value);
 
 function configuration(environment = process.env) {
+  if (environment.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED !== 'true') return null;
   const scopeKey = environment.META_MARKETING_INSTAGRAM_EXTENSION_SCOPE;
   const parentPageId = environment.META_MARKETING_INSTAGRAM_EXTENSION_PAGE;
-  if (!scopeKey && !parentPageId) return null;
   if (!/^clinic:[1-9][0-9]{0,9}$/.test(scopeKey) || !C.positive(Number(scopeKey.slice(7))) || !M.graphId(parentPageId)) fail();
   return { scopeKey, parentPageId };
+}
+
+function availableFor(row, business, settings = configuration) {
+  let configured;
+  try { configured = settings(); } catch { return false; }
+  return Boolean(configured && row.state === 'active' && !business && row.scope_key === configured.scopeKey
+    && row.clinicIds.length === 1
+    && row.selected.some(asset => asset.kind === 'facebook_page' && asset.id === configured.parentPageId)
+    && !row.selected.some(asset => asset.kind === 'instagram_business' && asset.parentPageId === configured.parentPageId));
 }
 
 function authUrl(raw, source, state) {
@@ -271,6 +280,6 @@ function instance() {
     client: require('./metaMarketingOAuthClient.service').createClient() });
 }
 
-module.exports = { createService, configuration, authUrl, receipt,
+module.exports = { createService, configuration, availableFor, authUrl, receipt,
   ...Object.fromEntries(['overview','begin','confirm','cancel'].map(name => [name, (...args) => instance()[name](...args)])),
 };

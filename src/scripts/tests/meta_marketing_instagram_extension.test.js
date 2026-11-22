@@ -9,6 +9,7 @@ const { randomUUID } = require('node:crypto');
 const C = require('../../services/metaMarketingEnrollment.contract');
 const F = require('../../services/metaMarketingEffectiveCredential.service');
 const I = require('../../../services/integrations-broker/src/meta-marketing-instagram-extension-contract');
+const { configuration, availableFor } = require('../../services/metaMarketingInstagramExtension.service');
 
 function fixture() {
   const clock = +new Date('2030-01-01T12:00:00Z');
@@ -166,4 +167,19 @@ test('a response cannot supply another OAuth recipient, a linked picture from an
   f.data.status = 'active';
   await assert.rejects(f.service.overview(f.input), { httpStatus: 409 });
   assert.equal(f.data.row.status, 'processing');
+});
+
+test('availability requires an enabled direct clinic with its approved Facebook parent and a USER grant', () => {
+  const env = { META_MARKETING_INSTAGRAM_EXTENSION_SCOPE: 'clinic:77', META_MARKETING_INSTAGRAM_EXTENSION_PAGE: '401' };
+  const row = { state: 'active', scope_key: 'clinic:77', clinicIds: [77],
+    selected: [{ kind: 'facebook_page', id: '401' }] };
+  const settings = () => configuration(env);
+  assert.equal(availableFor(row, null, settings), false);
+  env.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED = 'true';
+  assert.equal(availableFor(row, null, settings), true);
+  assert.equal(availableFor({ ...row, scope_key: 'group:9' }, null, settings), false);
+  assert.equal(availableFor(row, {}, settings), false);
+  assert.equal(availableFor({ ...row, selected: [...row.selected, { kind: 'instagram_business', parentPageId: '401' }] }, null, settings), false);
+  env.META_MARKETING_INSTAGRAM_EXTENSION_PAGE = '402';
+  assert.equal(availableFor(row, null, settings), false);
 });
