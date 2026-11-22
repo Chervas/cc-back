@@ -56,6 +56,7 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
       ||assetRefs.some(ref=>typeof ref!=='string'||!/^meta-(ad_account|facebook_page|instagram_business):[1-9][0-9]{0,29}$/.test(ref))))fail('invalid_request');
     if(includeAvatars&&!assetRefs)fail('invalid_request');
     const wanted=assetRefs===undefined?null:new Set(assetRefs),included=(kind,id)=>!wanted||wanted.has(`meta-${kind}:${id}`);
+    const pending=wanted?new Set(wanted):null;
     K.metadata(metadata,binding);const ownToken=Buffer.from(token),ownApp=Buffer.from(appSecret),appToken=Buffer.concat([Buffer.from(metadata.appId+'|'),ownApp]);
     const inspect=require('./meta-marketing-http').createMetaMarketingHttp({request,timeoutMs,pacer,appId:metadata.appId,now,authorize,graphVersion:metadata.graphVersion});
     const wipe=()=>{ownToken.fill(0);ownApp.fill(0);appToken.fill(0);};signal.addEventListener('abort',wipe,{once:true});
@@ -63,7 +64,14 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
       const verify=async()=>{authorize();if(signal.aborted)fail('provider_timeout');const raw=await inspect({action:'inspect',id:metadata.appId,token:appToken,candidate:ownToken,signal});authorize();if(signal.aborted)fail('provider_timeout');D.fresh(raw,binding,metadata,now());};
       await verify();const available=D.kinds(metadata),assets=[],seen=new Set(),budget={pages:0,bytes:0};
       const proof=createHmac('sha256',ownApp).update(ownToken).digest('hex');
-      const push=a=>{if(seen.has(a.assetRef)||seen.size>=D.MAX_ASSETS)fail('provider_failed');seen.add(a.assetRef);if(K.business(binding)&&!K.bindingFor(binding).credentialAssetRefs?.includes(a.assetRef))return;M.assertAssetCredential(metadata,a);assets.push(a);};
+      const push=a=>{
+        if(seen.has(a.assetRef)||seen.size>=D.MAX_ASSETS)fail('provider_failed');
+        seen.add(a.assetRef);
+        if(K.business(binding)&&!K.bindingFor(binding).credentialAssetRefs?.includes(a.assetRef))return;
+        M.assertAssetCredential(metadata,a);
+        assets.push(a);
+        pending?.delete(a.assetRef);
+      };
       const edges=[];
       if(available.includes('ad_account')&&(!wanted||assetRefs.some(ref=>ref.startsWith('meta-ad_account:'))))edges.push([K.business(binding)?'assigned_ad_accounts':'adaccounts','id,account_id,name,account_status,currency,timezone_name']);
       const includeInstagram=available.includes('instagram_business')&&(!wanted||assetRefs.some(ref=>ref.startsWith('meta-instagram_business:')));
@@ -75,6 +83,7 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
       };
       for(const [edge,fields]of edges){
         let after=null;const cursors=new Set();
+        const adAccounts=edge==='adaccounts'||edge==='assigned_ad_accounts';
         let photos=includeAvatars&&['accounts','assigned_pages'].includes(edge);
         const fieldsWithPhotos='id,name,picture.width(120).height(120)'+(includeInstagram?',instagram_business_account{id,name,username,profile_picture_url}':'');
         do{
@@ -86,7 +95,7 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
           if(signal.aborted)fail('provider_timeout');
           authorize();
           for(const raw of r.rows){
-            if(['adaccounts','assigned_ad_accounts'].includes(edge)){
+            if(adAccounts){
               if(!included('ad_account',raw?.account_id))continue;
               if(!C.exact(raw,'id,account_id,name,account_status,currency,timezone_name'))fail('provider_failed');push(D.project(raw,'ad_account'));
             }else{
@@ -102,6 +111,9 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
             }
           }
           after=r.next;if(after){if(cursors.has(after))fail('provider_failed');cursors.add(after);}
+          // A selected read has no reason to inspect another page once this
+          // edge has returned every requested, authorized asset.
+          if(pending&&![...pending].some(ref=>ref.startsWith('meta-ad_account:')===adAccounts))break;
         }while(after);
       }
       await verify();return assets;
