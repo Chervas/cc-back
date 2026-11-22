@@ -202,18 +202,52 @@ test('live principal, operation grant, scope binding and enrollment withdrawal f
     await assert.rejects(r.discover());assert.equal(changed,true);
   }
 });
-test('provider continuation contributes only a bounded cursor and never fetches the supplied URL or discloses extras',async t=>{
+test('selected inventory stops both edges at the complete page and still inspects the credential afterward',async t=>{
+  const r=await ready(t,{refs:[...REFS,'meta-instagram_business:501']}),start=r.f.state.httpCalls.length,before=r.immutable();
+  r.f.state.afterGraph=(kind,value)=>{
+    if(kind!=='adaccounts'&&kind!=='accounts')return value;
+    if(r.f.state.lastAfter)return {error:{code:4}};
+    return {...value,paging:{cursors:{after:'UNNEEDED_'+kind},next:'https://foreign.invalid/ignored'}};
+  };
+  const result=(await r.discover()).data;
+  assert.deepEqual(result.assets.map(E.identity),r.grant.assets);
+  assert.deepEqual(r.f.state.httpCalls.slice(start).map(call=>call.kind),['inspect','adaccounts','accounts','inspect']);
+  V.validateResult(result,r.expected());
+  assert.equal(r.immutable(),before);
+});
+test('a complete page still rejects duplicate selected assets and a revoked final credential',async t=>{
+  const r=await ready(t);
+  r.f.state.afterGraph=(kind,value)=>kind==='accounts'?{data:[value.data[0],value.data[0]]}:value;
+  await assert.rejects(r.discover(),{code:'provider_failed'});
+
+  let inspections=0;
+  r.f.state.afterGraph=(kind,value)=>{
+    if(kind==='inspect'&&++inspections===2)value.data.is_valid=false;
+    return value;
+  };
+  await assert.rejects(r.discover(),{code:'credential_revoked'});
+  assert.equal(inspections,2);
+});
+test('a missing selected asset follows only the bounded cursor and never returns extra assets',async t=>{
   const r=await ready(t);let pages=0;
   r.f.state.afterGraph=(kind,value)=>{
     if(kind==='accounts'){
-      if(pages++===0)return {data:value.data,paging:{cursors:{after:'QA_ACTIVE_CURSOR'},next:'https://foreign.invalid/private?access_token='+TOKEN}};
-      assert.equal(r.f.state.lastAfter,'QA_ACTIVE_CURSOR');return {data:[{id:'402',name:'UNSELECTED_CONTINUATION'}]};
+      if(pages++===0)return {data:[{id:'402',name:'UNSELECTED_FIRST_PAGE'}],paging:{cursors:{after:'QA_ACTIVE_CURSOR'},next:'https://foreign.invalid/private?access_token='+TOKEN}};
+      assert.equal(r.f.state.lastAfter,'QA_ACTIVE_CURSOR');return {...value,paging:{cursors:{after:'UNNEEDED_CURSOR'},next:'https://foreign.invalid/ignored'}};
     }return value;
   };
   const result=(await r.discover()).data;
   assert.equal(pages,2);assert.deepEqual(result.assets.map(E.identity),r.grant.assets);assert(!JSON.stringify(result).includes('QA_ACTIVE_CURSOR'));
-  r.f.state.afterGraph=(kind,value)=>kind==='accounts'?{data:value.data,paging:{cursors:{after:'SAME'},next:'https://foreign.invalid'}}:value;
-  await assert.rejects(r.discover(),{code:'provider_failed'});
+  for(const complete of [false,true]){
+    pages=0;
+    r.f.state.afterGraph=(kind,value)=>{
+      if(kind!=='accounts')return value;pages++;
+      const data=complete&&pages===2?value.data:[{id:'402',name:'UNSELECTED_REPEAT'}];
+      return {data,paging:{cursors:{after:'SAME'},next:'https://foreign.invalid'}};
+    };
+    await assert.rejects(r.discover(),{code:'provider_failed'});
+    assert.equal(pages,2);
+  }
 });
 test('active result validator rejects substituted pins, extra assets, candidate fields, expired TTL and provider-only kinds',async t=>{
   const r=await ready(t),valid=(await r.discover()).data,expected=r.expected();
