@@ -13,6 +13,7 @@ const whatsappCoexistenceService = require('../services/whatsappCoexistence.serv
 const whatsappAccountComplianceService = require('../services/whatsappAccountCompliance.service');
 const whatsappAccountHealthService = require('../services/whatsappAccountHealth.service');
 const whatsappAuthorizedPhoneRefreshService = require('../services/whatsappAuthorizedPhoneRefresh.service');
+const { profilePictureUrl: safeProfilePictureUrl } = require('../../services/integrations-broker/src/whatsapp-profile-picture');
 const whatsappChannelBindingsService = require('../services/whatsappChannelBindings.service');
 const whatsappPermissionInventoryService = require('../services/whatsappPermissionInventory.service');
 const { buildWhatsappProfileAlignment } = require('../lib/whatsapp-profile-alignment');
@@ -2100,6 +2101,10 @@ exports.listPhones = async (req, res) => {
       String(req.query.effective_only || '').trim().toLowerCase()
     );
     const routingScopeClinicId = Number(req.query.routing_scope_clinic_id || 0) || null;
+    const includeGroupRouting = req.query.include_group_routing === '1';
+    if (req.query.include_group_routing !== undefined && (!includeGroupRouting || !groupIdFilter || routingScopeClinicId)) {
+      return res.status(400).json({ error: 'whatsapp_scope_invalid' });
+    }
     if (routingScopeClinicId) {
       await assertWhatsappTemplateClinicAccess({
         clinicId: routingScopeClinicId,
@@ -2118,13 +2123,14 @@ exports.listPhones = async (req, res) => {
       assetType: 'whatsapp_phone_number',
     };
 
+    let groupClinicIds = [];
     if (groupIdFilter) {
       const groupClinics = await Clinica.findAll({
         where: { grupoClinicaId: groupIdFilter },
         attributes: ['id_clinica'],
         raw: true,
       });
-      const groupClinicIds = groupClinics.map((c) => c.id_clinica).filter(Boolean);
+      groupClinicIds = groupClinics.map((c) => c.id_clinica).filter(Boolean);
       if (!groupClinicIds.length || !await hasMarketingClinicScopeAccess({ userId, clinicIds: groupClinicIds,
         access: 'read', globalAdminCheck: isWhatsappGlobalAdmin })) return res.status(403).json({ error: 'group_scope_not_allowed' });
       where[Op.or] = [
@@ -2229,6 +2235,9 @@ exports.listPhones = async (req, res) => {
     const routingBindingByAssetId = new Map(
       routingBindings.map((binding) => [Number(binding.asset_id), binding])
     );
+    const groupAssignments = includeGroupRouting
+      ? await whatsappChannelBindingsService.listGroupPhoneAssignments({ groupId: groupIdFilter, clinicIds: groupClinicIds, phones })
+      : null;
     const permissionStatuses = await whatsappPermissionInventoryService.read({
       clinicId: routingScopeClinicId || clinicIdFilter,
       phones,
@@ -2316,6 +2325,7 @@ exports.listPhones = async (req, res) => {
           clinic_id: scopeBinding.clinic_id,
           role: channelRouting.role,
         } : null,
+        ...(groupAssignments ? { routing_bindings: groupAssignments.get(Number(p.id)) || [] } : {}),
         clinic_id: p.clinicaId || null,
         clinic_name: clinica.nombre_clinica || null,
         clinic_avatar: clinica.url_avatar || null,
@@ -2337,7 +2347,7 @@ exports.listPhones = async (req, res) => {
         new_display_name: additionalData.newDisplayName || additionalData.new_display_name || null,
         new_name_status: additionalData.newNameStatus || additionalData.new_name_status || null,
         display_name_requested_at: additionalData.requestedDisplayNameAt || additionalData.displayNameRequestedAt || null,
-        profile_picture_url: additionalData.profilePictureUrl || null,
+        profile_picture_url: safeProfilePictureUrl(additionalData.profilePictureUrl),
         profile_description: additionalData.profileDescription || null,
         profile_category: additionalData.profileCategory || null,
         profile_email: additionalData.profileEmail || null,
@@ -2395,7 +2405,8 @@ exports.listPhones = async (req, res) => {
     const configurationTests = await require('../services/whatsappConfigurationTestEvidence.service').forAssets(
       phones, { bindings: configurationTestBindings });
     for (const phone of payload) phone.configuration_test = configurationTests.get(Number(phone.id)) || null;
-    return res.json({ phones: payload, preverified_enabled: PREVERIFIED_ENABLED, routing_enabled: true });
+    return res.json({ phones: payload, preverified_enabled: PREVERIFIED_ENABLED, routing_enabled: true,
+      ...(groupAssignments ? { group_routing_included: true } : {}) });
   } catch (err) {
     if (err?.statusCode === 403) return res.status(403).json({ error: 'whatsapp_clinic_scope_forbidden' });
     return res.status(503).json({ error: 'whatsapp_phones_unavailable' });

@@ -3,6 +3,7 @@
 // provider clients or operational sender configuration to render a receipt.
 const { fn, col, literal } = require('sequelize');
 const { createHash } = require('node:crypto');
+const { profilePictureUrl } = require('../../services/integrations-broker/src/whatsapp-profile-picture');
 const ROOT_ATTRIBUTES = Object.freeze(['id', 'assetType', 'phoneNumberId', 'wabaId',
   'assignmentScope', 'clinicaId', 'grupoClinicaId', 'metaAssetName', 'waVerifiedName',
   'quality_rating', 'messaging_limit', 'meta_billed_by', 'createdAt', 'updatedAt']);
@@ -127,7 +128,7 @@ function project(row, authorization, now, { clinic = null, group = null, routing
   for (const field of ['display_name_requested_at', 'registration_blocked_until', 'coexistence_contacts_sync_last_at',
     'coexistence_history_sync_last_at', 'verification_expiry_time']) result[field] = timestamp(v(field));
   for (const field of ['registration_requires_pin', 'is_on_biz_app', 'coexistence_can_send_api', 'is_test_number', 'is_preverified']) result[field] = boolean(v(field));
-  result.profile_picture_url = url(v('profile_picture_url')); result.profile_website = url(v('profile_website'));
+  result.profile_picture_url = profilePictureUrl(v('profile_picture_url')); result.profile_website = url(v('profile_website'));
   result.connection_mode = text(v('connection_mode') ?? v('legacy_connection_mode'), 64);
   result.business_verification_status = text(v('business_verification_status') ?? v('legacy_business_verification_status'), 64);
   return result;

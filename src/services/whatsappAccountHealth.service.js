@@ -334,7 +334,7 @@ async function recordObservationForAsset({
       // Materialize a profile and its health under the same identity lock. Do
       // not overwrite newer payment, routing or disconnect metadata.
       if (!expectedIdentity || require('../lib/whatsappManualDisconnect').current(asset)) return null;
-      for (const key of ['platformType', 'isOnBizApp', 'authorizedProfileObservedAt']) {
+      for (const key of ['platformType', 'isOnBizApp', 'authorizedProfileObservedAt', 'profilePictureUrl']) {
         if (profilePatch[key] !== null && profilePatch[key] !== undefined) additionalData[key] = profilePatch[key];
       }
       additionalData.registration = { ...safeObject(additionalData.registration), ...profilePatch.registration };

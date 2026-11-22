@@ -64,6 +64,7 @@ async function prepareGroupAssetSelectionGuard({ models, payload, groupId, clini
   const touched=Object.keys(sections(payload||{})).filter(kind=>KINDS[kind]&&sections(payload||{})[kind]);
   const shareOptions={attributes:['assetType','assetId','clinicaId','grupoClinicaId'],where:{grupoClinicaId:groupId,assetType:{[Op.in]:touched.map(kind=>ASSET_TYPES[kind])}},order:[['assetType','ASC'],['assetId','ASC'],['clinicaId','ASC']],raw:true,logging:false,limit:1001};
   const primaryFields=[...new Set(touched.flatMap(kind=>PRIMARY_FIELDS[kind]||[]))];
+  if (touched.includes('metaAds')) primaryFields.push('meta_ad_account_assignment_updated_at');
   let previousShares=[],previousGroup=null;
   try {
     if(touched.length)previousShares=await models.GroupAssetClinicAssignment.findAll(shareOptions);

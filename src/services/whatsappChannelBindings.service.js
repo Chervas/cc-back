@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../../models');
+const { Op } = require('sequelize');
 const {
   buildWhatsappRoutingAdditionalData,
   normalizeWhatsappChannelRole,
@@ -23,6 +24,36 @@ async function listClinicBindings(clinicId, options = {}) {
     ...(options.transaction ? { transaction: options.transaction } : {}),
     ...(options.raw === false ? {} : { raw: true }),
   });
+}
+
+async function listGroupPhoneAssignments({ groupId, clinicIds, phones }) {
+  const authorizedClinics = new Set(clinicIds.map(toInt).filter(Boolean));
+  const visiblePhones = new Map(phones.filter(phone => !phone.additionalData?.whatsappArchive?.archivedAt
+    && (phone.assignmentScope === 'group' && toInt(phone.grupoClinicaId) === groupId
+      || phone.assignmentScope === 'clinic' && authorizedClinics.has(toInt(phone.clinicaId))))
+    .map(phone => [toInt(phone.id), phone]).filter(([id]) => id !== null));
+  const byAsset = new Map();
+  if (!authorizedClinics.size || !visiblePhones.size) return byAsset;
+
+  const bindings = await WhatsappChannelBinding.findAll({
+    where: { clinic_id: { [Op.in]: [...authorizedClinics] }, asset_id: { [Op.in]: [...visiblePhones.keys()] }, is_active: true },
+    attributes: ['id', 'clinic_id', 'asset_id', 'role'],
+    order: [['clinic_id', 'ASC'], ['id', 'ASC']],
+    limit: authorizedClinics.size * 2,
+    raw: true,
+  });
+  for (const binding of bindings) {
+    const id = toInt(binding.id);
+    const clinicId = toInt(binding.clinic_id);
+    const assetId = toInt(binding.asset_id);
+    const phone = visiblePhones.get(assetId);
+    const role = normalizeWhatsappChannelRole(binding.role);
+    if (!id || !role || !authorizedClinics.has(clinicId) || !phone
+        || phone.assignmentScope === 'clinic' && toInt(phone.clinicaId) !== clinicId) continue;
+    if (!byAsset.has(assetId)) byAsset.set(assetId, []);
+    byAsset.get(assetId).push({ id, clinic_id: clinicId, role });
+  }
+  return byAsset;
 }
 
 function applyBindingToAsset(asset, binding) {
@@ -146,6 +177,7 @@ module.exports = {
   applyBindingToAsset,
   applyClinicBindings,
   listClinicBindings,
+  listGroupPhoneAssignments,
   removeClinicBinding,
   upsertClinicBinding,
 };

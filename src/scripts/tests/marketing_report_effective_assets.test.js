@@ -161,6 +161,47 @@ async function testExplicitlySharedMetaProfilesAreEffective() {
   assert.equal(assets.ad_accounts[0].last_checked_at, '2026-08-23T22:17:34.000Z');
 }
 
+async function testExplicitMetaDestinationsStopGroupFallbackForOneClinic() {
+  const groupRows = [
+    { id: 21, assetType: 'facebook_page', metaAssetId: '401' },
+    { id: 22, assetType: 'ad_account', metaAssetId: 'act_301' },
+    { id: 23, assetType: 'instagram_business', metaAssetId: '501' }
+  ].map(row => ({ ...row, assignmentScope: 'group', grupoClinicaId: 5, metaConnectionId: 7, isActive: true }));
+  const directPage = { id: 24, assetType: 'facebook_page', metaAssetId: '402', assignmentScope: 'clinic',
+    clinicaId: 36, metaConnectionId: 8, isActive: true };
+  const after = {
+    id_grupo: 5, meta_ad_account_assignment_updated_at: new Date(),
+    facebook_assignment_mode: 'clinic', facebook_assignment_updated_at: new Date(),
+    instagram_assignment_mode: 'group', instagram_primary_asset_id: 23,
+  };
+  const fixtures = {
+    assetModel: { async findAll() { return [...groupRows, directPage]; } },
+    assignmentModel: { async findAll({ where }) {
+      return where.clinicaId === 37 ? [
+        { assetId: 21, assetType: 'meta.facebook_page' }, { assetId: 22, assetType: 'meta.ad_account' }
+      ] : [];
+    } },
+    groupModel: { async findByPk() { return after; } },
+  };
+
+  const removed = await listScopedMetaAssets(clinicScope, fixtures);
+  assert.deepEqual(removed.ad_accounts, []);
+  assert.deepEqual(removed.facebook_pages.map(row => row.mapping_id), [24]);
+  assert.deepEqual(removed.instagram_business.map(row => row.mapping_id), [23]);
+
+  const sibling = await listScopedMetaAssets({ ...clinicScope, clinic_id: 37, clinic_ids: [37] }, {
+    ...fixtures, assetModel: { async findAll() { return groupRows; } },
+  });
+  assert.deepEqual(sibling.ad_accounts.map(row => row.mapping_id), [22]);
+  assert.deepEqual(sibling.facebook_pages.map(row => row.mapping_id), [21]);
+
+  const old = await listScopedMetaAssets(clinicScope, {
+    ...fixtures, groupModel: { async findByPk() { return { id_grupo: 5 }; } },
+  });
+  assert.deepEqual(old.ad_accounts.map(row => row.mapping_id), [22]);
+  assert.deepEqual(old.facebook_pages.map(row => row.mapping_id).sort(), [21, 24]);
+}
+
 async function testGooglePropertiesResolveDirectSharedAndGroupPrimary() {
   const groupModel = {
     async findByPk(groupId) {
@@ -515,6 +556,7 @@ async function testSeoV15HelpersStayBackendOwned() {
 async function run() {
   await testExplicitlySharedGoogleAccountIsEffective();
   await testExplicitlySharedMetaProfilesAreEffective();
+  await testExplicitMetaDestinationsStopGroupFallbackForOneClinic();
   await testGooglePropertiesResolveDirectSharedAndGroupPrimary();
   await testInventoryResolverIsReadOnly();
   await testReportsResolveReadOnlyAndKeepHistoricalAdsScope();

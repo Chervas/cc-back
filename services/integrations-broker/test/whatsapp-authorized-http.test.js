@@ -33,6 +33,21 @@ test('Authorized transport refuses arbitrary Graph payloads, endpoints and token
     {json:{...message(),interactive:{...message().interactive,type:'flow'}}}])await assert.rejects(http({...input(),...change}),{code:'invalid_request'});
   assert.equal(f.calls.length,0);
 });
+test('Authorized business-profile picture is a fixed GET requesting only the image URL', async () => {
+  const f = fixture({ response: { data: [{ profile_picture_url: 'https://pps.whatsapp.net/v/photo.jpg' }] } });
+  const http = createWhatsappAuthorizedHttp({ request: f.request });
+  const metadata = { ...input(), action: 'profile_picture', json: undefined };
+  await http(metadata);
+  const call = f.calls[0];
+  const url = new URL('https://graph.facebook.com' + call.options.path);
+  assert.equal(call.options.method, 'GET');
+  assert.equal(url.pathname, '/v24.0/401/whatsapp_business_profile');
+  assert.equal(url.searchParams.get('fields'), 'profile_picture_url');
+  assert.equal(call.body, undefined);
+  assert(!url.href.includes(TOKEN));
+  await assert.rejects(http({ ...metadata, json: { profile_picture_url: 'https://other.invalid/photo' } }), { code: 'invalid_request' });
+  assert.equal(f.calls.length, 1);
+});
 test('photo upload uses fixed Graph phone/media with multipart bytes only in memory, followed by an ID-only message', async () => {
   const { createHash } = require('node:crypto');
   const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jB1sAAAAASUVORK5CYII=','base64');

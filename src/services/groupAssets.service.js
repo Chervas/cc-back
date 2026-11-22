@@ -610,6 +610,7 @@ async function getGroupConfig(groupId) {
       },
       ads: {
         meta: metaAdsAccounts,
+        metaAssignmentUpdatedAt: group.meta_ad_account_assignment_updated_at ?? null,
         google: googleAdsAccounts
       }
     },
@@ -1005,6 +1006,10 @@ async function _updateMetaAdAccounts({ mode, primaryAccountId, clinicAssignments
   }
 
   const accountIds = accounts.map(acc => acc.id);
+  await GrupoClinica.update(
+    { meta_ad_account_assignment_updated_at: new Date() },
+    { where: { id_grupo: groupId }, transaction }
+  );
 
   if (mode === 'group') {
     const parsedPrimary = primaryAccountId != null ? Number(primaryAccountId) : null;

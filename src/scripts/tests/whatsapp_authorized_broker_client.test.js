@@ -193,6 +193,20 @@ test('permission status uses the exact authorized binding and a bounded secretle
   assert.deepEqual(f.calls[0].payload, { authorizationId: binding().authorizationId, phoneId: '401' });
   assert.equal(f.calls[0].tenantRef, 'clinic:123'); assert.equal(f.calls[0].assetRef, 'wa-phone:401');
 });
+test('authorized photo refresh preserves basic health reads against an older owner', async () => {
+  const f = fixture({ createTransport: () => ({ execute: async command => {
+    f.calls.push(command);
+    if (command.payload.includeProfilePicture === true) throw Object.assign(new Error('invalid_request'), { code: 'invalid_request' });
+    return { requestId: command.requestId, replayed: false, data: { id: '401', status: 'CONNECTED' } };
+  } }) });
+  assert.equal((await f.client.profile(123, 456, { includeProfilePicture: true })).status, 'CONNECTED');
+  assert.deepEqual(f.calls.map(call => call.payload), [
+    { authorizationId: binding().authorizationId, phoneId: '401', includeProfilePicture: true },
+    { authorizationId: binding().authorizationId, phoneId: '401' },
+  ]);
+  assert.equal(f.calls[1].assetRef, f.calls[0].assetRef);
+  assert.equal(f.calls[1].operation, f.calls[0].operation);
+});
 test('unbound or forged clinic, asset, authorization and revision never dispatch', async () => {
   for (const forged of [{ clinicId: 999 }, { assetId: 999 }, { phoneId: '402' }, { wabaId: '502' }, { revision: 2 },
     { connectionRef: 'wa:foreign' }, { authorizationId: 'b1234567-1234-4234-8234-123456789abc' }, { accessToken: 'SYNTHETIC_FORBIDDEN' }]) {

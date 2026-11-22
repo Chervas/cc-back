@@ -38,6 +38,12 @@ const META_GROUP_ASSET_TYPE_BY_ASSET_TYPE = Object.freeze({
   instagram_business: GROUP_ASSET_TYPES.META_INSTAGRAM_BUSINESS
 });
 
+const META_GROUP_DESTINATION_FIELDS = Object.freeze({
+  ad_account: { updated: 'meta_ad_account_assignment_updated_at' },
+  facebook_page: { updated: 'facebook_assignment_updated_at', mode: 'facebook_assignment_mode', primary: 'facebook_primary_asset_id' },
+  instagram_business: { updated: 'instagram_assignment_updated_at', mode: 'instagram_assignment_mode', primary: 'instagram_primary_asset_id' }
+});
+
 const GOOGLE_PROPERTY_ASSET_CONFIG = Object.freeze({
   search_console: Object.freeze({
     assetType: GROUP_ASSET_TYPES.GOOGLE_SEARCH_CONSOLE,
@@ -1033,9 +1039,32 @@ async function listScopedMetaAssets(scope, dependencies = {}) {
     order: [['updatedAt', 'DESC']],
     raw: true
   });
+  const groupId = getScopeGroupId(scope);
+  const clinicId = getScopeClinicId(scope);
+  const groupOwned = row => row.assignmentScope === 'group' && parseInteger(row.grupoClinicaId) === groupId;
+  let eligibleRows = rawRows;
+  if (getScopeAssignmentScope(scope) === 'clinic' && groupId && clinicId && rawRows.some(groupOwned)) {
+    const groupModel = dependencies.groupModel || GrupoClinica;
+    const policy = await groupModel.findByPk(groupId, {
+      attributes: ['id_grupo', ...Object.values(META_GROUP_DESTINATION_FIELDS).flatMap(fields => Object.values(fields))],
+      raw: true
+    });
+    const shares = new Set(assignmentRows.map(row => `${row.assetType}:${parseInteger(row.assetId)}`));
+    eligibleRows = rawRows.filter(row => {
+      if (!groupOwned(row)) return true;
+      if (!policy || parseInteger(policy.id_grupo) !== groupId) return false;
+      const fields = META_GROUP_DESTINATION_FIELDS[row.assetType];
+      const mappingId = parseInteger(row.id);
+      if (fields.mode && policy[fields.mode] === 'group' && policy[fields.primary] != null) {
+        return parseInteger(policy[fields.primary]) === mappingId;
+      }
+      if (!policy[fields.updated]) return true;
+      return shares.has(`${META_GROUP_ASSET_TYPE_BY_ASSET_TYPE[row.assetType]}:${mappingId}`);
+    });
+  }
   const rows = markExplicitlyAssignedRows(
     scope,
-    rawRows,
+    eligibleRows,
     assignmentRows,
     (row) => META_GROUP_ASSET_TYPE_BY_ASSET_TYPE[row.assetType]
   );

@@ -342,7 +342,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       if(!latest||!sameBinding(captured,latest))fail('whatsapp_authorized_binding_changed');
       return operation===TM.LIST ? TM.project(operation,{...result.data,paging:result.data?.after?{next:true,cursors:{after:result.data.after}}:null}) : TM.project(operation,result.data);
     },
-    async profile(clinicId, assetId) {
+    async profile(clinicId, assetId, { includeProfilePicture = false } = {}) {
       runtime.namespace(environment());
       const P = require('../../services/integrations-broker/src/whatsapp-authorized-profile');
       const captured = await binding(clinicId, assetId);
@@ -352,14 +352,27 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       if (!before || !sameBinding(captured, before) || JSON.stringify(read()) !== JSON.stringify(config)) {
         fail('whatsapp_authorized_binding_changed');
       }
-      const requestId = randomUUID();
-      const result = await createTransport(config).execute({
-        requestId,
-        tenantRef: 'clinic:' + captured.clinicId,
-        connectionRef: captured.connectionRef,
-        assetRef: 'wa-phone:' + captured.phoneId,
-        operation: P.READ,
-        payload: { authorizationId: captured.authorizationId, phoneId: captured.phoneId },
+      const readProfile = withPicture => {
+        const requestId = randomUUID();
+        return createTransport(config).execute({
+          requestId,
+          tenantRef: 'clinic:' + captured.clinicId,
+          connectionRef: captured.connectionRef,
+          assetRef: 'wa-phone:' + captured.phoneId,
+          operation: P.READ,
+          payload: { authorizationId: captured.authorizationId, phoneId: captured.phoneId,
+            ...(withPicture ? { includeProfilePicture: true } : {}) },
+        }).then(result => ({ requestId, result }));
+      };
+      const { requestId, result } = await readProfile(includeProfilePicture).catch(async error => {
+        // Older owners reject the optional field before making the provider
+        // call. Their basic read stays usable during deployment of the owner.
+        if (!includeProfilePicture || error?.code !== 'invalid_request') throw error;
+        const current = await binding(captured.clinicId, captured.assetId);
+        if (!current || !sameBinding(captured, current) || JSON.stringify(read()) !== JSON.stringify(config)) {
+          fail('whatsapp_authorized_binding_changed');
+        }
+        return readProfile(false);
       });
       const latest = await binding(captured.clinicId, captured.assetId);
       if (!latest || !sameBinding(captured, latest) || !exact(result, ['requestId','data','replayed'])
