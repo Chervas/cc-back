@@ -9,7 +9,7 @@ function createActiveInventory({models,sessions,client,now=()=>new Date(),enable
  const bindings=require('./metaMarketingEnrollmentBinding.service').createBindings({models,sessions,now}),credentials=F.createEffectiveCredentials({models,now});
  const audit=providedAudit||require('./platformAudit.repository').createRepository(models.PlatformAuditEvent);
  const gate=()=>{if(!enabled())C.fail('meta_enrollment_disabled',503);};
- async function capture(input,id,transaction){
+ async function capture(input,id,transaction,includeAvatars=false){
   await scope.authorize(input,transaction);
   const raw=await models.MetaMarketingEnrollmentRequest.findByPk(id,{transaction,lock:transaction.LOCK.UPDATE,logging:false});
   if(!raw||raw.scope_key!==input.scopeKey)C.fail('meta_enrollment_scope_forbidden',403);
@@ -18,7 +18,8 @@ function createActiveInventory({models,sessions,client,now=()=>new Date(),enable
   const flow=await models.MetaMarketingOAuthRequest.findByPk(row.flow_id,{transaction,lock:transaction.LOCK.UPDATE,logging:false});
   const effective=await credentials.resolve(row,flow,transaction);
   return {row,effective,authorityDigest:authority.digest,payload:{enrollmentId:id,scopeDigest:row.scope_digest,selectionDigest:row.selection_digest,
-   clinicSetDigest:C.hash(row.clinic_ids),assetSetDigest:F.assetSetDigest(row.selected),expectedEpoch:effective.epoch,expectedVersionId:effective.versionId,expectedCandidateDigest:effective.digest}};
+   clinicSetDigest:C.hash(row.clinic_ids),assetSetDigest:F.assetSetDigest(row.selected),expectedEpoch:effective.epoch,expectedVersionId:effective.versionId,
+   expectedCandidateDigest:effective.digest,...(includeAvatars?{includeAvatars:true}:{})}};
  }
  async function record(value,input,id,reason,transaction,result=null){
   const health=await audit.health(now(),{includeUnresolved:false,transaction});
@@ -35,12 +36,12 @@ function createActiveInventory({models,sessions,client,now=()=>new Date(),enable
   const value=await capture(input,row.enrollment_id,transaction);
   return {mode:'active',enrollmentId:row.enrollment_id,epoch:value.effective.epoch,versionId:value.effective.versionId};
  }
- async function assets(input,id){
+ async function assets(input,id,includeAvatars=false){
   gate();if(!C.UUID.test(id))C.fail('meta_enrollment_invalid',400);
   input=require('./metaMarketingTransactionOrder.service').pinInput(input);const requestId=randomUUID(),startedAt=+now();let captured;
   const authorized=work=>order.enrollment(input,id,async({transaction,enrollment})=>{
    gate();if(!enrollment)C.fail('meta_enrollment_scope_forbidden',403);
-   const fresh=await capture(input,id,transaction);
+   const fresh=await capture(input,id,transaction,includeAvatars);
    if(captured&&(fresh.authorityDigest!==captured.authorityDigest||JSON.stringify(fresh.payload)!==JSON.stringify(captured.payload)))C.fail('meta_enrollment_scope_changed',409);
    return work?work(fresh,transaction):fresh;
   });

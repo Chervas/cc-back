@@ -52,6 +52,36 @@ test('active inventory returns exactly selected identities and typed metadata wi
   assert.deepEqual(events.map(event=>event.action),['integration.requested','integration.completed']);
   for(const hidden of [TOKEN,APP,'UNSELECTED',r.flow.payload.state])assert(!JSON.stringify([result,events]).includes(hidden));
 });
+test('optional pictures resolve only on selected social assets and reject external or credential-bearing URLs',async t=>{
+  const r=await ready(t,{refs:[...REFS,'meta-instagram_business:501']}),before=r.immutable();
+  const facebook='https://scontent.example.fbcdn.net/qa-profile.jpg?oe=123';
+  const instagram='https://scontent.example.cdninstagram.com/qa-profile.jpg';
+  r.f.state.afterGraph=(kind,value)=>{
+    if(kind==='accounts'){
+      value.data[0].picture={data:{url:facebook,is_silhouette:false}};
+      value.data[0].instagram_business_account.profile_picture_url=instagram;
+      value.data.push({id:'402',name:'NOT_GRANTED',picture:{data:{url:facebook}}});
+    }
+    return value;
+  };
+  const result=(await r.discover({includeAvatars:true})).data;
+  assert.equal(result.assets.find(v=>v.kind==='facebook_page').avatarUrl,facebook);
+  assert.equal(result.assets.find(v=>v.kind==='instagram_business').avatarUrl,instagram);
+  assert.equal(result.assets.find(v=>v.kind==='ad_account').avatarUrl,undefined);
+  assert.deepEqual(result.assets.map(E.identity),r.grant.assets);
+  V.validateResult(result,{...r.expected(),includeAvatars:true});
+  assert.throws(()=>V.validateResult(result,r.expected()),{code:'provider_failed'});
+  for(const url of ['https://fbcdn.net.example.test/photo','https://scontent.example.fbcdn.net/photo?%61ccess_token=QA','https://user@scontent.example.fbcdn.net/photo']){
+    const unsafe=structuredClone(result);unsafe.assets.find(v=>v.kind==='facebook_page').avatarUrl=url;
+    assert.throws(()=>V.validateResult(unsafe,{...r.expected(),includeAvatars:true}),{code:'provider_failed'});
+  }
+  let attempts=0;
+  r.f.state.afterGraph=(kind,value)=>kind==='accounts'&&++attempts===1?{error:{code:100}}:value;
+  const withoutPictures=(await r.discover({includeAvatars:true})).data;
+  assert.equal(attempts,2);
+  assert(withoutPictures.assets.every(asset=>!Object.hasOwn(asset,'avatarUrl')));
+  assert.equal(r.immutable(),before);
+});
 test('epoch two inventory borrows only the effective retained flow after the original expires and AWSPENDING moves',async t=>{
   const r=await ready(t);r.f.state.clock+=1800000;
   const one=await r.stageRenewal();await one.activate();r.f.state.clock+=1800001;
