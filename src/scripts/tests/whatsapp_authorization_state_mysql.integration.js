@@ -40,8 +40,16 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const sessionsApi = require('../../services/accessSession.service');
   // The email-login suite validates delivery and one-use code verification.
   // Here seed fictitious durable proof to exercise the real session verifier.
-  const config = () => ({ mode: 'enforce', emailMfaMode: 'off', ttl: 3600, secret: 'FICTITIOUS_JWT_KEY' });
-  const sessions = sessionsApi.createService({ models, now, config });
+  const config = () => ({ mode: 'enforce', emailMfaMode: 'enforce', ttl: 3600, secret: 'FICTITIOUS_JWT_KEY' });
+  const revokedDevices = new Set();
+  const trustedDevices = { verifySession: async (session, user, { transaction }) => {
+    assert(transaction);
+    assert.equal(session.user_id, user.id_usuario);
+    if (revokedDevices.has(session.trusted_device_id)) {
+      throw Object.assign(Error('auth_trusted_device_invalid'), { code: 'auth_trusted_device_invalid' });
+    }
+  } };
+  const sessions = sessionsApi.createService({ models, now, config, trustedDevices });
   const repo = require('../../services/platformAudit.repository').createRepository(A);
   const keys = [];
   const make = (extra = {}) => require('../../services/whatsappAuthorizationState.service').createService({ models, sessions, now,
@@ -56,7 +64,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     const sessionRef = randomUUID(); const exp = now().getTime() + ttl;
     await models.AuthSession.create({ session_id: sessionRef, user_id: userId, issued_at: now(), expires_at: new Date(exp), absolute_expires_at: new Date(exp),
       credential_binding: sessions.credentialBinding(user), state: 'active', authentication_method: method,
-      email_verified_at: method === 'password_email' ? now() : null, email_challenge_id: method === 'password_email' ? randomUUID() : null });
+      email_verified_at: method === 'password_email' || method === 'password_trusted_device' ? now() : null,
+      email_challenge_id: method === 'password_email' ? randomUUID() : null,
+      trusted_device_id: method === 'password_trusted_device' ? randomUUID() : null });
     return { userId, sessionRef, sessionExpiresAt: exp / 1000 };
   }
   const issue = (who, scope = { type: 'group', id: 9 }, api = service, requestId = randomUUID()) => api.issue({ ...who, requestId, scope });
@@ -83,9 +93,15 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.equal((await R.findByPk(secondFlow.requestId)).state, 'awaiting');
   report.checks.push('Foreign actor, changed scope and false state rejected; two concurrent claimants yield one winner; restart or another user/scope/state cannot exchange the same code again');
   const plain = await actor({ method: 'password' });
-  await sessions.verifyReference({ userId: plain.userId, sessionRef: plain.sessionRef, expiresAt: new Date(plain.sessionExpiresAt * 1000) });
   await assert.rejects(issue(plain), codeIs('auth_invalid'));
-  report.checks.push('WhatsApp explicitly requires email proof even when injected managed-session configuration allows password-only sessions');
+  const remembered = await actor({ method: 'password_trusted_device' });
+  const rememberedFlow = await issue(remembered, { type: 'clinic', id: 71 });
+  assert.equal((await claim(remembered, rememberedFlow)).mayExchange, true);
+  assert.equal((await service.resume(inputFor(remembered, rememberedFlow))).status, 'claimed');
+  revokedDevices.add((await models.AuthSession.findByPk(remembered.sessionRef)).trusted_device_id);
+  await assert.rejects(service.resume(inputFor(remembered, rememberedFlow)), codeIs('auth_invalid'));
+  assert.equal((await R.findByPk(rememberedFlow.requestId)).state, 'claimed');
+  report.checks.push('Enforced login rejects password-only sessions. Trusted-device login can authorize and resume a new number until device revocation');
   const rotating = make({ config: () => ({ key: Buffer.alloc(32, 8) }) });
   await assert.rejects(rotating.status(inputFor(who, flow)), codeIs('whatsapp_authorization_unavailable'));
   const row = await R.findByPk(flow.requestId); await row.update({ scope_digest: 'f'.repeat(64) });

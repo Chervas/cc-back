@@ -41,7 +41,7 @@ function createService({ models, sessions, broker = configuredClient(), config =
   const keyFor = scope => scope.type + ':' + scope.id;
   async function verifyActor(actor) {
     // Regular MFA or a valid trusted-device session is sufficient for reading.
-    // requireEmail:true is reserved for authorizing a new credential.
+    // Read-only access can use a delegated reference; new number authorization uses an own session.
     await sessionApi().verifyReference({ userId:actor.userId,sessionRef:actor.sessionRef,
       expiresAt:new Date(actor.sessionExpiresAt*1000) }, { requireEmail:false, purpose:'whatsapp.authorization.read' });
   }

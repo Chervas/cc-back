@@ -13,6 +13,7 @@ function fixture() {
   const at = new Date('2026-11-13T10:00:00.000Z'), key = Buffer.alloc(32, 7);
   const actor = { userId: 501, sessionRef: randomUUID(), sessionExpiresAt: at.getTime() / 1000 + 3600 };
   const rows = new Map(), events = [], writes = [], sessions = [];
+  const remembered = new Set(), invalid = new Set();
   let tail = Promise.resolve();
   const models = {
     sequelize: { transaction: (options, work) => {
@@ -38,11 +39,16 @@ function fixture() {
     },
   };
   const make = () => createService({ models, now: () => new Date(at), config: () => ({ key: Buffer.from(key) }),
-    sessions: { verifyReference: async (input, options) => { sessions.push(options); assert.equal(options.requireEmail, true); } },
+    sessions: { verifyNormalReference: async (input, options) => {
+      sessions.push({ sessionRef: input.sessionRef, requireEmail: options.requireEmail });
+      assert(options.transaction);
+      if (invalid.has(input.sessionRef)) C.fail('auth_invalid', 401);
+      if (options.requireEmail && remembered.has(input.sessionRef)) C.fail('auth_email_verification_required', 403);
+    } },
     audit: { health: async () => ({ pending: 0, oldestAgeSeconds: 0 }), append: async row => events.push(row) } });
   const input = () => ({ ...actor, requestId: randomUUID(), scope: { type: 'clinic', id: 71 } });
   const ref = requestId => ({ ...actor, requestId });
-  return { rows, events, writes, sessions, input, ref, make, actor, key, at };
+  return { rows, events, writes, sessions, input, ref, make, actor, key, at, remembered, invalid };
 }
 
 test('Mode is an optional exact begin intent; it is never accepted on claim/status/cancel or as a policy', () => {
@@ -101,6 +107,28 @@ test('Mode survives issue replay, service reload, claim, resume and cancellation
     assert.equal(f.rows.get(input.requestId).onboarding_mode, mode);
     assert.deepEqual(f.events.map(row => row.reason), ['state_issued', 'state_claimed', 'state_cancelled']);
   }
+});
+
+test('Remembered own login authorizes a new number without another email code, while another user still needs email proof for assisted completion', async () => {
+  const f = fixture(), input = { ...f.input(), mode: 'coexistence' };
+  f.remembered.add(input.sessionRef);
+  const issued = await f.make().issue(input);
+  const claim = { ...f.ref(input.requestId), state: issued.state, code: 'FICTITIOUS_REMEMBERED_LOGIN' };
+  assert.equal((await f.make().claim(claim)).mayExchange, true);
+  await assert.rejects(f.make().claim(claim), { code: 'whatsapp_authorization_consumed' });
+
+  const current = { ...f.ref(input.requestId), sessionRef: randomUUID() };
+  f.remembered.add(current.sessionRef);
+  await assert.rejects(f.make().status(current), { code: 'whatsapp_authorization_forbidden' });
+  assert.equal((await f.make().resume(current)).status, 'claimed');
+  assert(f.sessions.every(session => session.requireEmail === false));
+
+  const colleague = { ...current, userId: 502, sessionRef: randomUUID() };
+  f.remembered.add(colleague.sessionRef);
+  await assert.rejects(f.make().resume(colleague), { code: 'auth_email_verification_required' });
+  f.invalid.add(current.sessionRef);
+  await assert.rejects(f.make().resume(current), { code: 'auth_invalid' });
+  assert.deepEqual(f.writes, ['create', 'update']);
 });
 
 test('Concurrent issue cannot change, add or omit the mode of the winning immutable attempt', async () => {
