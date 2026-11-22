@@ -225,4 +225,4 @@ async function main(filename,{awsFactory=connectAws,http,now=Date.now,report=()=
 if(require.main===module)main(process.argv[2]).then(runtime=>{
  const stop=()=>runtime.close().catch(()=>{process.exitCode=1;});process.once('SIGTERM',stop);process.once('SIGINT',stop);
 }).catch(()=>{process.stderr.write('GOOGLE_FIRST_OWNER_START_FAILED\n');process.exitCode=1;});
-module.exports={main,validateConfig,COHORT,PURPOSE,MAX_CONNECTIONS,MAX_ACTIVE,MAX_PER_MINUTE};
+module.exports={main,validateConfig,COHORT,PURPOSE,MAX_CONNECTIONS,MAX_ACTIVE,MAX_PER_MINUTE,scopeAdditionMaintenance:Object.freeze({authorityDigest,acquireLock,preflightState,privateFile,privateDirectory,MARKER,PURPOSE})};
