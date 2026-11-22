@@ -11,14 +11,17 @@ const F = require('../../services/metaMarketingEffectiveCredential.service');
 const I = require('../../../services/integrations-broker/src/meta-marketing-instagram-extension-contract');
 const { configuration, availableFor } = require('../../services/metaMarketingInstagramExtension.service');
 
-function fixture() {
+function fixture({ sessionMs = 3600000, tokenMs = null, dataAccessMs = 86400000 } = {}) {
   const clock = +new Date('2030-01-01T12:00:00Z');
   const now = () => new Date(clock);
   const digest = 'a'.repeat(64);
-  const input = { scopeKey: 'clinic:77', actorId: 2, sessionRef: randomUUID(), sessionExpiresAt: new Date(clock + 3600000) };
+  const input = { scopeKey: 'clinic:77', actorId: 2, sessionRef: randomUUID(), sessionExpiresAt: new Date(clock + sessionMs) };
   const scopes = ['ads_read','pages_read_engagement','public_profile'];
   const flow = { flow_id: randomUUID(), app_id: '101', scopes: JSON.stringify(scopes),
-    redirect_uri: 'https://auth.example.invalid/oauth/meta/marketing/callback', expires_at: new Date(clock + 86400000) };
+    redirect_uri: 'https://auth.example.invalid/oauth/meta/marketing/callback', expires_at: new Date(clock - 600000) };
+  flow.candidate_metadata = JSON.stringify({ versionId: flow.flow_id, digest, appId: flow.app_id, subjectId: '201',
+    tokenType: 'USER', scopes, expiresAt: tokenMs === null ? null : clock + tokenMs,
+    dataAccessExpiresAt: dataAccessMs === null ? null : clock + dataAccessMs, granularScopes: [] });
   const selected = C.assets([{ assetRef: 'meta-ad_account:301', kind: 'ad_account', id: '301', parentPageId: null },
     { assetRef: 'meta-facebook_page:401', kind: 'facebook_page', id: '401', parentPageId: null }]);
   const enrollment = { enrollment_id: randomUUID(), flow_id: flow.flow_id, session_ref: randomUUID(), prepare_request_id: randomUUID(),
@@ -28,8 +31,17 @@ function fixture() {
     mapping_ids: '[31,32]', session_expires_at: input.sessionExpiresAt, requested_at: now(), updated_at: now(), next_attempt_at: now(),
     prepared_at: now(), activated_at: now(), revoked_at: null, attempts: 0, selection_digest: digest, last_error: null,
     lease_token: null, lease_until: null, state: 'active' };
-  const effective = { epoch: 0, versionId: flow.flow_id, digest, metadata: { tokenType: 'USER' } };
   const data = { row: null, status: null, calls: [], live: true, legacyMapping: null, loseConfirmResponse: false, providerRejected: false };
+  function renewCredential() {
+    const renewalId = randomUUID();
+    const candidate = { ...JSON.parse(flow.candidate_metadata), versionId: renewalId, digest: 'c'.repeat(64) };
+    const receipt = JSON.stringify({ status: 'active', activationApplied: true, renewalId, enrollmentId: enrollment.enrollment_id,
+      effectiveCredential: { epoch: 1, versionId: renewalId, digest: candidate.digest, metadata: F.split(candidate) } });
+    const metadata = JSON.stringify(candidate);
+    data.renewal = { ...enrollment, state: 'active', renewal_id: renewalId, expected_epoch: 0, candidate_metadata: metadata, owner_receipt: receipt };
+    data.credential = { enrollment_id: enrollment.enrollment_id, epoch: 1, renewal_id: renewalId, version_id: renewalId,
+      candidate_digest: candidate.digest, candidate_metadata: metadata, owner_receipt_digest: C.hash(receipt) };
+  }
   const transaction = { LOCK: { UPDATE: true } };
   function journal() {
     return { ...structuredClone(data.row), get() { return structuredClone(data.row); }, async update(patch) {
@@ -46,6 +58,8 @@ function fixture() {
     },
     MetaMarketingEnrollmentRequest: { async findByPk() { return enrollment; } },
     MetaMarketingOAuthRequest: { async findByPk() { return flow; } },
+    MetaMarketingEffectiveCredential: { async findByPk() { return data.credential; } },
+    MetaMarketingCredentialRenewal: { async findByPk() { return data.renewal; } },
     ClinicMetaAsset: { async findOne() { return data.legacyMapping; } },
   };
   const source = path.resolve(__dirname, '../../services/metaMarketingInstagramExtension.service.js');
@@ -63,7 +77,6 @@ function fixture() {
         return work({ transaction, enrollment });
       },
     }) },
-    './metaMarketingEffectiveCredential.service': { ...F, createEffectiveCredentials: () => ({ async resolve() { return effective; } }) },
     './metaMarketingEnrollmentBinding.service': { createBindings: () => ({ async committed() { return { digest }; } }) },
   })[name] || originalRequire(name);
   loaded._compile(fs.readFileSync(source, 'utf8'), source);
@@ -100,7 +113,7 @@ function fixture() {
   const service = loaded.exports.createService({ models, sessions: {}, client, now, returnOrigin: 'https://app.example.invalid',
     settings: () => ({ scopeKey: input.scopeKey, parentPageId: '401' }) });
   const unchanged = JSON.stringify({ flow, enrollment });
-  return { service, data, input, candidate, effective, authUrl: loaded.exports.authUrl, receipt: loaded.exports.receipt, flow, now,
+  return { service, data, input, candidate, renewCredential, authUrl: loaded.exports.authUrl, receipt: loaded.exports.receipt, flow, now,
     unchanged: () => assert.equal(JSON.stringify({ flow, enrollment }), unchanged) };
 }
 
@@ -125,9 +138,38 @@ test('second consent for Instagram is staged, session-bound and confirmed explic
   assert.equal(f.data.row.status, 'active');
   assert.equal(f.data.calls.filter(name => name === 'confirm').length, 1);
   assert(!JSON.stringify(f.data.row).includes('FICTITIOUS_CODE'));
-  f.effective.epoch = 1;
+  f.renewCredential();
   assert.equal((await f.service.overview(f.input)).status, 'active');
   f.unchanged();
+});
+
+test('extension starts after the original OAuth window and respects the current session, token and data-access deadlines', async () => {
+  for (const [limits, expectedMs] of [
+    [{}, 600000],
+    [{ sessionMs: 90000 }, 90000],
+    [{ tokenMs: 120000, dataAccessMs: null }, 120000],
+    [{ tokenMs: 150000, dataAccessMs: 60000 }, 60000],
+    [{ dataAccessMs: null }, 600000],
+  ]) {
+    const f = fixture(limits);
+    assert(+f.flow.expires_at < +f.now());
+    assert.equal((await f.service.begin(f.input)).status, 'awaiting');
+    assert.equal(+f.data.row.expires_at, +f.now() + expectedMs);
+    f.unchanged();
+  }
+});
+
+test('an expired current Meta credential is a conflict and an expired CRM session is unauthorized', async () => {
+  for (const [limits, error] of [
+    [{ tokenMs: 0 }, { code: 'meta_instagram_expired', httpStatus: 409 }],
+    [{ dataAccessMs: 0 }, { code: 'meta_instagram_expired', httpStatus: 409 }],
+    [{ sessionMs: 0 }, { code: 'meta_instagram_session_required', httpStatus: 401 }],
+  ]) {
+    const f = fixture(limits);
+    await assert.rejects(f.service.begin(f.input), error);
+    assert.equal(f.data.row, null);
+    assert.deepEqual(f.data.calls, []);
+  }
 });
 
 test('denial, inactive CRM session and prior legacy claims do not replace any connections', async () => {
