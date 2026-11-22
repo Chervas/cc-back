@@ -17,11 +17,13 @@ test('authorized phone refresh materializes the broker profile without a CRM tok
     async update(values) { updates.push(values); Object.assign(this, values); },
   };
   const service = createService({
-    broker: { profile: async (clinicId, assetId) => {
+    broker: { profile: async (clinicId, assetId, options) => {
       assert.equal(clinicId, 56);
       assert.equal(assetId, 398);
+      assert.deepEqual(options, { includeProfilePicture: true });
       return { id: '401', status: 'CONNECTED', codeVerificationStatus: 'VERIFIED', qualityRating: 'GREEN',
-        isOnBizApp: false, platformType: 'CLOUD_API', displayPhoneNumber: '+34 600 000 401', verifiedName: 'Synthetic Clinic' };
+        isOnBizApp: false, platformType: 'CLOUD_API', displayPhoneNumber: '+34 600 000 401', verifiedName: 'Synthetic Clinic',
+        profilePictureUrl: 'https://pps.whatsapp.net/v/photo.jpg' };
     } },
     healthService: {
       summarizeAssetHealth: () => ({ state: 'stale', can_send: true }),
@@ -33,6 +35,7 @@ test('authorized phone refresh materializes the broker profile without a CRM tok
   assert.equal(updates.length, 0, 'The health transaction owns the guarded profile write');
   assert.equal(observations[0].profilePatch.displayPhoneNumber, '+34 600 000 401');
   assert.equal(observations[0].profilePatch.verifiedName, 'Synthetic Clinic');
+  assert.equal(observations[0].profilePatch.profilePictureUrl, 'https://pps.whatsapp.net/v/photo.jpg');
   assert.equal(observations[0].profilePatch.registration.status, 'registered');
   assert.equal(observations[0].profilePatch.authorizedProfileObservedAt, '2026-09-25T07:00:00.000Z');
   assert.equal(observations.length, 1);

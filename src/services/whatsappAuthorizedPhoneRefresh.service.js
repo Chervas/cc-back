@@ -15,7 +15,7 @@ function createService({
     const expectedIdentity = { whatsappAuthorizationId: asset.whatsappAuthorizationId || null,
       phoneNumberId: asset.phoneNumberId, wabaId: asset.wabaId };
     try {
-      profile = await broker.profile(Number(clinicId), Number(asset.id));
+      profile = await broker.profile(Number(clinicId), Number(asset.id), { includeProfilePicture: true });
     } catch (error) {
       if (error?.code !== 'whatsapp_authorized_phone_unavailable') throw error;
       const result = await healthService.recordObservationForAsset({

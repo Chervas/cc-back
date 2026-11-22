@@ -32,6 +32,10 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.DATE,
       allowNull: true,
     },
+    meta_ad_account_assignment_updated_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
     web_assignment_mode: {
       type: DataTypes.ENUM('manual', 'automatic'),
       allowNull: false,

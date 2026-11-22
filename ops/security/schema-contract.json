@@ -2,6 +2,7 @@
   "version": 1,
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
   "featureGroups": {
+    "meta_ad_account_assignment": {"required": true, "tables": ["GruposClinicas"], "migrations": ["20261122145500-add-meta-ad-account-assignment-marker.js"]},
     "dpd_workspace": {"required": true, "tables": ["DpdWorkspaceEntries"], "migrations": ["20261120090000-create-dpd-workspace.js"]},
     "ad_sharing_creative_payload": {"required":true,"tables":["SocialAdsEntities"],"migrations":["20261118123000-add-social-ad-creative-payload.js"]},
     "ad_sharing_media": {"required":true,"tables":["SocialPosts"],"migrations":["20261118113000-add-social-post-original-media-url.js"]},
@@ -86,6 +87,21 @@
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
+    "GruposClinicas": {
+      "columns": [
+        {
+          "COLUMN_NAME": "meta_ad_account_assignment_updated_at",
+          "COLUMN_TYPE": "datetime",
+          "IS_NULLABLE": "YES",
+          "COLUMN_DEFAULT": null,
+          "EXTRA": "",
+          "CHARACTER_SET_NAME": null,
+          "COLLATION_NAME": null,
+          "GENERATION_EXPRESSION": ""
+        }
+      ],
+      "indexes": []
+    },
     "DpdWorkspaceEntries": {"ENGINE": "InnoDB", "TABLE_COLLATION": "utf8mb4_0900_ai_ci", "columns": [{"COLUMN_NAME": "key", "COLUMN_TYPE": "varchar(96)", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": null, "EXTRA": "", "CHARACTER_SET_NAME": "utf8mb4", "COLLATION_NAME": "utf8mb4_0900_ai_ci", "GENERATION_EXPRESSION": ""}, {"COLUMN_NAME": "value", "COLUMN_TYPE": "json", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": null, "EXTRA": "", "CHARACTER_SET_NAME": null, "COLLATION_NAME": null, "GENERATION_EXPRESSION": ""}, {"COLUMN_NAME": "revision", "COLUMN_TYPE": "int unsigned", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": null, "EXTRA": "", "CHARACTER_SET_NAME": null, "COLLATION_NAME": null, "GENERATION_EXPRESSION": ""}, {"COLUMN_NAME": "updated_by", "COLUMN_TYPE": "int unsigned", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": null, "EXTRA": "", "CHARACTER_SET_NAME": null, "COLLATION_NAME": null, "GENERATION_EXPRESSION": ""}, {"COLUMN_NAME": "updated_at", "COLUMN_TYPE": "datetime", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": null, "EXTRA": "", "CHARACTER_SET_NAME": null, "COLLATION_NAME": null, "GENERATION_EXPRESSION": ""}], "indexes": [{"name": "PRIMARY", "columns": [{"INDEX_NAME": "PRIMARY", "NON_UNIQUE": 0, "SEQ_IN_INDEX": 1, "COLUMN_NAME": "key", "SUB_PART": null, "INDEX_TYPE": "BTREE"}]}], "checks": [], "foreignKeys": []},
     "SocialAdsEntities": {
       "columns": [
@@ -7206,6 +7222,7 @@
     {"name": "20261118073000-patient-follow-up-target-month.js", "sha256": "d49a3a3b53f3d135ea565ecbc02555adec0a8a3bf8cbb25369b61be7cddd3d08"},
     {"name": "20261118113000-add-social-post-original-media-url.js", "sha256": "1c81d87e1e2fb23cdf0c6fcd858999033e45d5dd45bd7c336027ef679c79502f"},
     {"name": "20261118123000-add-social-ad-creative-payload.js", "sha256": "349b4191959d0f7808ae7df5018a41ed512506db131842b88aa9d030c8474d9f"},
-    {"name": "20261120090000-create-dpd-workspace.js", "sha256": "26b3e2b82eb2d2951943b62dbeb72aa5c47c4ded9d5149ae371e4827840aef9a"}
+    {"name": "20261120090000-create-dpd-workspace.js", "sha256": "26b3e2b82eb2d2951943b62dbeb72aa5c47c4ded9d5149ae371e4827840aef9a"},
+    {"name": "20261122145500-add-meta-ad-account-assignment-marker.js", "sha256": "f7c267580cc5b96dfaf8d34ff6e0e86d4a78064f4b2c7b4bdaf86c92298cc01b"}
   ]
 }
