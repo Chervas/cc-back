@@ -26,6 +26,8 @@ function createRouter({service=require('../services/metaMarketingEnrollment.serv
       return res.json(result);
     }catch(error){
       const status=['JsonWebTokenError','TokenExpiredError'].includes(error?.name)?401:[400,401,403,409,429].includes(error?.httpStatus)?error.httpStatus:503;
+      if(name==='assets'&&status===429&&error?.code==='rate_limited'&&Number.isSafeInteger(error.retryAfterMs)
+        &&error.retryAfterMs>=1&&error.retryAfterMs<=86400000)res.set('Retry-After',String(Math.ceil(error.retryAfterMs/1000)));
       return res.status(status).json({success:false,error:safe(error)});
     }
   };

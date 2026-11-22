@@ -93,6 +93,10 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
               if(command.operation?.startsWith('meta.marketing.credential.maintenance.')&&res.statusCode!==200){
                 const cooldown=metaMaintenanceCooldownError(value,res.statusCode,res.headers);if(cooldown)return finish(cooldown);
               }
+              if(command.operation==='meta.marketing.enrollment.assets.v1'&&res.statusCode!==200){
+                const cooldown=metaMaintenanceCooldownError(value,res.statusCode,res.headers);
+                if(cooldown)return finish(Object.assign(cooldown,{httpStatus:429}));
+              }
               if (res.statusCode !== 200) return finish(error(SAFE_CODES.has(value?.error?.code) ? value.error.code : 'broker_unavailable'));
               if (value.requestId !== requestId || typeof value.replayed !== 'boolean' || !value.data || typeof value.data !== 'object' || Array.isArray(value.data)) throw Error();
               finish(null, value);
