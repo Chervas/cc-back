@@ -452,7 +452,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   report.phase = 'enqueue for scoped disconnect';
   const pendingDisconnect = await enqueue(); const disconnectModels = { ...models };
   for (const key of ['ClinicWebAsset','ClinicAnalyticsProperty','ClinicBusinessLocation','SearchConsoleBrokerBinding',
-    'AnalyticsBrokerBinding','GooglePropertyBrokerRevocation','BusinessProfileBrokerBinding','BusinessProfileBrokerRevocation']) {
+    'AnalyticsBrokerBinding','GooglePropertyBrokerRevocation','BusinessProfileBrokerBinding','BusinessProfileBrokerBindingGeneration',
+    'BusinessProfileBrokerRevocation']) {
     disconnectModels[key] = { findAll: async () => [] }; // Other cohorts are empty in this Ads fixture.
   }
   const disconnectSession = require('jsonwebtoken').decode((await sessions.authenticated(await models.Usuario.findByPk(9))).body.token).jti;
