@@ -259,10 +259,22 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
       || physical.has(alias.assetType + ':' + String(alias.metaAssetId).replace(/^act_/, ''))
       || row.snapshot.version !== 2 && row.canonical_connection_id !== null && Number(alias.metaConnectionId) === Number(row.canonical_connection_id));
     const mappingIds = new Set(aliases.map(alias => Number(alias.id)));
+    // A confirmed V2 group recovery freezes provider authority. Explicit Ads/Page
+    // use by its existing member clinics can change without rewriting that proof.
+    const groupId = phase === 'active' && row.state === 'active' && row.snapshot.version === 2 && row.scope_key.startsWith('group:')
+      ? Number(row.scope_key.split(':')[1]) : null;
+    const editableShares = new Map(groupId === null ? [] : aliases
+      .filter(alias => owned.includes(Number(alias.id)) && alias.assignmentScope === 'group'
+        && Number(alias.grupoClinicaId) === groupId && alias.clinicaId === null
+        && ['ad_account', 'facebook_page'].includes(alias.assetType))
+      .map(alias => [Number(alias.id), 'meta.' + alias.assetType]));
+    const shares = inventory.shares.filter(share => mappingIds.has(Number(share.assetId))
+      && !(groupId !== null && Number(share.grupoClinicaId) === groupId && row.clinicIds.includes(Number(share.clinicaId))
+        && editableShares.get(Number(share.assetId)) === share.assetType));
     return { clinics: inventory.clinics, blocks: inventory.blocks,
       connections: phase === 'active' ? [] : inventory.connections,
       aliases, assignments: phase === 'active' ? [] : inventory.assignments.filter(assignment => keys.has(assignment.scopeKey)),
-      shares: inventory.shares.filter(share => mappingIds.has(Number(share.assetId))),
+      shares,
       groups: inventory.groups.filter(group => mappingIds.has(Number(group.facebook_primary_asset_id)) || mappingIds.has(Number(group.instagram_primary_asset_id))) };
   }
   async function validateCurrent(row, transaction, { phase = 'pending' } = {}) {
