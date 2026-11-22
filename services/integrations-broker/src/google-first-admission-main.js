@@ -16,6 +16,7 @@ const {createFirstGoogleIdentityOwner}=require('./google-first-identity-owner');
 const {createFirstGoogleAdmissionRpc,OPERATIONS}=require('./google-first-admission-rpc');
 const COHORT='google-first-oauth-v1',PURPOSE='google-first-identity-only-v1',MARKER='google_first_runtime_identity_v1';
 const MAX_CONNECTIONS=8,MAX_ACTIVE=2,MAX_PER_MINUTE=12;
+const STARTUP_CONCURRENCY=2,STARTUP_TIMEOUT_MS=30000;
 const hash=v=>createHash('sha256').update(v).digest('hex');
 const exact=(o,keys)=>o&&Object.getPrototypeOf(o)===Object.prototype&&Object.keys(o).sort().join(',')===keys.split(',').sort().join(',');
 function privateFile(filename,limit=262144,read=true){
@@ -126,6 +127,53 @@ function restorePlan(config,row){
   version:intent.versionId,secretDigest:intent.digest,googleUserId:metadata.googleUserId,clientId:metadata.clientId,
   refreshTokenExpiresAt:metadata.refreshTokenExpiresAt,baselineVersion:intent.baselineVersion,metadataDigest:intent.metadataDigest};
 }
+async function probeStartupSlots({config,store,secrets,vault,signal}){
+ const controller=new AbortController(),guard=AbortSignal.any([signal,controller.signal]),uses=new Map(),apps=new Map();
+ let error;
+ for(const slot of config.slots)uses.set(slot.clientSecretArn,(uses.get(slot.clientSecretArn)||0)+1);
+ const publicApp=async slot=>{
+  const app=await secrets.application(slot,guard);
+  // Never retain the application secret/object in the startup cache.
+  return Object.freeze({clientId:app.clientId,secretVersion:app.secretVersion});
+ };
+ const application=slot=>{
+  if(uses.get(slot.clientSecretArn)===1)return publicApp(slot);
+  if(!apps.has(slot.clientSecretArn))apps.set(slot.clientSecretArn,publicApp(slot));
+  return apps.get(slot.clientSecretArn);
+ };
+ async function bounded(values,work){
+  let cursor=0;
+  async function worker(){
+   while(!error&&!guard.aborted&&cursor<values.length){
+    const value=values[cursor++];
+    try{await work(value);}catch(caught){if(!error)error=caught;controller.abort();}
+   }
+  }
+  await Promise.all(Array.from({length:Math.min(STARTUP_CONCURRENCY,values.length)},worker));
+  if(error)throw error;if(guard.aborted)fail('secret_unavailable');
+ }
+ try{
+  await bounded(config.slots,async slot=>{
+   const binding={...slot,connectionRef:'google-first:'+slot.service+':'+slot.scopeKey};
+   const app=await application(binding);if(guard.aborted)fail('secret_unavailable');
+   try{await secrets.assertFirstSlot(binding,slot,guard);}
+   catch(error){
+    if(guard.aborted)throw error;
+    if(!(error instanceof BrokerError)||!['secret_version_changed','secret_unavailable'].includes(error.code))throw error;
+    const rows=store.db.prepare('SELECT * FROM '+TABLE+' WHERE asset=? AND stage_intent IS NOT NULL LIMIT 2').all('google-oauth:'+slot.service+':'+slot.scopeKey);
+    if(rows.length!==1)throw error;const plan=restorePlan(config,rows[0]);
+    if(app.secretVersion!==plan.applicationVersion||app.clientId!==plan.clientId)fail('secret_version_changed');
+    await vault.confirmActivation(plan,{signal:guard});
+   }
+  });
+  // A shared application could rotate during the sweep: detect it before
+  // listening, interrupting journal contexts or starting the audit drainer.
+  await bounded(config.slots.filter((slot,index,all)=>uses.get(slot.clientSecretArn)>1&&all.findIndex(v=>v.clientSecretArn===slot.clientSecretArn)===index),async slot=>{
+   const old=await apps.get(slot.clientSecretArn),current=await publicApp(slot);
+   if(old.secretVersion!==current.secretVersion||old.clientId!==current.clientId)fail('secret_version_changed');
+  });
+ }finally{controller.abort();apps.clear();}
+}
 async function main(filename,{awsFactory=connectAws,http,now=Date.now,report=()=>{}}={}){
  const config=validateConfig(JSON.parse(privateFile(filename)));const cert=privateFile(config.tlsCertFile,65536),key=privateFile(config.tlsKeyFile,65536);
  privateFile(config.tlsRenewal.issuerCaFile,65536);
@@ -163,21 +211,10 @@ async function main(filename,{awsFactory=connectAws,http,now=Date.now,report=()=
   aws=await awsFactory();if(!aws?.secrets?.send||!aws?.sink?.write||typeof aws.close!=='function')fail('invalid_request');
   const options={client:aws.secrets,accountId:ACCOUNT,prefix:secretPrefix(config.environment),kmsKeyArn:SECRET_KEY};
   const vault=createFirstGoogleCredentialVault({...options,redirectUri:config.redirectUri,slots:config.slots,now});
-  const secrets=createGoogleOAuthSecrets(options),startupSignal=AbortSignal.timeout(10000);
+  const secrets=createGoogleOAuthSecrets(options),startupSignal=AbortSignal.timeout(STARTUP_TIMEOUT_MS);
   // Read-only startup checks; initialized slots remain anchored to their durable
   // exact intent. Actual first begin still requires the original empty marker.
-  for(const slot of config.slots){
-   const binding={...slot,connectionRef:'google-first:'+slot.service+':'+slot.scopeKey};
-   const application=await secrets.application(binding,startupSignal);
-   try{await secrets.assertFirstSlot(binding,slot,startupSignal);}
-   catch(error){
-    if(!(error instanceof BrokerError)||!['secret_version_changed','secret_unavailable'].includes(error.code))throw error;
-    const rows=store.db.prepare('SELECT * FROM '+TABLE+' WHERE asset=? AND stage_intent IS NOT NULL LIMIT 2').all('google-oauth:'+slot.service+':'+slot.scopeKey);
-    if(rows.length!==1)throw error;const plan=restorePlan(config,rows[0]);
-    if(application.secretVersion!==plan.applicationVersion||application.clientId!==plan.clientId)fail('secret_version_changed');
-    await vault.confirmActivation(plan,{signal:startupSignal});
-   }
-  }
+  await probeStartupSlots({config,store,secrets,vault,signal:startupSignal});
   for(const row of store.db.prepare("SELECT * FROM "+TABLE+" WHERE state IN ('prepared','exchanging','candidate_ready')").all()){
    journal.interrupt({attemptId:row.id,bindingDigest:row.binding_digest,service:row.service,expiresAt:row.expires_at},
     {principalId:row.principal,tenantRef:row.tenant,connectionRef:row.connection,assetRef:row.asset});
@@ -225,4 +262,5 @@ async function main(filename,{awsFactory=connectAws,http,now=Date.now,report=()=
 if(require.main===module)main(process.argv[2]).then(runtime=>{
  const stop=()=>runtime.close().catch(()=>{process.exitCode=1;});process.once('SIGTERM',stop);process.once('SIGINT',stop);
 }).catch(()=>{process.stderr.write('GOOGLE_FIRST_OWNER_START_FAILED\n');process.exitCode=1;});
-module.exports={main,validateConfig,COHORT,PURPOSE,MAX_CONNECTIONS,MAX_ACTIVE,MAX_PER_MINUTE,scopeAdditionMaintenance:Object.freeze({authorityDigest,acquireLock,preflightState,privateFile,privateDirectory,MARKER,PURPOSE})};
+module.exports={main,validateConfig,COHORT,PURPOSE,MAX_CONNECTIONS,MAX_ACTIVE,MAX_PER_MINUTE,STARTUP_CONCURRENCY,STARTUP_TIMEOUT_MS,
+ scopeAdditionMaintenance:Object.freeze({authorityDigest,acquireLock,preflightState,privateFile,privateDirectory,MARKER,PURPOSE}),probeStartupSlots};
