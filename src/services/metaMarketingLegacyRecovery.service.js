@@ -326,7 +326,7 @@ function createRecovery({ models, sessions, now = () => new Date(), enabled = ()
   async function actorCheck(row, actor, transaction) {
     if (Number(actor.actorId) !== Number(row.prepared_by_user_id) || actor.scopeKey !== row.scope_key || !C.UUID.test(actor.sessionRef)
       || !(actor.sessionExpiresAt instanceof Date) || +actor.sessionExpiresAt <= +now() || typeof sessions?.verifyReference !== 'function') fail('meta_recovery_actor_required');
-    try { await sessions.verifyReference({ userId: Number(actor.actorId), sessionRef: actor.sessionRef, expiresAt: actor.sessionExpiresAt }, { transaction, requireEmail: true }); }
+    try { await sessions.verifyReference({ userId: Number(actor.actorId), sessionRef: actor.sessionRef, expiresAt: actor.sessionExpiresAt }, { transaction }); }
     catch { fail('meta_recovery_actor_required'); }
   }
   const actorOf = flow => ({ scopeKey: flow.scope_key, actorId: Number(flow.actor_user_id), sessionRef: flow.session_ref, sessionExpiresAt: flow.session_expires_at });
