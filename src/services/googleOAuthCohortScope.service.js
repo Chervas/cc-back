@@ -48,7 +48,7 @@ async function authorizeConnection({ models, connectionId, subject, requestScope
   await permission(models, actorId, clinicIds, options);
   return { clinicIds, options };
 }
-async function consumers(models, kind, binding, options) {
+async function consumers(models, kind, binding, options, reviewedAnalytics) {
   const spec = SPECS[kind]; const gbp = kind === 'business_profile';
   const selected = kind === C.cohortOf(binding);
   const connectionField = gbp ? 'google_connection_id' : 'googleConnectionId';
@@ -128,7 +128,13 @@ async function consumers(models, kind, binding, options) {
         : mapping[resourceField] !== record[spec.resourceField])) C.fail();
   }
   if (!selected) return null;
-  if (!controls.length) C.fail();
+  if (!controls.length) {
+    // An exact, confirmed Analytics anchor can acquire its first resource.
+    // Historical or partially retired consumers remain subject to recovery.
+    if (kind !== 'analytics' || !reviewedAnalytics || records.length || mappings.length
+      || binding.asset_ref !== reviewedAnalytics.assetRef || id(binding.clinica_id) !== reviewedAnalytics.clinicId) C.fail();
+    return { affected: new Set([reviewedAnalytics.clinicId]), usage };
+  }
   if (mappingIds.size) {
     const ids = [...mappingIds];
     const shared = await bounded(models.GroupAssetClinicAssignment.findAll({ ...options,
@@ -146,16 +152,20 @@ async function consumers(models, kind, binding, options) {
   if (!affected.size || affected.size > 1000) C.fail();
   return { affected, usage };
 }
-async function inspectAuthority({ models, binding, requestScopeKey, actorId, sessionRef, expiresAt, expectedClinicIds, transaction, sessions }, reviewedAddition = false) {
+async function inspectAuthority({ models, binding, requestScopeKey, actorId, sessionRef, expiresAt, expectedClinicIds, transaction, sessions },
+  reviewedAddition = false, reviewedAnalytics) {
   C.validate(binding); if (binding.policy_version !== C.POLICY || !transaction) C.fail();
   const options = optionsFor(transaction);
   const fresh = await models.GoogleOAuthBrokerBinding.findOne({ ...options, where: C.keyFor(binding) });
   if (!fresh || C.digest(fresh) !== C.digest(binding)) C.fail();
   const requested = await authorizeConnection({ models, connectionId: binding.google_connection_id, subject: binding.google_user_id,
     requestScopeKey, actorId, sessionRef, expiresAt, transaction, sessions });
+  if (reviewedAnalytics && (fresh.secret_version !== reviewedAnalytics.credentialVersion
+    || !(fresh.confirmed_at instanceof Date) || !Number.isFinite(+fresh.confirmed_at)
+    || JSON.stringify(requested.clinicIds) !== JSON.stringify(reviewedAnalytics.clinicIds))) C.fail();
   let selected = await require('./googleAdsOAuthScope.service').consumers(models, binding, options);
   for (const kind of Object.keys(SPECS)) {
-    const result = await consumers(models, kind, binding, options); if (result) selected = result;
+    const result = await consumers(models, kind, binding, options, reviewedAnalytics); if (result) selected = result;
   }
   if (!selected || !reviewedAddition && !requested.clinicIds.some(clinicId => selected.usage.has(clinicId))) C.fail('google_oauth_scope_forbidden', 403);
   const clinicIds = [...new Set([...selected.affected, ...requested.clinicIds])].sort((a, b) => a - b);
@@ -175,4 +185,12 @@ async function authorizeReviewedAddition(input, capability) {
   await inspect(capability, input);
   return result;
 }
-module.exports = { authorize, authorizeConnection, authorizeReviewedAddition };
+async function authorizeReviewedAnalyticsAddition(input, capability) {
+  if (C.cohortOf(C.validate(input.binding)) !== 'analytics') C.fail();
+  const inspect = require('./googleReviewedAnalyticsMapping.service').inspectAdditionCapability;
+  const reviewed = await inspect(capability, input);
+  const result = await inspectAuthority(input, true, reviewed);
+  await inspect(capability, input);
+  return result;
+}
+module.exports = { authorize, authorizeConnection, authorizeReviewedAddition, authorizeReviewedAnalyticsAddition };

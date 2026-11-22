@@ -1,5 +1,6 @@
 'use strict';
 const fs = require('node:fs'); const path = require('node:path');
+const { Op } = require('sequelize');
 const C = require('./googleOAuthCohort.contract');
 const SC = require('../../services/integrations-broker/src/google-search-console-contract');
 const projection = require('../../services/integrations-broker/src/google-property-discovery-contract');
@@ -15,6 +16,55 @@ async function inspectAdditionCapability(capability, input) {
 const KEYS = ['descriptorId','scopeKey','clinicId','connectionId','googleUserId','connectionRef','siteUrl','assetRef',
   'authorizationBindingDigest','reviewedAtEpochMs','expiresAtEpochMs'].sort().join(',');
 const fail = (code = 'broker_binding_invalid', httpStatus = 409) => { throw Object.assign(Error(code), { code, httpStatus }); };
+const WRITE_FIELDS = ['clinicId', 'connectionId', 'googleUserId', 'connectionRef', 'assetRef', 'siteUrl', 'permissionLevel'];
+
+// Both admissions supply an exact property verified by their own broker and
+// revalidate authority in the same caller-owned transaction as these writes.
+async function persistVerifiedSearchConsoleMapping(models, transaction, input, { existingOnly = false } = {}) {
+  if (!transaction?.LOCK?.UPDATE || transaction.finished || typeof existingOnly !== 'boolean'
+    || !input || Object.getPrototypeOf(input) !== Object.prototype
+    || Reflect.ownKeys(input).length !== WRITE_FIELDS.length || !WRITE_FIELDS.every(key => Object.hasOwn(input, key))) fail();
+  const { clinicId, connectionId, googleUserId, connectionRef, assetRef, siteUrl, permissionLevel } = input;
+  const site = SC.site(siteUrl);
+  projection.projectSC({ siteUrl, permissionLevel }, site.siteUrl);
+  if (!Number.isInteger(clinicId) || !C.positive(String(clinicId))
+    || !Number.isInteger(connectionId) || !C.positive(String(connectionId))
+    || typeof googleUserId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(googleUserId) || googleUserId === 'unknown'
+    || typeof connectionRef !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(connectionRef)
+    || assetRef !== site.assetRef) fail();
+
+  const options = { transaction, lock: transaction.LOCK.UPDATE, logging: false };
+  const propertyType = siteUrl.startsWith('sc-domain:') ? 'sc-domain' : 'url-prefix';
+  let mapping = await models.ClinicWebAsset.findOne({ ...options, where: { clinicaId: clinicId, siteUrl } });
+  const siteScope = { site_hash: site.siteHash, clinica_id: clinicId };
+  const bindingsForMapping = () => models.SearchConsoleBrokerBinding.findAll({ ...options, raw: true, limit: 2,
+    where: mapping ? { [Op.or]: [siteScope, { mapping_id: Number(mapping.id) }] } : siteScope });
+  let bindings = await bindingsForMapping();
+  if (mapping) {
+    if (!mapping.isActive || Number(mapping.clinicaId) !== clinicId || mapping.siteUrl !== siteUrl
+      || Number(mapping.googleConnectionId) !== connectionId
+      || mapping.broker_read_connection_ref !== connectionRef || mapping.broker_read_asset_ref !== assetRef) fail();
+  } else {
+    if (existingOnly || bindings.length) fail();
+    mapping = await models.ClinicWebAsset.create({ clinicaId: clinicId, googleConnectionId: connectionId,
+      siteUrl, propertyType, permissionLevel, verified: true, isActive: true,
+      broker_read_connection_ref: connectionRef, broker_read_asset_ref: assetRef }, { transaction, logging: false });
+    await models.SearchConsoleBrokerBinding.create({ site_hash: site.siteHash, site_url: siteUrl, mapping_id: Number(mapping.id),
+      connection_ref: connectionRef, asset_ref: assetRef, clinica_id: clinicId,
+      google_connection_id: connectionId, google_user_id: googleUserId, state: 'active' }, { transaction, logging: false });
+    bindings = await bindingsForMapping();
+  }
+  if (bindings.length !== 1) fail();
+  const binding = bindings[0];
+  revocations.fromBinding('search_console', binding);
+  if (binding.connection_ref !== connectionRef || binding.asset_ref !== assetRef
+    || Number(binding.mapping_id) !== Number(mapping.id) || binding.site_url !== siteUrl
+    || Number(binding.clinica_id) !== clinicId || Number(binding.google_connection_id) !== connectionId
+    || binding.google_user_id !== googleUserId || binding.state !== 'active') fail();
+  return { id: Number(mapping.id), clinicaId: clinicId, googleConnectionId: connectionId,
+    siteUrl, propertyType, permissionLevel, verified: true, isActive: true };
+}
+
 function descriptor(row, now, { allowExpired = false } = {}) {
   if (!row || Object.keys(row).sort().join(',') !== KEYS || !UUID.test(row.descriptorId)
     || !C.positive(String(row.clinicId)) || !Number.isInteger(row.clinicId)
@@ -167,32 +217,14 @@ function createReviewedSearchConsoleMapping({ models, sessions, readSite, descri
         const actual = await inspect(input, entry, deadline); const m = getModels();
         const result = await m.sequelize.transaction({ isolationLevel: 'SERIALIZABLE' }, async transaction => {
           await check(input, entry, transaction);
-          const options = { transaction, lock: transaction.LOCK.UPDATE, logging: false };
-          let mapping = await m.ClinicWebAsset.findOne({ ...options, where: { clinicaId: entry.clinicId, siteUrl: entry.siteUrl } });
-          if (mapping) {
-            if (!mapping.isActive || Number(mapping.googleConnectionId) !== entry.connectionId
-              || mapping.broker_read_connection_ref !== entry.connectionRef || mapping.broker_read_asset_ref !== entry.assetRef) fail();
-          } else {
-            mapping = await m.ClinicWebAsset.create({ clinicaId: entry.clinicId, googleConnectionId: entry.connectionId,
-              siteUrl: entry.siteUrl, propertyType: entry.siteUrl.startsWith('sc-domain:') ? 'sc-domain' : 'url-prefix',
-              permissionLevel: actual.permissionLevel, verified: true, isActive: true,
-              broker_read_connection_ref: entry.connectionRef, broker_read_asset_ref: entry.assetRef }, { transaction, logging: false });
-            await m.SearchConsoleBrokerBinding.create({ site_hash: site.siteHash, site_url: site.siteUrl, mapping_id: Number(mapping.id),
-              connection_ref: entry.connectionRef, asset_ref: entry.assetRef, clinica_id: entry.clinicId,
-              google_connection_id: entry.connectionId, google_user_id: entry.googleUserId, state: 'active' }, { transaction, logging: false });
-          }
-          const bindings = await m.SearchConsoleBrokerBinding.findAll({ ...options, raw: true, limit: 2,
-            where: { site_hash: site.siteHash, mapping_id: Number(mapping.id) } });
-          if (bindings.length !== 1) fail();
-          const binding = bindings[0]; revocations.fromBinding('search_console', binding);
-          if (binding.connection_ref !== entry.connectionRef || binding.asset_ref !== entry.assetRef
-            || Number(binding.clinica_id) !== entry.clinicId || Number(binding.google_connection_id) !== entry.connectionId
-            || binding.google_user_id !== entry.googleUserId || binding.state !== 'active') fail();
+        const saved = await persistVerifiedSearchConsoleMapping(m, transaction, {
+          clinicId: entry.clinicId, connectionId: entry.connectionId, googleUserId: entry.googleUserId,
+          connectionRef: entry.connectionRef, assetRef: entry.assetRef, siteUrl: actual.siteUrl,
+          permissionLevel: actual.permissionLevel
+        });
           await check(input, entry, transaction);
           if (now() >= deadline) fail('broker_discovery_timeout', 503);
-          return { id: Number(mapping.id), clinicaId: entry.clinicId, googleConnectionId: entry.connectionId,
-            siteUrl: entry.siteUrl, propertyType: entry.siteUrl.startsWith('sc-domain:') ? 'sc-domain' : 'url-prefix',
-            permissionLevel: actual.permissionLevel, verified: true, isActive: true };
+        return saved;
         });
         // No automatic backfill/provider job: activation is a separate decision.
         return { success: true, mapped: 1, assets: [result], inventory_mode: 'broker_grants' };
@@ -204,5 +236,6 @@ let singleton;
 const service = () => singleton ||= createReviewedSearchConsoleMapping({ models: () => require('../../models'),
   readSite: require('./searchConsoleBroker.service').readReviewedSite });
 module.exports = { CONFIG, descriptor, loadDescriptors, createReviewedSearchConsoleMapping, inspectAdditionCapability,
+  persistVerifiedSearchConsoleMapping,
   additionStatus: (...args) => service().additionStatus(...args),
   inventory: (...args) => service().inventory(...args), map: (...args) => service().map(...args) };

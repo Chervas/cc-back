@@ -121,4 +121,19 @@ function createAnalyticsRepository(getModels) {
   };
 }
 const service = createAnalyticsBroker({ client, ...createAnalyticsRepository(() => require('../../models')) });
-module.exports = { ...service, createAnalyticsBroker, createAnalyticsRepository, safe };
+// Exact discovery before a local mapping exists. The Owner still requires the
+// same property, connection, tenant and operation in its signed policy.
+function createReviewedPropertyReader(broker = client) {
+  return async ({ connectionRef, clinicId, propertyName }, { beforeExecute, timeoutMs } = {}) => {
+    const resource = contract.property(propertyName);
+    if (!positive(clinicId) || typeof connectionRef !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(connectionRef)
+      || typeof beforeExecute !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) fail();
+    await beforeExecute();
+    const result = await broker.execute({ operation: discovery.GA_OPERATION, connectionRef,
+      assetRef: resource.assetRef, tenantRef: 'clinic:' + Number(clinicId), payload: {} }, { timeoutMs });
+    await beforeExecute();
+    try { return discovery.projectGA(result?.data, resource.propertyName); } catch { fail('broker_response_invalid'); }
+  };
+}
+module.exports = { ...service, createAnalyticsBroker, createAnalyticsRepository, createReviewedPropertyReader,
+  readReviewedProperty: createReviewedPropertyReader(), safe };

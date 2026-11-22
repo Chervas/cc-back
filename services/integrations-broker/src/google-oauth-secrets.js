@@ -64,6 +64,14 @@ function createGoogleOAuthSecrets({ client, accountId, prefix, kmsKeyArn }) {
       // It anchors version CAS but must not supply a fallback refresh token.
       return { version: r.version, reusable: binding.oauth.scopes.every(s => known.scopes.includes(s)) ? known : null };
     },
+    async assertFirstSlot(binding, { scopeKey, service, baselineVersion }, signal) {
+      const current = await read(binding.secretArn, { VersionStage: 'AWSCURRENT' }, signal);
+      if (current.version !== baselineVersion) fail('secret_version_changed');
+      const marker = current.value;
+      if (!exact(marker, 'version,provider,connectionRef,scopeKey,service') || marker.version !== 1
+        || marker.provider !== 'google-first-empty-slot' || marker.connectionRef !== binding.connectionRef
+        || marker.scopeKey !== scopeKey || marker.service !== service) fail('secret_unavailable');
+    },
     encode(binding, clientId, value) {
       const body = JSON.stringify(credential(value, binding, clientId)); return { body, digest: digest(body) };
     },
@@ -80,9 +88,9 @@ function createGoogleOAuthSecrets({ client, accountId, prefix, kmsKeyArn }) {
         if (result.ARN !== binding.secretArn || result.VersionId !== version || !result.VersionStages?.includes('AWSPENDING') || signal?.aborted) fail('secret_unavailable');
       } catch { fail('secret_unavailable'); }
     },
-    async candidate(binding, version, expectedDigest, signal) {
+    async candidate(binding, version, expectedDigest, signal, { currentOnly = false } = {}) {
       if (!/^[a-f0-9]{64}$/.test(expectedDigest)) fail('invalid_request');
-      const r = await read(binding.secretArn, { VersionId: version }, signal);
+      const r = await read(binding.secretArn, { VersionId: version, ...(currentOnly ? { VersionStage: 'AWSCURRENT' } : {}) }, signal);
       if (digest(r.body) !== expectedDigest) fail('secret_unavailable');
       return r;
     },

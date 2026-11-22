@@ -266,6 +266,9 @@ console.log('Ruta /api/userclinicas configurada');
 app.use('/api/common/notifications', notificationsRoutes);
 console.log('Ruta /api/common/notifications configurada');
 // RUTA: OAuth (exponer bajo /api/oauth para proxy y también /oauth por compatibilidad)
+if (process.env.GOOGLE_OAUTH_FIRST_ADMISSION_INSTALLED === 'true' || process.env.GOOGLE_OAUTH_FIRST_ADMISSION_CONFIG_FILE) {
+    require('./routes/googleOAuthAdmission.startup').initializeGoogleOAuthAdmissionHttp(oauthRoutes);
+}
 app.use('/api/oauth', oauthRoutes);
 app.use('/oauth', oauthRoutes);
 console.log('Ruta /api/oauth y /oauth configuradas');
