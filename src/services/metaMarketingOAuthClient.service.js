@@ -5,8 +5,9 @@ const E=require('../../services/integrations-broker/src/meta-marketing-enrollmen
 const A=require('../../services/integrations-broker/src/meta-marketing-admission-contract');
 const U=require('../../services/integrations-broker/src/meta-marketing-credential-renewal-contract');
 const L=require('../../services/integrations-broker/src/meta-marketing-business-contract'),M=require('../../services/integrations-broker/src/meta-marketing-credential-maintenance-contract');
-const ALLOWED=new Set([...Object.values(B.OPERATIONS),A.OPERATION,D.OPERATION,...Object.values(E.OPERATIONS),...Object.values(U.OPERATIONS),...Object.values(L.OPERATIONS),...Object.values(M.OPERATIONS)]);
-const CONTROL=new Set([B.OPERATIONS.abort,B.OPERATIONS.status,E.OPERATIONS.status,E.OPERATIONS.revoke,U.OPERATIONS.status,U.OPERATIONS.abort,L.OPERATIONS.status,L.OPERATIONS.abort,...Object.values(M.OPERATIONS)]);
+const I=require('../../services/integrations-broker/src/meta-marketing-instagram-extension-contract');
+const ALLOWED=new Set([...Object.values(B.OPERATIONS),A.OPERATION,D.OPERATION,...Object.values(E.OPERATIONS),...Object.values(U.OPERATIONS),...Object.values(L.OPERATIONS),...Object.values(M.OPERATIONS),...Object.values(I.OPERATIONS)]);
+const CONTROL=new Set([B.OPERATIONS.abort,B.OPERATIONS.status,E.OPERATIONS.status,E.OPERATIONS.revoke,U.OPERATIONS.status,U.OPERATIONS.abort,L.OPERATIONS.status,L.OPERATIONS.abort,I.OPERATIONS.status,I.OPERATIONS.abort,...Object.values(M.OPERATIONS)]);
 function createClient({env=process.env}={}){
   const clients=new Map();
   return {execute(command,budget){

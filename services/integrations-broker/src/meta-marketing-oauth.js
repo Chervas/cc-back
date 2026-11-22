@@ -12,6 +12,9 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
     state TEXT NOT NULL CHECK(state IN ('awaiting','exchanging','staging','staged','interrupted','aborted')),
     code_digest TEXT UNIQUE, secret_digest TEXT, credential_metadata TEXT);
     CREATE INDEX IF NOT EXISTS meta_marketing_oauth_scope ON meta_marketing_oauth_flows(connection,state,created_at);`);
+  if (!store.db.prepare('PRAGMA table_info(meta_marketing_oauth_flows)').all().some(column => column.name === 'lane')) {
+    store.db.exec("ALTER TABLE meta_marketing_oauth_flows ADD COLUMN lane TEXT NOT NULL DEFAULT 'standard' CHECK(lane IN ('standard','instagram_extension'))");
+  }
   // A process may die after Meta consumed the one-use code. Keep its uncertain
   // state until an explicit abort; never replay it or mutate another owner's work at startup.
   const running = new Map(), renewalContexts = new Map(); let closed = false;
@@ -19,6 +22,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
   function checked(request, binding, principal) {
     const row = rowFor(request.payload.flowId || request.requestId);
     if (!row || row.tenant !== request.tenantRef || row.connection !== request.connectionRef || row.asset !== request.assetRef
+      || row.lane !== (renewalContexts.get(row.id)?.lane || 'standard')
       || row.config_digest !== K.fingerprint(binding)
       || !principal.id.startsWith('control:') && row.principal !== principal.id) fail('scope_denied');
     return row;
@@ -66,6 +70,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
       // snapshot is only for audit; discovery still re-resolves every boundary.
       const auditPolicy=resolvePolicy&&name!=='assets'?resolvePolicy(request,principal,livePolicy):policy;
       const id = request.payload.flowId || request.requestId;
+      const lane = renewalContexts.get(id)?.lane || 'standard';
       if (closed) fail('connection_blocked');
       if (name === 'abort') {
         // Abort is allowed while an exchange is in flight and before a delayed begin arrives.
@@ -73,9 +78,9 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
           if (!rowFor(id)) {
             append(request, principal, 'integration.failed', 'denied', 'oauth_authorization_aborted',auditPolicy);
             store.db.prepare(`INSERT INTO meta_marketing_oauth_flows(id,principal,tenant,connection,asset,state_hash,config_digest,
-              scope_digest,clinic_digest,created_at,expires_at,updated_at,state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'aborted')`)
+              scope_digest,clinic_digest,created_at,expires_at,updated_at,state,lane) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'aborted',?)`)
               .run(id, principal.id.replace(/^control:/,'gateway:'), request.tenantRef, request.connectionRef, request.assetRef,
-                C.hash('aborted:' + id), K.fingerprint(binding), C.hash('aborted'), C.clinicDigest(b), now(), now(), now());
+                C.hash('aborted:' + id), K.fingerprint(binding), C.hash('aborted'), C.clinicDigest(b), now(), now(), now(), lane);
           } else {
             const row = checked(request,binding,principal);
             if (row.state !== 'aborted') {
@@ -152,11 +157,11 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
               const count = store.db.prepare('SELECT COUNT(*) n FROM meta_marketing_oauth_flows WHERE connection=? AND created_at>?').get(binding.connectionRef,now()-3600000).n;
               if (count >= 6) fail('rate_limited');
               const retained=retainedFlows(id);
-              if (store.db.prepare("SELECT id FROM meta_marketing_oauth_flows WHERE connection=? AND (state IN ('exchanging','staging','staged') OR (state='awaiting' AND expires_at>?))").all(binding.connectionRef,now()).some(row=>!retained.has(row.id))) fail('oauth_flow_busy');
+              if (store.db.prepare("SELECT id FROM meta_marketing_oauth_flows WHERE connection=? AND lane=? AND (state IN ('exchanging','staging','staged') OR (state='awaiting' AND expires_at>?))").all(binding.connectionRef,lane,now()).some(row=>!retained.has(row.id))) fail('oauth_flow_busy');
               append(request,principal,'integration.requested','accepted','oauth_authorization_requested',auditPolicy);
               store.db.prepare(`INSERT INTO meta_marketing_oauth_flows(id,principal,tenant,connection,asset,state_hash,config_digest,
-                scope_digest,clinic_digest,created_at,expires_at,updated_at,state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'awaiting')`)
-                .run(id,principal.id,request.tenantRef,request.connectionRef,request.assetRef,C.hash(p.state),K.fingerprint(binding),p.scopeDigest,p.clinicSetDigest,now(),p.expiresAt,now());
+                scope_digest,clinic_digest,created_at,expires_at,updated_at,state,lane) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'awaiting',?)`)
+                .run(id,principal.id,request.tenantRef,request.connectionRef,request.assetRef,C.hash(p.state),K.fingerprint(binding),p.scopeDigest,p.clinicSetDigest,now(),p.expiresAt,now(),lane);
             });
           }
           if (signal.aborted) fail('provider_timeout');
@@ -215,7 +220,8 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
   // history before it can exempt those retained flows from initial onboarding.
   service.executeRenewal=async(args,context)=>{
     const id=args.request.payload.flowId||args.request.requestId;
-    if(typeof context?.guard!=='function'||typeof context?.retainedFlowIds!=='function'||context.providerLifecycle!==undefined&&typeof context.providerLifecycle!=='function')fail('invalid_request');
+    if(typeof context?.guard!=='function'||typeof context?.retainedFlowIds!=='function'||context.providerLifecycle!==undefined&&typeof context.providerLifecycle!=='function'
+      || context.lane!==undefined&&context.lane!=='instagram_extension')fail('invalid_request');
     context.guard();const prior=renewalContexts.get(id);renewalContexts.set(id,context);
     try{return await service.execute(args);}finally{if(prior)renewalContexts.set(id,prior);else renewalContexts.delete(id);}
   };

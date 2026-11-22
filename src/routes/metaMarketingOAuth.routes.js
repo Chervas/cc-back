@@ -3,8 +3,10 @@ const C=require('../services/metaMarketingOAuth.contract'),{safe}=require('../se
 function createRouter({service=require('../services/metaMarketingOAuth.service'),sessions=require('../services/accessSession.service'),returnOrigin=C.frontendOrigin()}={}){
   const router=require('express').Router({strict:true});
   const headers=res=>{res.set('Cache-Control','private, no-store');res.set('Referrer-Policy','no-referrer');res.set('X-Content-Type-Options','nosniff');};
-  const redirect=(res,origin,id=null,error=false)=>{
-    const url=new URL('/pages/settings',origin);if(id)url.searchParams.set('meta_authorization',id);if(error)url.searchParams.set('meta_authorization_error','1');return res.redirect(303,url.toString());
+  const redirect=(res,origin,id=null,error=false,instagramExtension=false)=>{
+    const url=new URL('/pages/settings',origin);if(id)url.searchParams.set('meta_authorization',id);if(error)url.searchParams.set('meta_authorization_error','1');
+    if(instagramExtension){url.searchParams.set('meta_instagram_extension','1');url.searchParams.set('panel','connected-accounts');}
+    return res.redirect(303,url.toString());
   };
   router.get('/callback',async(req,res)=>{
     headers(res);
@@ -12,7 +14,7 @@ function createRouter({service=require('../services/metaMarketingOAuth.service')
       if(Object.keys(req.query).some(k=>!['state','code','error','error_reason','error_description'].includes(k))||typeof req.query.state!=='string'
         ||req.query.code!==undefined&&typeof req.query.code!=='string'||req.query.error!==undefined&&typeof req.query.error!=='string')C.fail('meta_oauth_state_invalid',400);
       const result=await service.callback({state:req.query.state,code:req.query.code,denied:!!req.query.error});
-      return redirect(res,result.returnOrigin,result.requestId);
+      return redirect(res,result.returnOrigin,result.requestId,false,result.instagramExtension===true);
     }catch{return redirect(res,returnOrigin,null,true);}
   });
   const handler=name=>async(req,res)=>{
