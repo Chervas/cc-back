@@ -38,6 +38,16 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
   const sessionApi = () => sessions || require('./accessSession.service');
   const repo = () => audit || require('./platformAudit.repository').createRepository(db().PlatformAuditEvent);
   const locked = transaction => ({ transaction, lock: transaction.LOCK.UPDATE, raw: true });
+  async function verifyActor(input, transaction, requireEmail = false) {
+    try {
+      await sessionApi().verifyReference({
+        userId: input.userId, sessionRef: input.sessionRef, expiresAt: new Date(input.sessionExpiresAt * 1000),
+      }, { transaction, requireEmail });
+    } catch (error) {
+      if (error?.code === 'auth_trusted_device_invalid') C.fail('auth_invalid', 401);
+      throw error;
+    }
+  }
   async function snapshot(scope, userId, transaction) {
     const clinics = await db().Clinica.findAll({ ...locked(transaction),
       where: scope.type === 'clinic' ? { id_clinica: scope.id } : { grupoClinicaId: scope.id },
@@ -119,10 +129,10 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
       const input = C.request(raw, operation); cfg = config();
       if (!Buffer.isBuffer(cfg?.key) || cfg.key.length !== 32) C.fail('whatsapp_onboarding_configuration_invalid', 503);
       return await db().sequelize.transaction({ isolationLevel: Transaction.ISOLATION_LEVELS.REPEATABLE_READ }, async transaction => {
-        // The managed-session verifier locks user then session, serializing
-        // issuance and matching logout/password-change order across processes.
-        await sessionApi().verifyReference({ userId: input.userId, sessionRef: input.sessionRef,
-          expiresAt: new Date(input.sessionExpiresAt * 1000) }, { transaction, requireEmail: true });
+        // A new number uses the user's existing durable login, including a
+        // valid trusted device. Replacing a number keeps its original proof.
+        // Verify and lock the user/session before touching scope membership.
+        await verifyActor(input, transaction, operation === 'issue' && input.replacementAssetId !== undefined);
         const R = db().WhatsappAuthorizationState;
         // Unlocked discovery only supplies the scope for lock ordering. The
         // authoritative row is read again under lock and validated below.
@@ -130,6 +140,7 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
         if (operation !== 'issue' && (!hint || hint.user_id !== input.userId || hint.session_ref !== input.sessionRef)) {
           C.fail('whatsapp_authorization_forbidden', 403);
         }
+        if (hint?.replacement_asset_id != null) await verifyActor(input, transaction, true);
         const scope = input.scope || { type: hint.scope_type, id: hint.scope_id };
         const current = operation === 'cancel' ? null : await snapshot(scope, input.userId, transaction);
         let row = await R.findByPk(input.requestId, { ...locked(transaction) });
@@ -161,7 +172,7 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
           || JSON.stringify(current.ids) !== JSON.stringify(row.original_clinic_ids))) C.fail('whatsapp_authorization_conflict', 409);
         if (operation === 'cancel') {
           // Cancellation may proceed after membership loss or a scope block.
-          // It still requires the original valid MFA session; it never deletes.
+          // It still requires the original valid session and never deletes.
           if (row.state !== 'cancelled') {
             row.state = 'cancelled'; row.cancelled_at = now();
             await R.update({ state: row.state, cancelled_at: row.cancelled_at }, { where: { request_id: row.request_id }, transaction });
@@ -205,16 +216,18 @@ function createService({ models, sessions, audit, config = C.settings, now = () 
       const input=C.request(raw,'status');cfg=config();
       if(!Buffer.isBuffer(cfg?.key)||cfg.key.length!==32)C.fail('whatsapp_onboarding_configuration_invalid',503);
       return await db().sequelize.transaction({isolationLevel:Transaction.ISOLATION_LEVELS.REPEATABLE_READ},async transaction=>{
-        await sessionApi().verifyReference({userId:input.userId,sessionRef:input.sessionRef,expiresAt:new Date(input.sessionExpiresAt*1000)},
-          {transaction,requireEmail:true});
+        await verifyActor(input,transaction);
         const hint=await db().WhatsappAuthorizationState.findByPk(input.requestId,{transaction,raw:true});
         if(!hint)C.fail('whatsapp_authorization_forbidden',403);
+        // A current login of the original authorizing user can resume a new
+        // number. Replacements and assisted completion retain email proof.
+        if(hint.user_id!==input.userId||hint.replacement_asset_id!=null)await verifyActor(input,transaction,true);
         const current=await snapshot({type:hint.scope_type,id:hint.scope_id},input.userId,transaction);
         const row=await db().WhatsappAuthorizationState.findByPk(input.requestId,{...locked(transaction)});
-        if(!row)C.fail('whatsapp_authorization_forbidden',403);
+        if(!row||row.user_id!==hint.user_id||row.replacement_asset_id!==hint.replacement_asset_id)C.fail('whatsapp_authorization_forbidden',403);
         validateRow(row,{userId:row.user_id,sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at.getTime()/1000},cfg.key);
         if(row.state!=='claimed'||current.digest!==row.scope_digest||JSON.stringify(current.ids)!==JSON.stringify(row.original_clinic_ids))C.fail('whatsapp_authorization_forbidden',403);
-        // Completion uses a current MFA session, never the expired OAuth code.
+        // Completion reuses the stored authorization, never the OAuth code.
         return projection(row);
       });
     }finally{cfg?.key?.fill(0);}
