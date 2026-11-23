@@ -58,37 +58,127 @@ test('dedicated TLS startup uses the actual signed transport and stages exactly 
  for(const secret of ['FICTITIOUS_RUNTIME_CODE','FICTITIOUS_RUNTIME_ACCESS','FICTITIOUS_RUNTIME_REFRESH',f.base.app.clientSecret,url.searchParams.get('state')])assert(!disk.includes(secret));
 });
 
-test('signed property confirmation survives TLS runtime restart and does not activate the credential twice', async t => {
+test('first GA4 consent through signed catalogue, confirmation and native scoped report survives restart and revokes once', async t => {
+ const { BrokerError } = require('../src/errors');
+ const { METRICS,REVOKE_OPERATION } = require('../src/google-analytics-contract');
+ const { GA_OPERATION,firstAnalyticsSubjectDigest } = require('../src/google-property-discovery-contract');
+ const { TABLE: publicationTable } = require('../src/google-first-publication-journal');
  const f = await fixture(t);
- f.config.publicationResources = [{
-  scopeKey:'group:11',service:'analytics',clinicId:31,resource:{ propertyName:'properties/321' },
- }];
+ const keys = generateKeyPairSync('ed25519');
+ const readerPin = {
+  id:'crm:staging:google-first-ga4-reader',keyId:'qa-google-first-ga4-reader-key',enabled:true,maxPerMinute:12,
+  publicKey:keys.publicKey.export({type:'spki',format:'pem'}),
+ };
+ f.config.analyticsReaderPrincipal = readerPin;
+ f.config.analyticsCursorKeyFile = f.file('analytics-cursor.key');
+ fs.writeFileSync(f.config.analyticsCursorKeyFile,randomBytes(32),{mode:0o600});
+ f.config.publicationResources = [
+  { scopeKey:'group:11',service:'analytics',clinicId:31,resource:{ propertyName:'properties/321' } },
+  { scopeKey:'group:11',service:'analytics',clinicId:17,resource:{ propertyName:'properties/654' } },
+ ];
  const existingHttp = f.deps.http;
+ let reports = 0;
  f.deps.http = async request => {
+  if (request.hostname === 'analyticsdata.googleapis.com') {
+   assert.equal(request.path,'/v1beta/properties/321:runReport');
+   assert.deepEqual(request.json.dateRanges,[{startDate:'2026-11-16',endDate:'2026-11-16'}]);
+   reports++;
+   return {dimensionHeaders:[{name:'date'}],metricHeaders:METRICS.map((name,index) => ({
+    name,type:index === 4 ? 'TYPE_CURRENCY' : 'TYPE_INTEGER',
+   })),metadata:{currencyCode:'EUR',timeZone:'Europe/Madrid'},rowCount:1,
+   rows:[{dimensionValues:[{value:'20261116'}],metricValues:[{value:'4'},{value:'3'},{value:'2'},{value:'1'},{value:'0'}]}]};
+  }
   if (request.hostname !== 'analyticsadmin.googleapis.com') return existingHttp(request);
+  if (request.path === '/v1beta/properties/654') throw new BrokerError('provider_unauthorized');
   assert.equal(request.path,'/v1beta/properties/321');
   f.httpCalls.push(request);
-  return { name:'properties/321',displayName:'Fictitious Property',propertyType:'PROPERTY_TYPE_ORDINARY',
-   parent:'accounts/17',account:'accounts/17' };
+  return {name:'properties/321',displayName:'Fictitious\u202e Property',propertyType:'PROPERTY_TYPE_ORDINARY',
+   parent:'accounts/17',account:'accounts/17'};
  };
+ const reader = createIntegrationsBrokerClient({
+  origin:'https://127.0.0.1:'+f.config.port,audience:f.config.policy.audience,keyId:readerPin.keyId,
+  privateKey:keys.privateKey.export({type:'pkcs8',format:'pem'}),ca:fs.readFileSync(f.file('ca.crt')),
+ });
+ const command = {operation:GA_OPERATION,connectionRef:'google-first:analytics:group:11',
+  assetRef:'ga4:321',tenantRef:'clinic:31',payload:{}};
  f.save();
  await f.start();
- const { authorizationUrl } = (await f.call('begin')).data;
+ const {authorizationUrl} = (await f.call('begin')).data;
  await f.call('finish',{ state:new URL(authorizationUrl).searchParams.get('state'),code:'FICTITIOUS_RUNTIME_CODE' });
- await assert.rejects(f.call('publication',{ clinicId:17,selectedAssetRef:'ga4:321' }));
- assert.equal(f.httpCalls.length,2);
- const selection = { clinicId:31,selectedAssetRef:'ga4:321' };
+ assert.equal((await f.call('catalogueReady')).data.canChooseAssets,true);
+ assert.deepEqual((await f.call('catalogue')).data,{attemptId:f.proof.attemptId,scopeKey:'group:11',service:'analytics',
+  assets:[{assetRef:'ga4:321',propertyName:'properties/321',displayName:'Fictitious Property',clinicIds:[31]}]});
+ assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS n FROM '+publicationTable).get().n,0);
+ await assert.rejects(f.call('publication',{clinicId:17,selectedAssetRef:'ga4:321',expectedSubjectDigest:'e'.repeat(64)}),{code:'scope_denied'});
+ await assert.rejects(reader.execute(command),{code:'scope_denied'});
+ const providerBefore = f.httpCalls.length, commandsBefore = f.base.state.calls.length;
+ const preview = (await f.call('identityPreview')).data;
+ assert.deepEqual(preview,{attemptId:f.proof.attemptId,scopeKey:'group:11',service:'analytics',
+  googleUserId:'10123456789',subjectDigest:firstAnalyticsSubjectDigest('10123456789')});
+ assert.equal(f.httpCalls.length,providerBefore);
+ assert.equal(f.base.state.calls.length,commandsBefore);
+ const selection = {clinicId:31,selectedAssetRef:'ga4:321',expectedSubjectDigest:preview.subjectDigest};
+ await assert.rejects(f.call('publication',{...selection,expectedSubjectDigest:firstAnalyticsSubjectDigest('different-fictitious-subject')}),
+  {code:'oauth_identity_mismatch'});
+ assert.equal(f.httpCalls.length,providerBefore);
+ assert.equal(f.base.state.calls.length,commandsBefore);
+ assert(!f.versions.get(f.proof.attemptId).stages.has('AWSCURRENT'));
  const first = (await f.call('publication',selection)).data;
+ // Exercise the real CRM routing and certificate client against the same
+ // signed Owner socket before the atomic API writer consumes the proof.
+ const {createAnalyticsFirstReader} = require('../../../src/services/analyticsBroker.service');
+ const signingFile = f.file('analytics-reader.pem');
+ fs.writeFileSync(signingFile,keys.privateKey.export({type:'pkcs8',format:'pem'}),{mode:0o600});
+ const crm = createAnalyticsFirstReader({env:{
+  RUNTIME_ROLE:'api',JOB_RUNTIME_NAMESPACE:'staging',GOOGLE_ANALYTICS_BROKER_ENABLED:'true',GOOGLE_ANALYTICS_FIRST_READER_ENABLED:'true',
+  GOOGLE_ANALYTICS_FIRST_READER_ORIGIN:'https://127.0.0.1:'+f.config.port,GOOGLE_ANALYTICS_FIRST_READER_KEY_ID:readerPin.keyId,
+  GOOGLE_ANALYTICS_FIRST_READER_KEY_FILE:signingFile,GOOGLE_ANALYTICS_FIRST_READER_CA_FILE:f.file('ca.crt'),
+ }});
+ assert.equal((await crm.verify({receipt:first,
+  context:{attemptId:f.proof.attemptId,scopeKey:'group:11',service:'analytics',clinicIds:[17,31]}})).displayName,'Fictitious Property');
  assert.equal(first.assetRef,'ga4:321');
  assert.equal(first.clinicId,31);
  assert.equal(first.secretVersion,f.proof.attemptId);
+ assert.equal(Object.hasOwn(first,'resource'),false);
  assert(f.versions.get(f.proof.attemptId).stages.has('AWSCURRENT'));
+ assert.equal((await reader.execute(command)).data.name,'properties/321');
+ await assert.rejects(reader.execute({...command,tenantRef:'clinic:17'}),{code:'scope_denied'});
+ await assert.rejects(reader.execute({...command,assetRef:'ga4:654'}),{code:'scope_denied'});
+ await assert.rejects(reader.execute({...command,operation:REVOKE_OPERATION}),{code:'scope_denied'});
+ const report = await reader.execute({...command,operation:'google.analytics.daily.read.v1',
+  payload:{startDate:'2026-11-16',endDate:'2026-11-16',pageToken:null}});
+ assert.equal(report.data.rows[0].metricValues[0].value,'4');
+ assert.equal(reports,1);
  await f.stop();
  await f.start();
  assert.deepEqual((await f.call('publication',selection)).data,first);
+ assert.equal((await reader.execute(command)).data.name,'properties/321');
  assert.equal(f.base.state.calls.filter(call => call.kind === 'UpdateSecretVersionStageCommand').length,1);
  const events = f.app.store.db.prepare('SELECT event FROM audit_outbox').all().map(row => JSON.parse(row.event)).concat(f.events);
  assert(events.some(event => event.operation === OPERATIONS.publication && event.reason === 'google_first_publication_receipt_confirmed'));
+ assert(events.some(event => event.operation === GA_OPERATION && event.reason === 'first_ga4_read_authority_installed'));
+ assert.equal((await f.client.execute({...command,operation:REVOKE_OPERATION})).data.revoked,true);
+ await assert.rejects(reader.execute(command),{code:'asset_revoked'});
+ await f.stop();
+ await f.start();
+ const providerCalls = f.httpCalls.length;
+ await assert.rejects(reader.execute(command),{code:'asset_revoked'});
+ await assert.rejects(f.call('publication',selection),{code:'asset_revoked'});
+ assert.equal(f.httpCalls.length,providerCalls);
+ assert.equal(f.base.state.calls.filter(call => call.kind === 'UpdateSecretVersionStageCommand').length,1);
+});
+
+test('first Analytics OAuth stays staged if a native reader was never installed', async t => {
+ const f = await fixture(t);
+ f.config.publicationResources = [{scopeKey:'group:11',service:'analytics',clinicId:31,resource:{propertyName:'properties/321'}}];
+ f.save();
+ await f.start();
+ const {authorizationUrl} = (await f.call('begin')).data;
+ await f.call('finish',{state:new URL(authorizationUrl).searchParams.get('state'),code:'FICTITIOUS_RUNTIME_CODE'});
+ assert.equal((await f.call('status')).data.state,'candidate_staged');
+ await assert.rejects(f.call('catalogueReady'));
+ await assert.rejects(f.call('publication',{clinicId:31,selectedAssetRef:'ga4:321',expectedSubjectDigest:'e'.repeat(64)}));
+ assert.equal(f.base.state.calls.filter(call => call.kind === 'UpdateSecretVersionStageCommand').length,0);
 });
 
 test('the signed Search Console catalogue checks provider access once per property and preserves exact destination clinics', async t => {

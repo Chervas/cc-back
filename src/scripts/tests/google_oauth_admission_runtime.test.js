@@ -203,3 +203,38 @@ test('failed local return registration withholds the consent URL and a retry use
   assert.equal(new Set(f.state.calls.filter(item => item.action === 'begin').map(item => item.requestId)).size,1);
   assert.equal(f.state.exchanges,0);
 });
+
+test('GA4 revoker pins analytics-only canonical asset and the exact approved clinic while starts are paused',async()=>{
+ const { createFirstAnalyticsRevoker }=require('../../services/googleOAuthAdmissionRuntime.service');
+ const requests=[],key=Buffer.from('fictitious GA control credential');
+ const revoker=createFirstAnalyticsRevoker({ env,readFile(filename,{ config:isConfig }={}) {
+  if(isConfig)return Buffer.from(JSON.stringify({ ...config,startsEnabled:false,scopes:[{ scopeKey:'group:29',clinicIds:[66,72],services:['analytics'] }] }));
+  return filename===config.keyFile?key:Buffer.from('fictitious TLS CA');
+ },clientFactory:pins=>{assert.equal(pins.keyId,config.keyId);return { execute(command,budget){requests.push({ command,budget });return { data:{ revoked:true } };} };} });
+ const command={ operation:'google.analytics.asset.revoke.v1',connectionRef:'google-first:analytics:group:29',tenantRef:'clinic:72',assetRef:'ga4:333',payload:{} };
+ for(const changes of [{ tenantRef:'clinic:90' },{ operation:'google.analytics.daily.read.v1' },{ assetRef:'ga4:0333' },
+  { assetRef:'sc:'+'b'.repeat(64) },{ connectionRef:'google-first:search_console:group:29' },{ payload:{ scopeKey:'group:29' } }])assert.throws(()=>revoker.execute({ ...command,...changes }),{ status:403 });
+ assert.equal(requests.length,0);assert.deepEqual(await revoker.execute(command,{ timeoutMs:10000 }),{ data:{ revoked:true } });
+ assert.deepEqual(requests,[{ command,budget:{ timeoutMs:10000 } }]);assert(key.every(byte=>byte===0));
+});
+
+
+test('new GA4 starts require installed completion and normal reader, then revalidate authority after availability',async t=>{
+ const f=harness(t),selection=f.command({ service:'analytics' }),gaScopes=[{ scopeKey:'group:29',clinicIds:[66,72],services:['analytics'] }];
+ const partial=f.make({ scopes:gaScopes });assert.deepEqual(await partial.capability(f.req(),selection),{ enabled:false });
+ await assert.rejects(partial.begin(f.req(),selection),{ status:403 });assert.equal(f.state.calls.length,0);
+ f.models.PlatformAuditEvent={ sequelize:f.models.sequelize };
+ let reader=false,revoke=false;
+ const publisherPath=require.resolve('../../services/googleOAuthAdmissionPublication.service'),cachedPublisher=require.cache[publisherPath];
+ // This test isolates start capability. Real publication/native SQL is tested
+ // in the dedicated isolated-MySQL fixture, without loading AWS packages here.
+ require.cache[publisherPath]={ id:publisherPath,filename:publisherPath,loaded:true,exports:{ createGoogleOAuthAdmissionPublication:()=>({ publish:()=>assert.fail('Unexpected publication') }) } };
+ let complete;try{complete=createGoogleOAuthAdmissionRuntime({ config:{ ...config,publicationEnabled:true,scopes:gaScopes },environment:'staging',
+  models:f.models,sessions:f.sessions,now:()=>new Date(f.state.now),readFile:()=>Buffer.from('FICTITIOUS_KEY'),clientFactory:()=>f.client,
+  readAuthority:{ async available(context){assert.deepEqual(context,{ scopeKey:'group:29',service:'analytics',clinicIds:[66,72] });
+    if(revoke)f.state.memberships.set(72,['personaldeclinica','aceptada']);return reader;},verify:async()=>assert.fail('Unexpected native publication') } });
+ }finally{if(cachedPublisher)require.cache[publisherPath]=cachedPublisher;else delete require.cache[publisherPath];}
+ assert.deepEqual(await complete.capability(f.req(),selection),{ enabled:false });await assert.rejects(complete.begin(f.req(),selection),{ status:403 });assert.equal(f.state.calls.length,0);
+ reader=true;assert.deepEqual(await complete.capability(f.req(),selection),{ enabled:true });
+ revoke=true;await assert.rejects(complete.begin(f.req(),selection),{ status:403 });assert.equal(f.state.calls.length,0);assert.equal(f.rows().length,0);
+});

@@ -1,4 +1,5 @@
 'use strict';
+const { createHash } = require('node:crypto');
 const { schema } = require('./contracts'); const { fail } = require('./errors');
 const validate = schema({});
 const SC_OPERATION = 'google.search_console.discovery.read.v1';
@@ -18,4 +19,13 @@ function projectGA(raw, propertyName) {
     || raw.deleteTime !== undefined || raw.expireTime !== undefined) fail('provider_failed');
   return { name: propertyName, displayName: raw.displayName, propertyType: raw.propertyType, parent: raw.parent, account: raw.account };
 }
-module.exports = { validate, SC_OPERATION, GA_OPERATION, GA_SCOPE, projectSC, projectGA };
+function projectFirstGA(raw, propertyName) {
+  const property = projectGA(raw, propertyName);
+  const displayName = property.displayName.replace(/[\u0080-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, '').trim();
+  return { ...property, displayName:displayName || propertyName };
+}
+function firstAnalyticsSubjectDigest(subject) {
+  if (typeof subject !== 'string' || subject === 'unknown' || !/^[A-Za-z0-9._-]{1,128}$/.test(subject)) fail('scope_denied');
+  return createHash('sha256').update(JSON.stringify(['clinicaclick/google-first-analytics-subject/1',subject])).digest('hex');
+}
+module.exports = { validate, SC_OPERATION, GA_OPERATION, GA_SCOPE, projectSC, projectGA, projectFirstGA, firstAnalyticsSubjectDigest };

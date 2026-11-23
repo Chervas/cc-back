@@ -1,5 +1,6 @@
 'use strict';
 
+const { Op } = require('sequelize');
 const fs = require('node:fs');
 const path = require('node:path');
 const C = require('./googleOAuthCohort.contract');
@@ -21,6 +22,44 @@ const validIds = values => Array.isArray(values) && values.length > 0 && values.
   values.every((value, i) => positive(value) && (!i || value > values[i - 1]));
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 const sqlOptions = transaction => ({ transaction, lock: transaction.LOCK.UPDATE, raw: true, logging: false });
+
+// Exact native resource, supplied only by the caller's verified Owner/reader
+// proof. Authorization, revocation checks and audit share this transaction.
+async function persistVerifiedAnalyticsMapping(models, transaction, input, { existingOnly = false } = {}) {
+  if (!transaction?.LOCK?.UPDATE || transaction.finished || typeof existingOnly !== 'boolean'
+    || !exact(input,['clinicId','connectionId','googleUserId','connectionRef','assetRef','property'])) fail();
+  const { clinicId,connectionId,googleUserId,connectionRef,assetRef } = input;
+  const property = projectGA(input.property,input.property?.name), resource = GA.property(property.name);
+  if (/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(property.displayName) || !positive(clinicId) || !positive(connectionId) || typeof googleUserId !== 'string'
+    || !/^[A-Za-z0-9._-]{1,128}$/.test(googleUserId) || googleUserId === 'unknown'
+    || typeof connectionRef !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(connectionRef)
+    || assetRef !== resource.assetRef) fail();
+  const options = { transaction,lock:transaction.LOCK.UPDATE,logging:false };
+  let mapping = await models.ClinicAnalyticsProperty.findOne({ ...options,where:{ clinicaId:clinicId,propertyName:property.name } });
+  const scope = { property_name:property.name,clinica_id:clinicId };
+  const rows = () => models.AnalyticsBrokerBinding.findAll({ ...options,raw:true,limit:2,
+    where:mapping ? { [Op.or]:[scope,{ mapping_id:Number(mapping.id) }] } : scope });
+  let bindings = await rows();
+  if (mapping) {
+    if (!mapping.isActive || Number(mapping.clinicaId) !== clinicId || mapping.propertyName !== property.name
+      || Number(mapping.googleConnectionId) !== connectionId || mapping.broker_read_connection_ref !== connectionRef
+      || mapping.broker_read_asset_ref !== assetRef) fail();
+  } else {
+    if (existingOnly || bindings.length) fail();
+    mapping = await models.ClinicAnalyticsProperty.create({ clinicaId:clinicId,googleConnectionId:connectionId,
+      propertyName:property.name,propertyDisplayName:property.displayName,propertyType:property.propertyType,parent:property.parent,
+      measurementId:null,isActive:true,broker_read_connection_ref:connectionRef,broker_read_asset_ref:assetRef },{ transaction,logging:false });
+    await models.AnalyticsBrokerBinding.create({ property_name:property.name,mapping_id:Number(mapping.id),connection_ref:connectionRef,
+      asset_ref:assetRef,clinica_id:clinicId,google_connection_id:connectionId,google_user_id:googleUserId,state:'active' },{ transaction,logging:false });
+    bindings = await rows();
+  }
+  if (bindings.length !== 1) fail();
+  const binding = bindings[0];fromBinding('analytics',binding);
+  if (binding.property_name !== property.name || Number(binding.mapping_id) !== Number(mapping.id)
+    || binding.connection_ref !== connectionRef || binding.asset_ref !== assetRef || Number(binding.clinica_id) !== clinicId
+    || Number(binding.google_connection_id) !== connectionId || binding.google_user_id !== googleUserId || binding.state !== 'active') fail();
+  return { id:Number(mapping.id),clinicaId:clinicId,googleConnectionId:connectionId,propertyName:property.name,isActive:true };
+}
 
 function descriptor(value, now = Date.now()) {
   if (!exact(value, KEYS) || !UUID.test(value.descriptorId) || !UUID.test(value.credentialVersion)
@@ -241,5 +280,5 @@ function createReviewedAnalyticsMapping({ models, sessions, readProperty, descri
 let singleton;
 const service = () => singleton ||= createReviewedAnalyticsMapping({ models: () => require('../../models'),
   readProperty: require('./analyticsBroker.service').readReviewedProperty });
-module.exports = { CONFIG, descriptor, createReviewedAnalyticsMapping, inspectAdditionCapability,
+module.exports = { CONFIG, descriptor, persistVerifiedAnalyticsMapping, createReviewedAnalyticsMapping, inspectAdditionCapability,
   additionStatus: (...args) => service().additionStatus(...args), inventory: (...args) => service().inventory(...args), map: (...args) => service().map(...args) };

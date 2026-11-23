@@ -210,3 +210,15 @@ test('reviewed catalogue rejects revoked targets or membership loss before retur
   }
   assert.equal(target.state.reads.length + target.state.writes.length, 0);
 });
+
+test('first GA4 native mapping rejects invisible display metadata before any model operation',async()=>{
+ const { persistVerifiedAnalyticsMapping }=require('../../services/googleReviewedAnalyticsMapping.service');
+ const transaction={ LOCK:{ UPDATE:'UPDATE' } },property={ name:'properties/333',displayName:'Propiedad ficticia',propertyType:'PROPERTY_TYPE_ORDINARY',parent:'accounts/9',account:'accounts/9' };
+ let reads=0,mapping=null;const bindings=[];
+ const models={ ClinicAnalyticsProperty:{ async findOne(){reads++;return mapping;},async create(value){mapping={ id:91,...value };return mapping;} },
+  AnalyticsBrokerBinding:{ async findAll(){reads++;return bindings;},async create(value){bindings.push(value);} } };
+ const input={ clinicId:66,connectionId:61,googleUserId:'fictitious-first',connectionRef:'google-first:analytics:clinic:66',assetRef:'ga4:333',property };
+ for(const character of ['\u0085','\u061c','\u200f','\u202e','\u2066'])await assert.rejects(persistVerifiedAnalyticsMapping(models,transaction,{ ...input,property:{ ...property,displayName:'x'+character } }),{ code:'broker_binding_invalid' });
+ assert.equal(reads,0);assert.equal(mapping,null);assert.equal(bindings.length,0);
+ const result=await persistVerifiedAnalyticsMapping(models,transaction,input);assert.equal(result.propertyName,'properties/333');assert.equal(mapping.propertyDisplayName,property.displayName);assert.equal(bindings.length,1);
+});

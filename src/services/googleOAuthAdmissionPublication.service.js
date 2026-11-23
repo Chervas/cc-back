@@ -6,6 +6,9 @@ const C = require('./googleOAuthAdmissionAttempt.contract');
 const Cohort = require('./googleOAuthCohort.contract');
 const { canonical } = require('../../services/integrations-broker/src/canonical');
 const SearchConsole = require('../../services/integrations-broker/src/google-search-console-contract');
+const Analytics = require('../../services/integrations-broker/src/google-analytics-contract');
+const { persistVerifiedAnalyticsMapping } = require('./googleReviewedAnalyticsMapping.service');
+const { projectGA,firstAnalyticsSubjectDigest } = require('../../services/integrations-broker/src/google-property-discovery-contract');
 const { projectSC } = require('../../services/integrations-broker/src/google-property-discovery-contract');
 const { persistVerifiedSearchConsoleMapping } = require('./googleReviewedSearchConsoleMapping.service');
 
@@ -180,8 +183,65 @@ function createGoogleOAuthAdmissionPublication({ models, authority, owner, audit
       connectedAt:new Date(receipt.observedAt), lastValidatedAt:new Date(receipt.observedAt) },{ transaction,logging:false });
   }
 
-  function projection(selection, replayed) {
-    const configured = selection.service === 'search_console';
+  function checkedIdentity(value, selection) {
+    if (!C.exact(value,['attemptId','scopeKey','service','googleUserId','subjectDigest'])
+      || value.attemptId !== selection.attemptId || value.scopeKey !== selection.scopeKey || value.service !== 'analytics'
+      || !string(value.googleUserId,SUBJECT) || value.subjectDigest !== firstAnalyticsSubjectDigest(value.googleUserId)) conflict();
+    return Object.freeze({ ...value });
+  }
+
+  async function analyticsClaim(context, selection, identity, transaction) {
+    const o = options(transaction), scope = Cohort.requestedScope(context.scopeKey);
+    const clinic = await M.Clinica.findByPk(selection.clinicId,{ ...o,attributes:['id_clinica','grupoClinicaId'] });
+    if (!clinic || Number(clinic.id_clinica) !== selection.clinicId || scope.type === 'group' && Number(clinic.grupoClinicaId) !== scope.id) conflict();
+    const otherKey = scope.type === 'group' ? 'clinic:'+selection.clinicId : clinic.grupoClinicaId == null ? null : 'group:'+Number(clinic.grupoClinicaId);
+    const keys = otherKey ? [context.scopeKey,otherKey].sort() : [context.scopeKey];
+    const allocations = await M.GoogleConnectionAssignment.findAll({ ...o,
+      attributes:['scopeKey','assignmentScope','googleConnectionId','clinicaId','grupoClinicaId','status'],
+      where:{ scopeKey:{ [Op.in]:keys } },order:[['scopeKey','ASC']],limit:3 });
+    if (allocations.length > keys.length || new Set(allocations.map(row=>row.scopeKey)).size !== allocations.length) conflict();
+    const connection = await connectionFor(identity.googleUserId,transaction), connectionId = connection ? Number(connection.id) : null;
+    if (connection && !positive(connectionId)) conflict();
+    for (const allocation of allocations) {
+      if (allocation.scopeKey === context.scopeKey || scope.type === 'group' || ['active','reauthorization_required'].includes(allocation.status)) {
+        if (connectionId === null) conflict();
+        checkedAllocation(allocation,allocation.scopeKey,connectionId);
+      }
+    }
+    // Lookup is global by canonical subject/cohort, not just this clinic.
+    // A first authorization must never replace an existing Analytics version.
+    const bindings = await M.GoogleOAuthBrokerBinding.findAll({ ...o,where:{ google_user_id:identity.googleUserId,cohort:'analytics' },limit:2 });
+    if (bindings.length > 1) conflict();
+    const previous = await M.GoogleOAuthAdmissionPublication.findByPk(selection.attemptId,o);
+    if (previous && (previous.scope_key !== context.scopeKey || previous.service !== 'analytics'
+      || Number(previous.clinic_id) !== selection.clinicId || previous.asset_ref !== selection.assetRef
+      || Number(previous.google_connection_id) !== connectionId)) conflict();
+    await assertHistory(selection,context,connectionId,transaction);
+    if (!previous) {
+      if (connectionId !== null && await M.ClinicAnalyticsProperty.findOne({ ...o,attributes:['id'],
+        where:{ googleConnectionId:connectionId,isActive:true } })) conflict();
+      const resource = Analytics.property('properties/'+selection.assetRef.slice(4));
+      const existingMapping = await M.ClinicAnalyticsProperty.findOne({ ...o,attributes:['id'],
+        where:{ clinicaId:selection.clinicId,propertyName:resource.propertyName } });
+      const existingBinding = await M.AnalyticsBrokerBinding.findOne({ ...o,attributes:['mapping_id'],
+        where:{ clinica_id:selection.clinicId,property_name:resource.propertyName } });
+      if (existingMapping || existingBinding) conflict();
+    }
+    if (bindings.length) {
+      if (!previous || connectionId === null) conflict();
+      const binding = Cohort.validate(bindings[0]);
+      if (binding.connection_ref !== 'google-first:analytics:'+context.scopeKey || binding.secret_version !== selection.attemptId
+        || binding.asset_ref !== selection.assetRef || Number(binding.clinica_id) !== selection.clinicId
+        || Number(binding.google_connection_id) !== connectionId || !binding.confirmed_at) conflict();
+    } else if (previous) conflict();
+    return digest({ subjectDigest:identity.subjectDigest,connectionId,allocations,
+      analyticsBinding:bindings.length ? Cohort.digest(bindings[0]) : null,
+      publication:previous ? [previous.receipt_id,previous.receipt_digest,previous.google_connection_id] : null,
+      targetClinic:[Number(clinic.id_clinica),clinic.grupoClinicaId == null ? null : Number(clinic.grupoClinicaId)] });
+  }
+
+  function projection(selection, replayed, analyticsResource) {
+    const configured = selection.service === 'search_console' || selection.service === 'analytics' && Boolean(analyticsResource);
     return { attemptId:selection.attemptId, scopeKey:selection.scopeKey, service:selection.service,
       authorizationConfirmed:true, connected:configured, configurationPending:!configured, replayed };
   }
@@ -198,19 +258,39 @@ function createGoogleOAuthAdmissionPublication({ models, authority, owner, audit
         return attempt(context,tx);
       });
       const request = { ...selection, bindingDigest:preview.binding_digest, clinicSetDigest:preview.clinic_digest, expiresAt:attemptExpiry(preview) };
+      let identity,claim;
+      const checkClaim = async tx => {
+        if (identity && await analyticsClaim(context,selection,identity,tx) !== claim) conflict();
+      };
+      if (selection.service === 'analytics' && verifyNativeAccess) {
+        if (typeof owner.previewIdentity !== 'function') unavailable();
+        identity = checkedIdentity(await owner.previewIdentity(Object.freeze({ ...request })),selection);
+        claim = await transaction(async tx => {
+          await authenticate(captured,context,tx);await attempt(context,tx);
+          return analyticsClaim(context,selection,identity,tx);
+        });
+        request.expectedSubjectDigest = identity.subjectDigest;
+      }
       const receipt = checkedReceipt(await owner.verifyPublication(Object.freeze(request)),selection,context,receiptBounds(preview));
+      if (identity && receipt.googleUserId !== identity.googleUserId) conflict();
+      let analyticsResource;
       if (verifyNativeAccess) {
         await transaction(async tx => {
           await authenticate(captured,context,tx);
-          await attempt(context,tx);
+          await attempt(context,tx);await checkClaim(tx);
         });
-        if (await verifyNativeAccess({ receipt,context }) !== true) unavailable();
+        const verified = await verifyNativeAccess({ receipt,context });
+        if (selection.service === 'analytics') {
+          const resource = Analytics.property('properties/' + selection.assetRef.slice(4));
+          analyticsResource = Object.freeze(projectGA(verified,resource.propertyName));
+        } else if (verified !== true) unavailable();
       }
       const receiptDigest = digest(receipt);
 
       return await transaction(async tx => {
         await authenticate(captured,context,tx);
         const row = await attempt(context,tx);
+        await checkClaim(tx);
         checkedReceipt(receipt,selection,context,receiptBounds(row));
         const previous = await M.GoogleOAuthAdmissionPublication.findByPk(selection.attemptId,options(tx));
         if (previous && (previous.receipt_digest !== receiptDigest || previous.receipt_id !== receipt.receiptId
@@ -236,6 +316,12 @@ function createGoogleOAuthAdmissionPublication({ models, authority, owner, audit
             connectionRef:receipt.connectionRef,assetRef:receipt.assetRef,...receipt.resource,
           },{ existingOnly:Boolean(previous) });
         }
+        if (analyticsResource) {
+          await persistVerifiedAnalyticsMapping(M,tx,{
+            clinicId:receipt.clinicId,connectionId,googleUserId:receipt.googleUserId,
+            connectionRef:receipt.connectionRef,assetRef:receipt.assetRef,property:analyticsResource,
+          },{ existingOnly:Boolean(previous) });
+        }
         if (!previous) {
           const record = { attempt_id:selection.attemptId, receipt_id:receipt.receiptId, receipt_digest:receiptDigest,
             google_connection_id:connectionId, scope_key:context.scopeKey, service:context.service,
@@ -245,7 +331,7 @@ function createGoogleOAuthAdmissionPublication({ models, authority, owner, audit
         }
         await authenticate(captured,context,tx);
         checkedReceipt(receipt,selection,context,receiptBounds(row));
-        return projection(selection,Boolean(previous));
+        return projection(selection,Boolean(previous),analyticsResource);
       });
     } catch (error) {
       const code = error?.status ?? error?.httpStatus;

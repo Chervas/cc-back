@@ -3,6 +3,7 @@
 // credential or provider. Installation is an explicit startup operation.
 const { createHash } = require('node:crypto');
 const SERVICES = Object.freeze(['business_profile', 'search_console', 'analytics', 'ads']);
+const COMPLETION = Object.freeze(['search_console', 'analytics']);
 const STATES = Object.freeze(['prepared', 'exchanging', 'candidate_ready', 'stage_intent', 'candidate_staged', 'interrupted', 'aborted', 'expired']);
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const SCOPE = /^(clinic|group):[1-9]\d{0,9}$/;
@@ -35,7 +36,7 @@ function localDto(value, selected, begin, completionInstalled = false) {
     || value.revision !== (value.state === 'prepared' ? 0 : 1)
     || !STATES.includes(value.authorizationState) || value.authorizationConfirmed !== false || value.connected !== false
     || withAssets && typeof value.canChooseAssets !== 'boolean'
-    || canChooseAssets && (begin || !completionInstalled || selected.service !== 'search_console'
+    || canChooseAssets && (begin || !completionInstalled || !COMPLETION.includes(selected.service)
       || value.state !== 'prepared' || value.authorizationState !== 'candidate_staged') || typeof value.expiresAt !== 'string'
     || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.expiresAt)
     || !Number.isFinite(Date.parse(value.expiresAt)) || new Date(value.expiresAt).toISOString() !== value.expiresAt) unavailable();
@@ -65,21 +66,28 @@ function searchConsoleSite(value) {
 }
 function assetsDto(value, selected) {
   if (!exact(value, ['attemptId', 'scopeKey', 'service', 'assets']) || value.attemptId !== selected.attemptId
-    || value.scopeKey !== selected.scopeKey || value.service !== 'search_console' || !Array.isArray(value.assets) || value.assets.length > 1000) unavailable();
+    || value.scopeKey !== selected.scopeKey || value.service !== selected.service || !COMPLETION.includes(selected.service) || !Array.isArray(value.assets) || value.assets.length > 1000) unavailable();
   const seen = new Set();
   const assets = value.assets.map(asset => {
-    if (!exact(asset, ['assetRef', 'siteUrl', 'clinicIds']) || typeof asset.assetRef !== 'string' || !/^sc:[a-f0-9]{64}$/.test(asset.assetRef)
-      || searchConsoleSite(asset.siteUrl) !== asset.assetRef || seen.has(asset.assetRef) || !Array.isArray(asset.clinicIds)
+    const analytics = selected.service === 'analytics';
+    if (!(analytics ? exact(asset, ['assetRef', 'propertyName', 'displayName', 'clinicIds'])
+      && typeof asset.assetRef === 'string' && /^ga4:[1-9]\d{0,19}$/.test(asset.assetRef)
+      && asset.propertyName === 'properties/' + asset.assetRef.slice(4)
+      && typeof asset.displayName === 'string' && asset.displayName.trim() && asset.displayName.length <= 100
+      && !/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(asset.displayName)
+      : exact(asset, ['assetRef', 'siteUrl', 'clinicIds']) && typeof asset.assetRef === 'string' && /^sc:[a-f0-9]{64}$/.test(asset.assetRef)
+      && searchConsoleSite(asset.siteUrl) === asset.assetRef)
+      || seen.has(asset.assetRef) || !Array.isArray(asset.clinicIds)
       || asset.clinicIds.length > 1000 || asset.clinicIds.some(id => !Number.isSafeInteger(id) || id <= 0 || id > 2147483647)
       || new Set(asset.clinicIds).size !== asset.clinicIds.length
       || selected.scopeKey.startsWith('clinic:') && asset.clinicIds.some(id => selected.scopeKey !== 'clinic:' + id)) unavailable();
-    seen.add(asset.assetRef); return { assetRef: asset.assetRef, siteUrl: asset.siteUrl, clinicIds: [...asset.clinicIds] };
+    seen.add(asset.assetRef); return { assetRef: asset.assetRef, ...(analytics ? { propertyName:asset.propertyName,displayName:asset.displayName } : { siteUrl:asset.siteUrl }), clinicIds: [...asset.clinicIds] };
   });
-  return { attemptId: selected.attemptId, scopeKey: selected.scopeKey, service: 'search_console', assets };
+  return { attemptId: selected.attemptId, scopeKey: selected.scopeKey, service: selected.service, assets };
 }
 function publishedDto(value, selected) {
   if (!exact(value, ['attemptId', 'scopeKey', 'service', 'authorizationConfirmed', 'connected', 'configurationPending', 'replayed'])
-    || value.attemptId !== selected.attemptId || value.scopeKey !== selected.scopeKey || value.service !== 'search_console'
+    || value.attemptId !== selected.attemptId || value.scopeKey !== selected.scopeKey || value.service !== selected.service || !COMPLETION.includes(selected.service)
     || value.authorizationConfirmed !== true || value.connected !== true || value.configurationPending !== false
     || typeof value.replayed !== 'boolean') unavailable();
   return { ...value };
@@ -144,7 +152,7 @@ function createGoogleOAuthAdmissionHttpAdapter({ runtime = null, authenticate, r
   router.get('/assets', async (req, res) => {
     try {
       emptyBody(req); const selected = selection(req.query, true);
-      if (selected.service !== 'search_console') fail();
+      if (!COMPLETION.includes(selected.service)) fail();
       if (!completionInstalled) fail(503, 'google_oauth_admission_disabled');
       // Runtime checks the original recorded intent, current normal session,
       // scoped read authority and signed catalogue policy on this request.
@@ -156,8 +164,8 @@ function createGoogleOAuthAdmissionHttpAdapter({ runtime = null, authenticate, r
       if (!exact(req.query, []) || !req.is('application/json')
         || !exact(req.body, ['attempt_id', 'scope_key', 'google_service', 'clinic_id', 'asset_ref'])) fail();
       const selected = selection({ attempt_id: req.body.attempt_id, scope_key: req.body.scope_key, google_service: req.body.google_service }, true);
-      if (selected.service !== 'search_console' || !Number.isSafeInteger(req.body.clinic_id) || req.body.clinic_id <= 0 || req.body.clinic_id > 2147483647
-        || typeof req.body.asset_ref !== 'string' || !/^sc:[a-f0-9]{64}$/.test(req.body.asset_ref)
+      if (!COMPLETION.includes(selected.service) || !Number.isSafeInteger(req.body.clinic_id) || req.body.clinic_id <= 0 || req.body.clinic_id > 2147483647
+        || typeof req.body.asset_ref !== 'string' || !(selected.service === 'analytics' ? /^ga4:[1-9]\d{0,19}$/ : /^sc:[a-f0-9]{64}$/).test(req.body.asset_ref)
         || selected.scopeKey.startsWith('clinic:') && selected.scopeKey !== 'clinic:' + req.body.clinic_id) fail();
       if (!completionInstalled) fail(503, 'google_oauth_admission_disabled');
       // No extra status/start-capability request: publication owns its fresh

@@ -174,8 +174,9 @@ const clients = Object.fromEntries(Object.keys(KINDS).map(kind => {
   let cached; let first;
   const prefix = kind === 'search_console' ? 'GOOGLE_SEARCH_CONSOLE_BROKER_' : 'GOOGLE_ANALYTICS_BROKER_';
   return [kind, { execute(command, budget) {
-    if (kind === 'search_console' && command.connectionRef.startsWith('google-first:')) {
-      first ||= require('./googleOAuthAdmissionRuntime.service').createFirstSearchConsoleRevoker();
+    if (command.connectionRef.startsWith('google-first:')) {
+      const runtime = require('./googleOAuthAdmissionRuntime.service');
+      first ||= kind === 'search_console' ? runtime.createFirstSearchConsoleRevoker() : runtime.createFirstAnalyticsRevoker();
       return first.execute(command,budget);
     }
     cached ||= createIntegrationsBrokerClient({ origin: process.env[prefix + 'ORIGIN'], audience: process.env[prefix + 'AUDIENCE'],

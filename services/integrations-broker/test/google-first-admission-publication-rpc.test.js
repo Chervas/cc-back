@@ -66,7 +66,7 @@ test('signed publication resolves only the configured native locator for the app
   assert.deepEqual(f.state.calls[0],{ pin:proof,owner:{ principalId,tenantRef:'clinic:17',
     connectionRef:'google-first:'+proof.attemptId,assetRef:'google-oauth:search_console:group:9' },
   selection:{ scopeKey:'group:9',clinicId:31,assetRef:property.assetRef },resource:{ siteUrl:property.siteUrl } });
-  const ga = await f.send({ service:'analytics',clinicId:17,selectedAssetRef:'ga4:321' });
+  const ga = await f.send({ service:'analytics',clinicId:17,selectedAssetRef:'ga4:321',expectedSubjectDigest:'e'.repeat(64) });
   assert.equal(ga.data.service,'analytics');
   assert.equal(ga.data.resource,undefined);
   assert.deepEqual(f.state.calls[1].resource,{ propertyName:'properties/321' });

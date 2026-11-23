@@ -45,6 +45,24 @@ class Deployment(unittest.TestCase):
             with self.subTest(environment=environment), self.assertRaises(ValueError):
                 check.validate(config, environment)
 
+    def test_native_analytics_needs_its_dedicated_reader_and_cursor(self):
+        for keep_sc in (False, True):
+            config = fixture()
+            if not keep_sc:
+                for field in ('searchConsoleReaderPrincipal', 'searchConsoleCursorKeyFile'):
+                    del config[field]
+                for key in ('scopes', 'slots', 'publicationResources'):
+                    config[key].clear()
+            config['scopes'].append(dict(services=['analytics']))
+            config['slots'].append(dict(service='analytics'))
+            config['publicationResources'].append(dict(service='analytics'))
+            config['analyticsReaderPrincipal'] = dict(id='crm:staging:google-first-ga4-reader')
+            config['analyticsCursorKeyFile'] = '/etc/clinicaclick-google-first-owner-staging/analytics-cursor.key'
+            check.validate(config, 'staging')
+            config['analyticsCursorKeyFile'] = '/etc/clinicaclick-google-first-owner-staging/cursor.key'
+            with self.assertRaises(Exception):
+                check.validate(config, 'staging')
+
     def test_service_exact_isolation_and_runtime(self):
         text = (ROOT / 'deploy/clinicaclick-google-first-owner@.service').read_text()
         for line in ['User=cc-google-first-%i', 'Group=cc-google-first-%i', 'StateDirectoryMode=0700',

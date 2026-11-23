@@ -101,12 +101,77 @@ function privateFile(filename) {
   } catch { fail('broker_configuration_invalid'); }
 }
 let cachedClient;
-const client = { execute(command, budget) {
+const managedClient = { execute(command, budget) {
   cachedClient ||= createIntegrationsBrokerClient({ origin: process.env.GOOGLE_ANALYTICS_BROKER_ORIGIN,
     audience: process.env.GOOGLE_ANALYTICS_BROKER_AUDIENCE, keyId: process.env.GOOGLE_ANALYTICS_BROKER_KEY_ID,
     privateKey: privateFile(process.env.GOOGLE_ANALYTICS_BROKER_KEY_FILE), ca: privateFile(process.env.GOOGLE_ANALYTICS_BROKER_CA_FILE), timeoutMs: 30000 });
   return cachedClient.execute(command, budget);
 } };
+const firstPrefix = 'google-first:analytics:';
+const validFirstScope = scope => typeof scope === 'string' && /^(clinic|group):[1-9]\d{0,9}$/.test(scope) && positive(scope.split(':')[1]);
+function createAnalyticsFirstReader({ env = process.env, readFile = privateFile, createClient = createIntegrationsBrokerClient } = {}) {
+  let signer;
+  const enabled = () => env.GOOGLE_ANALYTICS_BROKER_ENABLED === 'true'
+    && env.GOOGLE_ANALYTICS_FIRST_READER_ENABLED === 'true';
+  function configuredClient() {
+    if (!enabled() || env.RUNTIME_ROLE !== 'api' || !['dev','staging'].includes(env.JOB_RUNTIME_NAMESPACE)) fail('broker_configuration_invalid');
+    if (signer) return signer;
+    let key;
+    try {
+      key = readFile(env.GOOGLE_ANALYTICS_FIRST_READER_KEY_FILE);
+      signer = createClient({
+        origin:env.GOOGLE_ANALYTICS_FIRST_READER_ORIGIN,
+        audience:'clinicaclick:google-first-oauth:'+env.JOB_RUNTIME_NAMESPACE+':v1',
+        keyId:env.GOOGLE_ANALYTICS_FIRST_READER_KEY_ID,privateKey:key,
+        ca:readFile(env.GOOGLE_ANALYTICS_FIRST_READER_CA_FILE),timeoutMs:30000,
+      });
+    } finally {
+      if (Buffer.isBuffer(key)) key.fill(0);
+    }
+    return signer;
+  }
+  const reader = {
+    available({ scopeKey,service,clinicIds }) {
+      if (!enabled() || service !== 'analytics' || !validFirstScope(scopeKey) || !Array.isArray(clinicIds) || !clinicIds.length
+        || clinicIds.length > 1000 || clinicIds.some((id,index) => !Number.isSafeInteger(id) || !positive(id) || index && id <= clinicIds[index-1])
+        || scopeKey.startsWith('clinic:') && (clinicIds.length !== 1 || scopeKey !== 'clinic:'+clinicIds[0])) return false;
+      return typeof configuredClient()?.execute === 'function';
+    },
+    execute(command,budget) {
+      if (typeof command?.connectionRef !== 'string' || !command.connectionRef.startsWith(firstPrefix)
+        || !contract.OPERATIONS.includes(command.operation) || !/^ga4:[1-9]\d{0,19}$/.test(command.assetRef)
+        || !validFirstScope(command.tenantRef) || !command.tenantRef.startsWith('clinic:')) fail('broker_binding_invalid');
+      const scope = command.connectionRef.slice(firstPrefix.length);
+      if (!validFirstScope(scope) || scope.startsWith('clinic:') && scope !== command.tenantRef) fail('broker_binding_invalid');
+      contract.validate(command.operation,command.payload);
+      return configuredClient().execute(command,budget);
+    },
+    async verify({ receipt,context }) {
+      if (!reader.available(context) || receipt?.mode !== 'provisioned' || receipt.service !== context.service
+        || receipt.attemptId !== context.attemptId || receipt.scopeKey !== context.scopeKey || !context.clinicIds.includes(receipt.clinicId)
+        || receipt.connectionRef !== firstPrefix+context.scopeKey || !/^ga4:[1-9]\d{0,19}$/.test(receipt.assetRef)
+        || receipt.secretVersion !== context.attemptId || receipt.status !== 'confirmed_resource_access') return false;
+      return readFirstRegisteredProperty(reader,{ clinicId:receipt.clinicId,connectionRef:receipt.connectionRef,
+        assetRef:receipt.assetRef,propertyName:'properties/'+receipt.assetRef.slice(4) });
+    },
+  };
+  return Object.freeze(reader);
+}
+async function readFirstRegisteredProperty(reader,{ clinicId,connectionRef,assetRef,propertyName }) {
+  const resource = contract.property(propertyName);
+  if (!Number.isSafeInteger(clinicId) || !positive(clinicId) || resource.assetRef !== assetRef) fail('broker_binding_invalid');
+  const response = await reader.execute({ operation:discovery.GA_OPERATION,connectionRef,
+    tenantRef:'clinic:'+clinicId,assetRef,payload:{} },{ timeoutMs:15000 });
+  try { return discovery.projectFirstGA(response?.data,resource.propertyName); } catch { fail('broker_response_invalid'); }
+}
+function createAnalyticsRoutedClient(firstReader,otherReader) {
+  return Object.freeze({ execute(command,budget) {
+    return (String(command?.connectionRef || '').startsWith('google-first:') ? firstReader : otherReader).execute(command,budget);
+  } });
+}
+const firstReader = createAnalyticsFirstReader();
+const client = createAnalyticsRoutedClient(firstReader,managedClient);
+
 function createAnalyticsRepository(getModels) {
   return {
     loadMapping: id => getModels().ClinicAnalyticsProperty.findByPk(id, { attributes: ['id', 'clinicaId', 'googleConnectionId', 'propertyName', 'isActive',
@@ -136,4 +201,4 @@ function createReviewedPropertyReader(broker = client) {
   };
 }
 module.exports = { ...service, createAnalyticsBroker, createAnalyticsRepository, createReviewedPropertyReader,
-  readReviewedProperty: createReviewedPropertyReader(), safe };
+  readReviewedProperty: createReviewedPropertyReader(), createAnalyticsFirstReader, createAnalyticsRoutedClient, firstReadAuthority:firstReader, safe };

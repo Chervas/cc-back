@@ -320,9 +320,9 @@ test('an empty SC catalogue is valid and cannot manufacture a completed connecti
   assert.equal(Object.hasOwn(empty.json, 'connected'), false); assert.equal(f.state.publish, 0);
 });
 
-test('completion remains Search Console only with exact request schemas and strict numeric clinic', async t => {
+test('completion supports only Search Console/Analytics with exact request schemas and strict numeric clinic', async t => {
   const f = await fixture(t, { installed: true, completion: true });
-  assert.equal((await f.request(assetsPath.replace('search_console', 'analytics'))).status, 400);
+  assert.equal((await f.request(assetsPath.replace('search_console', 'business_profile'))).status, 400);
   assert.equal((await f.request(assetsPath + '&asset_ref=' + ASSET)).status, 400);
   for (const body of [{ ...confirmBody, google_service: 'ads' }, { ...confirmBody, clinic_id: '66' }, { ...confirmBody, clinic_id: 0 },
     { ...confirmBody, asset_ref: 'gbp:1:2' }, { ...confirmBody, accessToken: PRIVATE }, { ...confirmBody, scope_key: 'clinic:72' }]) {
@@ -368,4 +368,38 @@ test('SC completion preserves sanitized runtime 409/503 and rejects permissive o
     f.state.publishValue = { ...receipt, ...change }; const response = await f.request('/google/admission/confirm', { method: 'POST', body: confirmBody });
     assert.equal(response.status, 503); assert(!response.body.includes(PRIVATE));
   }
+});
+
+const gaAsset = { assetRef:'ga4:333',propertyName:'properties/333',displayName:'Propiedad ficticia',clinicIds:[66,72] };
+const gaAssetsPath = assetsPath.replace('search_console','analytics');
+const gaConfirmBody = { ...selected,clinic_id:66,asset_ref:gaAsset.assetRef };
+test('GA4 completion uses positive prepared/candidate_staged readiness and exact native catalogue while starts are paused',async t=>{
+ const f=await fixture(t,{ installed:true,completion:true });f.state.capabilityError=503;
+ f.state.statusValue={ ...dto({ attemptId:ID,scopeKey:'group:29',service:'analytics' }),authorizationState:'candidate_staged',canChooseAssets:true };
+ assert.equal((await f.request(statusPath)).json.canChooseAssets,true);
+ f.state.assetsValue={ attemptId:ID,scopeKey:'group:29',service:'analytics',assets:[gaAsset] };
+ const catalogue=await f.request(gaAssetsPath);assert.equal(catalogue.status,200);assert.deepEqual(catalogue.json,f.state.assetsValue);protectedHeaders(catalogue);
+ const confirmed=await f.request('/google/admission/confirm',{ method:'POST',body:gaConfirmBody });assert.equal(confirmed.status,200);
+ assert.deepEqual(confirmed.json,{ attemptId:ID,scopeKey:'group:29',service:'analytics',authorizationConfirmed:true,connected:true,configurationPending:false,replayed:false });
+ f.state.replayed=true;assert.equal((await f.request('/google/admission/confirm',{ method:'POST',body:gaConfirmBody })).json.replayed,true);
+ assert.equal(f.state.capability,0);assert.equal(f.state.status,1);
+ const seen=f.state.seen.find(row=>row.kind==='publish');assert.deepEqual(seen.selection,{ attemptId:ID,scopeKey:'group:29',service:'analytics',clinicId:66,assetRef:gaAsset.assetRef });
+ assert.equal(seen.session,f.state.sessionRef);assert.equal(seen.actorId,501);
+ f.state.assetsValue={ ...f.state.assetsValue,assets:[] };assert.deepEqual((await f.request(gaAssetsPath)).json.assets,[]);
+});
+test('GA4 catalogue rejects noncanonical property, cross-service metadata, duplicate IDs and raw extra fields',async t=>{
+ const f=await fixture(t,{ installed:true,completion:true });
+ for(const asset of [{ ...gaAsset,assetRef:'ga4:0333' },{ ...gaAsset,propertyName:'properties/334' },{ ...gaAsset,displayName:'x\n' },
+  { ...gaAsset,displayName:'' },{ ...gaAsset,displayName:'x\u0085' },{ ...gaAsset,displayName:'x\u202e' },{ ...gaAsset,clinicIds:[66,66] },{ ...gaAsset,siteUrl:SITE },{ ...gaAsset,refreshToken:PRIVATE }]){
+  f.state.assetsValue={ attemptId:ID,scopeKey:'group:29',service:'analytics',assets:[asset] };
+  const response=await f.request(gaAssetsPath);assert.equal(response.status,503);assert(!response.body.includes(PRIVATE));
+ }
+ for(const body of [{ ...gaConfirmBody,asset_ref:ASSET },{ ...gaConfirmBody,clinic_id:'66' },{ ...gaConfirmBody,scope_key:'clinic:72' },{ ...gaConfirmBody,property_name:'properties/333' }])assert.equal((await f.request('/google/admission/confirm',{ method:'POST',body })).status,400);
+ assert.equal(f.state.publish,0);
+});
+test('GA4 completion remains off without both runtime methods and preserves sanitized conflicts',async t=>{
+ const f=await fixture(t,{ installed:true,completion:'assets_only' });
+ assert.equal((await f.request(gaAssetsPath)).status,503);assert.equal((await f.request('/google/admission/confirm',{ method:'POST',body:gaConfirmBody })).status,503);
+ const ready=await fixture(t,{ installed:true,completion:true });
+ for(const status of [409,503]){ready.state.assetsError=ready.state.publishError=status;const assets=await ready.request(gaAssetsPath),publish=await ready.request('/google/admission/confirm',{ method:'POST',body:gaConfirmBody });assert.equal(assets.status,status);assert.equal(publish.status,status);assert(!assets.body.includes(PRIVATE));assert(!publish.body.includes(PRIVATE));}
 });

@@ -441,4 +441,110 @@ withIsolatedCampaignMysql(async ({ sql,models,report }) => {
   assert.equal(event.assetRef,signedSite.assetRef);
   assert.equal(event.actor.id,String(actorId));
   report.checks.push('The CRM runtime builds its signed publication context from the same authorized scope and commits the native audit event with Search Console; replay adds no audit event.');
+
+  const nativeGa = await begin('clinic:62',62,'analytics','ga4:777',{});
+  const gaResource = { name:'properties/777',displayName:'Primera GA ficticia',propertyType:'PROPERTY_TYPE_ORDINARY',parent:'accounts/9',account:'accounts/9' };
+  let allowGaNative=false,gaVerifyCount=0,gaDuringVerify=null;
+  const subjectDigest=require('../../../services/integrations-broker/src/google-property-discovery-contract').firstAnalyticsSubjectDigest;
+  const gaPublisher=createGoogleOAuthAdmissionPublication({ models,authority,now,owner:{
+   async previewIdentity(input) { const receipt=replies.get(input.attemptId);return { attemptId:input.attemptId,scopeKey:input.scopeKey,service:'analytics',googleUserId:receipt.googleUserId,subjectDigest:subjectDigest(receipt.googleUserId) }; },
+   async verifyPublication(input) {
+    gaVerifyCount++;assert.equal(input.expectedSubjectDigest,subjectDigest(replies.get(input.attemptId).googleUserId));await gaDuringVerify?.();
+    return { ...replies.get(input.attemptId),bindingDigest:input.bindingDigest,clinicSetDigest:input.clinicSetDigest };
+  } },verifyNativeAccess:async ({ receipt,context })=>{
+    assert.equal(receipt.assetRef,'ga4:777');assert.equal(receipt.service,'analytics');assert.deepEqual(context.clinicIds,[62]);
+    return allowGaNative ? gaResource : false;
+  },async audit(record,{ transaction }) { await sql.query('INSERT INTO fixture_google_first_audit (attempt_id) VALUES (?)',{ replacements:[record.attempt_id],transaction }); } });
+  const gaCounts = async()=>({ connections:await models.GoogleConnection.count(),mappings:await models.ClinicAnalyticsProperty.count(),
+    bindings:await models.AnalyticsBrokerBinding.count(),publications:await models.GoogleOAuthAdmissionPublication.count(),audit:await countAudit() });
+  const beforeGa=await gaCounts();await assert.rejects(gaPublisher.publish(readSession,nativeGa),{ status:503 });assert.deepEqual(await gaCounts(),beforeGa);
+  allowGaNative=true;
+  assert.deepEqual(await gaPublisher.publish(readSession,nativeGa),{ attemptId:nativeGa.attemptId,scopeKey:'clinic:62',service:'analytics',authorizationConfirmed:true,connected:true,configurationPending:false,replayed:false });
+  const nativeGaConnection=await models.GoogleConnection.findOne({ where:{ googleUserId:'fictitious_new_62' },raw:true });
+  assert.equal(nativeGaConnection.accessToken,null);assert.equal(nativeGaConnection.refreshToken,null);
+  const nativeGaMapping=await models.ClinicAnalyticsProperty.findOne({ where:{ clinicaId:62,propertyName:'properties/777' },raw:true });
+  assert.equal(nativeGaMapping.googleConnectionId,nativeGaConnection.id);assert.equal(nativeGaMapping.propertyDisplayName,gaResource.displayName);
+  assert.equal(nativeGaMapping.propertyType,gaResource.propertyType);assert.equal(nativeGaMapping.parent,gaResource.parent);
+  assert.equal(nativeGaMapping.broker_read_connection_ref,'google-first:analytics:clinic:62');assert.equal(nativeGaMapping.broker_read_asset_ref,'ga4:777');
+  const nativeGaBinding=await models.AnalyticsBrokerBinding.findOne({ where:{ mapping_id:nativeGaMapping.id },raw:true });
+  assert.equal(nativeGaBinding.property_name,'properties/777');assert.equal(nativeGaBinding.google_user_id,'fictitious_new_62');assert.equal(nativeGaBinding.state,'active');
+  const afterGa=await gaCounts();assert.equal((await gaPublisher.publish(readSession,nativeGa)).replayed,true);assert.deepEqual(await gaCounts(),afterGa);
+  await models.ClinicAnalyticsProperty.update({ isActive:false },{ where:{ id:nativeGaMapping.id } });
+  await assert.rejects(gaPublisher.publish(readSession,nativeGa),{ status:409 });
+  assert.equal((await models.ClinicAnalyticsProperty.findByPk(nativeGaMapping.id)).isActive,false);
+  assert.deepEqual(await gaCounts(),afterGa);
+  report.checks.push('GA4 native verification denies before business SQL writes; exact projected native metadata, identity, allocation, OAuth binding, mapping, scoped Analytics binding and audit commit together. Exact retry is inert and never restores a disabled mapping.');
+
+  const gaRuntimeSelection=await begin('clinic:63',63,'analytics','ga4:888',{}),gaSelectedScope={ attemptId:gaRuntimeSelection.attemptId,scopeKey:'clinic:63',service:'analytics' };
+  const gaRuntimeResource={ ...gaResource,name:'properties/888' },gaRow={ assetRef:'ga4:888',propertyName:'properties/888',displayName:gaResource.displayName,clinicIds:[63] };
+  let gaNative=false,gaCatalogue=[gaRow],gaRevokeRole=false;const gaSigned=[];
+  const gaRuntime=createGoogleOAuthAdmissionRuntime({
+    config:{ schema:'clinicaclick-google-first-admission-crm/1',environment:'staging',startsEnabled:false,publicationEnabled:true,
+      origin:'https://owner.example.invalid/',keyId:'test-only',keyFile:'/etc/example/key',caFile:'/etc/example/ca',
+      clientId:'fictitious.apps.googleusercontent.com',redirectUri:'https://crm.example.invalid/oauth/google/callback',
+      scopes:[{ scopeKey:'clinic:63',clinicIds:[63],services:['analytics'] }] },environment:'staging',models,sessions,now,
+    readFile:()=>Buffer.from('FICTITIOUS_PIN'),readAuthority:{ available:()=>true,verify:async()=>gaNative ? gaRuntimeResource : false },
+    clientFactory:()=>({ async execute(request) {
+      gaSigned.push(request);assert.equal(request.tenantRef,'clinic:63');assert.equal(request.connectionRef,'google-first:'+gaRuntimeSelection.attemptId);
+      assert.equal(request.assetRef,'google-oauth:analytics:clinic:63');assert(!JSON.stringify(request).includes(sessionRef));let data;
+      if(request.operation==='google.oauth.admission.identity.preview.v1'){
+        const receipt=replies.get(gaRuntimeSelection.attemptId);data={ ...gaSelectedScope,googleUserId:receipt.googleUserId,subjectDigest:subjectDigest(receipt.googleUserId) };
+      }else if(request.operation==='google.oauth.admission.status.v1'){ const { clinicSetDigest,...proof }=request.payload;data={ ...proof,state:'candidate_staged',authorizationConfirmed:false,connected:false }; }
+      else if(request.operation==='google.oauth.admission.catalogue.ready.v1')data={ ...gaSelectedScope,canChooseAssets:true };
+      else if(request.operation==='google.oauth.admission.catalogue.v1'){
+        if(gaRevokeRole)await models.UsuarioClinica.update({ rol_clinica:'personaldeclinica' },{ where:{ id_usuario:actorId,id_clinica:63 } });
+        data={ ...gaSelectedScope,assets:gaCatalogue };
+      }else{ assert.equal(request.operation,'google.oauth.admission.publication.verify.v1');assert.equal(request.payload.clinicId,63);assert.equal(request.payload.selectedAssetRef,'ga4:888');assert.equal(request.payload.expectedSubjectDigest,subjectDigest(replies.get(gaRuntimeSelection.attemptId).googleUserId));
+        data={ ...replies.get(gaRuntimeSelection.attemptId),bindingDigest:request.payload.bindingDigest,clinicSetDigest:request.payload.clinicSetDigest }; }
+      return { requestId:request.requestId,data,replayed:false };
+    } }),
+  });
+  assert.equal((await gaRuntime.capability(readSession,gaSelectedScope)).enabled,false);
+  assert.equal((await gaRuntime.status(readSession,gaSelectedScope)).canChooseAssets,true);
+  assert.deepEqual(await gaRuntime.assets(readSession,gaSelectedScope),{ ...gaSelectedScope,assets:[gaRow] });
+  gaCatalogue=[{ ...gaRow,propertyName:'properties/889' }];await assert.rejects(gaRuntime.assets(readSession,gaSelectedScope),{ status:503 });
+  gaCatalogue=[{ ...gaRow,clinicIds:[62] }];await assert.rejects(gaRuntime.assets(readSession,gaSelectedScope),{ status:503 });
+  gaCatalogue=[gaRow];gaRevokeRole=true;await assert.rejects(gaRuntime.assets(readSession,gaSelectedScope),{ status:403 });gaRevokeRole=false;
+  await models.UsuarioClinica.update({ rol_clinica:'propietario' },{ where:{ id_usuario:actorId,id_clinica:63 } });
+  const beforeGaRuntime=await gaCounts();await assert.rejects(gaRuntime.publish(readSession,gaRuntimeSelection),{ status:503 });assert.deepEqual(await gaCounts(),beforeGaRuntime);
+  gaNative=true;const gaPublished=await gaRuntime.publish(readSession,gaRuntimeSelection);assert.equal(gaPublished.connected,true);assert.equal(gaPublished.configurationPending,false);
+  assert.equal((await gaRuntime.publish(readSession,gaRuntimeSelection)).replayed,true);
+  assert.equal(await models.PlatformAuditEvent.count(),2);
+  const gaNativeMapping=await models.ClinicAnalyticsProperty.findOne({ where:{ clinicaId:63,propertyName:'properties/888' },raw:true });assert(gaNativeMapping?.isActive);
+  assert.equal(await models.AnalyticsBrokerBinding.count({ where:{ mapping_id:gaNativeMapping.id,state:'active' } }),1);
+  report.checks.push('Paused GA4 starts preserve current own-session signed readiness/catalogue/confirmation. Noncanonical properties, foreign destinations and a role change during catalogue are closed; rejected normal-reader verification performs zero business writes; exact confirmation/replay creates one native mapping and one transactional platform audit event.');
+
+  const existingOtherClinic=await begin('clinic:74',74,'analytics','ga4:999',{ googleUserId:oldSubject });
+  const beforeExistingGa=await gaCounts(),beforeVerify=gaVerifyCount;
+  await assert.rejects(gaPublisher.publish(readSession,existingOtherClinic),{ status:409 });
+  assert.equal(gaVerifyCount,beforeVerify,'global existing Analytics credential denied before Owner promotion');assert.deepEqual(await gaCounts(),beforeExistingGa);
+  const wrongScopeSubject=await begin('clinic:64',64,'analytics','ga4:999',{ googleUserId:'fictitious_wrong_subject' });
+  await assert.rejects(gaPublisher.publish(readSession,wrongScopeSubject),{ status:409 });assert.equal(gaVerifyCount,beforeVerify);assert.deepEqual(await gaCounts(),beforeExistingGa);
+  const assignmentRace=await begin('clinic:74',74,'analytics','ga4:999',{});
+  gaDuringVerify=async()=>{gaDuringVerify=null;await models.GoogleConnectionAssignment.create({ scopeKey:'clinic:74',assignmentScope:'clinic',clinicaId:74,googleConnectionId:anchorId,status:'active' });};
+  await assert.rejects(gaPublisher.publish(readSession,assignmentRace),{ status:409 });assert.equal(gaVerifyCount,beforeVerify+1);
+  assert.deepEqual(await gaCounts(),beforeExistingGa);assert.equal((await models.GoogleConnectionAssignment.findOne({ where:{ scopeKey:'clinic:74' } })).googleConnectionId,anchorId);
+  assert.equal((await models.GoogleOAuthBrokerBinding.findOne({ where:{ google_user_id:oldSubject,cohort:'analytics' } })).secret_version,inheritedVersion);
+  report.checks.push('Signed Analytics identity preview checks exact active scope/inheritance and the global canonical subject/cohort before promotion. A different subject and an existing Analytics credential in another clinic make zero promotion calls. Assignment drift during the simulated Owner call blocks native verification and every SQL publication write while preserving the concurrent assignment and established credential. This race may leave an Owner promotion pending, so real activation remains OFF pending reservation/reconciliation design.');
+
+  await models.Clinica.bulkCreate([76,77,78].map(id_clinica=>({ id_clinica,nombre_clinica:'Fixture preclaim',grupoClinicaId:null,estado_clinica:true })));
+  await models.UsuarioClinica.bulkCreate([76,77,78].map(id_clinica=>({ id_usuario:actorId,id_clinica,rol_clinica:'propietario',estado_invitacion:'aceptada' })));
+  await models.GoogleConnection.create({ id:500,googleUserId:'fictitious_legacy_candidate',userId:null,accessToken:null,refreshToken:null });
+  await models.ClinicAnalyticsProperty.create({ clinicaId:61,googleConnectionId:500,propertyName:'properties/445',isActive:true });
+  const legacyActive=await begin('clinic:76',76,'analytics','ga4:999',{ googleUserId:'fictitious_legacy_candidate' });
+  const beforeLegacyVerify=gaVerifyCount;
+  await assert.rejects(gaPublisher.publish(readSession,legacyActive),{ status:409 });assert.equal(gaVerifyCount,beforeLegacyVerify);
+  await models.ClinicAnalyticsProperty.create({ clinicaId:77,googleConnectionId:anchorId,propertyName:'properties/999',isActive:false });
+  const oldExactTarget=await begin('clinic:77',77,'analytics','ga4:999',{});
+  await assert.rejects(gaPublisher.publish(readSession,oldExactTarget),{ status:409 });assert.equal(gaVerifyCount,beforeLegacyVerify);
+  await models.GooglePropertyBrokerRevocation.create({ tuple_hash:'e'.repeat(64),kind:'analytics',resource:'properties/999',
+    connection_ref:'fixture:prior',asset_ref:'ga4:999',clinica_id:78,google_connection_id:anchorId,google_user_id:oldSubject,
+    request_id:randomUUID(),actor_user_id:actorId,requested_at:now(),next_attempt_at:now(),state:'confirmed',confirmed_at:now() });
+  const preRevoked=await begin('clinic:78',78,'analytics','ga4:999',{});
+  await assert.rejects(gaPublisher.publish(readSession,preRevoked),{ status:409 });assert.equal(gaVerifyCount,beforeLegacyVerify);
+  report.checks.push('Known legacy active mappings without a cohort binding, an exact historical/inactive target mapping and resource tombstones all fail the same preclaim before any promotion call; existing rows and credentials remain untouched.');
+
+
+
+
 }).catch(error => { process.stderr.write(String(error.stack) + '\n'); process.exitCode = 1; });

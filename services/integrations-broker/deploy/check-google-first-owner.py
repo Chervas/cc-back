@@ -25,11 +25,25 @@ def validate(config, environment):
     certificate = '/server-cert.crt' if environment == 'staging' else '/server-cert.pem'
     need(config.get('tlsCertFile') == directory + certificate and config.get('tlsKeyFile') == directory + '/server-key.pem')
     need(isinstance(config.get('tlsRenewal'), dict) and config['tlsRenewal'].get('issuerCaFile') == directory + '/issuer-ca.pem')
-    need(config.get('searchConsoleCursorKeyFile') == directory + '/cursor.key')
+    readers = {
+        'search_console': ('searchConsoleReaderPrincipal', 'searchConsoleCursorKeyFile', 'sc', 'cursor.key'),
+        'analytics': ('analyticsReaderPrincipal', 'analyticsCursorKeyFile', 'ga4', 'analytics-cursor.key'),
+    }
     scopes, slots, resources = config.get('scopes'), config.get('slots'), config.get('publicationResources')
-    need(isinstance(scopes, list) and scopes and all(isinstance(row, dict) and row.get('services') == ['search_console'] for row in scopes))
-    need(isinstance(slots, list) and slots and all(isinstance(row, dict) and row.get('service') == 'search_console' for row in slots))
-    need(isinstance(resources, list) and resources and all(isinstance(row, dict) and row.get('service') == 'search_console' for row in resources))
+    need(isinstance(scopes, list) and scopes and all(
+        isinstance(row, dict) and isinstance(row.get('services'), list) and row['services']
+        and all(service in readers for service in row['services']) and len(row['services']) == len(set(row['services']))
+        for row in scopes))
+    enabled_services = {service for row in scopes for service in row['services']}
+    for rows in (slots, resources):
+        need(isinstance(rows, list) and rows and all(isinstance(row, dict) and row.get('service') in readers for row in rows))
+        need({row['service'] for row in rows} == enabled_services)
+    for service, (principal, cursor, role, filename) in readers.items():
+        if service in enabled_services:
+            need(config.get(cursor) == directory + '/' + filename)
+            need(config.get(principal, {}).get('id') == 'crm:' + environment + ':google-first-' + role + '-reader')
+        else:
+            need(principal not in config and cursor not in config)
     policy = config.get('policy', {})
     need(policy.get('audience') == 'clinicaclick:google-first-oauth:' + environment + ':v1'
          and policy.get('version') == 'google-first-oauth:' + environment + ':v1'
@@ -37,7 +51,6 @@ def validate(config, environment):
     principals = policy.get('principals')
     need(isinstance(principals, list) and len(principals) == 1
          and principals[0].get('id') == 'crm:' + environment + ':google-first-oauth')
-    need(config.get('searchConsoleReaderPrincipal', {}).get('id') == 'crm:' + environment + ':google-first-sc-reader')
 
 
 def main():

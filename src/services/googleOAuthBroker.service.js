@@ -22,6 +22,9 @@ const safe = error => SAFE.has(error?.code) ? error.code : 'google_oauth_unavail
 const fail = (code = 'google_oauth_unavailable', status = 503) => scope.fail(code, status);
 const stateFor = row => ({ mode: 'broker', authorization_status: row?.state || 'none',
   activation_confirmed: row?.state === 'active', pending: !!row && OPEN.includes(row.state) });
+const FIRST_ANALYTICS_PREFIX = 'google-first:analytics:';
+const firstAnalyticsBinding = binding => C.cohortOf(binding) === 'analytics' && binding.connection_ref.startsWith(FIRST_ANALYTICS_PREFIX);
+
 function createGoogleOAuthBroker({ models, client, sessions, audit = createRepository(models.PlatformAuditEvent),
   enabled = kind => process.env.GOOGLE_OAUTH_BROKER_ENABLED === 'true' && (!kind || process.env[C.COHORTS[kind]?.gate] === 'true'),
   workerEnabled = () => process.env.GOOGLE_OAUTH_BROKER_WORKER_ENABLED === 'true', now = () => new Date() }) {
@@ -33,6 +36,28 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
   const authorization = (row, transaction) => scope.authorize({ models, binding: row, actorId: row.actor_user_id,
     requestScopeKey: row.request_scope_key || row.scope_key, sessionRef: row.session_ref,
     expiresAt: new Date(row.expires_at), expectedClinicIds: row.clinic_ids, transaction, sessions });
+  async function firstAnalyticsStatus(binding, transaction) {
+    const scopeKey = binding.connection_ref.slice(FIRST_ANALYTICS_PREFIX.length);
+    C.requestedScope(scopeKey);
+    if (binding.policy_version !== C.POLICY || !UUID.test(binding.secret_version)
+      || !(binding.confirmed_at instanceof Date) || !Number.isFinite(+binding.confirmed_at)
+      || +binding.confirmed_at > +now() || !models.GoogleOAuthAdmissionPublication) fail('google_oauth_scope_conflict',409);
+    const row = await models.GoogleOAuthAdmissionPublication.findByPk(binding.secret_version,{
+      ...locked(transaction),raw:true,logging:false,
+      attributes:['attempt_id','receipt_id','receipt_digest','google_connection_id','scope_key','service','clinic_id','asset_ref','published_at'],
+    });
+    if (!row || row.attempt_id !== binding.secret_version || !UUID.test(row.receipt_id) || !/^[a-f0-9]{64}$/.test(row.receipt_digest)
+      || row.service !== 'analytics' || row.scope_key !== scopeKey || Number(row.google_connection_id) !== Number(binding.google_connection_id)
+      || Number(row.clinic_id) !== Number(binding.clinica_id) || row.asset_ref !== binding.asset_ref
+      || !(row.published_at instanceof Date) || !(+row.published_at >= +binding.confirmed_at && +row.published_at <= +now())) {
+      fail('google_oauth_scope_conflict',409);
+    }
+    // Local publication metadata is sufficient to reopen the ordinary asset
+    // inventory, which still uses the independently signed Analytics reader.
+    return { ...stateFor({ state:'active' }),google_service:'analytics',enabled:false,connected:false,
+      reason:'broker_authorization_metadata',googleUserId:binding.google_user_id,confirmed_at:binding.confirmed_at };
+  }
+
   async function append(row, action, stage, reason, transaction, worker = false) {
     const health = await audit.health(now(), { includeUnresolved: false, transaction });
     if (health.pending >= 9998 || health.oldestAgeSeconds >= 3600) fail('audit_unavailable');
@@ -137,7 +162,9 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
     },
     async begin({ binding, scopeKey, actorId, sessionRef, sessionExpiresAt, returnTo }) {
       if (binding?.mode === 'broker_services') fail('google_oauth_service_required', 409);
-      C.validate(binding); guard(binding); C.requestedScope(scopeKey);
+      C.validate(binding);
+      if (firstAnalyticsBinding(binding)) fail('google_oauth_disabled',409);
+      guard(binding); C.requestedScope(scopeKey);
       if (binding.policy_version === C.LEGACY_POLICY && scopeKey !== binding.scope_key || !UUID.test(sessionRef) || !Number.isSafeInteger(sessionExpiresAt)) fail('google_oauth_scope_conflict', 409);
       if (!['https://app.clinicaclick.com', 'https://crm.clinicaclick.com', 'http://localhost:4200', 'http://localhost:4203'].includes(returnTo)) fail('google_oauth_state_invalid', 400);
       const state = randomBytes(32).toString('base64url');
@@ -204,6 +231,7 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
       C.validate(binding); if (binding.policy_version === C.LEGACY_POLICY && scopeKey !== binding.scope_key) fail('google_oauth_scope_conflict', 409);
       return transact(async transaction => {
         const authorized = await scope.authorize({ models, binding, requestScopeKey: scopeKey, actorId, sessionRef, expiresAt: new Date(sessionExpiresAt * 1000), transaction, sessions });
+        if (firstAnalyticsBinding(binding)) return firstAnalyticsStatus(authorized.binding,transaction);
         const latest = await requests.findOne({ where: { google_connection_id: binding.google_connection_id, cohort: C.cohortOf(binding), binding_digest: C.digest(binding) },
           order: [['requested_at', 'DESC'], ['flow_id', 'DESC']], raw: true, transaction });
         return { ...stateFor(latest), google_service: C.cohortOf(binding), enabled: enabled(C.cohortOf(binding)), connected: false, reason: 'broker_authorization_metadata',

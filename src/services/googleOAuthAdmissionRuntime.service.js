@@ -14,6 +14,7 @@ const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerCli
 const SCHEMA = 'clinicaclick-google-first-admission-crm/1';
 const CONFIG_KEYS = ['schema','environment','startsEnabled','origin','keyId','keyFile','caFile','clientId','redirectUri','scopes'];
 const IDENTITY_OPERATION = /^google\.oauth\.admission\.(begin|status|finish|abort)\.v1$/;
+const IDENTITY_PREVIEW = 'google.oauth.admission.identity.preview.v1';
 const VERIFY_SELECTION = 'google.oauth.admission.publication.verify.v1';
 const CATALOGUE_READY = 'google.oauth.admission.catalogue.ready.v1';
 const CATALOGUE = 'google.oauth.admission.catalogue.v1';
@@ -151,11 +152,12 @@ function createGoogleOAuthAdmissionRuntime({
     const { createRepository } = require('./platformAudit.repository');
     const { fromFlow,ACTIONS } = require('../../services/platform-audit/src/integration-oauth-event');
     const { site } = require('../../services/integrations-broker/src/google-search-console-contract');
+    const { property } = require('../../services/integrations-broker/src/google-analytics-contract');
     const audit = createRepository(models.PlatformAuditEvent);
 
     function approvedScope({ scopeKey,service,clinicSetDigest },clinicId) {
       const allowed = policy.scopes.get(scopeKey);
-      if (service !== 'search_console' || !allowed?.services.includes(service)
+      if (!['search_console','analytics'].includes(service) || !allowed?.services.includes(service)
         || clinicSetDigest !== clinicDigest(allowed.clinicIds)
         || clinicId !== undefined && !allowed.clinicIds.includes(clinicId)) forbidden();
       return allowed;
@@ -198,7 +200,7 @@ function createGoogleOAuthAdmissionRuntime({
     }
     status = async (req,selection) => {
       const current = await coordinator.status(req,selection);
-      if (selection.service !== 'search_console' || current.state !== 'prepared' || current.authorizationState !== 'candidate_staged') return current;
+      if (!['search_console','analytics'].includes(selection.service) || current.state !== 'prepared' || current.authorizationState !== 'candidate_staged') return current;
       const verified = await checkOriginal(req,selection);
       if (!(await canRead(verified))) return current;
       const ready = await callOwner(CATALOGUE_READY,verified,{},10000);
@@ -220,8 +222,11 @@ function createGoogleOAuthAdmissionRuntime({
         || result.scopeKey !== scopeKey || result.service !== service || !Array.isArray(result.assets) || result.assets.length > 256) unavailable();
       const seen = new Set();
       for (const entry of result.assets) {
-        if (!C.exact(entry,['assetRef','siteUrl','clinicIds']) || entry.assetRef !== site(entry.siteUrl).assetRef
-          || seen.has(entry.assetRef) || !Array.isArray(entry.clinicIds) || !entry.clinicIds.length
+        const resourceValid = service === 'analytics'
+          ? C.exact(entry,['assetRef','propertyName','displayName','clinicIds']) && property(entry.propertyName).assetRef === entry.assetRef
+            && typeof entry.displayName === 'string' && entry.displayName.trim() && entry.displayName.length <= 100 && !/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(entry.displayName)
+          : C.exact(entry,['assetRef','siteUrl','clinicIds']) && entry.assetRef === site(entry.siteUrl).assetRef;
+        if (!resourceValid || seen.has(entry.assetRef) || !Array.isArray(entry.clinicIds) || !entry.clinicIds.length
           || entry.clinicIds.some((id,index) => !clinicIds.includes(id) || index && id <= entry.clinicIds[index-1])) unavailable();
         seen.add(entry.assetRef);
       }
@@ -231,9 +236,14 @@ function createGoogleOAuthAdmissionRuntime({
     };
 
     publisher = createGoogleOAuthAdmissionPublication({ models,authority,now,owner:{
+      async previewIdentity(selection) {
+        if (!(await canRead(selection))) unavailable();
+        return callOwner(IDENTITY_PREVIEW,selection,{},10000);
+      },
       async verifyPublication(selection) {
         if (!(await canRead(selection))) unavailable();
-        return callOwner(VERIFY_SELECTION,selection,{ clinicId:selection.clinicId,selectedAssetRef:selection.assetRef });
+        return callOwner(VERIFY_SELECTION,selection,{ clinicId:selection.clinicId,selectedAssetRef:selection.assetRef,
+          ...(selection.service === 'analytics' ? { expectedSubjectDigest:selection.expectedSubjectDigest } : {}) });
       },
     },verifyNativeAccess:proof => readAuthority.verify(proof),
     async audit(record,{ transaction,context,receipt }) {
@@ -253,7 +263,15 @@ function createGoogleOAuthAdmissionRuntime({
     if (!policy.startsEnabled || !granted?.services.includes(selection.service)) return false;
     const captured = await authority.capture(req,selection);
     const clinics = captured.context.clinicIds;
-    return clinics.length === granted.clinicIds.length && clinics.every((id,index) => id === granted.clinicIds[index]);
+    if (clinics.length !== granted.clinicIds.length || !clinics.every((id,index) => id === granted.clinicIds[index])) return false;
+    if (selection.service === 'analytics') {
+      // Do not emit a new consent URL for a partially installed GA4 flow.
+      // Pausing starts never gates callbacks/status or a recorded completion.
+      if (!publisher || await readAuthority.available({ scopeKey:selection.scopeKey,service:selection.service,clinicIds:[...clinics] }) !== true) return false;
+      const fresh = await authority.capture(req,selection);
+      if (C.bindingDigest(C.input(fresh.context)) !== C.bindingDigest(C.input(captured.context))) forbidden();
+    }
+    return true;
   }
   return Object.freeze({
     async capability(req,{ scopeKey,service }) {
@@ -280,7 +298,10 @@ function installGoogleOAuthAdmissionRuntime({
   env = process.env, readFile = privateFile,
   dependencies = config => ({
     models:require('../../models'),sessions:require('./accessSession.service'),
-    ...(config?.publicationEnabled === true ? { readAuthority:require('./searchConsoleBroker.service').firstReadAuthority } : {}),
+    ...(config?.publicationEnabled === true ? { readAuthority:{
+      available(context) { return (context.service === 'analytics' ? require('./analyticsBroker.service') : require('./searchConsoleBroker.service')).firstReadAuthority.available(context); },
+      verify(proof) { return (proof.context.service === 'analytics' ? require('./analyticsBroker.service') : require('./searchConsoleBroker.service')).firstReadAuthority.verify(proof); },
+    } } : {}),
   }),
 } = {}) {
   const config = loadConfig(env,readFile);
@@ -290,22 +311,24 @@ function installGoogleOAuthAdmissionRuntime({
   });
 }
 
-function createFirstSearchConsoleRevoker({ env = process.env,readFile = privateFile,clientFactory = createIntegrationsBrokerClient } = {}) {
+function createFirstPropertyRevoker(service,{ env = process.env,readFile = privateFile,clientFactory = createIntegrationsBrokerClient } = {}) {
   let policy,client;
   return Object.freeze({
     execute(command,options) {
-      const prefix = 'google-first:search_console:';
+      const prefix = 'google-first:' + service + ':';
       const scopeKey = typeof command?.connectionRef === 'string' && command.connectionRef.startsWith(prefix) ? command.connectionRef.slice(prefix.length) : '';
-      if (!SCOPE_KEY.test(scopeKey) || command.operation !== 'google.search_console.asset.revoke.v1'
+      if (!SCOPE_KEY.test(scopeKey) || command.operation !== (service === 'analytics' ? 'google.analytics.asset.revoke.v1' : 'google.search_console.asset.revoke.v1')
         || typeof command.tenantRef !== 'string' || !/^clinic:[1-9]\d{0,9}$/.test(command.tenantRef)
-        || !/^sc:[a-f0-9]{64}$/.test(command.assetRef) || !C.exact(command.payload,[])) forbidden();
+        || !(service === 'analytics' ? /^ga4:[1-9]\d{0,19}$/ : /^sc:[a-f0-9]{64}$/).test(command.assetRef) || !C.exact(command.payload,[])) forbidden();
       if (!policy) policy = readPolicy(loadConfig(env,readFile),env.JOB_RUNTIME_NAMESPACE);
       const scope = policy.scopes.get(scopeKey);
-      if (!scope?.services.includes('search_console') || !scope.clinicIds.includes(Number(command.tenantRef.slice(7)))) forbidden();
+      if (!scope?.services.includes(service) || !scope.clinicIds.includes(Number(command.tenantRef.slice(7)))) forbidden();
       client ||= controlClient(policy,readFile,clientFactory);
       return client.execute(command,options);
     },
   });
 }
 
-module.exports = { createGoogleOAuthAdmissionRuntime,installGoogleOAuthAdmissionRuntime,createFirstSearchConsoleRevoker };
+const createFirstSearchConsoleRevoker = options => createFirstPropertyRevoker('search_console',options);
+const createFirstAnalyticsRevoker = options => createFirstPropertyRevoker('analytics',options);
+module.exports = { createGoogleOAuthAdmissionRuntime,installGoogleOAuthAdmissionRuntime,createFirstSearchConsoleRevoker,createFirstAnalyticsRevoker };

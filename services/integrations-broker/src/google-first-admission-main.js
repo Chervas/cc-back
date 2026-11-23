@@ -17,6 +17,12 @@ const {createFirstGoogleAdmissionRpc,OPERATIONS}=require('./google-first-admissi
 const COHORT='google-first-oauth-v1',PURPOSE='google-first-identity-only-v1',MARKER='google_first_runtime_identity_v1';
 const MAX_CONNECTIONS=8,MAX_ACTIVE=2,MAX_PER_MINUTE=12;
 const STARTUP_CONCURRENCY=2,STARTUP_TIMEOUT_MS=30000;
+const READERS=Object.freeze({
+ search_console:Object.freeze({principal:'searchConsoleReaderPrincipal',cursor:'searchConsoleCursorKeyFile',role:'sc',contract:require('./google-search-console-contract')}),
+ analytics:Object.freeze({principal:'analyticsReaderPrincipal',cursor:'analyticsCursorKeyFile',role:'ga4',contract:require('./google-analytics-contract')}),
+});
+const configuredReaders=config=>Object.entries(READERS).filter(([,r])=>Object.hasOwn(config,r.principal)||Object.hasOwn(config,r.cursor));
+
 const hash=v=>createHash('sha256').update(v).digest('hex');
 const exact=(o,keys)=>o&&Object.getPrototypeOf(o)===Object.prototype&&Object.keys(o).sort().join(',')===keys.split(',').sort().join(',');
 function privateFile(filename,limit=262144,read=true){
@@ -32,8 +38,8 @@ function privateDirectory(dir){
 const secretPrefix=environment=>'/clinicaclick/integrations/'+(environment==='dev'?'dev':'prod')+'/';
 function validateConfig(config){
  const publication=Object.hasOwn(config||{},'publicationResources');
- const reader=Object.hasOwn(config||{},'searchConsoleReaderPrincipal')||Object.hasOwn(config||{},'searchConsoleCursorKeyFile');
- const extra=(publication?',publicationResources':'')+(reader?',searchConsoleReaderPrincipal,searchConsoleCursorKeyFile':'');
+ const readers=configuredReaders(config||{});
+ const extra=(publication?',publicationResources':'')+readers.map(([,reader])=>','+reader.principal+','+reader.cursor).join('');
  if(!exact(config,'cohort,purpose,enabled,environment,listenAddress,port,stateFile,tlsCertFile,tlsKeyFile,tlsRenewal,policy,scopes,slots,redirectUri'+extra)
   ||config.cohort!==COHORT||config.purpose!==PURPOSE||config.enabled!==true||!['dev','staging'].includes(config.environment)
   ||!net.isIP(config.listenAddress)||!Number.isInteger(config.port)||config.port<1024||config.port>65535
@@ -49,11 +55,15 @@ function validateConfig(config){
  const noop={begin(){},status(){},finish(){},abort(){}};
  createFirstGoogleAdmissionRpc({policy,principalId,scopes:config.scopes,flow:noop,
   ...(publication?{publication:{resources:config.publicationResources,publish(){}}}:{})});
- if(reader){
-  if(!publication||!config.publicationResources.some(entry=>entry.service==='search_console')
-   ||typeof config.searchConsoleCursorKeyFile!=='string'||!path.isAbsolute(config.searchConsoleCursorKeyFile))fail('invalid_request');
-  readerPolicy(config);
+ for(const [service,reader] of readers){
+  if(!publication||!config.publicationResources.some(entry=>entry.service===service)
+   ||typeof config[reader.cursor]!=='string'||!path.isAbsolute(config[reader.cursor]))fail('invalid_request');
+  readerPolicy(config,reader);
  }
+ const readerFiles=readers.map(([,reader])=>config[reader.cursor]);
+ const readerKeys=readers.map(([,reader])=>readerFingerprint(config[reader.principal]));
+ if(new Set(readerFiles).size!==readerFiles.length||new Set(readerKeys).size!==readerKeys.length)fail('invalid_request');
+
  createFirstGoogleCredentialVault({client:{send(){fail('operation_denied');}},accountId:ACCOUNT,prefix:secretPrefix(config.environment),kmsKeyArn:SECRET_KEY,
   redirectUri:config.redirectUri,slots:config.slots});
  const wanted=config.scopes.flatMap(row=>row.services.map(service=>row.scopeKey+'/'+service)).sort();
@@ -61,20 +71,22 @@ function validateConfig(config){
  if(JSON.stringify(actual)!==JSON.stringify(wanted))fail('invalid_request');
  return config;
 }
-function readerPolicy(config){
- const principal=config.searchConsoleReaderPrincipal;
- if(!principal||principal.enabled!==true||principal.id!=='crm:'+config.environment+':google-first-sc-reader'
+const readerFingerprint=principal=>createPublicKey(principal.publicKey).export({type:'spki',format:'der'}).toString('hex');
+function readerPolicy(config,reader){
+ const principal=config[reader.principal];
+ if(!principal||principal.enabled!==true||principal.id!=='crm:'+config.environment+':google-first-'+reader.role+'-reader'
   ||principal.maxPerMinute>60)fail('invalid_request');
  const policy=validatePolicy({...config.policy,principals:[...config.policy.principals,principal]});
- const fingerprints=policy.principals.map(row=>createPublicKey(row.publicKey).export({type:'spki',format:'der'}).toString('hex'));
+ const fingerprints=policy.principals.map(readerFingerprint);
  if(new Set(fingerprints).size!==policy.principals.length)fail('invalid_request');
  return policy;
 }
 function authorityDigest(config){return hash(canonical({cohort:config.cohort,purpose:config.purpose,environment:config.environment,
  policy:config.policy,scopes:config.scopes,slots:config.slots,redirectUri:config.redirectUri,
  ...(Object.hasOwn(config,'publicationResources')?{publicationResources:config.publicationResources}:{}),
- ...(Object.hasOwn(config,'searchConsoleReaderPrincipal')?{searchConsoleReaderPrincipal:config.searchConsoleReaderPrincipal,
-  searchConsoleCursorKeyFile:config.searchConsoleCursorKeyFile}:{})}));}
+ ...Object.fromEntries(configuredReaders(config).flatMap(([,reader])=>[
+  [reader.principal,config[reader.principal]],[reader.cursor,config[reader.cursor]],
+ ]))}));}
 function acquireLock(stateFile){
  privateDirectory(path.dirname(stateFile));const filename=stateFile+'.owner.lock';
  const body=JSON.stringify({purpose:PURPOSE,pid:process.pid,uid:process.geteuid(),nonce:randomUUID()});
@@ -178,28 +190,29 @@ async function main(filename,{awsFactory=connectAws,http,now=Date.now,report=()=
  const config=validateConfig(JSON.parse(privateFile(filename)));const cert=privateFile(config.tlsCertFile,65536),key=privateFile(config.tlsKeyFile,65536);
  privateFile(config.tlsRenewal.issuerCaFile,65536);
  const releaseLock=acquireLock(config.stateFile);
- let store,aws,owner,server,maintenance,timer,draining,closing,broker,readOwner,cursorKey,active=0;
- const readOperations=config.searchConsoleReaderPrincipal ? new Set([
-  ...require('./google-search-console-contract').OPERATIONS,require('./google-search-console-contract').REVOKE_OPERATION,
- ]) : null;
+ let store,aws,owner,server,maintenance,timer,draining,closing,broker,active=0;
+ const readOwners=new Map(),cursorKeys=[],readOperations=new Map();
+ for(const [service,{contract}] of configuredReaders(config)){
+  for(const operation of [...contract.OPERATIONS,contract.REVOKE_OPERATION])readOperations.set(operation,service);
+ }
  const close=()=>closing||=(async()=>{
   clearInterval(timer);maintenance?.close();owner?.close();
   if(server?.listening)await new Promise(resolve=>{server.close(resolve);server.closeIdleConnections?.();});
-  await draining;readOwner?.close();cursorKey?.fill(0);aws?.close();store?.close();key.fill(0);releaseLock();
+  await draining;
+  for(const reader of readOwners.values())reader.close();
+  for(const cursorKey of cursorKeys)cursorKey.fill(0);
+  aws?.close();store?.close();key.fill(0);releaseLock();
  })();
  try{
   server=createServer({async execute(raw,headers){
    if(active>=MAX_ACTIVE)fail('rate_limited');
    active++;
    try{
-    let target=broker;
-    if(readOwner){
-     // The parsed operation only selects the verifier. Authentication and
-     // authority still cover the original signed request in that Broker.
-     let operation;
-     try{operation=JSON.parse(raw).operation;}catch{}
-     if(readOperations.has(operation))target=readOwner.broker;
-    }
+    // The parsed operation selects a verifier. Each Broker authenticates
+    // the unmodified, signed request independently.
+    let operation;
+    try{operation=JSON.parse(raw).operation;}catch{}
+    const target=readOwners.get(readOperations.get(operation))?.broker||broker;
     return await target.execute(raw,headers);
    }finally{active--;}
   }},{cert,key});
@@ -230,25 +243,50 @@ async function main(filename,{awsFactory=connectAws,http,now=Date.now,report=()=
    const ledger=createFirstGooglePublicationJournal({store,journal,approvedScopes:config.scopes,now,
     onTransition:transitionAudit(store,config,now,true)});
    const verifier=createFirstGooglePropertyVerifier({vault,ledger,http:providerHttp,now});
-   if(config.searchConsoleReaderPrincipal){
-    const {createFirstSearchConsoleReadOwner}=require('./google-first-search-console-read-owner');
+   for(const [service,reader] of configuredReaders(config)){
+    const {createFirstPropertyReadOwner}=require('./google-first-property-read-owner');
     const {cursorCodec}=require('./provider-cursor');
-    cursorKey=privateFile(config.searchConsoleCursorKeyFile,32);
-    if(cursorKey.length!==32)fail('invalid_request');
-    readOwner=createFirstSearchConsoleReadOwner({store,ledger,firstJournal:journal,vault,client:aws.secrets,http:providerHttp,
-     cursor:cursorCodec(cursorKey),policy:readerPolicy(config),readerPrincipalId:config.searchConsoleReaderPrincipal.id,
+    const cursorKey=privateFile(config[reader.cursor],32);
+    if(cursorKey.length!==32||cursorKeys.some(key=>key.equals(cursorKey))){cursorKey.fill(0);fail('invalid_request');}
+    cursorKeys.push(cursorKey);
+    readOwners.set(service,createFirstPropertyReadOwner(service,{store,ledger,firstJournal:journal,vault,client:aws.secrets,http:providerHttp,
+     cursor:cursorCodec(cursorKey),policy:readerPolicy(config,reader),readerPrincipalId:config[reader.principal].id,
      controlPrincipalId:config.policy.principals[0].id,approvedScopes:config.scopes,slots:config.slots,redirectUri:config.redirectUri,
-     accountId:ACCOUNT,prefix:secretPrefix(config.environment),kmsKeyArn:SECRET_KEY,now});
+     accountId:ACCOUNT,prefix:secretPrefix(config.environment),kmsKeyArn:SECRET_KEY,now}));
    }
    const publisher=createFirstGooglePublicationOwner({ledger,vault,verifier,now});
-   publication={
-    resources:config.publicationResources,
+   // Existing configurations without an Analytics reader retain OAuth state
+   // handling. Offering or confirming a GA property needs the native reader.
+   const resources=config.publicationResources.filter(row=>row.service!=='analytics'||readOwners.has('analytics'));
+   const assertSelectedActive=(proof,selection)=>store.assertAssetActive({
+    tenantRef:'clinic:'+selection.clinicId,connectionRef:'google-first:'+proof.service+':'+selection.scopeKey,assetRef:selection.assetRef,
+   });
+   function analyticsSubject(proof,owner){
+    const {state}=journal.read(proof,owner),record=journal.getPrivateState(proof,owner);
+    if(proof.service!=='analytics'||state!=='candidate_staged'||record.cancelRequested||!record.metadata||!record.stageIntent
+      ||hash(canonical(record.metadata))!==record.metadataDigest)fail('scope_denied');
+    return record.metadata.googleUserId;
+   }
+   if(resources.length)publication={
+    resources,
+    ...(readOwners.has('analytics')?{identityPreview:analyticsSubject}:{}),
     async publish(proof,owner,selection,resource,options){
+     assertSelectedActive(proof,selection);
+     if(proof.service==='analytics'){
+      const {firstAnalyticsSubjectDigest}=require('./google-property-discovery-contract');
+      if(firstAnalyticsSubjectDigest(analyticsSubject(proof,owner))!==options.expectedSubjectDigest)fail('oauth_identity_mismatch');
+     }
      const receipt=await publisher.publish(proof,owner,selection,resource,options);
-     if(proof.service==='search_console'&&readOwner)await readOwner.bootstrap({proof,owner,receipt});
+     assertSelectedActive(proof,selection);
+     await readOwners.get(proof.service)?.bootstrap({proof,owner,receipt});
      return receipt;
     },
-    observe:verifier.observe,
+    async observe(proof,owner,selection,resource,options){
+     assertSelectedActive(proof,selection);
+     const observation=await verifier.observe(proof,owner,selection,resource,options);
+     assertSelectedActive(proof,selection);
+     return observation;
+    },
    };
   }
   const rpc=createFirstGoogleAdmissionRpc({policy:config.policy,principalId:config.policy.principals[0].id,scopes:config.scopes,flow:owner,publication,now});
