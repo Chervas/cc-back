@@ -338,6 +338,25 @@ test('enrollment control can revoke before prepare without secrets; the original
   const status = await f.execute('status', { enrollmentId: p.enrollmentId }, {}, restarted.broker);
   assert.equal(status.data.state, 'revoked'); assert.equal(f.state.sdk.length, 0);
 });
+test('shared enrollment control cannot cancel an unknown customer outside its allowlist', async t => {
+  const f = enrollmentFixture(t);
+  const policy = structuredClone(f.policy);
+  const scope = policy.connections[0].googleAdsEnrollmentScopes[0];
+  Object.assign(scope, { managerAccess: 'shared', allowedCustomerIds: [NEW] });
+  validateConfig({ ...f.config, policy });
+  const { broker } = f.make(f.store, policy);
+  const p = f.intent();
+  await assert.rejects(f.execute(contract.REVOKE_OPERATION, { ...p, customerId: OTHER }, {}, broker, 'control'), { code: 'scope_denied' });
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM google_ads_enrollment_cancellations').get().n, 0);
+  assert.equal((await f.execute(contract.REVOKE_OPERATION, p, {}, broker, 'control')).data.state, 'revoked');
+  const next = structuredClone(policy);
+  next.connections[0].googleAdsEnrollmentScopes[0].allowedCustomerIds = [OTHER];
+  validateConfig({ ...f.config, policy: next });
+  const restarted = f.make(f.store, next);
+  assert.equal((await f.execute(contract.REVOKE_OPERATION, p, {}, restarted.broker, 'control')).data.state, 'revoked');
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM google_ads_enrollment_cancellations').get().n, 1);
+  assert.equal(f.state.calls.length, 0);
+});
 test('enrollment revocation races with preparation and activation without allowing late grants', async t => {
   const f = enrollmentFixture(t); const p = f.intent();
   f.state.onRead = () => f.execute(contract.REVOKE_OPERATION, p, {}, f.broker, 'control');

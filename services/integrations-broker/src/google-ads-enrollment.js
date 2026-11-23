@@ -49,6 +49,9 @@ function createGoogleAdsEnrollment({ store, http, cursor, withDeveloperSecret, n
     if (policy.connections.some(c => c.googleAdsAccounts?.some(a => a.customerId === p.customerId))) fail('scope_denied');
     const owner = contract.ownerFor(policy, binding, s);
     const row = owned(request, { id: owner });
+    // Unknown preemptive cancellations obey this shared scope's customer list.
+    // An exact durable owned row still permits historical revoke/recovery.
+    if (!row && !contract.allowsCustomer(s, p.customerId)) fail('scope_denied');
     const cancelled = get('SELECT id FROM google_ads_enrollment_cancellations WHERE tenant=? AND connection=? AND customer=?', request.tenantRef, request.connectionRef, p.customerId);
     if (cancelled && cancelled.id !== p.enrollmentId) fail('scope_denied');
     const byAsset = get('SELECT id FROM google_ads_enrollments WHERE asset=?', 'ads:' + p.customerId);
