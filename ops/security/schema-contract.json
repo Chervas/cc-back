@@ -2,6 +2,7 @@
   "version": 1,
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
   "featureGroups": {
+    "google_first_admission_recovery": {"required":true,"tables":["GoogleOAuthAdmissionRecoveries"],"migrations":["20261123050000-create-google-oauth-admission-recoveries.js"]},
     "google_first_admission": {"enabledWhenAll":{"GOOGLE_OAUTH_FIRST_ADMISSION_INSTALLED":"true"},"tables":["GoogleOAuthAdmissionAttempts","GoogleOAuthAdmissionReturns","GoogleOAuthAdmissionPublications"],"migrations":["20261122223000-create-google-oauth-admission-attempts.js","20261122224500-create-google-oauth-admission-returns.js","20261122225000-create-google-oauth-admission-publications.js"]},
     "meta_marketing_group_destinations": {"enabledWhenAll":{"META_MARKETING_GROUP_DESTINATION_PLAN_ENABLED":"true"},"tables":["MetaMarketingEnrollmentDestinationPlans"],"migrations":["20261122213000-create-meta-marketing-enrollment-destination-plans.js"]},
     "meta_ad_account_assignment": {"required": true, "tables": ["GruposClinicas"], "migrations": ["20261122145500-add-meta-ad-account-assignment-marker.js"]},
@@ -90,6 +91,61 @@
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
+    "GoogleOAuthAdmissionRecoveries": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "utf8mb4_bin",
+      "columns": [
+        {"COLUMN_NAME":"attempt_id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"crm_intent_id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"dispatch_request_id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"binding_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"actor_user_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"session_ref_hash","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"session_expires_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"scope_key","COLUMN_TYPE":"varchar(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"clinic_ids","COLUMN_TYPE":"text","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"clinic_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"service","COLUMN_TYPE":"enum('analytics')","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"clinic_id","COLUMN_TYPE":"int","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"asset_ref","COLUMN_TYPE":"varchar(128)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"selection_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"attempt_requested_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"attempt_expires_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"google_user_id","COLUMN_TYPE":"varchar(128)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"subject_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"claim_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"scope_lock","COLUMN_TYPE":"char(64)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"subject_lock","COLUMN_TYPE":"char(64)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"state","COLUMN_TYPE":"enum('prepared','dispatch_pending','effect_unknown','remote_confirmed','sql_committed','published','quarantine_pending','quarantined','closed_unused')","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"revision","COLUMN_TYPE":"int unsigned","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"generation","COLUMN_TYPE":"int unsigned","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"lease_token","COLUMN_TYPE":"char(36)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"lease_until","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"owner_observation","COLUMN_TYPE":"text","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"owner_observation_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"owner_receipt","COLUMN_TYPE":"text","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"owner_receipt_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"native_resource","COLUMN_TYPE":"text","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"utf8mb4","COLLATION_NAME":"utf8mb4_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"native_resource_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"sql_publication_digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"last_error","COLUMN_TYPE":"varchar(48)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"created_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"updated_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"completed_at","COLUMN_TYPE":"datetime(3)","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}
+      ],
+      "indexes": [
+        {"name":"cc_google_recovery_dispatch","columns":[{"INDEX_NAME":"cc_google_recovery_dispatch","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"dispatch_request_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"cc_google_recovery_due","columns":[{"INDEX_NAME":"cc_google_recovery_due","NON_UNIQUE":1,"SEQ_IN_INDEX":1,"COLUMN_NAME":"state","SUB_PART":null,"INDEX_TYPE":"BTREE"},{"INDEX_NAME":"cc_google_recovery_due","NON_UNIQUE":1,"SEQ_IN_INDEX":2,"COLUMN_NAME":"lease_until","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"cc_google_recovery_intent","columns":[{"INDEX_NAME":"cc_google_recovery_intent","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"crm_intent_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"cc_google_recovery_scope","columns":[{"INDEX_NAME":"cc_google_recovery_scope","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"scope_lock","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"cc_google_recovery_subject","columns":[{"INDEX_NAME":"cc_google_recovery_subject","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"subject_lock","SUB_PART":null,"INDEX_TYPE":"BTREE"}]},
+        {"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"attempt_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}
+      ],
+      "checks": [
+        {"CONSTRAINT_NAME":"cc_google_recovery_ids_positive","ENFORCED":"YES","CHECK_CLAUSE":"((`actor_user_id` > 0) and (`clinic_id` > 0) and (`generation` > 0))"}
+      ],
+      "foreignKeys": []
+    },
     "GoogleOAuthAdmissionAttempts": {
       "ENGINE": "InnoDB",
       "TABLE_COLLATION": "ascii_bin",
@@ -7078,6 +7134,7 @@
   "migrations": [
     {"name":"20261122223000-create-google-oauth-admission-attempts.js","sha256":"46cb281bb26de3f5506ac128f6da6d221ec6dfac8749a260f9d22d12afdad139"},
     {"name":"20261122224500-create-google-oauth-admission-returns.js","sha256":"02e624cc5f79861a37e2cc2bdf570b664cfe49993803dd6a309a7453af48b926"},
+    {"name":"20261123050000-create-google-oauth-admission-recoveries.js","sha256":"da9a84fd176daa7203ccddf39dac4236e5ac887a6d27a5f236e04627de752b3b"},
     {"name":"20261122225000-create-google-oauth-admission-publications.js","sha256":"39d364c385d24ee884a0302e3a48ecb8a964975610787f458aa589834e731fec"},
     {
       "name": "20261122213000-create-meta-marketing-enrollment-destination-plans.js",

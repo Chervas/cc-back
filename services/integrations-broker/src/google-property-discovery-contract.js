@@ -4,6 +4,7 @@ const { schema } = require('./contracts'); const { fail } = require('./errors');
 const validate = schema({});
 const SC_OPERATION = 'google.search_console.discovery.read.v1';
 const GA_OPERATION = 'google.analytics.discovery.read.v1';
+const GA_ADMISSION_PROOF = 'google.analytics.admission.verify.v1';
 const GA_SCOPE = 'https://www.googleapis.com/auth/analytics.readonly';
 const account = value => typeof value === 'string' && /^accounts\/[1-9]\d{0,19}$/.test(value);
 function projectSC(raw, siteUrl) {
@@ -28,4 +29,4 @@ function firstAnalyticsSubjectDigest(subject) {
   if (typeof subject !== 'string' || subject === 'unknown' || !/^[A-Za-z0-9._-]{1,128}$/.test(subject)) fail('scope_denied');
   return createHash('sha256').update(JSON.stringify(['clinicaclick/google-first-analytics-subject/1',subject])).digest('hex');
 }
-module.exports = { validate, SC_OPERATION, GA_OPERATION, GA_SCOPE, projectSC, projectGA, projectFirstGA, firstAnalyticsSubjectDigest };
+module.exports = { validate, SC_OPERATION, GA_OPERATION, GA_ADMISSION_PROOF, GA_SCOPE, projectSC, projectGA, projectFirstGA, firstAnalyticsSubjectDigest };

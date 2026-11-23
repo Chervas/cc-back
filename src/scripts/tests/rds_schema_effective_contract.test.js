@@ -112,6 +112,19 @@ test('runtime filtering preserves database defaults and every unconditional requ
   const p=await f.plan();f.state.tables=f.state.tables.filter(row=>row.TABLE_NAME!=='ExistingRequired');await assert.rejects(f.apply(p),/plan_stale/);
   const strict=fixture(t,{defaultFullContract:true}),s=await strict.plan();assert(s.compatibilityBefore.issues.some(i=>i.table===TABLES[GOAL]));
 });
+test('published GA4 mappings retain the recovery journal dependency with first admission and its worker disabled', () => {
+  const release = require('../../../ops/security/schema-contract.json');
+  const table = 'GoogleOAuthAdmissionRecoveries';
+  const migration = '20261123050000-create-google-oauth-admission-recoveries.js';
+  const effective = N.effectiveContract(release, {
+    GOOGLE_OAUTH_FIRST_ADMISSION_INSTALLED: 'false',
+    GOOGLE_OAUTH_FIRST_RECOVERY_WORKER_ENABLED: 'false',
+  });
+  assert(effective.tables[table]);
+  assert(!effective.tables.GoogleOAuthAdmissionAttempts);
+  const migrationFile = path.resolve(__dirname, '../../../migrations', migration);
+  assert.equal(effective.migrations.find(entry => entry.name === migration)?.sha256, P.sha(fs.readFileSync(migrationFile)));
+});
 test('normal CLI pins observer dependencies as public code only and binds the observed primary runtime',()=>{
   const source=path.resolve(__dirname,'../../..'),pins=CLI.operatorPins(source);assert(pins.some(row=>row.path==='src/scripts/security-email-login-metadata.js'));assert(pins.some(row=>row.path==='src/scripts/security-database-metadata.js'));
   assert(pins.every(row=>!row.path.includes('.env')&&/^[a-f0-9]{64}$/.test(row.sha256)));

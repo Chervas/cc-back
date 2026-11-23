@@ -50,6 +50,11 @@ const SCHEDULED_JOB_DEFINITIONS = Object.freeze({
     enabledEnv: 'GOOGLE_PROPERTY_REVOCATION_WORKER_ENABLED', timezone: 'Europe/Madrid',
     usesIntegrationLease: false, reportedFailureRetryable: false, maxAttempts: 1,
   }),
+  googleFirstAdmissionRecovery: Object.freeze({
+    type:'google_first_admission_recovery',priority:'high',executorMethod:'executeGoogleFirstAdmissionRecovery',
+    enabledEnv:'GOOGLE_OAUTH_FIRST_RECOVERY_WORKER_ENABLED',timezone:'Europe/Madrid',
+    usesIntegrationLease:false,reportedFailureRetryable:false,maxAttempts:1,
+  }),
   googleOAuthReconciliation: Object.freeze({
     type: 'google_oauth_broker_reconciliation', priority: 'high', executorMethod: 'executeGoogleOAuthReconciliation',
     enabledEnv: 'GOOGLE_OAUTH_BROKER_WORKER_ENABLED', timezone: 'Europe/Madrid',

@@ -14,7 +14,11 @@ const OPERATIONS = Object.freeze({ ...Object.fromEntries(ACTIONS.map(action => [
   publication:'google.oauth.admission.publication.verify.v1',
   catalogueReady:'google.oauth.admission.catalogue.ready.v1',
   catalogue:'google.oauth.admission.catalogue.v1',
-  identityPreview:'google.oauth.admission.identity.preview.v1' });
+  identityPreview:'google.oauth.admission.identity.preview.v1',
+  recoveryObserve:'google.oauth.admission.recovery.observe.v1',
+  recoveryAck:'google.oauth.admission.recovery.ack.v1',
+  recoveryQuarantine:'google.oauth.admission.recovery.quarantine.v1' });
+const RECOVERY = Object.freeze({ recoveryObserve:'observe',recoveryAck:'ack',recoveryQuarantine:'quarantine' });
 const ACTION_FOR = new Map(Object.entries(OPERATIONS).map(([action, operation]) => [operation, action]));
 const STATES = new Set(['prepared', 'exchanging', 'candidate_ready', 'stage_intent', 'candidate_staged', 'interrupted', 'aborted', 'expired']);
 const PROVIDER = 'google_first_oauth';
@@ -46,6 +50,8 @@ function createFirstGoogleAdmissionRpc({ policy, principalId, scopes, flow, publ
   const catalogues = new Map();
   const hasCatalogue = typeof publication?.observe === 'function';
   const hasIdentityPreview = typeof publication?.identityPreview === 'function';
+  const hasRecovery = publication?.recovery !== undefined;
+  if (hasRecovery && !Object.values(RECOVERY).every(action => typeof publication.recovery?.[action] === 'function')) fail('invalid_request');
 
   for (const row of scopes) {
     if (!exact(row, ['scopeKey', 'clinicIds', 'services']) || !typed(row.scopeKey, SCOPE) || approved.has(row.scopeKey)
@@ -63,7 +69,7 @@ function createFirstGoogleAdmissionRpc({ policy, principalId, scopes, flow, publ
     return JSON.stringify([scopeKey,service,clinicId,assetRef]);
   }
   if (publication !== undefined) {
-    if (!exact(publication,['resources','publish',...(hasCatalogue ? ['observe'] : []),...(hasIdentityPreview ? ['identityPreview'] : [])])
+    if (!exact(publication,['resources','publish',...(hasCatalogue ? ['observe'] : []),...(hasIdentityPreview ? ['identityPreview'] : []),...(hasRecovery ? ['recovery'] : [])])
       || typeof publication.publish !== 'function'
       || !Array.isArray(publication.resources) || !publication.resources.length || publication.resources.length > 256) fail('invalid_request');
     for (const row of publication.resources) {
@@ -95,15 +101,19 @@ function createFirstGoogleAdmissionRpc({ policy, principalId, scopes, flow, publ
 
   function payload(value, action) {
     const analyticsPublication = action === 'publication' && value?.service === 'analytics';
-    const extras = action === 'finish' ? ['state', 'code'] : action === 'publication'
-      ? ['clinicId','selectedAssetRef',...(analyticsPublication ? ['expectedSubjectDigest'] : [])] : [];
+    const recovering = Object.hasOwn(RECOVERY,action);
+    const selects = action === 'publication' || recovering;
+    const extras = action === 'finish' ? ['state', 'code'] : selects
+      ? ['clinicId','selectedAssetRef',...(analyticsPublication || recovering ? ['expectedSubjectDigest','crmIntentId'] : []),
+        ...(action === 'recoveryAck' ? ['receiptId','receiptDigest'] : [])] : [];
     if (!exact(value, [...PROOF, 'clinicSetDigest', ...extras]) || !typed(value.attemptId, UUID) || !typed(value.bindingDigest, HASH)
       || !SERVICES.includes(value.service) || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0 || !typed(value.clinicSetDigest, HASH)
       || action === 'finish' && (!typed(value.state, STATE) || !typed(value.code, TOKEN))
       || ['catalogue','catalogueReady'].includes(action) && !['search_console','analytics'].includes(value.service)
-      || analyticsPublication && !typed(value.expectedSubjectDigest,HASH)
-      || action === 'identityPreview' && value.service !== 'analytics'
-      || action === 'publication' && (!Number.isSafeInteger(value.clinicId) || value.clinicId < 1 || value.clinicId > 2147483647
+      || (analyticsPublication || recovering) && (!typed(value.expectedSubjectDigest,HASH) || !typed(value.crmIntentId,UUID))
+      || (action === 'identityPreview' || recovering) && value.service !== 'analytics'
+      || action === 'recoveryAck' && (!typed(value.receiptId,UUID) || !typed(value.receiptDigest,HASH))
+      || selects && (!Number.isSafeInteger(value.clinicId) || value.clinicId < 1 || value.clinicId > 2147483647
         || !typed(value.selectedAssetRef,value.service === 'search_console' ? /^sc:[a-f0-9]{64}$/ : /^ga4:[1-9]\d{0,19}$/)
         || !['analytics','search_console'].includes(value.service))) fail('invalid_request');
     return Object.freeze(Object.fromEntries(PROOF.map(key => [key, value[key]])));
@@ -112,7 +122,7 @@ function createFirstGoogleAdmissionRpc({ policy, principalId, scopes, flow, publ
   function validateRequest(request, principal, livePolicy) {
     const action = ACTION_FOR.get(request.operation);
     if (!action || action === 'publication' && !publication || ['catalogue','catalogueReady'].includes(action) && !hasCatalogue
-      || action === 'identityPreview' && !hasIdentityPreview || principal.id !== principalId || hash(canonical(livePolicy)) !== policyDigest) fail('scope_denied');
+      || action === 'identityPreview' && !hasIdentityPreview || Object.hasOwn(RECOVERY,action) && !hasRecovery || principal.id !== principalId || hash(canonical(livePolicy)) !== policyDigest) fail('scope_denied');
     const proof = payload(request.payload, action);
     if (request.connectionRef !== 'google-first:' + proof.attemptId || action === 'begin' && request.requestId !== proof.attemptId) fail('scope_denied');
     const prefix = 'google-oauth:' + proof.service + ':';
@@ -131,11 +141,13 @@ function createFirstGoogleAdmissionRpc({ policy, principalId, scopes, flow, publ
       if (!catalogues.has(scopeKey + '/analytics') || proof.expiresAt <= now()) fail('scope_denied');
       return { action,proof,owner,scopeKey };
     }
-    if (action !== 'publication') return { action,proof,owner };
+    if (action !== 'publication' && !Object.hasOwn(RECOVERY,action)) return { action,proof,owner };
     const selection = Object.freeze({ scopeKey,clinicId:request.payload.clinicId,assetRef:request.payload.selectedAssetRef });
     const resource = resources.get(resourceKey(scopeKey,proof.service,selection.clinicId,selection.assetRef));
-    if (!resource || proof.expiresAt <= now()) fail('scope_denied');
-    return { action,proof,owner,selection,resource };
+    if (!resource || action === 'publication' && proof.expiresAt <= now()) fail('scope_denied');
+    const pins = proof.service === 'analytics' ? Object.freeze({ proof,owner,selection,clinicSetDigest:request.payload.clinicSetDigest,
+      crmIntentId:request.payload.crmIntentId,expectedSubjectDigest:request.payload.expectedSubjectDigest }) : undefined;
+    return { action,proof,owner,selection,resource,pins };
   }
 
   function resolve(request, principal, livePolicy) {
@@ -216,11 +228,11 @@ function createFirstGoogleAdmissionRpc({ policy, principalId, scopes, flow, publ
   }
 
   const actions = publication ? [...ACTIONS,'publication',...(hasCatalogue ? ['catalogueReady','catalogue'] : []),
-    ...(hasIdentityPreview ? ['identityPreview'] : [])] : ACTIONS;
+    ...(hasIdentityPreview ? ['identityPreview'] : []),...(hasRecovery ? Object.keys(RECOVERY) : [])] : ACTIONS;
   const operations = Object.fromEntries(actions.map(action => [OPERATIONS[action], {
     provider: PROVIDER, control: 'google_oauth', validate: value => payload(value, action),
     async execute({ request, principal, policy: livePolicy, signal }) {
-      const { proof,owner,selection,resource,scopeKey,catalogue } = validateRequest(request, principal, livePolicy);
+      const { proof,owner,selection,resource,scopeKey,catalogue,pins } = validateRequest(request, principal, livePolicy);
       if (action === 'catalogueReady') {
         const status = project(await flow.status(proof,owner),proof,'status');
         const data = { attemptId:proof.attemptId,scopeKey,service:proof.service,
@@ -237,9 +249,17 @@ function createFirstGoogleAdmissionRpc({ policy, principalId, scopes, flow, publ
         return { requestId:request.requestId,replayed:false,data:Object.freeze({ attemptId:proof.attemptId,scopeKey,
           service:proof.service,googleUserId,subjectDigest:firstAnalyticsSubjectDigest(googleUserId) }) };
       }
+      if (Object.hasOwn(RECOVERY,action)) {
+        const deadline=AbortSignal.timeout(10000);
+        const options={ signal:signal?AbortSignal.any([signal,deadline]):deadline,operation:request.operation,requestId:request.requestId };
+        const data=action==='recoveryAck'
+          ? await publication.recovery.ack(pins,{receiptId:request.payload.receiptId,receiptDigest:request.payload.receiptDigest},options)
+          : await publication.recovery[RECOVERY[action]](pins,options);
+        return { requestId:request.requestId,data,replayed:false };
+      }
       if (action === 'publication') {
         const value = await publication.publish(proof,owner,selection,resource,{ signal,
-          ...(proof.service === 'analytics' ? { expectedSubjectDigest:request.payload.expectedSubjectDigest } : {}) });
+          ...(pins ? { expectedSubjectDigest:pins.expectedSubjectDigest,pins } : {}) });
         return { requestId:request.requestId,data:projectPublication(value,proof,selection,resource,request.payload.clinicSetDigest),replayed:false };
       }
       const code = action === 'finish' ? Buffer.from(request.payload.code, 'ascii') : undefined;

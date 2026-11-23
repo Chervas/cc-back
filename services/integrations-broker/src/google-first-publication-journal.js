@@ -157,6 +157,15 @@ function createFirstGooglePublicationJournal({store,journal,approvedScopes,now=D
   const at=clock();if(proof.expiresAt<=at||credential.accessExpiresAt<=at||credential.refreshTokenExpiresAt!==null&&credential.refreshTokenExpiresAt<=at
    ||approval.validUntil<=at)fail('oauth_flow_interrupted');
  }
+ function cancelLocked(proof,owner){
+   if(store.db.isTransaction!==true)fail('invalid_request');
+   const ctx=context(proof,owner),prior=get(proof.attemptId);
+   if(!prior){store.db.prepare(`INSERT INTO ${TABLE}(attempt_id,binding_digest,service,expires_at,principal,tenant,connection,asset,clinic_digest,state,cancel_requested,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,'cancelled',1,?,?)`).run(proof.attemptId,proof.bindingDigest,proof.service,proof.expiresAt,owner.principalId,owner.tenantRef,owner.connectionRef,owner.assetRef,ctx.clinicDigest,clock(),clock());
+    const row=get(proof.attemptId);emit(row,'cancel_tombstone');return publicState(row);}
+   const row=bound(proof,owner);if(row.cancel_requested)return safeState(row,proof,owner);
+   return publicState(update(row,{state:row.state==='activation_intent'?'activation_intent':'cancelled',cancel_requested:1},'publication_cancel_requested'));
+ }
  const service={
   preflight(proof,owner,selection){return store.transaction(()=>{const selected=select(proof,owner,selection),saved=source(proof,owner);
    if(saved.cancelled)fail('oauth_flow_interrupted');
@@ -229,14 +238,8 @@ function createFirstGooglePublicationJournal({store,journal,approvedScopes,now=D
    credentialDigest:row.credential_digest,approval:row.approval?JSON.parse(row.approval):null,
    activationIntent:row.activation_intent?JSON.parse(row.activation_intent):null,
    activationReadbackDigest:row.activation_readback_digest,receipt:row.receipt?JSON.parse(row.receipt):null,cancelRequested:!!row.cancel_requested};},
-  cancel(proof,owner){return store.transaction(()=>{
-   const ctx=context(proof,owner),prior=get(proof.attemptId);
-   if(!prior){store.db.prepare(`INSERT INTO ${TABLE}(attempt_id,binding_digest,service,expires_at,principal,tenant,connection,asset,clinic_digest,state,cancel_requested,created_at,updated_at)
-    VALUES(?,?,?,?,?,?,?,?,?,'cancelled',1,?,?)`).run(proof.attemptId,proof.bindingDigest,proof.service,proof.expiresAt,owner.principalId,owner.tenantRef,owner.connectionRef,owner.assetRef,ctx.clinicDigest,clock(),clock());
-    const row=get(proof.attemptId);emit(row,'cancel_tombstone');return publicState(row);}
-   const row=bound(proof,owner);if(row.cancel_requested)return safeState(row,proof,owner);
-   return publicState(update(row,{state:row.state==='activation_intent'?'activation_intent':'cancelled',cancel_requested:1},'publication_cancel_requested'));
-  });},
+  cancel:(proof,owner)=>store.transaction(()=>cancelLocked(proof,owner)),
+  cancelLocked,
   expire(proof,owner){return store.transaction(()=>{
    const row=bound(proof,owner),approval=row.approval?JSON.parse(row.approval):null;
    if(row.state!=='approved'||proof.expiresAt>clock()&&approval?.validUntil>clock())return safeState(row,proof,owner);

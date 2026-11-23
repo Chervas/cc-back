@@ -1,10 +1,13 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),net=require('node:net');
-const {execFileSync,fork}=require('node:child_process'),{generateKeyPairSync,randomUUID,randomBytes}=require('node:crypto');
+const {execFileSync,fork}=require('node:child_process'),{createHash,generateKeyPairSync,randomUUID,randomBytes}=require('node:crypto');
 const {allowPort,removePort}=require('./offline-guard.cjs');
 const R=require('../src/google-first-admission-main'),{OPERATIONS,clinicSetFingerprint}=require('../src/google-first-admission-rpc');
 const {requiredScopesFor}=require('../src/google-first-identity-provider'),{TABLE}=require('../src/google-first-identity-journal');
 const {BrokerStore}=require('../src/store'),{oauthSecretsFixture}=require('./google-oauth-fixture.cjs');
+const {canonical}=require('../src/canonical');
+const receiptDigest=receipt=>createHash('sha256').update(canonical(receipt)).digest('hex');
+
 const {createIntegrationsBrokerClient}=require('../../../src/lib/integrationsBrokerClient');
 async function fixture(t,{maxBacklog=1000,service='analytics'}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cc-google-first-runtime-'));fs.chmodSync(dir,0o700);const file=n=>path.join(dir,n);
@@ -109,7 +112,6 @@ test('first GA4 consent through signed catalogue, confirmation and native scoped
  assert.deepEqual((await f.call('catalogue')).data,{attemptId:f.proof.attemptId,scopeKey:'group:11',service:'analytics',
   assets:[{assetRef:'ga4:321',propertyName:'properties/321',displayName:'Fictitious Property',clinicIds:[31]}]});
  assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS n FROM '+publicationTable).get().n,0);
- await assert.rejects(f.call('publication',{clinicId:17,selectedAssetRef:'ga4:321',expectedSubjectDigest:'e'.repeat(64)}),{code:'scope_denied'});
  await assert.rejects(reader.execute(command),{code:'scope_denied'});
  const providerBefore = f.httpCalls.length, commandsBefore = f.base.state.calls.length;
  const preview = (await f.call('identityPreview')).data;
@@ -117,7 +119,7 @@ test('first GA4 consent through signed catalogue, confirmation and native scoped
   googleUserId:'10123456789',subjectDigest:firstAnalyticsSubjectDigest('10123456789')});
  assert.equal(f.httpCalls.length,providerBefore);
  assert.equal(f.base.state.calls.length,commandsBefore);
- const selection = {clinicId:31,selectedAssetRef:'ga4:321',expectedSubjectDigest:preview.subjectDigest};
+ const selection = {clinicId:31,selectedAssetRef:'ga4:321',expectedSubjectDigest:preview.subjectDigest,crmIntentId:randomUUID()};
  await assert.rejects(f.call('publication',{...selection,expectedSubjectDigest:firstAnalyticsSubjectDigest('different-fictitious-subject')}),
   {code:'oauth_identity_mismatch'});
  assert.equal(f.httpCalls.length,providerBefore);
@@ -141,22 +143,36 @@ test('first GA4 consent through signed catalogue, confirmation and native scoped
  assert.equal(first.secretVersion,f.proof.attemptId);
  assert.equal(Object.hasOwn(first,'resource'),false);
  assert(f.versions.get(f.proof.attemptId).stages.has('AWSCURRENT'));
+ const reportCommand={...command,operation:'google.analytics.daily.read.v1',
+  payload:{startDate:'2026-11-16',endDate:'2026-11-16',pageToken:null}};
+ await assert.rejects(reader.execute(command),{code:'scope_denied'});
+ await assert.rejects(reader.execute(reportCommand),{code:'scope_denied'});
+ assert.equal(reports,0);
+ const ack={...selection,receiptId:first.receiptId,receiptDigest:receiptDigest(first)};
+ const observed=(await f.call('recoveryObserve',selection)).data;
+ assert.equal(observed.state,'confirmed_current');
+ assert.deepEqual(observed.receipt,first);
+ const publication=(await f.call('recoveryAck',ack)).data;
+ assert.equal(publication.state,'published');
+ assert.equal(publication.receipt,null);
+ assert.equal(publication.receiptDigest,observed.receiptDigest);
  assert.equal((await reader.execute(command)).data.name,'properties/321');
  await assert.rejects(reader.execute({...command,tenantRef:'clinic:17'}),{code:'scope_denied'});
  await assert.rejects(reader.execute({...command,assetRef:'ga4:654'}),{code:'scope_denied'});
  await assert.rejects(reader.execute({...command,operation:REVOKE_OPERATION}),{code:'scope_denied'});
- const report = await reader.execute({...command,operation:'google.analytics.daily.read.v1',
-  payload:{startDate:'2026-11-16',endDate:'2026-11-16',pageToken:null}});
+ const report=await reader.execute(reportCommand);
  assert.equal(report.data.rows[0].metricValues[0].value,'4');
  assert.equal(reports,1);
  await f.stop();
  await f.start();
- assert.deepEqual((await f.call('publication',selection)).data,first);
+ const replay=(await f.call('recoveryAck',ack)).data;
+ assert.deepEqual(replay,publication);
  assert.equal((await reader.execute(command)).data.name,'properties/321');
  assert.equal(f.base.state.calls.filter(call => call.kind === 'UpdateSecretVersionStageCommand').length,1);
  const events = f.app.store.db.prepare('SELECT event FROM audit_outbox').all().map(row => JSON.parse(row.event)).concat(f.events);
  assert(events.some(event => event.operation === OPERATIONS.publication && event.reason === 'google_first_publication_receipt_confirmed'));
  assert(events.some(event => event.operation === GA_OPERATION && event.reason === 'first_ga4_read_authority_installed'));
+ assert.equal(new Set(events.filter(event=>event.reason==='google_first_analytics_sql_acknowledged').map(event=>event.eventId)).size,1);
  assert.equal((await f.client.execute({...command,operation:REVOKE_OPERATION})).data.revoked,true);
  await assert.rejects(reader.execute(command),{code:'asset_revoked'});
  await f.stop();
@@ -177,8 +193,200 @@ test('first Analytics OAuth stays staged if a native reader was never installed'
  await f.call('finish',{state:new URL(authorizationUrl).searchParams.get('state'),code:'FICTITIOUS_RUNTIME_CODE'});
  assert.equal((await f.call('status')).data.state,'candidate_staged');
  await assert.rejects(f.call('catalogueReady'));
- await assert.rejects(f.call('publication',{clinicId:31,selectedAssetRef:'ga4:321',expectedSubjectDigest:'e'.repeat(64)}));
+ await assert.rejects(f.call('publication',{clinicId:31,selectedAssetRef:'ga4:321',expectedSubjectDigest:'e'.repeat(64),crmIntentId:randomUUID()}));
  assert.equal(f.base.state.calls.filter(call => call.kind === 'UpdateSecretVersionStageCommand').length,0);
+});
+
+async function recoveryFixture(t) {
+ const {firstAnalyticsSubjectDigest}=require('../src/google-property-discovery-contract');
+ const f=await fixture(t),keys=generateKeyPairSync('ed25519');
+ const readerPin={id:'crm:staging:google-first-ga4-reader',keyId:'qa-ga4-recovery-reader',enabled:true,maxPerMinute:12,
+  publicKey:keys.publicKey.export({type:'spki',format:'pem'})};
+ f.config.analyticsReaderPrincipal=readerPin;
+ f.config.analyticsCursorKeyFile=f.file('analytics-recovery-cursor.key');
+ fs.writeFileSync(f.config.analyticsCursorKeyFile,randomBytes(32),{mode:0o600});
+ f.config.publicationResources=[
+  {scopeKey:'group:11',service:'analytics',clinicId:31,resource:{propertyName:'properties/321'}},
+  {scopeKey:'group:11',service:'analytics',clinicId:17,resource:{propertyName:'properties/654'}},
+ ];
+ const previousHttp=f.deps.http;
+ f.deps.http=async input=>{
+  if(input.hostname!=='analyticsadmin.googleapis.com')return previousHttp(input);
+  f.httpCalls.push(input);
+  const name=input.path.slice('/v1beta/'.length);
+  return{name,displayName:'Fictitious property',propertyType:'PROPERTY_TYPE_ORDINARY',parent:'accounts/17',account:'accounts/17'};
+ };
+ const reader=createIntegrationsBrokerClient({origin:'https://127.0.0.1:'+f.config.port,audience:f.config.policy.audience,
+  keyId:readerPin.keyId,privateKey:keys.privateKey.export({type:'pkcs8',format:'pem'}),ca:fs.readFileSync(f.file('ca.crt'))});
+ const selection={clinicId:31,selectedAssetRef:'ga4:321',expectedSubjectDigest:firstAnalyticsSubjectDigest('10123456789'),crmIntentId:randomUUID()};
+ const command={operation:require('../src/google-property-discovery-contract').GA_ADMISSION_PROOF,
+  connectionRef:'google-first:analytics:group:11',tenantRef:'clinic:31',assetRef:'ga4:321',payload:{}};
+ f.save();
+ await f.start();
+ const {authorizationUrl}=(await f.call('begin')).data;
+ await f.call('finish',{state:new URL(authorizationUrl).searchParams.get('state'),code:'FICTITIOUS_RUNTIME_CODE'});
+ return {f,selection,reader,command};
+}
+
+test('lost activation acknowledgement is recovered after original expiry and quarantined without bootstrap',async t=>{
+ const {f,selection,reader,command}=await recoveryFixture(t);
+ const {BrokerError}=require('../src/errors');
+ const {TABLE:publications}=require('../src/google-first-publication-journal');
+ const send=f.base.client.send.bind(f.base.client);
+ let lost=false;
+ f.base.client.send=async(request,options)=>{
+  const value=await send(request,options);
+  if(!lost&&request.constructor.name==='UpdateSecretVersionStageCommand'){lost=true;throw new BrokerError('secret_unavailable');}
+  return value;
+ };
+ await assert.rejects(f.call('publication',selection));
+ assert.equal(lost,true);
+ const intent=f.app.store.db.prepare('SELECT * FROM '+publications+' WHERE attempt_id=?').get(f.proof.attemptId);
+ assert.equal(intent.state,'activation_intent');
+ assert.equal(intent.receipt,null);
+ assert.equal(f.app.store.db.prepare('SELECT count(*) n FROM google_first_ga4_read_authorities_v1').get().n,0);
+ assert(f.versions.get(f.proof.attemptId).stages.has('AWSCURRENT'));
+ // Move the two test signing clocks beyond both approval and original proof.
+ const realNow=Date.now,timed=realNow(); Date.now=()=>timed+600001;
+ try {
+  await f.stop();await f.start();
+  const providerCalls=f.httpCalls.length;
+  const observed=(await f.call('recoveryObserve',selection)).data;
+  assert.equal(observed.state,'confirmed_current');
+  assert.equal(observed.receipt,null);
+  assert.equal(f.httpCalls.length,providerCalls);
+  const mismatched={...selection,crmIntentId:randomUUID()};
+  await assert.rejects(f.call('recoveryQuarantine',mismatched),{code:'idempotency_conflict'});
+  const quarantined=(await f.call('recoveryQuarantine',selection)).data;
+  assert.equal(quarantined.state,'quarantined');
+  assert.equal(f.httpCalls.length,providerCalls);
+  assert.deepEqual(f.app.store.db.prepare('SELECT tenant,connection,asset FROM asset_revocations').all().map(row=>({...row})),[
+   {tenant:'clinic:31',connection:'google-first:analytics:group:11',asset:'ga4:321'},
+  ]);
+  await f.stop();await f.start();
+  const secretCalls=f.base.state.calls.length;
+  assert.deepEqual((await f.call('recoveryObserve',selection)).data,quarantined);
+  assert.deepEqual((await f.call('recoveryQuarantine',selection)).data,quarantined);
+  await assert.rejects(reader.execute(command));
+  await assert.rejects(f.call('publication',selection));
+  assert.equal(f.httpCalls.length,providerCalls);
+  assert.equal(f.base.state.calls.length,secretCalls);
+  assert.equal(f.base.state.calls.filter(call=>call.kind==='UpdateSecretVersionStageCommand').length,1);
+ } finally { Date.now=realNow; }
+});
+
+test('quarantine wins before the original publication dispatch and fences delayed work',async t=>{
+ const {f,selection,reader,command}=await recoveryFixture(t);
+ const providerCalls=f.httpCalls.length,secretCalls=f.base.state.calls.length;
+ assert.equal((await f.call('recoveryObserve',selection)).data.state,'unknown');
+ assert.equal((await f.call('recoveryQuarantine',selection)).data.state,'quarantined');
+ await assert.rejects(f.call('publication',selection),{code:'asset_revoked'});
+ await assert.rejects(f.call('publication',{...selection,clinicId:17,selectedAssetRef:'ga4:654'}),{code:'idempotency_conflict'});
+ await assert.rejects(reader.execute(command));
+ assert.equal(f.httpCalls.length,providerCalls);
+ assert.equal(f.base.state.calls.length,secretCalls);
+ assert(f.versions.get(f.slot.baselineVersion).stages.has('AWSCURRENT'));
+});
+
+test('lost SQL ACK can reconcile the original expired receipt without Google or relabelling secrets',async t=>{
+ const {f,selection,reader,command}=await recoveryFixture(t);
+ const receipt=(await f.call('publication',selection)).data;
+ const ack={...selection,receiptId:receipt.receiptId,receiptDigest:receiptDigest(receipt)};
+ await assert.rejects(reader.execute({...command,operation:'google.analytics.discovery.read.v1'}),{code:'scope_denied'});
+ const realNow=Date.now,timed=realNow(); Date.now=()=>timed+600001;
+ try {
+  await f.stop();await f.start();
+  const providerCalls=f.httpCalls.length;
+  const observed=(await f.call('recoveryObserve',selection)).data;
+  assert.equal(observed.state,'confirmed_current');
+  assert.deepEqual(observed.receipt,receipt);
+  assert(observed.receipt.validUntil<Date.now());
+  await assert.rejects(f.call('recoveryAck',{...ack,receiptDigest:'0'.repeat(64)}),{code:'idempotency_conflict'});
+  const acknowledged=(await f.call('recoveryAck',ack)).data;
+  assert.equal(acknowledged.state,'published');
+  assert.equal(acknowledged.receipt,null);
+  assert.equal(f.httpCalls.length,providerCalls);
+  await assert.rejects(f.call('recoveryQuarantine',selection),{code:'idempotency_conflict'});
+  await f.stop();await f.start();
+  assert.deepEqual((await f.call('recoveryAck',ack)).data,acknowledged);
+  assert.equal(f.httpCalls.length,providerCalls);
+  assert.equal((await reader.execute({...command,operation:'google.analytics.discovery.read.v1'})).data.name,'properties/321');
+  assert.equal(f.base.state.calls.filter(call=>call.kind==='UpdateSecretVersionStageCommand').length,1);
+ } finally { Date.now=realNow; }
+});
+
+test('a receipt saved before reader bootstrap never authorizes ACK on its own',async t=>{
+ const {f,selection}=await recoveryFixture(t);
+ const {BrokerError}=require('../src/errors');
+ const {TABLE:publications}=require('../src/google-first-publication-journal');
+ const send=f.base.client.send.bind(f.base.client);
+ let lost=false;
+ f.base.client.send=async(request,options)=>{
+  if(!lost&&request.constructor.name==='GetSecretValueCommand'
+   &&f.app.store.db.prepare('SELECT state FROM '+publications+' WHERE attempt_id=?').get(f.proof.attemptId)?.state==='confirmed'){
+   lost=true;throw new BrokerError('secret_unavailable');
+  }
+  return send(request,options);
+ };
+ await assert.rejects(f.call('publication',selection));
+ assert.equal(lost,true);
+ assert.equal(f.app.store.db.prepare('SELECT count(*) n FROM google_first_ga4_read_authorities_v1').get().n,0);
+ const result=(await f.call('recoveryObserve',selection)).data;
+ assert.equal(result.state,'confirmed_current');
+ assert(result.receipt);
+ const before=f.base.state.calls.length;
+ await assert.rejects(f.call('recoveryAck',{...selection,receiptId:result.receiptId,receiptDigest:result.receiptDigest}),{code:'scope_denied'});
+ assert.equal(f.base.state.calls.length,before);
+ assert.equal((await f.call('recoveryQuarantine',selection)).data.state,'quarantined');
+ assert.equal(f.base.state.calls.length,before);
+});
+
+test('an earlier quarantine wins over an ACK whose exact readback is in flight',async t=>{
+ const {f,selection,reader,command}=await recoveryFixture(t);
+ const receipt=(await f.call('publication',selection)).data;
+ const ack={...selection,receiptId:receipt.receiptId,receiptDigest:receiptDigest(receipt)};
+ const send=f.base.client.send.bind(f.base.client);
+ let unblock,entered,start=true;
+ const stopped=new Promise(resolve=>{entered=resolve;}),gate=new Promise(resolve=>{unblock=resolve;});
+ f.base.client.send=async(request,options)=>{
+  if(start&&request.constructor.name==='GetSecretValueCommand'&&request.input.SecretId===f.slot.secretArn){
+   start=false;entered();await gate;
+  }
+  return send(request,options);
+ };
+ const accepting=assert.rejects(f.call('recoveryAck',ack),{code:'asset_revoked'});
+ try{
+  await Promise.race([stopped,accepting.then(()=>assert.fail('ACK did not wait for exact readback'))]);
+  const providerCalls=f.httpCalls.length;
+  assert.equal((await f.call('recoveryQuarantine',selection)).data.state,'quarantined');
+  await assert.rejects(reader.execute(command));
+  assert.equal(f.httpCalls.length,providerCalls);
+ }finally{unblock();}
+ await accepting;
+ assert.equal(f.base.state.calls.filter(call=>call.kind==='UpdateSecretVersionStageCommand').length,1);
+});
+
+test('readback with a different app version or current secret body cannot acknowledge a historical receipt',async t=>{
+ const {f,selection}=await recoveryFixture(t);
+ const receipt=(await f.call('publication',selection)).data;
+ const ack={...selection,receiptId:receipt.receiptId,receiptDigest:receiptDigest(receipt)};
+ const providerCalls=f.httpCalls.length;
+ const apps=f.base.state.records.get(f.slot.clientSecretArn),previous=apps.get(f.applicationVersion),newVersion=randomUUID();
+ previous.stages.delete('AWSCURRENT');
+ apps.set(newVersion,{body:previous.body,stages:new Set(['AWSCURRENT'])});
+ assert.equal((await f.call('recoveryObserve',selection)).data.state,'unknown');
+ await assert.rejects(f.call('recoveryAck',ack),{code:'secret_version_changed'});
+ apps.delete(newVersion);previous.stages.add('AWSCURRENT');
+ const secret=f.versions.get(f.proof.attemptId);
+ const original=secret.body;
+ secret.body=secret.body.replace('FICTITIOUS_RUNTIME_REFRESH','FICTITIOUS_WRONG_REFRESH');
+ assert.notEqual(secret.body,original);
+ assert.equal((await f.call('recoveryObserve',selection)).data.state,'unknown');
+ await assert.rejects(f.call('recoveryAck',ack));
+ assert.equal(f.httpCalls.length,providerCalls);
+ assert.equal(f.base.state.calls.filter(call=>call.kind==='UpdateSecretVersionStageCommand').length,1);
+ secret.body=original;
+ assert.equal((await f.call('recoveryAck',ack)).data.state,'published');
 });
 
 test('the signed Search Console catalogue checks provider access once per property and preserves exact destination clinics', async t => {

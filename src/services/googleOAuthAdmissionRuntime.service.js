@@ -14,6 +14,9 @@ const { createIntegrationsBrokerClient } = require('../lib/integrationsBrokerCli
 const SCHEMA = 'clinicaclick-google-first-admission-crm/1';
 const CONFIG_KEYS = ['schema','environment','startsEnabled','origin','keyId','keyFile','caFile','clientId','redirectUri','scopes'];
 const IDENTITY_OPERATION = /^google\.oauth\.admission\.(begin|status|finish|abort)\.v1$/;
+const OBSERVE_RECOVERY = 'google.oauth.admission.recovery.observe.v1';
+const ACK_RECOVERY = 'google.oauth.admission.recovery.ack.v1';
+const QUARANTINE_RECOVERY = 'google.oauth.admission.recovery.quarantine.v1';
 const IDENTITY_PREVIEW = 'google.oauth.admission.identity.preview.v1';
 const VERIFY_SELECTION = 'google.oauth.admission.publication.verify.v1';
 const CATALOGUE_READY = 'google.oauth.admission.catalogue.ready.v1';
@@ -165,7 +168,7 @@ function createGoogleOAuthAdmissionRuntime({
     async function callOwner(operation,selection,extras = {},timeoutMs = 25000) {
       const { attemptId,service,scopeKey,bindingDigest,clinicSetDigest,expiresAt } = selection;
       const allowed = approvedScope(selection,extras.clinicId);
-      const requestId = randomUUID();
+      const requestId = operation===VERIFY_SELECTION&&selection.dispatchRequestId ? selection.dispatchRequestId : randomUUID();
       const response = await client.execute({ requestId,operation,tenantRef:'clinic:'+allowed.clinicIds[0],
         connectionRef:'google-first:'+attemptId,assetRef:'google-oauth:'+service+':'+scopeKey,
         payload:{ attemptId,service,bindingDigest,clinicSetDigest,expiresAt,...extras },
@@ -200,6 +203,10 @@ function createGoogleOAuthAdmissionRuntime({
     }
     status = async (req,selection) => {
       const current = await coordinator.status(req,selection);
+      if(selection.service==='analytics'){
+        const effect=await publisher.recoveryState(req,selection);
+        if(['quarantine_pending','quarantined','closed_unused','sql_committed','published'].includes(effect))return {...current,canChooseAssets:false};
+      }
       if (!['search_console','analytics'].includes(selection.service) || current.state !== 'prepared' || current.authorizationState !== 'candidate_staged') return current;
       const verified = await checkOriginal(req,selection);
       if (!(await canRead(verified))) return current;
@@ -243,7 +250,18 @@ function createGoogleOAuthAdmissionRuntime({
       async verifyPublication(selection) {
         if (!(await canRead(selection))) unavailable();
         return callOwner(VERIFY_SELECTION,selection,{ clinicId:selection.clinicId,selectedAssetRef:selection.assetRef,
-          ...(selection.service === 'analytics' ? { expectedSubjectDigest:selection.expectedSubjectDigest } : {}) });
+          ...(selection.service === 'analytics' ? { expectedSubjectDigest:selection.expectedSubjectDigest,crmIntentId:selection.crmIntentId } : {}) });
+      },
+      observeRecovery:selection=>callOwner(OBSERVE_RECOVERY,selection,{clinicId:selection.clinicId,selectedAssetRef:selection.assetRef,
+        crmIntentId:selection.crmIntentId,expectedSubjectDigest:selection.expectedSubjectDigest},10000),
+      ackRecovery:selection=>callOwner(ACK_RECOVERY,selection,{clinicId:selection.clinicId,selectedAssetRef:selection.assetRef,
+        crmIntentId:selection.crmIntentId,expectedSubjectDigest:selection.expectedSubjectDigest,receiptId:selection.receiptId,receiptDigest:selection.receiptDigest},10000),
+      quarantineRecovery:selection=>callOwner(QUARANTINE_RECOVERY,selection,{clinicId:selection.clinicId,selectedAssetRef:selection.assetRef,
+        crmIntentId:selection.crmIntentId,expectedSubjectDigest:selection.expectedSubjectDigest},10000),
+      async abortUnused(selection) {
+        let value=await callOwner('google.oauth.admission.abort.v1',selection,{},10000);
+        if(value.state==='stage_intent')value=await callOwner('google.oauth.admission.status.v1',selection,{},10000);
+        return value;
       },
     },verifyNativeAccess:proof => readAuthority.verify(proof),
     async audit(record,{ transaction,context,receipt }) {
@@ -267,7 +285,7 @@ function createGoogleOAuthAdmissionRuntime({
     if (selection.service === 'analytics') {
       // Do not emit a new consent URL for a partially installed GA4 flow.
       // Pausing starts never gates callbacks/status or a recorded completion.
-      if (!publisher || await readAuthority.available({ scopeKey:selection.scopeKey,service:selection.service,clinicIds:[...clinics] }) !== true) return false;
+      if (!publisher || await publisher.recoverySchemaReady()!==true || await readAuthority.available({ scopeKey:selection.scopeKey,service:selection.service,clinicIds:[...clinics] }) !== true) return false;
       const fresh = await authority.capture(req,selection);
       if (C.bindingDigest(C.input(fresh.context)) !== C.bindingDigest(C.input(captured.context))) forbidden();
     }
@@ -289,7 +307,7 @@ function createGoogleOAuthAdmissionRuntime({
     },
     status,
     callback:dispatcher.dispatch,
-    ...(publisher ? { assets,publish:publisher.publish } : {}),
+    ...(publisher ? {assets,publish:publisher.publish,reconcile:publisher.reconcile,runRecovery:publisher.runRecovery} : {}),
     settingsOrigin:environment === 'dev' ? 'http://localhost:4203' : 'https://crm.clinicaclick.com',
   });
 }
@@ -331,4 +349,9 @@ function createFirstPropertyRevoker(service,{ env = process.env,readFile = priva
 
 const createFirstSearchConsoleRevoker = options => createFirstPropertyRevoker('search_console',options);
 const createFirstAnalyticsRevoker = options => createFirstPropertyRevoker('analytics',options);
-module.exports = { createGoogleOAuthAdmissionRuntime,installGoogleOAuthAdmissionRuntime,createFirstSearchConsoleRevoker,createFirstAnalyticsRevoker };
+async function runGoogleOAuthAdmissionRecovery({env=process.env,install=installGoogleOAuthAdmissionRuntime}={}) {
+  if(env.GOOGLE_OAUTH_FIRST_RECOVERY_WORKER_ENABLED!=='true'||env.RUNTIME_ROLE!=='api'||!['dev','staging'].includes(env.JOB_RUNTIME_NAMESPACE))
+    return {status:'completed',skipped:true,reason:'google_first_recovery_worker_disabled'};
+  const runtime=install({env});if(typeof runtime?.runRecovery!=='function')unavailable();return runtime.runRecovery();
+}
+module.exports = {createGoogleOAuthAdmissionRuntime,installGoogleOAuthAdmissionRuntime,createFirstSearchConsoleRevoker,createFirstAnalyticsRevoker,runGoogleOAuthAdmissionRecovery};

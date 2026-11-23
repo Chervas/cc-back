@@ -194,6 +194,7 @@ async function main(filename,{awsFactory=connectAws,http,now=Date.now,report=()=
  const readOwners=new Map(),cursorKeys=[],readOperations=new Map();
  for(const [service,{contract}] of configuredReaders(config)){
   for(const operation of [...contract.OPERATIONS,contract.REVOKE_OPERATION])readOperations.set(operation,service);
+  if(service==='analytics')readOperations.set(require('./google-property-discovery-contract').GA_ADMISSION_PROOF,service);
  }
  const close=()=>closing||=(async()=>{
   clearInterval(timer);maintenance?.close();owner?.close();
@@ -243,7 +244,25 @@ async function main(filename,{awsFactory=connectAws,http,now=Date.now,report=()=
    const ledger=createFirstGooglePublicationJournal({store,journal,approvedScopes:config.scopes,now,
     onTransition:transitionAudit(store,config,now,true)});
    const verifier=createFirstGooglePropertyVerifier({vault,ledger,http:providerHttp,now});
-   for(const [service,reader] of configuredReaders(config)){
+   const readerConfigs=configuredReaders(config);
+   let recovery;
+   if(readerConfigs.some(([service])=>service==='analytics')){
+    const {createFirstAnalyticsRecovery}=require('./google-first-analytics-recovery');
+    const analyticsSlots=new Map(config.slots.filter(slot=>slot.service==='analytics').map(slot=>[slot.scopeKey,slot]));
+    recovery=createFirstAnalyticsRecovery({store,ledger,journal,policyVersion:config.policy.version,maxBacklog:config.policy.maxBacklog,now,
+     assertReaderCertificate(value){
+      const reader=readOwners.get('analytics');if(!reader)fail('scope_denied');reader.assertCertificate(value);
+     },
+     async reobserveCurrent(plan,{signal}={}){
+      const slot=analyticsSlots.get(plan.scopeKey);
+      if(!slot||plan.service!=='analytics')fail('scope_denied');
+      const observed=await vault.confirmActivation(plan,{signal});
+      if(observed.version!==plan.version||observed.secretDigest!==plan.secretDigest)fail('secret_version_changed');
+      const app=await secrets.application(slot,signal);
+      if(app.secretVersion!==plan.applicationVersion||app.clientId!==plan.clientId)fail('secret_version_changed');
+     }});
+   }
+   for(const [service,reader] of readerConfigs){
     const {createFirstPropertyReadOwner}=require('./google-first-property-read-owner');
     const {cursorCodec}=require('./provider-cursor');
     const cursorKey=privateFile(config[reader.cursor],32);
@@ -252,7 +271,8 @@ async function main(filename,{awsFactory=connectAws,http,now=Date.now,report=()=
     readOwners.set(service,createFirstPropertyReadOwner(service,{store,ledger,firstJournal:journal,vault,client:aws.secrets,http:providerHttp,
      cursor:cursorCodec(cursorKey),policy:readerPolicy(config,reader),readerPrincipalId:config[reader.principal].id,
      controlPrincipalId:config.policy.principals[0].id,approvedScopes:config.scopes,slots:config.slots,redirectUri:config.redirectUri,
-     accountId:ACCOUNT,prefix:secretPrefix(config.environment),kmsKeyArn:SECRET_KEY,now}));
+     accountId:ACCOUNT,prefix:secretPrefix(config.environment),kmsKeyArn:SECRET_KEY,now,
+     ...(service==='analytics'?{readAllowed:recovery.readAllowed}:{})}));
    }
    const publisher=createFirstGooglePublicationOwner({ledger,vault,verifier,now});
    // Existing configurations without an Analytics reader retain OAuth state
@@ -269,16 +289,18 @@ async function main(filename,{awsFactory=connectAws,http,now=Date.now,report=()=
    }
    if(resources.length)publication={
     resources,
-    ...(readOwners.has('analytics')?{identityPreview:analyticsSubject}:{}),
+    ...(recovery?{identityPreview:analyticsSubject,recovery}:{}),
     async publish(proof,owner,selection,resource,options){
      assertSelectedActive(proof,selection);
      if(proof.service==='analytics'){
       const {firstAnalyticsSubjectDigest}=require('./google-property-discovery-contract');
       if(firstAnalyticsSubjectDigest(analyticsSubject(proof,owner))!==options.expectedSubjectDigest)fail('oauth_identity_mismatch');
+      recovery.begin(options.pins);
      }
      const receipt=await publisher.publish(proof,owner,selection,resource,options);
      assertSelectedActive(proof,selection);
      await readOwners.get(proof.service)?.bootstrap({proof,owner,receipt});
+     if(proof.service==='analytics')recovery.assertOpen(options.pins);
      return receipt;
     },
     async observe(proof,owner,selection,resource,options){

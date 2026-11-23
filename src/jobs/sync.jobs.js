@@ -397,6 +397,7 @@ class MetaSyncJobs {
       metaMarketingCredentialRenewal: 'Concilia renovaciones de credenciales solicitadas por el usuario, sin cambiar activos ni repetir códigos OAuth.',
       googleAdsRevocations: 'Confirma bloqueos Ads solicitados mediante el broker; no llama a Google ni modifica campañas.',
       googlePropertyRevocations: 'Confirma bloqueos SC/GA ya solicitados mediante el broker; no llama a Google ni envía conversiones.',
+      googleFirstAdmissionRecovery: 'Concilia una primera autorización de Analytics sin repetir su activación.',
       googleOAuthReconciliation: 'Concilia reautorizaciones Google solicitadas y confirma su activación mediante el broker.',
       authSessionExpiry: 'Registra las expiraciones observadas de sesiones persistentes; no elimina evidencias.',
       platformAuditReconciliation: 'Comprueba entregas de auditoría dudosas mediante el lector separado.',
@@ -457,6 +458,7 @@ class MetaSyncJobs {
         metaMarketingCredentialRenewal: '* * * * *',
         googleAdsRevocations: '* * * * *',
         googlePropertyRevocations: '* * * * *',
+        googleFirstAdmissionRecovery: '* * * * *',
         googleOAuthReconciliation: '* * * * *',
         authSessionExpiry: '*/5 * * * *',
         platformAuditReconciliation: '*/5 * * * *',
@@ -4660,6 +4662,9 @@ try {
   }
   async executeGooglePropertyRevocations() {
     return require('../services/googlePropertyRevocation.service').run();
+  }
+  async executeGoogleFirstAdmissionRecovery() {
+    return require('../services/googleOAuthAdmissionRecovery.service').run();
   }
   async executeGoogleOAuthReconciliation() {
     return require('../services/googleOAuthBroker.service').run();

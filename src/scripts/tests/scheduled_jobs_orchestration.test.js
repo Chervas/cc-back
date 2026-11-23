@@ -34,7 +34,7 @@ function testCatalogCoversEveryCronAndExecutor() {
   const catalogNames = definitions.map(([name]) => name).sort();
   const types = definitions.map(([, definition]) => definition.type);
 
-  assert.equal(definitions.length, 58, 'the canonical scheduler retains existing jobs and adds Meta continuity reconciliation and expiring-business maintenance');
+  assert.equal(definitions.length, 59, 'the canonical scheduler retains existing jobs and adds explicitly gated first-admission recovery');
   assert.equal(SCHEDULED_JOB_DEFINITIONS.searchConsoleRetention.type, 'search_console_retention');
   assert.deepEqual(SCHEDULED_JOB_DEFINITIONS.searchConsoleRetention.runtimeNamespaces, ['staging']);
   assert.deepEqual(SCHEDULED_JOB_DEFINITIONS.infrastructureNotifications.runtimeNamespaces, ['staging']);
@@ -1466,6 +1466,7 @@ async function testPlatformAuditJobsRespectGates() {
   try {
     for (const [name, type, env, module, method, cron] of [
       ['googleAdsEnrollment', 'google_ads_broker_enrollment', 'GOOGLE_ADS_ENROLLMENT_WORKER_ENABLED', '../../services/googleAdsEnrollment.service', 'executeGoogleAdsEnrollment', '* * * * *'],
+      ['googleFirstAdmissionRecovery','google_first_admission_recovery','GOOGLE_OAUTH_FIRST_RECOVERY_WORKER_ENABLED','../../services/googleOAuthAdmissionRecovery.service','executeGoogleFirstAdmissionRecovery','* * * * *'],
       ['googleOAuthReconciliation', 'google_oauth_broker_reconciliation', 'GOOGLE_OAUTH_BROKER_WORKER_ENABLED', '../../services/googleOAuthBroker.service', 'executeGoogleOAuthReconciliation', '* * * * *'],
       ['businessProfileRevocations', 'business_profile_broker_revocations', 'GOOGLE_BUSINESS_PROFILE_REVOCATION_WORKER_ENABLED', '../../services/businessProfileRevocation.service', 'executeBusinessProfileRevocations', '* * * * *'],
       ['metaMarketingRevocations', 'meta_marketing_broker_revocations', 'META_MARKETING_REVOCATION_WORKER_ENABLED', '../../services/metaMarketingRevocation.service', 'executeMetaMarketingRevocations', '* * * * *'],

@@ -139,11 +139,12 @@ function createAnalyticsFirstReader({ env = process.env, readFile = privateFile,
     },
     execute(command,budget) {
       if (typeof command?.connectionRef !== 'string' || !command.connectionRef.startsWith(firstPrefix)
-        || !contract.OPERATIONS.includes(command.operation) || !/^ga4:[1-9]\d{0,19}$/.test(command.assetRef)
+        || !contract.OPERATIONS.includes(command.operation) && command.operation !== discovery.GA_ADMISSION_PROOF || !/^ga4:[1-9]\d{0,19}$/.test(command.assetRef)
         || !validFirstScope(command.tenantRef) || !command.tenantRef.startsWith('clinic:')) fail('broker_binding_invalid');
       const scope = command.connectionRef.slice(firstPrefix.length);
       if (!validFirstScope(scope) || scope.startsWith('clinic:') && scope !== command.tenantRef) fail('broker_binding_invalid');
-      contract.validate(command.operation,command.payload);
+      const operation = command.operation === discovery.GA_ADMISSION_PROOF ? discovery.GA_OPERATION : command.operation;
+      contract.validate(operation,command.payload);
       return configuredClient().execute(command,budget);
     },
     async verify({ receipt,context }) {
@@ -160,7 +161,7 @@ function createAnalyticsFirstReader({ env = process.env, readFile = privateFile,
 async function readFirstRegisteredProperty(reader,{ clinicId,connectionRef,assetRef,propertyName }) {
   const resource = contract.property(propertyName);
   if (!Number.isSafeInteger(clinicId) || !positive(clinicId) || resource.assetRef !== assetRef) fail('broker_binding_invalid');
-  const response = await reader.execute({ operation:discovery.GA_OPERATION,connectionRef,
+  const response = await reader.execute({ operation:discovery.GA_ADMISSION_PROOF,connectionRef,
     tenantRef:'clinic:'+clinicId,assetRef,payload:{} },{ timeoutMs:15000 });
   try { return discovery.projectFirstGA(response?.data,resource.propertyName); } catch { fail('broker_response_invalid'); }
 }

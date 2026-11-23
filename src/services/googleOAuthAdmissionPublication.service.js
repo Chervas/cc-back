@@ -246,48 +246,10 @@ function createGoogleOAuthAdmissionPublication({ models, authority, owner, audit
       authorizationConfirmed:true, connected:configured, configurationPending:!configured, replayed };
   }
 
-  async function publish(req,input) {
-    try {
-      const selection = command(input);
-      const captured = await authority.capture(req,{ attemptId:selection.attemptId,scopeKey:selection.scopeKey,service:selection.service });
-      const context = C.input(captured.context);
-      if (context.attemptId !== selection.attemptId || context.scopeKey !== selection.scopeKey || context.service !== selection.service
-        || !context.clinicIds.includes(selection.clinicId)) forbidden();
-      const preview = await transaction(async tx => {
-        await authenticate(captured,context,tx);
-        return attempt(context,tx);
-      });
-      const request = { ...selection, bindingDigest:preview.binding_digest, clinicSetDigest:preview.clinic_digest, expiresAt:attemptExpiry(preview) };
-      let identity,claim;
-      const checkClaim = async tx => {
-        if (identity && await analyticsClaim(context,selection,identity,tx) !== claim) conflict();
-      };
-      if (selection.service === 'analytics' && verifyNativeAccess) {
-        if (typeof owner.previewIdentity !== 'function') unavailable();
-        identity = checkedIdentity(await owner.previewIdentity(Object.freeze({ ...request })),selection);
-        claim = await transaction(async tx => {
-          await authenticate(captured,context,tx);await attempt(context,tx);
-          return analyticsClaim(context,selection,identity,tx);
-        });
-        request.expectedSubjectDigest = identity.subjectDigest;
-      }
-      const receipt = checkedReceipt(await owner.verifyPublication(Object.freeze(request)),selection,context,receiptBounds(preview));
-      if (identity && receipt.googleUserId !== identity.googleUserId) conflict();
-      let analyticsResource;
-      if (verifyNativeAccess) {
-        await transaction(async tx => {
-          await authenticate(captured,context,tx);
-          await attempt(context,tx);await checkClaim(tx);
-        });
-        const verified = await verifyNativeAccess({ receipt,context });
-        if (selection.service === 'analytics') {
-          const resource = Analytics.property('properties/' + selection.assetRef.slice(4));
-          analyticsResource = Object.freeze(projectGA(verified,resource.propertyName));
-        } else if (verified !== true) unavailable();
-      }
-      const receiptDigest = digest(receipt);
-
-      return await transaction(async tx => {
+  async function commitVerified({selection,captured,context,receipt,analyticsResource,checkClaim,recovery,effect}) {
+    const receiptDigest=digest(receipt);
+    return transaction(async tx => {
+        if (recovery) await recovery.assertForCommit(effect.fence,{transaction:tx});
         await authenticate(captured,context,tx);
         const row = await attempt(context,tx);
         await checkClaim(tx);
@@ -331,8 +293,121 @@ function createGoogleOAuthAdmissionPublication({ models, authority, owner, audit
         }
         await authenticate(captured,context,tx);
         checkedReceipt(receipt,selection,context,receiptBounds(row));
-        return projection(selection,Boolean(previous),analyticsResource);
+        const intent = recovery ? await recovery.markSqlCommitted(effect.fence,{transaction:tx}) : null;
+        return { value:projection(selection,Boolean(previous),analyticsResource),intent,replayed:Boolean(previous) };
+    });
+  }
+
+  const Recovery=require('./googleOAuthAdmissionRecovery.contract');
+  function recoveryAvailable() {
+    return typeof M.GoogleOAuthAdmissionRecovery?.findByPk==='function'
+      && ['previewIdentity','verifyPublication','observeRecovery','ackRecovery','quarantineRecovery','abortUnused'].every(name=>typeof owner[name]==='function');
+  }
+  async function acceptedRecovery(row,{transaction:tx}) {
+    const previous=plain(await M.GoogleOAuthAdmissionAttempt.findByPk(row.attempt_id,options(tx)));if(!previous)return false;
+    const original=C.record(previous);
+    return original.binding_digest===row.binding_digest&&original.actor_user_id===row.actor_user_id&&original.session_ref_hash===row.session_ref_hash
+      &&+original.session_expires_at===+row.session_expires_at&&original.scope_key===row.scope_key&&original.clinic_ids===row.clinic_ids
+      &&original.service==='analytics'&&+original.requested_at===+row.attempt_requested_at&&+original.expires_at===+row.attempt_expires_at;
+  }
+  async function currentCommitted(row,{transaction:tx}={}) {
+    const inspect=async transaction=>{
+      if(await acceptedRecovery(row,{transaction})!==true)return false;
+      const receipt=Recovery.json(row.owner_receipt),resource=Recovery.json(row.native_resource);
+      const context={scopeKey:row.scope_key,clinicIds:Recovery.json(row.clinic_ids)};
+      const selection={attemptId:row.attempt_id,scopeKey:row.scope_key,service:'analytics',clinicId:row.clinic_id,assetRef:row.asset_ref};
+      const roster=await M.Clinica.findAll({...options(transaction),attributes:['id_clinica'],where:row.scope_key.startsWith('group:')
+        ?{grupoClinicaId:Number(row.scope_key.slice(6))}:{id_clinica:Number(row.scope_key.slice(7))},order:[['id_clinica','ASC']],limit:1001});
+      if(JSON.stringify(roster.map(value=>Number(value.id_clinica)))!==row.clinic_ids)return false;
+      const saved=plain(await M.GoogleOAuthAdmissionPublication.findByPk(row.attempt_id,options(transaction)));
+      if(!saved||Recovery.publicationDigest(saved)!==row.sql_publication_digest)return false;
+      await analyticsClaim(context,selection,{googleUserId:row.google_user_id,subjectDigest:row.subject_digest},transaction);
+      await reconcileBinding(receipt,Number(saved.google_connection_id),true,transaction);
+      await assign(context,receipt,Number(saved.google_connection_id),true,transaction);
+      await persistVerifiedAnalyticsMapping(M,transaction,{clinicId:row.clinic_id,connectionId:Number(saved.google_connection_id),googleUserId:row.google_user_id,
+        connectionRef:receipt.connectionRef,assetRef:row.asset_ref,property:resource},{existingOnly:true});
+      return true;
+    };
+    return tx?inspect(tx):transaction(inspect);
+  }
+  let recoveryCoordinator;
+  function recovery() {
+    if(!recoveryAvailable())unavailable();
+    if(recoveryCoordinator)return recoveryCoordinator;
+    const {createGoogleOAuthAdmissionRecovery}=require('./googleOAuthAdmissionRecovery.repository');
+    recoveryCoordinator=require('./googleOAuthAdmissionRecoveryCoordinator.service').createGoogleOAuthAdmissionRecoveryCoordinator({
+      capture:(req,selection)=>authority.capture(req,selection),owner,now,
+      repository:captured=>createGoogleOAuthAdmissionRecovery({model:M.GoogleOAuthAdmissionRecovery,attemptModel:M.GoogleOAuthAdmissionAttempt,
+        publicationModel:M.GoogleOAuthAdmissionPublication,sequelize:M.sequelize,authorize:captured?captured.authorize:async()=>false,
+        authorizeRecovery:acceptedRecovery,verifyCommitted:currentCommitted,now}),
+      claim:({captured,context,selection,identity})=>transaction(async tx=>{
+        await authenticate(captured,context,tx);await attempt(context,tx);return analyticsClaim(context,selection,identity,tx);
+      }),
+      validateOriginal:({captured,context,selection,intent})=>transaction(async tx=>{
+        await authenticate(captured,context,tx);await attempt(context,tx);
+        if(await analyticsClaim(context,selection,{googleUserId:intent.google_user_id,subjectDigest:intent.subject_digest},tx)!==intent.claim_digest)conflict();
+        await authenticate(captured,context,tx);
+      }),
+      verifyNative:verifyNativeAccess,
+      commit:async({captured,context,selection,receipt,resource,intent,repository})=>{
+        const row=await transaction(async tx=>{await authenticate(captured,context,tx);return attempt(context,tx);});
+        checkedReceipt(receipt,selection,context,receiptBounds(row));
+        const checkClaim=async tx=>{if(await analyticsClaim(context,selection,{googleUserId:intent.row.google_user_id,subjectDigest:intent.row.subject_digest},tx)!==intent.row.claim_digest)conflict();};
+        const committed=await commitVerified({selection,captured,context,receipt,analyticsResource:resource,checkClaim,recovery:repository,effect:intent});
+        return {intent:committed.intent,replayed:committed.replayed};
+      },
+      verifyCommitted:row=>currentCommitted(row),
+      mayContinue:row=>transaction(async tx=>{
+        if(await acceptedRecovery(row,{transaction:tx})!==true)return false;
+        const original=plain(await M.GoogleOAuthAdmissionAttempt.findByPk(row.attempt_id,options(tx)));
+        return original.state==='prepared'&&+row.attempt_expires_at>C.clock(now())&&+row.session_expires_at>C.clock(now());
+      }),
+    });return recoveryCoordinator;
+  }
+
+  async function publish(req,input) {
+    try {
+      const selection = command(input);
+      if(selection.service==='analytics'&&verifyNativeAccess)return await recovery().publish(req,selection);
+      const captured = await authority.capture(req,{ attemptId:selection.attemptId,scopeKey:selection.scopeKey,service:selection.service });
+      const context = C.input(captured.context);
+      if (context.attemptId !== selection.attemptId || context.scopeKey !== selection.scopeKey || context.service !== selection.service
+        || !context.clinicIds.includes(selection.clinicId)) forbidden();
+      const preview = await transaction(async tx => {
+        await authenticate(captured,context,tx);
+        return attempt(context,tx);
       });
+      const request = { ...selection, bindingDigest:preview.binding_digest, clinicSetDigest:preview.clinic_digest, expiresAt:attemptExpiry(preview) };
+      let identity,claim;
+      const checkClaim = async tx => {
+        if (identity && await analyticsClaim(context,selection,identity,tx) !== claim) conflict();
+      };
+      if (selection.service === 'analytics' && verifyNativeAccess) {
+        if (typeof owner.previewIdentity !== 'function') unavailable();
+        identity = checkedIdentity(await owner.previewIdentity(Object.freeze({ ...request })),selection);
+        claim = await transaction(async tx => {
+          await authenticate(captured,context,tx);await attempt(context,tx);
+          return analyticsClaim(context,selection,identity,tx);
+        });
+        request.expectedSubjectDigest = identity.subjectDigest;
+      }
+      const receipt = checkedReceipt(await owner.verifyPublication(Object.freeze(request)),selection,context,receiptBounds(preview));
+      if (identity && receipt.googleUserId !== identity.googleUserId) conflict();
+      let analyticsResource;
+      if (verifyNativeAccess) {
+        await transaction(async tx => {
+          await authenticate(captured,context,tx);
+          await attempt(context,tx);await checkClaim(tx);
+        });
+        const verified = await verifyNativeAccess({ receipt,context });
+        if (selection.service === 'analytics') {
+          const resource = Analytics.property('properties/' + selection.assetRef.slice(4));
+          analyticsResource = Object.freeze(projectGA(verified,resource.propertyName));
+        } else if (verified !== true) unavailable();
+      }
+      const receiptDigest = digest(receipt);
+
+      return (await commitVerified({selection,captured,context,receipt,analyticsResource,checkClaim})).value;
     } catch (error) {
       const code = error?.status ?? error?.httpStatus;
       if (code === 401) throw C.problem('google_oauth_admission_session_required',401);
@@ -344,7 +419,28 @@ function createGoogleOAuthAdmissionPublication({ models, authority, owner, audit
     }
   }
 
-  return Object.freeze({ publish });
+  async function recoveryState(req,selection) {
+    if(selection.service!=='analytics'||!recoveryAvailable())return null;
+    const captured=await authority.capture(req,{attemptId:selection.attemptId,scopeKey:selection.scopeKey,service:'analytics'}),context=C.input(captured.context);
+    return transaction(async tx=>{
+      await authenticate(captured,context,tx);
+      const row=plain(await M.GoogleOAuthAdmissionRecovery.findByPk(selection.attemptId,options(tx)));
+      if(!row)return null;return Recovery.bound(row,context).state;
+    });
+  }
+  async function recoverySchemaReady() {
+    if(!recoveryAvailable())return false;
+    await M.GoogleOAuthAdmissionRecovery.findAll({attributes:['attempt_id'],limit:1,raw:true,logging:false});return true;
+  }
+  async function runRecovery() {
+    if(!recoveryAvailable())return {status:'completed',skipped:true};
+    const rows=await M.GoogleOAuthAdmissionRecovery.findAll({attributes:['attempt_id'],raw:true,logging:false,
+      where:{state:{[Op.notIn]:Recovery.TERMINAL},lease_until:{[Op.lte]:now()},[Op.or]:[{last_error:null},{last_error:{[Op.ne]:'authority_changed'}}]},order:[['lease_until','ASC'],['attempt_id','ASC']],limit:2});
+    let completed=0,failed=0;const deadline=C.clock(now())+20000;
+    for(const row of rows){if(C.clock(now())>=deadline)break;try{await recovery().reconcile(row.attempt_id);completed++;}catch{failed++;}}
+    return {status:failed?'failed':'completed',processed:completed,failed};
+  }
+  return Object.freeze({publish,recoveryAvailable,recoverySchemaReady,recoveryState,reconcile:attemptId=>recovery().reconcile(attemptId),runRecovery});
 }
 
 module.exports = { createGoogleOAuthAdmissionPublication };

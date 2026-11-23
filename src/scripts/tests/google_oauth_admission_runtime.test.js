@@ -228,7 +228,7 @@ test('new GA4 starts require installed completion and normal reader, then revali
  const publisherPath=require.resolve('../../services/googleOAuthAdmissionPublication.service'),cachedPublisher=require.cache[publisherPath];
  // This test isolates start capability. Real publication/native SQL is tested
  // in the dedicated isolated-MySQL fixture, without loading AWS packages here.
- require.cache[publisherPath]={ id:publisherPath,filename:publisherPath,loaded:true,exports:{ createGoogleOAuthAdmissionPublication:()=>({ publish:()=>assert.fail('Unexpected publication') }) } };
+ require.cache[publisherPath]={ id:publisherPath,filename:publisherPath,loaded:true,exports:{ createGoogleOAuthAdmissionPublication:()=>({publish:()=>assert.fail('Unexpected publication'),recoverySchemaReady:async()=>true,recoveryState:async()=>null}) } };
  let complete;try{complete=createGoogleOAuthAdmissionRuntime({ config:{ ...config,publicationEnabled:true,scopes:gaScopes },environment:'staging',
   models:f.models,sessions:f.sessions,now:()=>new Date(f.state.now),readFile:()=>Buffer.from('FICTITIOUS_KEY'),clientFactory:()=>f.client,
   readAuthority:{ async available(context){assert.deepEqual(context,{ scopeKey:'group:29',service:'analytics',clinicIds:[66,72] });
@@ -237,4 +237,13 @@ test('new GA4 starts require installed completion and normal reader, then revali
  assert.deepEqual(await complete.capability(f.req(),selection),{ enabled:false });await assert.rejects(complete.begin(f.req(),selection),{ status:403 });assert.equal(f.state.calls.length,0);
  reader=true;assert.deepEqual(await complete.capability(f.req(),selection),{ enabled:true });
  revoke=true;await assert.rejects(complete.begin(f.req(),selection),{ status:403 });assert.equal(f.state.calls.length,0);assert.equal(f.rows().length,0);
+});
+
+
+test('first recovery worker is explicit API-only opt-in and never loads an absent runtime by default',async()=>{
+ const {runGoogleOAuthAdmissionRecovery}=require('../../services/googleOAuthAdmissionRuntime.service');const deny=()=>assert.fail('Unexpected config/key/model read');
+ for(const env of [{},{GOOGLE_OAUTH_FIRST_RECOVERY_WORKER_ENABLED:'true',RUNTIME_ROLE:'gateway',JOB_RUNTIME_NAMESPACE:'staging'},
+  {GOOGLE_OAUTH_FIRST_RECOVERY_WORKER_ENABLED:'false',RUNTIME_ROLE:'api',JOB_RUNTIME_NAMESPACE:'staging'}])assert.equal((await runGoogleOAuthAdmissionRecovery({env,install:deny})).skipped,true);
+ let ran=0;const result=await runGoogleOAuthAdmissionRecovery({env:{GOOGLE_OAUTH_FIRST_RECOVERY_WORKER_ENABLED:'true',RUNTIME_ROLE:'api',JOB_RUNTIME_NAMESPACE:'staging'},
+  install:()=>({async runRecovery(){ran++;return{status:'completed',processed:2};}})});assert.equal(ran,1);assert.equal(result.processed,2);
 });

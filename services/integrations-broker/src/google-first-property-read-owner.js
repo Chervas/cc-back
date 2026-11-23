@@ -19,14 +19,14 @@ const {createFirstGoogleCredentialVault}=require('./google-first-identity-vault'
 const digest=v=>createHash('sha256').update(canonical(v)).digest('hex');
 const exact=(o,keys)=>o&&Object.getPrototypeOf(o)===Object.prototype&&Reflect.ownKeys(o).length===keys.split(',').length&&keys.split(',').every(k=>Object.hasOwn(o,k));
 function createFirstPropertyReadOwner(service,{store,ledger,firstJournal,vault,client,http,cursor,policy,readerPrincipalId,controlPrincipalId,
- approvedScopes,slots,redirectUri,accountId,prefix,kmsKeyArn,now=Date.now}={}){
+ approvedScopes,slots,redirectUri,accountId,prefix,kmsKeyArn,readAllowed,now=Date.now}={}){
  if(!Object.hasOwn(PROVIDERS,service))fail('invalid_request');
  const {contract:C,createOperations,table:TABLE,domain:DOMAIN,scope:readScope,discover,auditReason}=PROVIDERS[service];
  const DDL=`CREATE TABLE IF NOT EXISTS ${TABLE}(connection TEXT PRIMARY KEY,tenant TEXT NOT NULL,asset TEXT NOT NULL,attempt_id TEXT NOT NULL UNIQUE,
  body TEXT NOT NULL,body_digest TEXT NOT NULL,created_at INTEGER NOT NULL) STRICT`;
  if(!store?.db||typeof store.transaction!=='function'||!ledger?.getPrivateState||!firstJournal?.read||!firstJournal?.getPrivateState
   ||!vault?.confirmActivation||!client?.send||typeof http!=='function'||!cursor?.seal||!cursor?.open||typeof now!=='function'
-  ||!Array.isArray(approvedScopes)||!Array.isArray(slots))fail('invalid_request');
+  ||!Array.isArray(approvedScopes)||!Array.isArray(slots)||service==='analytics'&&typeof readAllowed!=='function')fail('invalid_request');
  const base=structuredClone(validatePolicy(policy)),policyDigest=digest(base),cache=new Map(),scopeMap=new Map(),slotMap=new Map();
  if(base.connections.length||base.grants.length||base.principals.length!==2||base.maxBacklog>1000||readerPrincipalId===controlPrincipalId
   ||!base.principals.some(p=>p.id===readerPrincipalId&&p.enabled&&p.maxPerMinute<=60)
@@ -91,11 +91,13 @@ function createFirstPropertyReadOwner(service,{store,ledger,firstJournal,vault,c
    ...(service==='search_console'?{searchConsoleSites:[{siteUrl:cert.resource.siteUrl,assetRef:r.assetRef}]}
     :{analyticsProperties:[{propertyName:cert.resource.propertyName,assetRef:r.assetRef}]})};
  }
+ const nativeOperations=service==='analytics'?[...C.OPERATIONS,D.GA_ADMISSION_PROOF]:C.OPERATIONS;
  function resolve(request,principal,livePolicy){
-  if(digest(livePolicy)!==policyDigest||!C.OPERATIONS.includes(request.operation)&&request.operation!==C.REVOKE_OPERATION)fail('operation_denied');
+  if(digest(livePolicy)!==policyDigest||!nativeOperations.includes(request.operation)&&request.operation!==C.REVOKE_OPERATION)fail('operation_denied');
   const revoking=request.operation===C.REVOKE_OPERATION,role=revoking?controlPrincipalId:readerPrincipalId;
   if(principal.id!==role)fail('scope_denied');const cert=revoking?certificate(request.connectionRef,true):active(request.connectionRef);
   if(request.tenantRef!==cert.row.tenant||request.assetRef!==cert.row.asset)fail('scope_denied');
+  if(service==='analytics'&&!readAllowed(cert.body,request.operation===D.GA_ADMISSION_PROOF))fail('scope_denied');
   return{...livePolicy,connections:[binding(cert)],grants:[{principalId:role,tenantRef:cert.row.tenant,connectionRef:cert.row.connection,assetRef:cert.row.asset,operations:[request.operation]}]};
  }
  function guardContext(request,principal,expected){
@@ -108,14 +110,15 @@ function createFirstPropertyReadOwner(service,{store,ledger,firstJournal,vault,c
   if(app.secretVersion!==cert.body.plan.applicationVersion||app.clientId!==cert.body.plan.clientId)fail('secret_version_changed');
  }
  const native=createOperations({http,cursor}),operations={};
- for(const operation of C.OPERATIONS){
-  const original=native[operation];operations[operation]={...original,
+ for(const operation of nativeOperations){
+  const operationName=operation===D.GA_ADMISSION_PROOF?D.GA_OPERATION:operation;
+  const original=native[operationName];operations[operation]={...original,
    authorize:({request,principal})=>guardContext(request,principal),
    async execute(context){
     const request={operation,tenantRef:context.tenantRef,connectionRef:context.binding.connectionRef,assetRef:context.assetRef,payload:context.payload};
     const principal={id:context.principalId},cert=guardContext(request,principal);
     const guarded=async input=>{guardContext(request,principal,cert.bodyDigest);const result=await http(input);guardContext(request,principal,cert.bodyDigest);return result;};
-    const work=createOperations({http:guarded,cursor})[operation];const result=await work.execute(context);guardContext(request,principal,cert.bodyDigest);return result;
+    const work=createOperations({http:guarded,cursor})[operationName];const result=await work.execute(context);guardContext(request,principal,cert.bodyDigest);return result;
    }};
  }
  operations[C.REVOKE_OPERATION]=native[C.REVOKE_OPERATION];
@@ -169,7 +172,12 @@ function createFirstPropertyReadOwner(service,{store,ledger,firstJournal,vault,c
    return{installed:true,connectionRef:r.connectionRef,tenantRef:'clinic:'+r.clinicId,assetRef:r.assetRef,certificateDigest:prepared.bodyDigest};
   });
  }
+ function assertCertificate({proof,owner,receipt}){
+  const cert=certificate(receipt.connectionRef,true).body;
+  if(canonical(cert.proof)!==canonical(proof)||canonical(cert.owner)!==canonical(owner)
+   ||canonical(cert.receipt)!==canonical(receipt))fail('idempotency_conflict');
+ }
  const close=()=>{for(const controllers of broker.active.values())for(const controller of controllers)controller.abort();secrets.close();};
- return Object.freeze({broker,bootstrap,close});
+ return Object.freeze({broker,bootstrap,assertCertificate,close});
 }
 module.exports={createFirstPropertyReadOwner};

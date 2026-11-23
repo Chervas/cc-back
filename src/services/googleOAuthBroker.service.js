@@ -52,8 +52,18 @@ function createGoogleOAuthBroker({ models, client, sessions, audit = createRepos
       || !(row.published_at instanceof Date) || !(+row.published_at >= +binding.confirmed_at && +row.published_at <= +now())) {
       fail('google_oauth_scope_conflict',409);
     }
-    // Local publication metadata is sufficient to reopen the ordinary asset
-    // inventory, which still uses the independently signed Analytics reader.
+    // SQL metadata alone is not confirmation while Owner normal reads await
+    // the durable exact ACK. Never expose an active authorization early.
+    let acknowledged=false;
+    if(models.GoogleOAuthAdmissionRecovery){
+      const intent=await models.GoogleOAuthAdmissionRecovery.findByPk(binding.secret_version,{...locked(transaction),raw:true,logging:false});
+      if(intent){const R=require('./googleOAuthAdmissionRecovery.contract'),effect=R.record(plain(intent));
+        acknowledged=effect.state==='published'&&effect.attempt_id===row.attempt_id&&effect.scope_key===scopeKey
+          &&effect.asset_ref===row.asset_ref&&effect.owner_receipt_digest===row.receipt_digest
+          &&effect.sql_publication_digest===R.publicationDigest(row)&&R.json(effect.owner_observation).state==='published';}
+    }
+    if(!acknowledged)return {...stateFor({state:'processing'}),google_service:'analytics',enabled:false,connected:false,
+      reason:'broker_authorization_metadata',googleUserId:binding.google_user_id,confirmed_at:binding.confirmed_at};
     return { ...stateFor({ state:'active' }),google_service:'analytics',enabled:false,connected:false,
       reason:'broker_authorization_metadata',googleUserId:binding.google_user_id,confirmed_at:binding.confirmed_at };
   }
