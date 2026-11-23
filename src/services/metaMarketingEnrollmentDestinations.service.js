@@ -70,8 +70,15 @@ function createDestinations({ models, enabled = () => process.env.META_MARKETING
   const P = models.MetaMarketingEnrollmentDestinationPlan;
 
   async function available(scopeKey, transaction, ref) {
-    if (!P || !groupScope(scopeKey) || !enabled() || !admitted(scopeKey) || ref !== undefined && !dynamic(scopeKey, ref)) return false;
-    return models.sequelize.getQueryInterface().tableExists(TABLE, { transaction, logging: false });
+    if (!groupScope(scopeKey) || !enabled() || !admitted(scopeKey) || ref !== undefined && !dynamic(scopeKey, ref)) return false;
+    // A new opted-in group selection must be persistable. Missing schema/model
+    // is an outage, never permission to fall back to the legacy no-plan writer.
+    if (!P || typeof P.findByPk !== 'function' || typeof P.create !== 'function') C.fail();
+    let exists;
+    try { exists = await models.sequelize.getQueryInterface().tableExists(TABLE, { transaction, logging: false }); }
+    catch { C.fail(); }
+    if (exists !== true) C.fail();
+    return true;
   }
 
   function prepare(row, candidate) {

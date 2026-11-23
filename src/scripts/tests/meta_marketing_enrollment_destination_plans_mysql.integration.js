@@ -89,7 +89,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const qi = sql.getQueryInterface(), commands = [], inventory = new Map(), owners = new Map();
   const { createService } = require('../../services/metaMarketingEnrollment.service');
   const { createDestinations } = require('../../services/metaMarketingEnrollmentDestinations.service');
-  let clock = Date.now(), rollout = true, lostReply = false, afterActivate, catalogReads = 0;
+  let clock = Date.now(), rollout = false, lostReply = false, afterActivate, catalogReads = 0;
   const now = () => new Date(clock);
   const advance = (ms = 130000) => { clock += ms; };
   const sessions = { async verifyNormalReference(ref, options) { assert.equal(ref.userId, ACTOR); assert(options.transaction); } };
@@ -165,6 +165,8 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   assert.deepEqual(Object.keys(columns), ['enrollment_id', 'plan', 'digest', 'asset_labels']);
   assert.equal(columns.enrollment_id.primaryKey, true);
   assert.equal(columns.asset_labels.allowNull, true);
+  // Resume the already persisted no-plan intent after opting the group in.
+  rollout = true;
   assert(Object.entries(columns).filter(([key]) => key !== 'asset_labels').every(([, column]) => column.allowNull === false));
   assert.equal((await enrollment.overview(legacy.input)).groupDestinationPlanVersion, undefined);
   assert.equal((await enrollment.run({ enrollmentId: old.requestId })).advanced, 1);
