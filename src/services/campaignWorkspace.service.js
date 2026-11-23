@@ -15,6 +15,7 @@ const { loadNativeFormEvidence } = require('./campaignWorkspaceNativeReception.s
 const { loadGoogleNativeEvidence } = require('./campaignWorkspaceGoogleReception.service');
 const { loadMetaSignalEvidence } = require('./campaignWorkspaceSignalEvidence.service');
 const { loadGoogleSignalEvidence } = require('./campaignWorkspaceGoogleSignalEvidence.service');
+const { deriveMetaCampaignSpendFacts } = require('./campaignWorkspaceMetaSpend.service');
 
 const LEAD_FIELDS = ['id', 'clinica_id', 'source', 'channel', 'utm_source', 'utm_campaign', 'source_detail', 'google_ads_customer_id', 'google_ads_campaign_id', 'external_source', 'external_id', 'created_at'];
 const GOOGLE_MAPPING_FIELDS = ['id', 'customerId', 'descriptiveName', 'currencyCode', 'clinicaId', 'grupoClinicaId', 'assignmentScope', 'lastSyncedAt'];
@@ -255,6 +256,9 @@ async function loadCampaignWorkspace({ models, scope, days, now = new Date() }) 
   if (olderLeadIds.length) leads.push(...await models.LeadIntake.findAll({ where: { id: { [Op.in]: olderLeadIds },
     clinica_id: { [Op.in]: scope.clinicIds } }, attributes: LEAD_FIELDS, raw: true }));
   const ads = await loadWorkspaceAds({ models, googleWhere, metaCampaigns, dateWhere });
+  // Current Meta sync stores ad-level snapshots. Reuse only the scoped hierarchy
+  // already loaded above; native campaign snapshots take precedence per day.
+  facts.push(...deriveMetaCampaignSpendFacts({ campaigns, facts, ads }));
   await attachLeadAdvertisingIdentities({ models, leads });
   leads = await loadReportingPatientContexts({ models, leads });
   // The budget reader still follows its explicit lead/appointment chain. A care lead

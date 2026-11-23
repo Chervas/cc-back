@@ -183,6 +183,7 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
       if (totals) { row.current.accepted = totals.current / 100; row.previous.accepted = totals.previous / 100; }
     }
   }
+  const adDerivedSpend = new Map(rows.map(row => [row.campaign.id, { current: false, previous: false }]));
   const seenFacts = new Set();
   const campaignDates = new Map(rows.map(row => [row.campaign.id, { current: new Map(), previous: new Map() }]));
   const adDaily = new Map(rows.map(row => [row.campaign.id, { current: new Map(), previous: new Map() }]));
@@ -200,6 +201,7 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
     row[target].spend += number(fact.spend);
     if (fact.providerConversions != null) row[target].providerConversions = (row[target].providerConversions || 0) + number(fact.providerConversions);
     row.coverage[target === 'current' ? 'spend' : 'previousSpend'] = true;
+    if (fact.provider === 'meta_ads' && fact.spendSource === 'meta_ads_ad_rollup') adDerivedSpend.get(key)[target] = true;
     // Freshness belongs to the latest metric day, using its oldest segment observation.
     // A backfill of older dates must not make a stale campaign appear current.
     const observed = observationTime(fact.updatedAt, now);
@@ -339,6 +341,13 @@ function aggregateReport({ campaigns, facts = [], leads = [], appointments = [],
       ad.metricDays = { current: dates.current.size, previous: dates.previous.size };
     }
     row.adSpendCoverage = evaluateAdSpendCoverage(row, period, campaignDates.get(row.campaign.id), adDaily.get(row.campaign.id));
+    // Summing ad snapshots exposes observed campaign spend, but is not an
+    // independent campaign/ad reconciliation for comparisons or recommendations.
+    for (const target of ['current', 'previous']) {
+      if (adDerivedSpend.get(row.campaign.id)[target]) row.adSpendCoverage[target] = {
+        ...row.adSpendCoverage[target], status: 'incomplete', independentCampaignSpend: false,
+      };
+    }
     for (const ad of row.ads) {
       ad.currentCpl = row.adSpendCoverage.current.status === 'matched' && row.campaign.assigned
         && row.adAttribution.unattributed.current.leads === 0 ? cpl(ad.current) : null;
