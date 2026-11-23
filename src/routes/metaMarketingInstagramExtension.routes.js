@@ -31,7 +31,8 @@ function createRouter({ service = require('../services/metaMarketingInstagramExt
       const status = invalidSession ? 401 : [400,401,403,409,429].includes(error?.httpStatus) ? error.httpStatus : 503;
       const code = codes.has(error?.code) ? error.code
         : { 400:'meta_instagram_invalid',401:'meta_instagram_session_required',403:'meta_instagram_scope_forbidden',409:'meta_instagram_scope_changed' }[status] || 'meta_instagram_unavailable';
-      return res.status(status).json({ success: false, error: code });
+      const saved = name === 'overview' && status === 429 && code === 'meta_instagram_rate_limited' ? error.savedAssignment : null;
+      return res.status(status).json({ success: false, error: code, ...(saved ? { savedAssignment: saved } : {}) });
     }
   };
   router.get('/instagram-extension', handler('overview'));

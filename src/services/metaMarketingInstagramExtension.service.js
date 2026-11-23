@@ -143,6 +143,27 @@ function createService({ models, sessions, client, now = () => new Date(), retur
     });
   }
 
+  async function savedAssignment(input, previous, expectedAuthorityHash) {
+    return inScope(input, async ({ transaction, enrollment }) => {
+      const row = await current(input, transaction);
+      if (!row || row.status !== 'active' || row.scope_key !== input.scopeKey || row.reserved_scope !== input.scopeKey
+          || row.flow_id !== previous.flow_id || row.selected_instagram_id !== previous.selected_instagram_id
+          || row.selected_candidate_digest !== previous.selected_candidate_digest || !M.graphId(row.selected_instagram_id)
+          || !hashPattern.test(row.selected_candidate_digest || '') || !row.confirmed_at
+          || !Number.isFinite(+row.confirmed_at) || +row.confirmed_at > +now()) return null;
+
+      const authority = await capture(input, enrollment, transaction);
+      if (authority.authorityHash !== expectedAuthorityHash) return null;
+      matches(row, authority);
+      await unassigned(row.selected_instagram_id, transaction);
+      // CRM has a durable confirmation and asset id, independently of the
+      // provider's current availability. Never turn it into a live profile.
+      return { scopeKey: input.scopeKey, enrollmentId: authority.payload.enrollmentId, epoch: authority.payload.epoch,
+        versionId: authority.payload.versionId, assetRef: 'meta-instagram_business:' + row.selected_instagram_id,
+        kind: 'instagram_business', id: row.selected_instagram_id };
+    });
+  }
+
   async function cancel(input, id, denied = false) {
     if (!configured(input)) return disabled();
     const row = await inScope(input, async ({ transaction }) => {
@@ -180,9 +201,11 @@ function createService({ models, sessions, client, now = () => new Date(), retur
           return { row: plain(row), cleanup: true };
         }
         if (row.status !== 'active' && !ownedBy(row, input)) fail('meta_instagram_scope_forbidden', 403);
-        try { matches(row, await capture(input, enrollment, transaction)); }
-        catch (error) { if (error?.httpStatus === 409) return { row: plain(row), cleanup: true }; throw error; }
-        return { row: plain(row) };
+        try {
+          const authority = await capture(input, enrollment, transaction);
+          matches(row, authority);
+          return { row: plain(row), authorityHash: authority.authorityHash };
+        } catch (error) { if (error?.httpStatus === 409) return { row: plain(row), cleanup: true }; throw error; }
       });
       if (!local) return view('none');
       const { row } = local;
@@ -190,7 +213,14 @@ function createService({ models, sessions, client, now = () => new Date(), retur
       if (row.status === 'starting' || row.status === 'awaiting') return view('awaiting', row.flow_id);
       let remote;
       try { remote = await call(row, 'status', { flowId: row.flow_id }); }
-      catch (error) { if (error?.httpStatus === 409) return view('requires_cleanup', row.flow_id); throw error; }
+      catch (error) {
+        if (error?.httpStatus === 409) return view('requires_cleanup', row.flow_id);
+        if (error?.httpStatus === 429 && error.code === 'meta_instagram_rate_limited' && row.status === 'active') {
+          const saved = await savedAssignment(input, row, local.authorityHash);
+          if (saved) error.savedAssignment = saved;
+        }
+        throw error;
+      }
       if (remote.status === 'active') return applyActive(input, row.flow_id, remote);
       return inScope(input, async ({ transaction, enrollment }) => {
         const fresh = await current(input, transaction);

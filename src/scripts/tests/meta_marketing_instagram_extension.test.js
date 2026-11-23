@@ -90,6 +90,10 @@ function fixture({ sessionMs = 3600000, tokenMs = null, dataAccessMs = 86400000 
       const name = Object.keys(I.OPERATIONS).find(key => I.OPERATIONS[key] === operation);
       I.validators[name](payload);
       data.calls.push(name);
+      if (name === 'status' && data.statusError) {
+        data.onStatusError?.();
+        throw Object.assign(Error('fictitious provider status'), { code: data.statusError });
+      }
       let result;
       if (name === 'begin') {
         assert.equal(payload.parentPageId, '401');
@@ -224,4 +228,91 @@ test('availability requires an enabled direct clinic with its approved Facebook 
   assert.equal(availableFor({ ...row, selected: [...row.selected, { kind: 'instagram_business', parentPageId: '401' }] }, null, settings), false);
   env.META_MARKETING_INSTAGRAM_EXTENSION_PAGE = '402';
   assert.equal(availableFor(row, null, settings), false);
+});
+
+async function authorizedInstagram(f, confirm = true) {
+  const attempt = await f.service.begin(f.input);
+  const state = new URL(attempt.authUrl).searchParams.get('state');
+  await f.service.callback({ state, code: 'FICTITIOUS_CODE' });
+  if (confirm) await f.service.confirm(f.input, attempt.flowId, { instagramId: '501', candidateDigest: f.candidate.digest });
+}
+
+test('explicit rate limiting projects only the locally confirmed Instagram and the current enrollment proof', async () => {
+  const f = fixture();
+  await authorizedInstagram(f);
+  f.data.statusError = 'rate_limited';
+  const before = structuredClone(f.data.row);
+  const otherManager = { ...f.input, actorId: 5, sessionRef: randomUUID() };
+  await assert.rejects(f.service.overview(otherManager), error => {
+    assert.equal(error.code, 'meta_instagram_rate_limited');
+    assert.equal(error.httpStatus, 429);
+    assert.deepEqual(error.savedAssignment, {
+      scopeKey: 'clinic:77', enrollmentId: before.enrollment_id, epoch: 0, versionId: f.flow.flow_id,
+      assetRef: 'meta-instagram_business:501', id: '501', kind: 'instagram_business',
+    });
+    return true;
+  });
+  assert.deepEqual(f.data.row, before);
+  assert.equal(f.data.calls.filter(call => call === 'status').length, 1);
+  f.unchanged();
+});
+
+test('drafts, invalid durable confirmation and changed session, credential or claim cannot supply saved inventory', async () => {
+  const f = fixture();
+  await authorizedInstagram(f, false);
+  f.data.statusError = 'rate_limited';
+  await assert.rejects(f.service.overview(f.input), error => error.httpStatus === 429 && !error.savedAssignment);
+  const mutations = [
+    [f => { f.data.row.confirmed_at = null; }, 429],
+    [f => { f.data.row.status = 'cancel_pending'; }, 429],
+    [f => { f.data.row.selected_instagram_id = '999'; }, 429],
+    [f => { f.renewCredential(); }, 429],
+    [f => { f.data.live = false; }, 401],
+    [f => { f.data.legacyMapping = { id: 17 }; }, 409],
+  ];
+  for (const [change, status] of mutations) {
+    const active = fixture();
+    await authorizedInstagram(active);
+    active.data.statusError = 'rate_limited';
+    active.data.onStatusError = () => change(active);
+    await assert.rejects(active.service.overview(active.input), error => error.httpStatus === status && !error.savedAssignment);
+    assert.equal(active.data.calls.filter(call => call === 'status').length, 1);
+    active.unchanged();
+  }
+});
+
+test('generic provider failures and definite loss never turn the stored extension into a display fallback', async () => {
+  const f = fixture();
+  await authorizedInstagram(f);
+  f.data.statusError = 'provider_unavailable';
+  await assert.rejects(f.service.overview(f.input), error => error.httpStatus === 503 && !error.savedAssignment);
+  f.data.statusError = 'credential_revoked';
+  const revoked = await f.service.overview(f.input);
+  assert.equal(revoked.status, 'requires_cleanup');
+  assert.equal(revoked.candidate, null);
+});
+
+test('the HTTP router preserves 429 and projects the saved reference only on overview', async () => {
+  const { createRouter } = require('../../routes/metaMarketingInstagramExtension.routes');
+  const f = fixture();
+  await authorizedInstagram(f);
+  f.data.statusError = 'rate_limited';
+  const withheld = Object.assign(Error('fixture denied write'), { code: 'meta_instagram_rate_limited', httpStatus: 429, savedAssignment: { private: true } });
+  const router = createRouter({ service: { ...f.service, begin: async () => { throw withheld; } }, sessions: { verify: async () => ({
+    userId: f.input.actorId, jti: f.input.sessionRef, sessionVersion: 1, exp: +f.input.sessionExpiresAt / 1000,
+  }) } });
+  const read = async method => {
+    let value, status = 200;
+    const res = { headers: {}, set(key, value) { this.headers[key] = value; }, status(code) { status = code; return this; }, json(body) { value = body; } };
+    await router.stack.find(layer => layer.route?.path === '/instagram-extension' && layer.route.methods[method]).route.stack[0].handle({
+      headers: { authorization: 'Bearer FICTITIOUS_SESSION' }, query: { clinic_id: '77' }, params: {},
+    }, res);
+    assert.equal(status, 429);
+    assert.equal(res.headers['Cache-Control'], 'private, no-store');
+    return value;
+  };
+  const get = await read('get');
+  assert.deepEqual(Object.keys(get).sort(), ['error', 'savedAssignment', 'success']);
+  assert.deepEqual(Object.keys(get.savedAssignment).sort(), ['assetRef', 'enrollmentId', 'epoch', 'id', 'kind', 'scopeKey', 'versionId']);
+  assert.deepEqual(await read('post'), { success: false, error: 'meta_instagram_rate_limited' });
 });
