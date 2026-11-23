@@ -135,8 +135,16 @@ function createMetaDataAccessRepository(models, { broker, now = () => new Date()
       // enrollment, including fresh Pages/Ads rather than only legacy aliases.
       const recovery = require('./metaMarketingLegacyRecovery.service');
       try { recovery.snapshotRecord(row); } catch { fail('meta_metadata_data_access_unavailable', 503); }
-      const proof = await models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, transaction =>
-        recovery.createRecovery({ models, now }).assertActive({ enrollmentId: row.enrollment_id, allowExpiredCredential: true }, transaction));
+      // Metadata follows the same current Enrollment/ancestor prefix as readers.
+      // Observe outside RR; lock/recheck before Recovery -> Flow can take locks.
+      const order = require('./metaMarketingTransactionOrder.service').createOrder({ models,
+        unavailable: () => fail('meta_metadata_data_access_unavailable', 503) });
+      const prepared = await order.prepareEnrollment(row.enrollment_id, { scopeKey, appId: row.app_id });
+      if (!prepared) fail('meta_metadata_data_access_unavailable', 503);
+      const proof = await models.sequelize.transaction({ isolationLevel: 'REPEATABLE READ' }, async transaction => {
+        await order.lockPrepared(prepared, transaction);
+        return recovery.createRecovery({ models, now }).assertActive({ enrollmentId: row.enrollment_id, allowExpiredCredential: true }, transaction);
+      });
       if (!proof || proof.version !== 2 || proof.recoveryId !== row.recovery_id || proof.flowId !== row.flow_id
         || proof.enrollmentId !== row.enrollment_id || proof.scopeKey !== scopeKey || proof.snapshotDigest !== row.snapshot_digest
         || proof.appId !== row.app_id || proof.subjectId !== row.meta_user_id || !positive(proof.canonicalConnectionId)
