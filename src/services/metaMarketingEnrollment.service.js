@@ -1,5 +1,6 @@
 'use strict';
 const {randomUUID}=require('node:crypto'),{Op}=require('sequelize'),C=require('./metaMarketingEnrollment.contract');
+const {createDestinations,VERSION:DESTINATION_VERSION}=require('./metaMarketingEnrollmentDestinations.service');
 const plain=v=>v?.get?v.get({plain:true}):v;
 const CLOSING=new Set(['meta_enrollment_disabled','meta_enrollment_scope_changed','meta_enrollment_scope_blocked','meta_enrollment_asset_revoked',
   'meta_enrollment_asset_in_use','meta_enrollment_assignment_review','meta_enrollment_identity_review','meta_oauth_scope_changed','meta_oauth_scope_forbidden',
@@ -8,20 +9,29 @@ const SAFE=new Set([...CLOSING,'meta_enrollment_lease_lost','meta_enrollment_pre
   'meta_enrollment_invalid','meta_enrollment_scope_forbidden','meta_enrollment_busy','meta_enrollment_unavailable',
     'broker_response_invalid','broker_configuration_invalid','broker_timeout','broker_unavailable','rate_limited','audit_unavailable','outcome_unknown','provider_timeout','meta_credential_renewal_required','secret_version_changed','meta_business_activation_uncertain']);
 const safe=error=>SAFE.has(error?.code)?error.code:'meta_enrollment_unavailable';
+// Sequelize rolls back a MySQL deadlock victim before throwing. Only the
+// SQL-only overview starts a new read, with the original session and scope.
+const overviewDeadlock=error=>error?.name==='SequelizeDatabaseError'
+  &&error.original?.code==='ER_LOCK_DEADLOCK'&&error.original?.errno===1213;
 const claimSql=id=>`SELECT enrollment_id FROM MetaMarketingEnrollmentRequests
   WHERE delivery_due_at <= $now AND state <> 'superseded' AND (lease_until IS NULL OR lease_until <= $now)
   ${id?'AND enrollment_id = $id':''} ORDER BY delivery_due_at,enrollment_id LIMIT 1 FOR UPDATE SKIP LOCKED`;
 function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_ENROLLMENT_ENABLED==='true',discoveryEnabled=()=>process.env.META_MARKETING_OAUTH_DISCOVERY_ENABLED==='true',
-  workerEnabled=()=>process.env.META_MARKETING_ENROLLMENT_WORKER_ENABLED==='true'}){
+  workerEnabled=()=>process.env.META_MARKETING_ENROLLMENT_WORKER_ENABLED==='true',destinations=createDestinations({models})}){
   const R=models.MetaMarketingEnrollmentRequest,scope=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now});
-  const authority=require('./metaMarketingEnrollmentAuthority.service').createAuthority({models,sessions,oauth,now,enabled});
-  const bindings=require('./metaMarketingEnrollmentBinding.service').createBindings({models,sessions,authority,now});
+  const authority=require('./metaMarketingEnrollmentAuthority.service').createAuthority({models,sessions,oauth,now,enabled,destinations});
+  const bindings=require('./metaMarketingEnrollmentBinding.service').createBindings({models,sessions,authority,now,destinations});
   const tx=fn=>models.sequelize.transaction({isolationLevel:'REPEATABLE READ'},fn),lock=transaction=>({transaction,lock:transaction.LOCK.UPDATE,logging:false});
   const order=require('./metaMarketingTransactionOrder.service').createOrder({models,authorize:scope.authorize,unavailable:()=>C.fail('meta_enrollment_unavailable',503)});
   let activeInventory;
   const inventory=()=>activeInventory||=require('./metaMarketingActiveInventory.service').createActiveInventory({models,sessions,client,now,enabled:()=>enabled()&&discoveryEnabled()});
-  const project=row=>({requestId:row.enrollment_id,flowId:row.flow_id,state:row.state,connected:row.state==='active',clinicCount:row.clinicIds.length,
-    assets:row.selected,selectionDigest:row.selection_digest,mappingIds:row.mappingIds,lastError:row.last_error,cancellationConfirmed:row.state==='revoked'});
+  const project=(row,proposed)=>({requestId:row.enrollment_id,flowId:row.flow_id,state:row.state,connected:row.state==='active',clinicCount:row.clinicIds.length,
+    assets:row.selected,selectionDigest:row.selection_digest,mappingIds:row.mappingIds,lastError:row.last_error,cancellationConfirmed:row.state==='revoked',
+    ...(proposed?{destinationPlan:proposed.plan,destinationDigest:proposed.digest}:{}),
+    ...(proposed?.pendingAssetLabels?.length&&['prepare_pending','prepared','activate_pending'].includes(row.state)
+      ?{pendingAssetLabels:proposed.pendingAssetLabels}:{})});
+  const groupCapability=async(input,transaction,ref)=>enabled()&&await destinations.available(input.scopeKey,transaction,ref)
+    ?{groupDestinationPlanVersion:DESTINATION_VERSION}:{};
   async function current(id,transaction){
     if(!C.UUID.test(id))C.fail('meta_enrollment_invalid',400);const row=await R.findByPk(id,lock(transaction));
     if(!row)C.fail('meta_enrollment_scope_forbidden',403);return C.request(plain(row));
@@ -134,43 +144,55 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
   }
   let running=false;
   return {
-    async overview(input){return order.scope(input,{},async({transaction,enrollment,input})=>{
-      if(!enrollment)return {enabled:enabled(),canSelect:enabled(),selection:null,discovery:{mode:'pending'}};
-      const row=await current(enrollment.enrollment_id,transaction);let selection=project(row),discovery={mode:row.state==='active'?'unavailable':'pending'};
-      let instagramExtensionAvailable=false,displayAssets;
-      if(row.state==='active')try{
-        const committed=await bindings.committed(row.enrollment_id,transaction);
-        if(enabled()&&discoveryEnabled()){
-          const {displayAssets:cached,...capability}=await inventory().describe(input,row,transaction)||{mode:'unavailable'};
-          discovery=capability;displayAssets=cached;
+    async overview(input){
+      const pinned=require('./metaMarketingTransactionOrder.service').pinInput(input);
+      const read=()=>order.scope(pinned,{},async({transaction,enrollment,input})=>{
+        if(!enrollment)return {enabled:enabled(),canSelect:enabled(),selection:null,discovery:{mode:'pending'},...await groupCapability(input,transaction)};
+        const row=await current(enrollment.enrollment_id,transaction),proposed=await destinations.read(row,transaction);
+        let selection=project(row,proposed),discovery={mode:row.state==='active'?'unavailable':'pending'};
+        const capability=proposed?{groupDestinationPlanVersion:DESTINATION_VERSION}:row.state==='revoked'?await groupCapability(input,transaction,row.connection_ref):{};
+        let instagramExtensionAvailable=false,displayAssets;
+        if(row.state==='active')try{
+          const committed=await bindings.committed(row.enrollment_id,transaction);
+          if(enabled()&&discoveryEnabled()){
+            const {displayAssets:cached,...capability}=await inventory().describe(input,row,transaction)||{mode:'unavailable'};
+            discovery=capability;displayAssets=cached;
+          }
+          instagramExtensionAvailable=discovery?.mode==='active'&&process.env.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED==='true'
+            &&require('./metaMarketingInstagramExtension.service').availableFor(row,committed.business);
         }
-        instagramExtensionAvailable=discovery?.mode==='active'&&process.env.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED==='true'
-          &&require('./metaMarketingInstagramExtension.service').availableFor(row,committed.business);
+        catch(error){if(overviewDeadlock(error)||[401,403].includes(error.httpStatus))throw error;selection={...selection,connected:false,attentionRequired:true,lastError:safe(error)};}
+        return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',discovery,...capability,...(instagramExtensionAvailable?{instagramExtensionAvailable:true}:{}),selection:{...selection,
+          canConfirm:enabled()&&row.state==='prepared'&&Number(row.actor_user_id)===input.actorId&&row.session_ref===input.sessionRef
+            &&+row.session_expires_at===+input.sessionExpiresAt&&+row.session_expires_at>+now(),canCancel:!['revoke_pending','revoked'].includes(row.state)},
+          ...(displayAssets&&selection.connected?{displayAssets}:{})};
+      });
+      try { return await read(); }
+      catch (error) {
+        if (!overviewDeadlock(error)) throw error;
+        return read();
       }
-      catch(error){if([401,403].includes(error.httpStatus))throw error;selection={...selection,connected:false,attentionRequired:true,lastError:safe(error)};}
-      return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',discovery,...(instagramExtensionAvailable?{instagramExtensionAvailable:true}:{}),selection:{...selection,
-        canConfirm:enabled()&&row.state==='prepared'&&Number(row.actor_user_id)===input.actorId&&row.session_ref===input.sessionRef
-          &&+row.session_expires_at===+input.sessionExpiresAt&&+row.session_expires_at>+now(),canCancel:!['revoke_pending','revoked'].includes(row.state)},
-        ...(displayAssets&&selection.connected?{displayAssets}:{})};
-    });},
+    },
     async assets(input,id,includeAvatars=false){return inventory().assets(input,id,includeAvatars);},
     async cancelFromOAuth(flowId,transaction,actor){
       if(!transaction||!C.UUID.test(flowId))C.fail();
       const row=await R.findOne({...lock(transaction),where:{flow_id:flowId}});
       return row?cancelLocked(C.request(plain(row)),transaction,actor):null;
     },
-    async reserve(input,flowId,refs){return project(C.request(await authority.reserve(input,flowId,refs)));},
-    async status(input,id){if(!C.UUID.test(id))C.fail('meta_enrollment_invalid',400);return order.enrollment(input,id,async({transaction,enrollment,input})=>{if(!enrollment)C.fail('meta_enrollment_scope_forbidden',403);const row=await access(input,id,transaction);if(row.state==='active')await bindings.committed(id,transaction);return project(row);});},
-    async confirm(input,id,selectionDigest){
-      if(!C.UUID.test(id)||!C.HASH.test(selectionDigest))C.fail('meta_enrollment_invalid',400);
+    async reserve(input,flowId,refs,destinationPlan){
+      const row=await authority.reserve(input,flowId,refs,destinationPlan);return project(C.request(row),row.destinations);
+    },
+    async status(input,id){if(!C.UUID.test(id))C.fail('meta_enrollment_invalid',400);return order.enrollment(input,id,async({transaction,enrollment,input})=>{if(!enrollment)C.fail('meta_enrollment_scope_forbidden',403);const row=await access(input,id,transaction);if(row.state==='active')await bindings.committed(id,transaction);return project(row,await destinations.read(row,transaction));});},
+    async confirm(input,id,selectionDigest,destinationDigest){
+      if(!C.UUID.test(id)||!C.HASH.test(selectionDigest)||destinationDigest!==undefined&&!C.HASH.test(destinationDigest))C.fail('meta_enrollment_invalid',400);
       return order.enrollment(input,id,async({transaction,enrollment,input})=>{
         if(!enrollment)C.fail('meta_enrollment_scope_forbidden',403);
-        const row=await access(input,id,transaction,true);await authority.assertPending(row,transaction);
-        if(row.selection_digest!==selectionDigest||!['prepared','activate_pending'].includes(row.state))C.fail('meta_enrollment_scope_changed',409);
-        if(row.state==='activate_pending')return project(row);
+        const row=await access(input,id,transaction,true),pending=await authority.assertPending(row,transaction);
+        if(row.selection_digest!==selectionDigest||pending.destinations?.digest!==destinationDigest||!['prepared','activate_pending'].includes(row.state))C.fail('meta_enrollment_scope_changed',409);
+        if(row.state==='activate_pending')return project(row,pending.destinations);
         if(row.lease_until&&row.lease_until>now())C.fail('meta_enrollment_busy',409);
         const next={...row,state:'activate_pending',attempts:0,updated_at:now(),next_attempt_at:now(),last_error:null};
-        await bindings.record(next,'meta_enrollment_activation_requested',transaction);return project(await update(row,next,transaction));
+        await bindings.record(next,'meta_enrollment_activation_requested',transaction);return project(await update(row,next,transaction),pending.destinations);
       });
     },
     async cancel(input,id){if(!C.UUID.test(id))C.fail('meta_enrollment_invalid',400);return order.enrollment(input,id,async({transaction,enrollment,input})=>{if(!enrollment)C.fail('meta_enrollment_scope_forbidden',403);return project(await cancelLocked(await access(input,id,transaction),transaction,{actorId:input.actorId,sessionRef:input.sessionRef}));});},

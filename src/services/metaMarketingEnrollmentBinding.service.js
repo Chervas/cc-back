@@ -2,10 +2,11 @@
 const {Op,literal,where}=require('sequelize'),C=require('./metaMarketingEnrollment.contract');
 const {fromEnrollment}=require('../../services/platform-audit/src/meta-enrollment-event');
 const {isCertified}=require('./metaMarketingFirstEnrollmentAuthority.service');
+const {createDestinations}=require('./metaMarketingEnrollmentDestinations.service');
 const plain=v=>v?.get?v.get({plain:true}):v;
 const fail=(code='meta_enrollment_scope_changed')=>C.fail(code,409);
 const scopeOf=row=>{const [assignmentScope,id]=row.scope_key.split(':');return {assignmentScope,clinicId:assignmentScope==='clinic'?Number(id):null,groupId:assignmentScope==='group'?Number(id):null};};
-function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGuard}){
+function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGuard,destinations=createDestinations({models})}){
   const R=models.MetaMarketingEnrollmentRequest,B=models.MetaMarketingBrokerBinding;
   const recovery=recoveryGuard||require('./metaMarketingLegacyRecovery.service').createRecovery({models,sessions,now});
   const S=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now,recoveryGuard:recovery});
@@ -146,7 +147,7 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
     if(!C.UUID.test(row.lease_token)||row.lease_token!==expected.lease_token||+row.lease_until<=+now())fail('meta_enrollment_lease_lost');
     if(row.state!=='activate_pending'||row.mappingIds.length)fail();
     const receipt=C.receipt(remote,row,{states:['active']});if(receipt.accessBlocked!==false)fail('meta_enrollment_asset_revoked');
-    await authority.assertPending(row,transaction);
+    const pending=await authority.assertPending(row,transaction);
     const flow=await models.MetaMarketingOAuthRequest.findByPk(row.flow_id,o),proof=await recovery.forFlow(flow,transaction,{phase:'pending'});
     const marketingOnly=isCertified(row);
     if(marketingOnly&&proof)fail();
@@ -198,12 +199,13 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
         }
       }else mapping=await models.ClinicMetaAsset.create({metaConnectionId:row.meta_connection_id,assignmentScope:scope.assignmentScope,clinicaId:scope.clinicId,
         grupoClinicaId:scope.groupId,assetType:asset.kind,metaAssetId:asset.id,metaAssetName:null,isActive:true,pageAccessToken:null,waAccessToken:null,additionalData:null},{transaction,logging:false});
-      mappings.push({id:Number(mapping.id),assetType:asset.kind});
+      mappings.push({id:Number(mapping.id),assetType:asset.kind,assetRef:asset.assetRef});
       await B.create({mapping_id:Number(mapping.id),enrollment_id:row.enrollment_id,asset_ref:asset.assetRef,meta_connection_id:row.meta_connection_id,meta_user_id:row.meta_user_id,
         app_id:row.app_id,connection_ref:row.connection_ref,scope_key:row.scope_key,tenant_clinic_id:row.clinicIds[0],parent_page_id:asset.parentPageId,state:'active'},{transaction,logging:false});
     }
     if(newMappings.length)await references(row,newMappings,transaction,{newlyAllocated:true});
     await references(row,mappings,transaction,{newlyAllocated:!proof});
+    if(pending?.destinations)await destinations.activate(row,pending.destinations,mappings,transaction,now());
     const current=C.request({...row,mapping_ids:JSON.stringify(mappings.map(v=>v.id).sort((a,b)=>a-b)),state:'active',activated_at:now(),updated_at:now(),last_error:null,
       lease_token:null,lease_until:null,next_attempt_at:new Date(+now()+300000)});
     const [changed]=await R.update({mapping_ids:current.mapping_ids,state:current.state,activated_at:current.activated_at,updated_at:current.updated_at,last_error:null,
