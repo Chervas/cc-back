@@ -116,7 +116,8 @@ function response(result, name, row, b, requestId, selection) {
     return { ...structuredClone(d), channelRole: S.channelRole(d.channelRole), phoneState: d.phoneState ?? null };
   } catch { fail('whatsapp_onboarding_result_unknown', true); }
 }
-function createWhatsappOnboardingBrokerClient({ client, loadBinding, prepareBinding, guard = assertGateway }) {
+function createWhatsappOnboardingBrokerClient({ client, loadBinding, prepareBinding, guard = assertGateway,
+  activationModePinEnabled = false }) {
   if (typeof client?.execute !== 'function' || typeof loadBinding !== 'function') fail('whatsapp_onboarding_configuration_invalid');
   async function call(name, value, input = {}) {
     guard(); const row = context(value); const payload = structuredClone(input); let selected;
@@ -150,6 +151,7 @@ function createWhatsappOnboardingBrokerClient({ client, loadBinding, prepareBind
     if(legacyPhoneDigest!==undefined&&(operation!==A.ACTIVATE||row.replacement||row.scope.type!=='clinic'||row.mode!=='coexistence'
       ||typeof legacyPhoneDigest!=='string'||!/^[a-f0-9]{64}$/.test(legacyPhoneDigest)))fail('whatsapp_onboarding_binding_invalid');
     const payload={flowId:row.requestId,scopeDigest:row.scopeDigest,clinicSetDigest:row.clinicSetDigest,
+      ...(activationModePinEnabled&&row.mode==='coexistence'&&operation!==A.STATUS?{mode:'coexistence'}:{}),
       ...(operation===A.ACTIVATE?{assetId,...(row.replacement?.authorizationId===null?{legacyPhoneDigest:row.replacement.phoneDigest}:
         legacyPhoneDigest!==undefined?{legacyPhoneDigest}:{})}:{})};
     A.validate(payload,operation);
@@ -210,7 +212,8 @@ function configuredClient({ environment = () => process.env } = {}) {
       key = privateFile(cfg.privateKeyFile, 8192); ca = privateFile(cfg.caFile, 65536);
       const client = createIntegrationsBrokerClient({ origin: cfg.origin, keyId: cfg.keyId, audience: cfg.audience, privateKey: key, ca,
         timeoutMs: 100000, transportProfile: 'whatsapp-onboarding' });
-      const api = createWhatsappOnboardingBrokerClient({ client, guard: () => assertGateway(environment()), loadBinding: async scope => {
+      const api = createWhatsappOnboardingBrokerClient({ client, guard: () => assertGateway(environment()),
+        activationModePinEnabled: environment().WHATSAPP_ONBOARDING_ACTIVATION_MODE_PIN_ENABLED === 'true', loadBinding: async scope => {
         const current = configuration(environment());
         if (JSON.stringify(current) !== JSON.stringify(cfg)) fail('whatsapp_onboarding_binding_invalid');
         return current.bindings.find(b => b.scopeKey === scope.type + ':' + scope.id)
@@ -236,7 +239,7 @@ function configuredClient({ environment = () => process.env } = {}) {
     } catch (error) {
       if (['whatsapp_onboarding_result_unknown','whatsapp_onboarding_binding_invalid',
         'whatsapp_authorization_busy','whatsapp_authorization_limit','whatsapp_onboarding_preparation_unavailable',
-        'whatsapp_onboarding_preparation_disabled'].includes(error?.code)) throw error;
+        'whatsapp_onboarding_preparation_disabled','whatsapp_coexistence_profile_unverified'].includes(error?.code)) throw error;
       fail('whatsapp_onboarding_configuration_invalid');
     } finally { key?.fill(0); ca?.fill(0); }
   }

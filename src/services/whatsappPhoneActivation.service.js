@@ -52,8 +52,11 @@ function createService({models,audit,states=require('./whatsappAuthorizationStat
     return role||'primary';
   }
   async function persist(context,remote,actor){
-    if(!remote.profile||remote.flowId!==context.requestId||remote.scopeKey!==context.scope.type+':'+context.scope.id
+    if(remote?.flowId!==context.requestId||remote.scopeKey!==context.scope.type+':'+context.scope.id
       ||JSON.stringify(remote.clinicIds)!==JSON.stringify(context.clinicIds))S.fail('whatsapp_onboarding_binding_invalid',503);
+    if(S.onboardingMode(context.mode)==='coexistence'&&!coexistence(remote.profile))
+      S.fail('whatsapp_coexistence_profile_unverified',409);
+    if(!remote.profile)S.fail('whatsapp_onboarding_binding_invalid',503);
     return locked(()=>db().sequelize.transaction(async transaction=>{
       const options={transaction,lock:transaction.LOCK.UPDATE};
       const existing=await db().WhatsappPhoneActivation.findByPk(context.requestId,options);

@@ -17,9 +17,13 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
   store.db.exec(`CREATE TABLE IF NOT EXISTS whatsapp_activations (
     flow_id TEXT PRIMARY KEY,state TEXT NOT NULL,profile TEXT,asset_id INTEGER,definition TEXT NOT NULL,
     pin_version TEXT NOT NULL,started_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,activated_at INTEGER,
-    lease_owner TEXT,lease_until INTEGER NOT NULL DEFAULT 0,legacy_phone_digest TEXT)`);
-  if(!store.db.prepare("SELECT 1 FROM pragma_table_info('whatsapp_activations') WHERE name='legacy_phone_digest'").get())
-    store.db.exec('ALTER TABLE whatsapp_activations ADD COLUMN legacy_phone_digest TEXT');
+    lease_owner TEXT,lease_until INTEGER NOT NULL DEFAULT 0,legacy_phone_digest TEXT,
+    onboarding_mode TEXT CHECK(onboarding_mode IS NULL OR onboarding_mode='coexistence'))`);
+  store.transaction(()=>{
+    const columns=new Set(store.db.prepare("PRAGMA table_info('whatsapp_activations')").all().map(column=>column.name));
+    if(!columns.has('legacy_phone_digest'))store.db.exec('ALTER TABLE whatsapp_activations ADD COLUMN legacy_phone_digest TEXT');
+    if(!columns.has('onboarding_mode'))store.db.exec("ALTER TABLE whatsapp_activations ADD COLUMN onboarding_mode TEXT CHECK(onboarding_mode IS NULL OR onboarding_mode='coexistence')");
+  });
   const enrollment=ref=>policy.connections.find(b=>b.connectionRef===ref)||resolveBinding?.(ref);
   const row=id=>store.db.prepare('SELECT * FROM whatsapp_activations WHERE flow_id=?').get(id);
   const withPin=pinFactory({client,kmsKeyArn});
@@ -65,6 +69,7 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
   }
   async function execute({request,principal,binding,policy:originalPolicy=policy}) {
     const ctx=context(request,principal,binding);
+    const coexistenceRequested=request.payload.mode==='coexistence';
     const registry=registryFactory({filename,authorizations:[ctx.definition],loadEnrollmentBinding:enrollment,now});
     let secrets;const owner=randomUUID();const id=ctx.flow.id;
     const active=()=>{context(request,principal,binding);registry.review(ctx.operational);};
@@ -90,14 +95,19 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
         if(saved.state==='superseded')fail('asset_revoked');
         if(saved.definition!==JSON.stringify(ctx.definition)||saved.asset_id && request.operation===A.ACTIVATE && saved.asset_id!==request.payload.assetId)fail('idempotency_conflict');
         if(request.operation===A.ACTIVATE&&saved.legacy_phone_digest&&saved.legacy_phone_digest!==request.payload.legacyPhoneDigest)fail('idempotency_conflict');
+        if(saved.onboarding_mode!==null&&(!coexistenceRequested||saved.onboarding_mode!=='coexistence'))fail('idempotency_conflict');
+        if(coexistenceRequested&&saved.state==='active'){
+          if(!coexistence(JSON.parse(saved.profile)))fail('whatsapp_coexistence_profile_unverified');
+          return saved;
+        }
         if(saved.lease_until>now())fail('rate_limited');
         if(request.operation===A.ACTIVATE && !saved.profile)fail('invalid_request');
         if(request.operation===A.ACTIVATE){let currentProfile;try{currentProfile=JSON.parse(saved.profile);}catch{fail('scope_denied');}
           if(request.payload.legacyPhoneDigest&&(phoneDigest(currentProfile.displayPhoneNumber)!==request.payload.legacyPhoneDigest||!coexistence(currentProfile)))fail('scope_denied');
           previousFor(id,request.payload.assetId,ctx.definition,currentProfile,ctx.flow.channel_role||'primary');}
-        store.db.prepare('UPDATE whatsapp_activations SET lease_owner=?,lease_until=?,asset_id=COALESCE(asset_id,?),legacy_phone_digest=COALESCE(legacy_phone_digest,?) WHERE flow_id=?')
+        store.db.prepare('UPDATE whatsapp_activations SET lease_owner=?,lease_until=?,asset_id=COALESCE(asset_id,?),legacy_phone_digest=COALESCE(legacy_phone_digest,?),onboarding_mode=COALESCE(onboarding_mode,?) WHERE flow_id=?')
           .run(owner,now()+(request.operation===A.ACTIVATE?limits.LEASE_MS:45000),request.operation===A.ACTIVATE?request.payload.assetId:null,
-            request.operation===A.ACTIVATE?request.payload.legacyPhoneDigest||null:null,id);
+            request.operation===A.ACTIVATE?request.payload.legacyPhoneDigest||null:null,coexistenceRequested?'coexistence':null,id);
         return row(id);
       });
       if(saved.state==='active')return {requestId:request.requestId,data:projection(saved,ctx),replayed:true};
@@ -108,6 +118,7 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
         const call=async(action,target,pin)=>{active();const v=await http({action,id:target,token,
           proof:secrets.proof(token,ctx.operational.connectionRef),signal,...(pin===undefined?{}:{pin})});active();return v;};
         let p=A.profile(await call('profile',ctx.flow.phone_id),ctx.flow.phone_id);
+        if(coexistenceRequested&&!coexistence(p))fail('whatsapp_coexistence_profile_unverified');
         // This new server-pinned policy is exclusively for Business App
         // coexistence. Reconfirm the provider state here even if enrollment
         // observed coexistence: never turn a later false/unknown profile into
@@ -146,6 +157,10 @@ function createWhatsappActivation({store,filename,policy,resolveBinding,client,a
         update('subscribing',p);
         if(!await subscribed()) {const result=await call('subscribe',ctx.flow.waba_id);if(result.success!==true&&result.success!=='true')fail('provider_failed');}
         if(!await subscribed())fail('provider_failed');
+        if(coexistenceRequested){
+          p=A.profile(await call('profile',ctx.flow.phone_id),ctx.flow.phone_id);
+          if(!coexistence(p)||p.status!=='CONNECTED')fail('whatsapp_coexistence_profile_unverified');
+        }
         store.transaction(()=>{active();const current=row(id);if(current.lease_owner!==owner)fail('idempotency_conflict');
           supersedePrevious(id,current.asset_id,ctx.definition,p,ctx.flow.channel_role||'primary');
           record('whatsapp_activation_completed');

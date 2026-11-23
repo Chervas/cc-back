@@ -28,7 +28,7 @@ test('an exact legacy adoption passes its server proof without changing the sign
   }
   command=null;await assert.rejects(client.activate({...row,scope:{type:'group',id:9}},991,proof),{code:'whatsapp_onboarding_binding_invalid'});assert.equal(command,null);
 });
-test('configured gateway forwards the legacy proof over TLS and prevents Cloud registration after a coexistence change', async t => {
+async function checkCoexistenceDriftOverTls(t, useSignedMode) {
   const g=brokerForGateway(t,{customer:{selectionOnly:true},scopes:['public_profile','whatsapp_business_management','whatsapp_business_messaging']});
   const f=g.f,file=name=>f.dir+'/'+name,net=require('node:net');
   Object.assign(f.binding.whatsappOnboarding,{scopeKey:'clinic:71',clinicIds:[71]});
@@ -66,13 +66,26 @@ test('configured gateway forwards the legacy proof over TLS and prevents Cloud r
     AUTH_SESSION_MODE:'enforce',AUTH_EMAIL_MFA_MODE:'enforce',PLATFORM_AUDIT_AUTH_ENABLED:'true',PLATFORM_AUDIT_AUTH_POLICY:'auth-durable-v1',
     PLATFORM_AUDIT_WHATSAPP_ONBOARDING_ENABLED:'true',PLATFORM_AUDIT_WHATSAPP_ONBOARDING_POLICY:'whatsapp-onboarding-v1',
     WHATSAPP_ONBOARDING_STATE_KEY_FILE:file('state.key'),WHATSAPP_ONBOARDING_BROKER_CONFIG_FILE:file('gateway.json')};
-  const client=configuredClient({environment:()=>env}),row={...context(g),scope:{type:'clinic',id:71},clinicIds:[71],clinicSetDigest:C.hash('[71]'),mode:'coexistence'},saved=JSON.stringify(row),proof=C.hash('34600000401');
+  if (useSignedMode) env.WHATSAPP_ONBOARDING_ACTIVATION_MODE_PIN_ENABLED = 'true';
+  const client=configuredClient({environment:()=>env}),row={...context(g),scope:{type:'clinic',id:71},clinicIds:[71],clinicSetDigest:C.hash('[71]'),mode:'coexistence'},saved=JSON.stringify(row);
+  const proof = useSignedMode ? undefined : C.hash('34600000401');
   await client.begin(row);await client.finish(row,finish(row));assert.equal((await client.profile(row)).state,'prepared');
-  isOnBizApp=false;await assert.rejects(client.activate(row,991,proof),{code:'whatsapp_onboarding_configuration_invalid'});
+  isOnBizApp = false;
+  await assert.rejects(client.activate(row, 991, proof), {
+    code: useSignedMode ? 'whatsapp_coexistence_profile_unverified' : 'whatsapp_onboarding_configuration_invalid',
+  });
   assert(!calls.includes('register_phone'));assert.equal(subscribed,false);
-  assert.equal(app.store.db.prepare('SELECT legacy_phone_digest FROM whatsapp_activations WHERE flow_id=?').get(row.requestId).legacy_phone_digest,proof);
+  const activation = app.store.db.prepare('SELECT legacy_phone_digest, onboarding_mode FROM whatsapp_activations WHERE flow_id=?').get(row.requestId);
+  assert.equal(activation.legacy_phone_digest, proof ?? null);
+  assert.equal(activation.onboarding_mode, useSignedMode ? 'coexistence' : null);
   isOnBizApp=true;assert.equal((await client.activate(row,991,proof)).state,'active');
   assert.equal(JSON.stringify(row),saved);assert.equal(calls.filter(action=>action==='subscribe').length,1);assert.equal(f.state.codes,1);
+}
+test('configured gateway forwards the legacy proof over TLS and prevents Cloud registration after a coexistence change', t => {
+  return checkCoexistenceDriftOverTls(t, false);
+});
+test('configured gateway preserves the signed coexistence conflict over TLS and retries the same attempt', t => {
+  return checkCoexistenceDriftOverTls(t, true);
 });
 test('preparation timeouts and busy leases report uncertainty without transport retry or weakening identity failures', async t => {
   const g = brokerForGateway(t); const row = context(g);

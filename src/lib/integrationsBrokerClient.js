@@ -8,7 +8,7 @@ const aiLimits = require('../../services/integrations-broker/src/ai-limits');
 const emailLimits = require('../../services/integrations-broker/src/email-limits');
 const publicMediaLimits = require('../../services/integrations-broker/src/public-media-limits');
 const activationLimits = require('../../services/integrations-broker/src/whatsapp-activation-limits');
-const SAFE_CODES = new Set(['invalid_request', 'invalid_signature', 'scope_denied', 'operation_denied', 'whatsapp_template_not_authorized', 'whatsapp_authorized_phone_unavailable', 'connection_blocked', 'asset_revoked',
+const SAFE_CODES = new Set(['invalid_request', 'invalid_signature', 'scope_denied', 'operation_denied', 'whatsapp_template_not_authorized', 'whatsapp_authorized_phone_unavailable', 'whatsapp_coexistence_profile_unverified', 'connection_blocked', 'asset_revoked',
   'request_replayed', 'idempotency_conflict', 'outcome_unknown', 'rate_limited', 'provider_disabled', 'provider_failed',
   'whatsapp_capacity_concurrency', 'whatsapp_capacity_minute', 'whatsapp_capacity_fairness', 'whatsapp_broker_draining',
   'provider_timeout', 'provider_unauthorized', 'credential_revoked', 'secret_unavailable', 'audit_unavailable', 'internal_error',

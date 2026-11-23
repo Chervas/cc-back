@@ -2,6 +2,7 @@
 
 const STATUS = Object.freeze({
   invalid_request: 400, invalid_signature: 401, scope_denied: 403,
+  whatsapp_coexistence_profile_unverified: 409,
   operation_denied: 403, whatsapp_template_not_authorized: 403, connection_blocked: 423, asset_revoked: 423, request_replayed: 409,
   action_plan_conflict: 409, action_plan_expired: 409, action_plan_busy: 409,
   optimization_conflict: 409, optimization_expired: 409, optimization_busy: 409, optimization_cooldown: 409,

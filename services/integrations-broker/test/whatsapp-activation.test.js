@@ -37,7 +37,7 @@ async function setup(t,{legacyCaller=false,channelRole='primary',companion=false
         state.profile={...state.profile,status:'CONNECTED',platform_type:'CLOUD_API'};
         if(state.afterRegister)await state.afterRegister();return {success:true};
       }
-      if(r.action==='subscribe'){state.subscribed=true;return {success:true};}
+      if(r.action==='subscribe'){state.subscribed=true;state.afterSubscribe?.();return {success:true};}
       if(r.action==='subscriptions')return {data:state.subscribed?[{whatsapp_business_api_data:{id:'101'}}]:[]};
       return f.http(r);
     }});
@@ -70,6 +70,82 @@ test('Cloud registration completes subscription and exposes only exact activated
 test('already connected coexistence never registers or changes its PIN',async t=>{
   const f=await setup(t);Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
   await f.prepare();assert.equal((await f.execute()).data.state,'active');assert(!f.state.calls.includes('register_phone'));
+});
+test('signed coexistence activation on a strict binding rejects Cloud or unknown before capture or registration',async t=>{
+  const f=await setup(t);
+  const original=f.f.records.get(f.f.binding.secretArn).get(f.flow.flowId).body;
+  for(const profile of [{is_on_biz_app:false,platform_type:'CLOUD_API'},{is_on_biz_app:null,platform_type:'CLOUD_API'},
+    {is_on_biz_app:true,platform_type:'ON_PREMISE'},{is_on_biz_app:true,platform_type:null}]){
+    Object.assign(f.state.profile,profile);
+    await assert.rejects(f.execute(A.PROFILE,{mode:'coexistence'}),{code:'whatsapp_coexistence_profile_unverified'});
+  }
+  f.restart();
+  await assert.rejects(f.execute(A.PROFILE),{code:'idempotency_conflict'});
+  assert.equal((await f.execute(A.STATUS)).data.state,'prepared');
+  assert.equal(f.row().onboarding_mode,'coexistence');
+  assert.equal(f.row().activated_at,null);
+  assert.equal(f.state.captureCalls,0);
+  assert(f.state.calls.every(action=>action!=='register_phone'&&action!=='subscribe'));
+  assert.equal(f.f.records.get(f.f.binding.secretArn).get(f.flow.flowId).body,original);
+});
+test('signed pinned profile is rechecked inside activation before the previous authorization can be superseded',async t=>{
+  const f=await setup(t);
+  Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
+  await f.prepare();
+  await f.execute();
+  const replacement=await f.f.begin();await f.f.finish(replacement);
+  await f.executeFlow(replacement,A.PROFILE,{mode:'coexistence'});
+  f.restart();
+  Object.assign(f.state.profile,{status:'PENDING',platform_type:'NOT_APPLICABLE',is_on_biz_app:false});
+  f.state.calls.length=0;f.state.captureCalls=0;
+  await assert.rejects(f.executeFlow(replacement,A.ACTIVATE,{mode:'coexistence'}),{code:'whatsapp_coexistence_profile_unverified'});
+  assert.equal(f.row().state,'active');
+  assert.equal(f.row().onboarding_mode,null);
+  assert.equal(f.state.captureCalls,0);
+  assert(!f.state.calls.some(action=>['register_phone','subscribe'].includes(action)));
+  assert.equal((await f.executeFlow(replacement,A.STATUS)).data.state,'prepared');
+  Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
+  assert.equal((await f.executeFlow(replacement,A.ACTIVATE,{mode:'coexistence'})).data.state,'active');
+  assert.equal(f.row().state,'superseded');
+  assert(!f.state.calls.includes('register_phone'));
+});
+test('adding the verification pin column preserves the complete historical activation',async t=>{
+  const f=await setup(t);
+  await f.prepare();const prior=await f.execute();
+  const db=f.f.current.store.db;
+  db.exec('ALTER TABLE whatsapp_activations DROP COLUMN onboarding_mode');
+  const before={...f.row()};
+  f.restart();
+  const {onboarding_mode,...after}=f.row();
+  assert.equal(onboarding_mode,null);
+  assert.deepEqual(after,before);
+  assert.deepEqual((await f.execute(A.STATUS)).data,prior.data);
+  assert.equal(f.state.calls.filter(action=>action==='register_phone').length,1);
+});
+test('versioned coexistence downgrading during provider subscription does not grant active sending',async t=>{
+  const f=await setup(t);
+  Object.assign(f.state.profile,{status:'CONNECTED',platform_type:'CLOUD_API',is_on_biz_app:true});
+  await f.execute(A.PROFILE,{mode:'coexistence'});
+  f.state.afterSubscribe=()=>{f.state.profile.is_on_biz_app=false;};
+  await assert.rejects(f.execute(A.ACTIVATE,{mode:'coexistence'}),{code:'whatsapp_coexistence_profile_unverified'});
+  const reader=createActivationReader(f.f.filename);t.after(()=>reader.close());
+  assert.deepEqual(reader.definitions(),[]);
+  assert.equal(f.row().state,'subscribing');
+  assert.equal(f.row().activated_at,null);
+  assert(!f.state.calls.includes('register_phone'));
+  Object.assign(f.state.profile,{is_on_biz_app:true});
+  f.restart();
+  const result=await f.execute(A.ACTIVATE,{mode:'coexistence'});
+  assert.equal(result.data.state,'active');
+  assert.equal(result.data.profile.isOnBizApp,true);
+  assert.equal(f.state.calls.filter(action=>action==='subscribe').length,1);
+});
+test('the coexistence pin cannot be used as a read-only status input or a Cloud override',async t=>{
+  const f=await setup(t);
+  await assert.rejects(f.execute(A.STATUS,{mode:'coexistence'}),{code:'invalid_request'});
+  await assert.rejects(f.execute(A.PROFILE,{mode:'cloud_api'}),{code:'invalid_request'});
+  assert.equal(f.row(),undefined);
+  assert.equal(f.state.calls.length,0);
 });
 test('Server-pinned companion coexistence activates without Cloud registration or changing the staged grant',async t=>{
   const f=await setup(t,{companion:true});const original=f.f.records.get(f.f.binding.secretArn).get(f.flow.flowId).body;

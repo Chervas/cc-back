@@ -11,9 +11,11 @@ const phases = Object.freeze(['prepared','capture_ready','register_requested','r
 const storedPhases = Object.freeze([...phases, 'superseded']);
 const positive = n => Number.isSafeInteger(n) && n > 0 && n <= 2147483647;
 function validate(payload, operation) {
-  const keys = ['flowId', 'scopeDigest', 'clinicSetDigest', ...(operation === ACTIVATE ? ['assetId',
-    ...(Object.hasOwn(payload || {}, 'legacyPhoneDigest') ? ['legacyPhoneDigest'] : [])] : [])];
+  const keys = ['flowId', 'scopeDigest', 'clinicSetDigest',
+    ...(operation !== STATUS && Object.hasOwn(payload || {}, 'mode') ? ['mode'] : []),
+    ...(operation === ACTIVATE ? ['assetId', ...(Object.hasOwn(payload || {}, 'legacyPhoneDigest') ? ['legacyPhoneDigest'] : [])] : [])];
   if (!OPERATIONS.includes(operation) || !E.exact(payload, keys) || !E.uuid(payload.flowId)
+    || Object.hasOwn(payload, 'mode') && payload.mode !== 'coexistence'
     || !/^[a-f0-9]{64}$/.test(payload.scopeDigest) || !/^[a-f0-9]{64}$/.test(payload.clinicSetDigest)
     || operation === ACTIVATE && (!positive(payload.assetId)
       || Object.hasOwn(payload, 'legacyPhoneDigest') && !/^[a-f0-9]{64}$/.test(payload.legacyPhoneDigest))) fail('invalid_request');
