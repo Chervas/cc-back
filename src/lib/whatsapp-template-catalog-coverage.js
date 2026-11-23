@@ -1,5 +1,7 @@
 'use strict';
 
+const { PROPDENTAL_GROUP_ID, isPropdentalAvailabilityCatalog } = require('./whatsapp-propdental-availability');
+
 const { haveSameTemplateComponents } = require('./whatsapp-template-components');
 const { normalizeWhatsappLocale } = require('./whatsapp-template-locale');
 
@@ -84,6 +86,7 @@ function getClinicDisciplines(clinic) {
 }
 
 function catalogAppliesToClinic(catalog, clinic) {
+  if (isPropdentalAvailabilityCatalog(catalog)) return Number(clinic?.grupoClinicaId) === PROPDENTAL_GROUP_ID;
   if (isEnabled(catalog?.is_generic)) return true;
   const catalogDisciplines = new Set(getCatalogDisciplines(catalog));
   if (!catalogDisciplines.size) return false;
