@@ -12,14 +12,16 @@ function createRouter({service=require('../services/metaMarketingEnrollment.serv
       if(!['clinic','group'].includes(type)||typeof id!=='string'||!/^[1-9][0-9]{0,9}$/.test(id)||!C.positive(Number(id))
         ||type==='clinic'&&req.query.group_id!==undefined||type==='group'&&req.query.clinic_id!==undefined)C.fail('meta_enrollment_invalid',400);
       const body=req.body===undefined?{}:req.body,includeAvatars=name==='assets'&&body?.includeAvatars===true;
-      const keys=name==='reserve'?'flowId,assetRefs':name==='confirm'?'selectionDigest':includeAvatars?'includeAvatars':'';
+      const planned=type==='group'&&body&&Object.hasOwn(body,'destinationPlan'),pinned=type==='group'&&body&&Object.hasOwn(body,'destinationDigest');
+      const keys=name==='reserve'?'flowId,assetRefs'+(planned?',destinationPlan':''):name==='confirm'?'selectionDigest'+(pinned?',destinationDigest':''):includeAvatars?'includeAvatars':'';
       if(!body||Object.getPrototypeOf(body)!==Object.prototype||Object.keys(body).sort().join(',')!==keys.split(',').filter(Boolean).sort().join(','))C.fail('meta_enrollment_invalid',400);
       if(['confirm','cancel','assets'].includes(name)&&!C.UUID.test(req.params.id))C.fail('meta_enrollment_invalid',400);
       if(name==='reserve'&&(typeof body.flowId!=='string'||!C.UUID.test(body.flowId)||!Array.isArray(body.assetRefs)||!body.assetRefs.length||body.assetRefs.length>100
         ||new Set(body.assetRefs).size!==body.assetRefs.length||body.assetRefs.some(v=>typeof v!=='string'||!/^meta-(ad_account|facebook_page|instagram_business):[1-9][0-9]{0,29}$/.test(v))))C.fail('meta_enrollment_invalid',400);
-      if(name==='confirm'&&(typeof body.selectionDigest!=='string'||!C.HASH.test(body.selectionDigest)))C.fail('meta_enrollment_invalid',400);
+      if(name==='confirm'&&(typeof body.selectionDigest!=='string'||!C.HASH.test(body.selectionDigest)
+        ||pinned&&(typeof body.destinationDigest!=='string'||!C.HASH.test(body.destinationDigest))))C.fail('meta_enrollment_invalid',400);
       const input={scopeKey:type+':'+id,actorId:claims.userId,sessionRef:claims.jti,sessionExpiresAt:new Date(claims.exp*1000)};
-      const result=name==='reserve'?await service.reserve(input,body.flowId,body.assetRefs):name==='confirm'?await service.confirm(input,req.params.id,body.selectionDigest):
+      const result=name==='reserve'?await service.reserve(input,body.flowId,body.assetRefs,body.destinationPlan):name==='confirm'?await service.confirm(input,req.params.id,body.selectionDigest,body.destinationDigest):
         name==='cancel'?await service.cancel(input,req.params.id):name==='assets'?await service.assets(input,req.params.id,includeAvatars):await service.overview(input);
       return res.json(result);
     }catch(error){

@@ -2,6 +2,7 @@
   "version": 1,
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
   "featureGroups": {
+    "meta_marketing_group_destinations": {"enabledWhenAll":{"META_MARKETING_GROUP_DESTINATION_PLAN_ENABLED":"true"},"tables":["MetaMarketingEnrollmentDestinationPlans"],"migrations":["20261122213000-create-meta-marketing-enrollment-destination-plans.js"]},
     "meta_ad_account_assignment": {"required": true, "tables": ["GruposClinicas"], "migrations": ["20261122145500-add-meta-ad-account-assignment-marker.js"]},
     "meta_marketing_instagram_extension": {"enabledWhenAll":{"META_MARKETING_INSTAGRAM_EXTENSION_ENABLED":"true"},"tables":["MetaMarketingInstagramExtensions"],"migrations":["20261122200000-create-meta-marketing-instagram-extensions.js"]},
     "dpd_workspace": {"required": true, "tables": ["DpdWorkspaceEntries"], "migrations": ["20261120090000-create-dpd-workspace.js"]},
@@ -88,6 +89,19 @@
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
+    "MetaMarketingEnrollmentDestinationPlans": {
+      "ENGINE": "InnoDB",
+      "TABLE_COLLATION": "ascii_bin",
+      "columns": [
+        {"COLUMN_NAME":"enrollment_id","COLUMN_TYPE":"char(36)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"plan","COLUMN_TYPE":"mediumtext","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"digest","COLUMN_TYPE":"char(64)","IS_NULLABLE":"NO","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":"ascii","COLLATION_NAME":"ascii_bin","GENERATION_EXPRESSION":""},
+        {"COLUMN_NAME":"asset_labels","COLUMN_TYPE":"json","IS_NULLABLE":"YES","COLUMN_DEFAULT":null,"EXTRA":"","CHARACTER_SET_NAME":null,"COLLATION_NAME":null,"GENERATION_EXPRESSION":""}
+      ],
+      "indexes": [{"name":"PRIMARY","columns":[{"INDEX_NAME":"PRIMARY","NON_UNIQUE":0,"SEQ_IN_INDEX":1,"COLUMN_NAME":"enrollment_id","SUB_PART":null,"INDEX_TYPE":"BTREE"}]}],
+      "checks": [],
+      "foreignKeys": []
+    },
     "GruposClinicas": {
       "columns": [
         {
@@ -6976,6 +6990,10 @@
     }
   },
   "migrations": [
+    {
+      "name": "20261122213000-create-meta-marketing-enrollment-destination-plans.js",
+      "sha256": "c716e5f1466648b69cba0a6aa299bd2f149d836a759676d6c02458e06d5de655"
+    },
     {
       "name": "20261122200000-create-meta-marketing-instagram-extensions.js",
       "sha256": "b02b4820e144e93679fe0c333a5e6a53806c0cca0ea88d5a98b7ff8d6ac2d039"
