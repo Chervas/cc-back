@@ -9,6 +9,10 @@ const SAFE=new Set([...CLOSING,'meta_enrollment_lease_lost','meta_enrollment_pre
   'meta_enrollment_invalid','meta_enrollment_scope_forbidden','meta_enrollment_busy','meta_enrollment_unavailable',
     'broker_response_invalid','broker_configuration_invalid','broker_timeout','broker_unavailable','rate_limited','audit_unavailable','outcome_unknown','provider_timeout','meta_credential_renewal_required','secret_version_changed','meta_business_activation_uncertain']);
 const safe=error=>SAFE.has(error?.code)?error.code:'meta_enrollment_unavailable';
+// Sequelize rolls back a MySQL deadlock victim before throwing. Only the
+// SQL-only overview starts a new read, with the original session and scope.
+const overviewDeadlock=error=>error?.name==='SequelizeDatabaseError'
+  &&error.original?.code==='ER_LOCK_DEADLOCK'&&error.original?.errno===1213;
 const claimSql=id=>`SELECT enrollment_id FROM MetaMarketingEnrollmentRequests
   WHERE delivery_due_at <= $now AND state <> 'superseded' AND (lease_until IS NULL OR lease_until <= $now)
   ${id?'AND enrollment_id = $id':''} ORDER BY delivery_due_at,enrollment_id LIMIT 1 FOR UPDATE SKIP LOCKED`;
@@ -140,27 +144,35 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
   }
   let running=false;
   return {
-    async overview(input){return order.scope(input,{},async({transaction,enrollment,input})=>{
-      if(!enrollment)return {enabled:enabled(),canSelect:enabled(),selection:null,discovery:{mode:'pending'},...await groupCapability(input,transaction)};
-      const row=await current(enrollment.enrollment_id,transaction),proposed=await destinations.read(row,transaction);
-      let selection=project(row,proposed),discovery={mode:row.state==='active'?'unavailable':'pending'};
-      const capability=proposed?{groupDestinationPlanVersion:DESTINATION_VERSION}:row.state==='revoked'?await groupCapability(input,transaction,row.connection_ref):{};
-      let instagramExtensionAvailable=false,displayAssets;
-      if(row.state==='active')try{
-        const committed=await bindings.committed(row.enrollment_id,transaction);
-        if(enabled()&&discoveryEnabled()){
-          const {displayAssets:cached,...capability}=await inventory().describe(input,row,transaction)||{mode:'unavailable'};
-          discovery=capability;displayAssets=cached;
+    async overview(input){
+      const pinned=require('./metaMarketingTransactionOrder.service').pinInput(input);
+      const read=()=>order.scope(pinned,{},async({transaction,enrollment,input})=>{
+        if(!enrollment)return {enabled:enabled(),canSelect:enabled(),selection:null,discovery:{mode:'pending'},...await groupCapability(input,transaction)};
+        const row=await current(enrollment.enrollment_id,transaction),proposed=await destinations.read(row,transaction);
+        let selection=project(row,proposed),discovery={mode:row.state==='active'?'unavailable':'pending'};
+        const capability=proposed?{groupDestinationPlanVersion:DESTINATION_VERSION}:row.state==='revoked'?await groupCapability(input,transaction,row.connection_ref):{};
+        let instagramExtensionAvailable=false,displayAssets;
+        if(row.state==='active')try{
+          const committed=await bindings.committed(row.enrollment_id,transaction);
+          if(enabled()&&discoveryEnabled()){
+            const {displayAssets:cached,...capability}=await inventory().describe(input,row,transaction)||{mode:'unavailable'};
+            discovery=capability;displayAssets=cached;
+          }
+          instagramExtensionAvailable=discovery?.mode==='active'&&process.env.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED==='true'
+            &&require('./metaMarketingInstagramExtension.service').availableFor(row,committed.business);
         }
-        instagramExtensionAvailable=discovery?.mode==='active'&&process.env.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED==='true'
-          &&require('./metaMarketingInstagramExtension.service').availableFor(row,committed.business);
+        catch(error){if(overviewDeadlock(error)||[401,403].includes(error.httpStatus))throw error;selection={...selection,connected:false,attentionRequired:true,lastError:safe(error)};}
+        return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',discovery,...capability,...(instagramExtensionAvailable?{instagramExtensionAvailable:true}:{}),selection:{...selection,
+          canConfirm:enabled()&&row.state==='prepared'&&Number(row.actor_user_id)===input.actorId&&row.session_ref===input.sessionRef
+            &&+row.session_expires_at===+input.sessionExpiresAt&&+row.session_expires_at>+now(),canCancel:!['revoke_pending','revoked'].includes(row.state)},
+          ...(displayAssets&&selection.connected?{displayAssets}:{})};
+      });
+      try { return await read(); }
+      catch (error) {
+        if (!overviewDeadlock(error)) throw error;
+        return read();
       }
-      catch(error){if([401,403].includes(error.httpStatus))throw error;selection={...selection,connected:false,attentionRequired:true,lastError:safe(error)};}
-      return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',discovery,...capability,...(instagramExtensionAvailable?{instagramExtensionAvailable:true}:{}),selection:{...selection,
-        canConfirm:enabled()&&row.state==='prepared'&&Number(row.actor_user_id)===input.actorId&&row.session_ref===input.sessionRef
-          &&+row.session_expires_at===+input.sessionExpiresAt&&+row.session_expires_at>+now(),canCancel:!['revoke_pending','revoked'].includes(row.state)},
-        ...(displayAssets&&selection.connected?{displayAssets}:{})};
-    });},
+    },
     async assets(input,id,includeAvatars=false){return inventory().assets(input,id,includeAvatars);},
     async cancelFromOAuth(flowId,transaction,actor){
       if(!transaction||!C.UUID.test(flowId))C.fail();
