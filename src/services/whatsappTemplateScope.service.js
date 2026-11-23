@@ -1,10 +1,20 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { WhatsappTemplate } = require('../../models');
+const { Clinica, WhatsappTemplate } = require('../../models');
 const { isApprovedTemplateInWaba, selectTemplateInWaba } = require('../lib/whatsapp-template-scope');
+const { isPropdentalAvailabilityInstance, templateBelongsToClinic } = require('../lib/whatsapp-propdental-availability');
+
+async function filterTemplatesForClinic(templates, clinicId, transaction) {
+  if (!templates.some(isPropdentalAvailabilityInstance)) return templates;
+  const clinic = Number(clinicId) > 0
+    ? await Clinica.findByPk(clinicId, { attributes: ['grupoClinicaId'], raw: true, transaction })
+    : null;
+  return templates.filter(template => templateBelongsToClinic(template, clinic));
+}
 
 async function resolveTemplateInWaba({ template, wabaId, clinicId, transaction, userId }) {
+  if (!(await filterTemplatesForClinic([template], clinicId, transaction)).length) return null;
   const scope = { wabaId, clinicId };
   if (isApprovedTemplateInWaba(template, scope)) return template;
   // Existing personal templates may be reused by their author across clinics
@@ -33,7 +43,7 @@ async function resolveTemplateInWaba({ template, wabaId, clinicId, transaction, 
     },
     transaction,
   });
-  return selectTemplateInWaba(template, candidates, scope);
+  return selectTemplateInWaba(template, await filterTemplatesForClinic(candidates, clinicId, transaction), scope);
 }
 
 async function assertTemplateInWaba({ wabaId, clinicId, name, language }) {
@@ -41,12 +51,13 @@ async function assertTemplateInWaba({ wabaId, clinicId, name, language }) {
     where: {
       waba_id: String(wabaId), name, language, status: 'APPROVED', is_active: true,
     },
-    attributes: ['id', 'waba_id', 'clinic_id', 'status', 'is_active', 'retired_at', 'superseded_by_template_id'],
+    attributes: ['id', 'name', 'waba_id', 'clinic_id', 'catalog_template_id', 'status', 'is_active', 'retired_at', 'superseded_by_template_id'],
     raw: true,
   });
   // Transport validates the provider account. Caller ACLs decide who may use
   // personal templates shared across clinics in the same WABA.
-  if (!isApprovedTemplateInWaba(row, { wabaId, clinicId: row?.clinic_id })) {
+  if (!isApprovedTemplateInWaba(row, { wabaId, clinicId: row?.clinic_id })
+    || !(await filterTemplatesForClinic([row], clinicId)).length) {
     throw Object.assign(new Error('whatsapp_template_waba_mismatch'), {
       code: 'whatsapp_template_waba_mismatch', retryable: false, statusCode: 409,
     });
@@ -65,4 +76,4 @@ async function filterClinicsForWaba(clinicIds, wabaId) {
   return result;
 }
 
-module.exports = { resolveTemplateInWaba, assertTemplateInWaba, filterClinicsForWaba };
+module.exports = { resolveTemplateInWaba, assertTemplateInWaba, filterClinicsForWaba, filterTemplatesForClinic };

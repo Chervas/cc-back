@@ -78,6 +78,18 @@ test('the author retains access to an existing personal template in the same sha
   const personal = { ...remote, clinic_id: 36, created_by_user_id: 99 };
   assert.equal(await service.resolveTemplateInWaba({ template: personal, ...scope, userId: 99 }), personal);
 });
+test('the shared Propdental availability template is confined to current group members, even on the same WABA', async t => {
+  const { AVAILABILITY_FAMILY } = require('../../lib/whatsapp-propdental-availability');
+  const template = { ...remote, name: AVAILABILITY_FAMILY, created_by_user_id: 99 };
+  t.mock.method(db.Clinica, 'findByPk', async id => id === 35 ? { grupoClinicaId: 5 } : { grupoClinicaId: 29 });
+  t.mock.method(db.WhatsappTemplate, 'findOne', async () => template);
+  assert.equal(await service.resolveTemplateInWaba({ template, ...scope }), template);
+  assert.equal(await service.resolveTemplateInWaba({ template, ...scope, clinicId: 36, userId: 99 }), null);
+  assert.deepEqual(await service.filterTemplatesForClinic([template, remote], 36), [remote]);
+  await service.assertTemplateInWaba({ ...scope, name: template.name, language: 'es' });
+  await assert.rejects(service.assertTemplateInWaba({ ...scope, clinicId: 36, name: template.name, language: 'es' }),
+    { code: 'whatsapp_template_waba_mismatch' });
+});
 test('an existing valid selection remains stable even if a newer version exists', () => {
   assert.equal(selectTemplateInWaba(remote, [{ ...remote, id: 21 }], scope), remote);
 });

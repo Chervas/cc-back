@@ -30,6 +30,11 @@ const {
 } = require('../lib/waba-catalog-creation-lease');
 const whatsappInboxAdminSync = require('../lib/whatsappInboxAdminSync');
 const templateSyncState = require('../lib/whatsappTemplateSyncState');
+const {
+  AVAILABILITY_FAMILY,
+  PROPDENTAL_GROUP_ID,
+  isPropdentalAvailabilityCatalog,
+} = require('../lib/whatsapp-propdental-availability');
 
 const {
   ClinicMetaAsset,
@@ -688,8 +693,9 @@ function normalizeDisciplines(raw) {
   return [];
 }
 
-function templateAppliesToDisciplines(template, disciplinas) {
+function templateAppliesToDisciplines(template, disciplinas, clinicGroupId) {
   if (!template) return false;
+  if (isPropdentalAvailabilityCatalog(template)) return Number(clinicGroupId) === PROPDENTAL_GROUP_ID;
   if (template.is_generic) return true;
   const templateDisciplines = normalizeDisciplines(
     template.disciplinas?.map((d) => d.disciplina_code)
@@ -934,7 +940,7 @@ async function prepareTemplateImageHeaderForMeta({ template, accessToken, wabaId
   }
 }
 
-async function selectCatalogTemplatesByDisciplines(disciplinas) {
+async function selectCatalogTemplatesByDisciplines(disciplinas, clinicGroupId) {
   const generic = await WhatsappTemplateCatalog.findAll({
     where: { is_active: true, is_generic: true },
   });
@@ -955,7 +961,15 @@ async function selectCatalogTemplatesByDisciplines(disciplinas) {
   }
 
   const templatesById = new Map();
-  [...generic, ...disciplineTemplates].forEach((t) => templatesById.set(t.id, t));
+  for (const template of [...generic, ...disciplineTemplates]) {
+    if (!isPropdentalAvailabilityCatalog(template)) templatesById.set(template.id, template);
+  }
+  if (Number(clinicGroupId) === PROPDENTAL_GROUP_ID) {
+    const availability = await WhatsappTemplateCatalog.findAll({
+      where: { is_active: true, family_key: AVAILABILITY_FAMILY },
+    });
+    for (const template of availability) templatesById.set(template.id, template);
+  }
   return Array.from(templatesById.values());
 }
 
@@ -979,7 +993,8 @@ async function createPlaceholderTemplatesForClinic({ clinicId, assignmentScope, 
     groupId: assignmentScope === 'group' ? groupId : null,
   });
 
-  const templates = await selectCatalogTemplatesByDisciplines(disciplinas);
+  const clinic = await Clinica.findByPk(clinicId, { attributes: ['grupoClinicaId'], raw: true });
+  const templates = await selectCatalogTemplatesByDisciplines(disciplinas, clinic?.grupoClinicaId);
   const created = [];
 
   for (const template of templates) {
@@ -2621,15 +2636,19 @@ async function createTemplatesFromCatalogWithLease({
     groupId: assignmentScope === 'group' ? groupId : null,
   });
 
-  const applicableTemplates = await selectCatalogTemplatesByDisciplines(disciplinas);
-  const templates = catalogTemplateIds === null ? applicableTemplates
-    : applicableTemplates.filter(template => catalogTemplateIds.includes(Number(template.id)));
   const targetClinicIds = await resolveTargetClinicIdsForTemplateProvisioning({
     clinicId,
     groupId,
     assignmentScope,
     wabaId,
   });
+  const targetGroupClinics = targetClinicIds.length
+    ? await Clinica.count({ where: { id_clinica: { [Op.in]: targetClinicIds }, grupoClinicaId: PROPDENTAL_GROUP_ID } })
+    : 0;
+  const applicableTemplates = await selectCatalogTemplatesByDisciplines(disciplinas,
+    targetGroupClinics > 0 && targetGroupClinics === targetClinicIds.length ? PROPDENTAL_GROUP_ID : null);
+  const templates = catalogTemplateIds === null ? applicableTemplates
+    : applicableTemplates.filter(template => catalogTemplateIds.includes(Number(template.id)));
   const result = {
     wabaId,
     assignmentScope,
@@ -2843,7 +2862,7 @@ async function propagateCatalogTemplateToAllClinics({
       ...(scopedClinicIds
         ? { where: { id_clinica: { [Op.in]: scopedClinicIds } } }
         : {}),
-      attributes: ['id_clinica', 'configuracion'],
+      attributes: ['id_clinica', 'grupoClinicaId', 'configuracion'],
       order: [['id_clinica', 'ASC']],
       raw: true,
     });
@@ -2874,7 +2893,7 @@ async function propagateCatalogTemplateToAllClinics({
       const language = getCatalogTemplateLanguage(template);
       let pendingTechnicalName = familyName;
 
-      if (!templateAppliesToDisciplines(template, effectiveDisciplines)) {
+      if (!templateAppliesToDisciplines(template, effectiveDisciplines, clinic.grupoClinicaId)) {
         summary.skipped_not_applicable += 1;
         continue;
       }
@@ -3534,10 +3553,11 @@ function catalogPropagationCoordinator() {
     JobRequest: db.JobRequest, sequelize: db.sequelize, loadCatalog: getCatalogTemplateById,
     listClinics: clinicIds => Clinica.findAll({ ...(Array.isArray(clinicIds)
       ? { where: { id_clinica: { [Op.in]: clinicIds } } } : {}),
-      attributes: ['id_clinica', 'configuracion'], order: [['id_clinica', 'ASC']], raw: true }),
+      attributes: ['id_clinica', 'grupoClinicaId', 'configuracion'], order: [['id_clinica', 'ASC']], raw: true }),
     resolveConfig: clinicId => require('./whatsapp.service').getClinicConfig(clinicId),
     applies: (template, clinic) => templateAppliesToDisciplines(template,
-      normalizeDisciplines(clinic.configuracion?.disciplinas).length ? normalizeDisciplines(clinic.configuracion.disciplinas) : ['dental']),
+      normalizeDisciplines(clinic.configuracion?.disciplinas).length ? normalizeDisciplines(clinic.configuracion.disciplinas) : ['dental'],
+      clinic.grupoClinicaId),
     enqueue: (...args) => jobRequestsService.enqueueUniqueJobRequest(...args),
     propagate: propagateCatalogTemplateToAllClinics,
     acquireLease: wabaId => acquireWabaCatalogCreationLease(wabaId, { sequelizeInstance: db.sequelize, waitSeconds: 0 }),

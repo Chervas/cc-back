@@ -20,6 +20,8 @@ const { buildWhatsappProfileAlignment } = require('../lib/whatsapp-profile-align
 const { filterEffectiveWhatsappPhoneAssets } = require('../lib/effective-whatsapp-phone');
 const whatsappDeliveryGovernanceService = require('../services/whatsappDeliveryGovernance.service');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
+const { isPropdentalAvailabilityInstance, templateBelongsToClinic } = require('../lib/whatsapp-propdental-availability');
+const { filterTemplatesForClinic } = require('../services/whatsappTemplateScope.service');
 const {
   buildWhatsappTemplateCatalogCoverage,
   buildWhatsappCatalogStatus,
@@ -670,12 +672,13 @@ async function loadEffectiveWhatsappTemplatesForClinic({
 
   const asset = await resolveWabaFromContext({ clinicId, userId });
   if (!asset?.wabaId) {
-    return includeAllTemplates
+    const visible = includeAllTemplates
       ? overrides
       : overrides.filter((template) => canUserSelectWhatsappTemplate(
         template?.toJSON ? template.toJSON() : template,
         userId
       ));
+    return filterTemplatesForClinic(visible, clinicId);
   }
 
   const connectedClinicScopes = [
@@ -726,7 +729,8 @@ async function loadEffectiveWhatsappTemplatesForClinic({
     const key = getTemplateIdentityKey(template);
     effective.set(key, pickPreferredTemplate(effective.get(key), template, clinicId));
   });
-  return Array.from(effective.values()).map((template) => annotateEffectiveWhatsappTemplateScope(template, asset));
+  const scoped = await filterTemplatesForClinic(Array.from(effective.values()), clinicId);
+  return scoped.map((template) => annotateEffectiveWhatsappTemplateScope(template, asset));
 }
 
 async function buildWhatsappTemplateUsageMap({ clinicId, templates }) {
@@ -1618,6 +1622,9 @@ exports.listTemplatesForClinic = async (req, res) => {
       });
     }
 
+    if (phoneNumberId || req.query.all_senders === '1') {
+      templates = await filterTemplatesForClinic(templates, clinicId || selectedAsset?.clinicaId);
+    }
     const usageMap = clinicId
       ? await buildWhatsappTemplateUsageMap({ clinicId, templates })
       : new Map();
@@ -1657,7 +1664,7 @@ exports.listTemplatesForClinic = async (req, res) => {
               ? 'system'
               : (isOwnedByCurrentUser ? 'personal' : (isLegacyUnassigned ? 'legacy_unassigned' : 'other_user')),
             can_send_by_current_user: canUserSelectWhatsappTemplate(json, userId),
-            can_manage_by_current_user: isOwnedByCurrentUser,
+            can_manage_by_current_user: isOwnedByCurrentUser && !isPropdentalAvailabilityInstance(json),
           };
         })
         .filter((item) => {
@@ -1716,11 +1723,11 @@ exports.getTemplateStatusForClinic = async (req, res) => {
       }),
       WhatsappTemplate.findOne({
         where: { id: templateId, is_active: true },
-        attributes: ['id', 'waba_id', 'clinic_id', 'status', 'origin', 'catalog_template_id', 'created_by_user_id'],
+        attributes: ['id', 'name', 'waba_id', 'clinic_id', 'status', 'origin', 'catalog_template_id', 'created_by_user_id'],
         raw: true,
       }),
     ]);
-    if (!template || !canUserSelectWhatsappTemplate(template, userId)) {
+    if (!template || !canUserSelectWhatsappTemplate(template, userId) || !templateBelongsToClinic(template, clinic)) {
       return res.status(404).json({ error: 'template_not_found' });
     }
 
@@ -1996,7 +2003,7 @@ exports.createCustomTemplate = async (req, res) => {
     const replacements = new Map();
     for (const id of replacementIds) {
       const previous = await WhatsappTemplate.findByPk(id);
-      if (!previous || Number(previous.created_by_user_id) !== Number(userId)
+      if (!previous || isPropdentalAvailabilityInstance(previous) || Number(previous.created_by_user_id) !== Number(userId)
         || Number(previous.clinic_id || clinicId) !== Number(clinicId)
         || !assets.some(asset => String(asset.wabaId) === String(previous.waba_id))
         || replacements.has(String(previous.waba_id))) return res.status(403).json({ error: 'template_owner_forbidden' });
