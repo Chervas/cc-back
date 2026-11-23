@@ -6,11 +6,12 @@ import importlib.util
 import json
 import pathlib
 import socket
+import ssl
 import stat
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 def load(name, filename):
@@ -29,6 +30,7 @@ CURRENT = [('authorized',8443),('onboarding',8444),('inbox',8445),('audit-writer
            ('google-business-profile-staging',8456)]
 FUTURE = [('google-search-console-staging',8457),('google-analytics-staging',8458),
           ('google-ads-staging',8459),('google-ads-goal-policy-staging',8460)]
+FIRST = [('google-first-owner-staging',8461)]
 # Wholly fictional pins; these are not enrollment descriptors or live certificates.
 CA_SHA, KEY_SHA, ID_SHA, CALLER_SHA = [c * 64 for c in 'abcd']
 
@@ -63,7 +65,8 @@ class ConfigurationTest(unittest.TestCase):
     def targets(self, tuples):
         return [{'id':i, 'hostname':'13.39.100.55', 'port':port,
                  'certificateFile':'/etc/clinicaclick-FICTIONAL/'+i+'.crt',
-                 'publicKeySha256':KEY_SHA, 'identitySha256':ID_SHA} for i,port in tuples]
+                 'publicKeySha256':KEY_SHA, 'identitySha256':ID_SHA,
+                 **({'peerAddress':'10.74.0.8'} if (i,port)==FIRST[0] else {})} for i,port in tuples]
 
     def configurations(self, tuples):
         targets = self.targets(tuples)
@@ -84,7 +87,7 @@ class ConfigurationTest(unittest.TestCase):
                   'stateDirectory':str(self.root/'signer-state'),
                   'statusFile':'/var/lib/clinicaclick-transport-health/servers.json',
                   'statusGroupId':1000,
-                  'targets':[{k:v for k,v in t.items() if k!='certificateFile'} for t in targets]}
+                  'targets':[{k:v for k,v in t.items() if k not in ('certificateFile','peerAddress')} for t in targets]}
         return pub, signer
 
     def invoke(self, module, config):
@@ -125,6 +128,67 @@ class ConfigurationTest(unittest.TestCase):
                 for module,config in zip((P,S),configs):
                     with self.assertRaisesRegex(module.Error,'configuration_invalid'):
                         self.invoke(module,config)
+
+    def test_nineteenth_target_only_with_exact_first_owner_preserves_previous_eighteen(self):
+        original=self.configurations(CURRENT+FUTURE)
+        configs=self.configurations(CURRENT+FUTURE+FIRST)
+        for old,new in zip(original,self.both(configs)):
+            self.assertEqual(new['targets'][:18],old['targets'])
+            self.assertEqual(len(new['targets']),19)
+            self.assertEqual((new['targets'][-1]['id'],new['targets'][-1]['port']),FIRST[0])
+        self.assertEqual(configs[0]['targets'][-1]['peerAddress'],'10.74.0.8')
+        self.assertNotIn('peerAddress',configs[1]['targets'][-1])
+
+    def test_twenty_targets_still_rejected_even_with_first_owner(self):
+        configs=self.configurations(CURRENT+FUTURE+FIRST+[('extra',9001)])
+        with patch.object(P,'target_port_valid',return_value=True),patch.object(S.publisher,'target_port_valid',return_value=True):
+            for module,config in zip((P,S),configs):
+                with self.assertRaisesRegex(module.Error,'configuration_invalid'):
+                    self.invoke(module,config)
+
+    def test_new_owner_identity_port_and_types_are_exact(self):
+        for identity,port in [('foreign',8461),('google-first-owner-dev',8461),('google-first-owner-staging',8460),
+                              ('google-first-owner-staging',8443),('google-first-owner-staging','8461'),
+                              ('google-first-owner-staging',8461.0),('google-first-owner-staging',True)]:
+            for module,config in zip((P,S),self.configurations(CURRENT+[(identity,port)])):
+                with self.subTest(identity=identity,port=port,module=module.__name__),self.assertRaisesRegex(module.Error,'configuration_invalid'):
+                    self.invoke(module,config)
+
+    def test_private_peer_required_and_exact_only_for_new_publisher_target(self):
+        for peer in [None,'127.0.0.1','0.0.0.0','::1','10.74.0.9','13.39.100.55','10.74.0.8:8461','http://10.74.0.8',8461]:
+            pub,_=self.configurations(CURRENT+FIRST)
+            if peer is None:pub['targets'][-1].pop('peerAddress')
+            else:pub['targets'][-1]['peerAddress']=peer
+            with self.subTest(peer=peer),self.assertRaisesRegex(P.Error,'configuration_invalid'):
+                self.invoke(P,pub)
+        pub,signer=self.configurations(CURRENT+FIRST)
+        pub['targets'][0]['peerAddress']='10.74.0.8'
+        with self.assertRaisesRegex(P.Error,'configuration_invalid'):self.invoke(P,pub)
+        signer['targets'][-1]['peerAddress']='10.74.0.8'
+        with self.assertRaisesRegex(S.Error,'configuration_invalid'):self.invoke(S,signer)
+
+    def test_private_peer_never_changes_tls_hostname_ca_or_client_identity(self):
+        target=self.targets(FIRST)[0]
+        context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        sock=MagicMock();peer=MagicMock();peer.__enter__.return_value.getpeercert.return_value=b'FICTITIOUS_DER'
+        with patch.object(P.ssl,'create_default_context',return_value=context) as factory, \
+             patch.object(P.socket,'create_connection',return_value=sock) as connect, \
+             patch.object(context,'load_cert_chain') as client,patch.object(context,'wrap_socket',return_value=peer) as wrap:
+            digest=P.peer_fingerprint(target,'/FICTIONAL/ca.crt',('/FICTIONAL/client.crt','/FICTIONAL/client.key'))
+        connect.assert_called_once_with(('10.74.0.8',8461),timeout=3)
+        factory.assert_called_once_with(cafile='/FICTIONAL/ca.crt')
+        wrap.assert_called_once_with(sock.__enter__.return_value,server_hostname='13.39.100.55')
+        client.assert_called_once_with('/FICTIONAL/client.crt','/FICTIONAL/client.key')
+        self.assertEqual(context.verify_mode,ssl.CERT_REQUIRED);self.assertTrue(context.check_hostname)
+        self.assertEqual(context.minimum_version,ssl.TLSVersion.TLSv1_2)
+        self.assertEqual(digest,P.hashlib.sha256(b'FICTITIOUS_DER').hexdigest())
+        self.assertEqual(P.peer_address(self.targets(CURRENT)[0]),'127.0.0.1')
+
+    def test_new_registration_keeps_hostname_certificate_suffix_and_pins_exact(self):
+        for field,value in [('hostname','10.74.0.8'),('certificateFile','/etc/clinicaclick-FICTIONAL/owner.pem'),
+                            ('publicKeySha256','bad'),('identitySha256','bad')]:
+            pub,_=self.configurations(CURRENT+FIRST);pub['targets'][-1][field]=value
+            with self.subTest(field=field),self.assertRaises(P.Error):self.invoke(P,pub)
 
     def test_wrong_identity_port_and_types_rejected(self):
         for identity,port in [('foreign',8457),('google-search-console-staging',8458),

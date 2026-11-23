@@ -23,6 +23,31 @@ transport = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(transport)
 Error = transport.CertificateError
 UTC = dt.timezone.utc
+FIRST_OWNER_ID = 'google-first-owner-staging'
+FIRST_OWNER_PORT = 8461
+FIRST_OWNER_PEER = '10.74.0.8'
+
+
+def first_owner_target(target):
+    return isinstance(target, dict) and target.get('id') == FIRST_OWNER_ID \
+        and type(target.get('port')) is int and target['port'] == FIRST_OWNER_PORT
+
+
+def target_count_valid(targets):
+    extra = any(first_owner_target(target) for target in targets)
+    return 1 <= len(targets) <= 18 + int(extra)
+
+
+def peer_address(target):
+    # The dedicated Owner binds only to the pinned instance's private interface.
+    # This is a local probe address, never a replacement for the TLS hostname.
+    if target.get('id') == FIRST_OWNER_ID:
+        if not first_owner_target(target) or target.get('peerAddress') != FIRST_OWNER_PEER:
+            raise Error('configuration_invalid')
+        return FIRST_OWNER_PEER
+    if 'peerAddress' in target:
+        raise Error('configuration_invalid')
+    return '127.0.0.1'
 
 
 def target_port_valid(target):
@@ -34,7 +59,8 @@ def target_port_valid(target):
                      'google-search-console-staging':8457,
                      'google-analytics-staging':8458,
                      'google-ads-staging':8459,
-                     'google-ads-goal-policy-staging':8460}
+                     'google-ads-goal-policy-staging':8460,
+                     FIRST_OWNER_ID:FIRST_OWNER_PORT}
     if not isinstance(port,int):return False
     if identity in dedicated_ports:return port==dedicated_ports[identity]
     return 8443<=port<=8450
@@ -67,7 +93,7 @@ def peer_fingerprint(target, ca, client=None):
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     if client:
         context.load_cert_chain(*client)
-    with socket.create_connection(('127.0.0.1', target['port']), timeout=3) as sock:
+    with socket.create_connection((peer_address(target), target['port']), timeout=3) as sock:
         with context.wrap_socket(sock, server_hostname=target['hostname']) as connection:
             return hashlib.sha256(connection.getpeercert(binary_form=True)).hexdigest()
 
@@ -135,14 +161,18 @@ def configuration(filename):
     if state.stat().st_uid != 0 or stat.S_IMODE(state.stat().st_mode) != 0o700:
         raise Error('unsafe_state_directory')
     ids = set(); files = set(); ports = set()
-    if not 1 <= len(config['targets']) <= 18:
+    if not target_count_valid(config['targets']):
         raise Error('configuration_invalid')
     for target in config['targets']:
-        if set(target) != {'id','certificateFile','hostname','port','publicKeySha256','identitySha256'} \
+        keys = {'id','certificateFile','hostname','port','publicKeySha256','identitySha256'}
+        if first_owner_target(target):
+            keys.add('peerAddress')
+        if set(target) != keys \
           or not re.fullmatch('[a-z][a-z0-9-]{1,39}',target['id']) or target['hostname'] != '13.39.100.55' \
           or not target_port_valid(target) \
           or any(not re.fullmatch('[a-f0-9]{64}',target[k]) for k in ['publicKeySha256','identitySha256']):
             raise Error('configuration_invalid')
+        peer_address(target)
         file = transport.private_path(target['certificateFile'])
         if not str(file).startswith('/etc/clinicaclick-') or file.suffix != '.crt' \
           or target['id'] in ids or str(file) in files or target['port'] in ports:

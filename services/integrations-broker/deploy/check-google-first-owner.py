@@ -22,7 +22,8 @@ def validate(config, environment):
     allowed = ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '::1/128']
     need(any(address.version == ipaddress.ip_network(network).version and address in ipaddress.ip_network(network) for network in allowed))
     need(type(config.get('port')) is int and 1024 <= config['port'] <= 65535)
-    need(config.get('tlsCertFile') == directory + '/server-cert.pem' and config.get('tlsKeyFile') == directory + '/server-key.pem')
+    certificate = '/server-cert.crt' if environment == 'staging' else '/server-cert.pem'
+    need(config.get('tlsCertFile') == directory + certificate and config.get('tlsKeyFile') == directory + '/server-key.pem')
     need(isinstance(config.get('tlsRenewal'), dict) and config['tlsRenewal'].get('issuerCaFile') == directory + '/issuer-ca.pem')
     need(config.get('searchConsoleCursorKeyFile') == directory + '/cursor.key')
     scopes, slots, resources = config.get('scopes'), config.get('slots'), config.get('publicationResources')

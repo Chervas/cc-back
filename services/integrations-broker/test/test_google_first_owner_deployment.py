@@ -13,7 +13,7 @@ def fixture(environment='staging'):
     directory = '/etc/clinicaclick-google-first-owner-' + environment
     return dict(environment=environment, enabled=True, cohort='google-first-oauth-v1', purpose='google-first-identity-only-v1',
                 stateFile='/var/lib/clinicaclick-google-first-owner-' + environment + '/owner.sqlite',
-                listenAddress='127.0.0.1', port=18461, tlsCertFile=directory+'/server-cert.pem', tlsKeyFile=directory+'/server-key.pem',
+                listenAddress='127.0.0.1', port=18461, tlsCertFile=directory+('/server-cert.crt' if environment=='staging' else '/server-cert.pem'), tlsKeyFile=directory+'/server-key.pem',
                 tlsRenewal=dict(issuerCaFile=directory+'/issuer-ca.pem'), searchConsoleCursorKeyFile=directory+'/cursor.key',
                 scopes=[dict(services=['search_console'])], slots=[dict(service='search_console')], publicationResources=[dict(service='search_console')],
                 policy=dict(audience='clinicaclick:google-first-oauth:'+environment+':v1', version='google-first-oauth:'+environment+':v1',
@@ -34,6 +34,16 @@ class Deployment(unittest.TestCase):
             value = fixture(); value.update(changes)
             with self.subTest(changes=changes), self.assertRaises(Exception):
                 check.validate(value, 'staging')
+
+    def test_staging_registered_leaf_extension_and_dev_contract(self):
+        for environment, accepted, rejected in [('staging', 'server-cert.crt', 'server-cert.pem'),
+                                                ('dev', 'server-cert.pem', 'server-cert.crt')]:
+            config = fixture(environment)
+            self.assertTrue(config['tlsCertFile'].endswith('/' + accepted))
+            check.validate(config, environment)
+            config['tlsCertFile'] = '/etc/clinicaclick-google-first-owner-' + environment + '/' + rejected
+            with self.subTest(environment=environment), self.assertRaises(ValueError):
+                check.validate(config, environment)
 
     def test_service_exact_isolation_and_runtime(self):
         text = (ROOT / 'deploy/clinicaclick-google-first-owner@.service').read_text()
