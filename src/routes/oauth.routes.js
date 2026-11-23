@@ -574,8 +574,8 @@ async function ensureGoogleAccessToken(conn, { allowExpired = false, credentials
   });
 }
 
-async function googlePropertyInventory(req, kind) {
-    const resolved = await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
+async function googlePropertyInventory(req, kind, resolved = null) {
+    resolved ||= await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true });
     if (!resolved.connection) throw Object.assign(Error('google_discovery_no_connection'), { code: 'google_discovery_no_connection' });
     const clinicIds = req.marketingConnectionScopeAuthorization?.clinicIds?.slice();
     const actor = getUserIdFromToken(req);
@@ -659,6 +659,36 @@ async function googleAdsMappingScope(req, access) {
             return hasMarketingClinicScopeAccess({ userId: claims.userId, clinicIds, access: 'write',
                 membershipModel: { findAll: options => db.UsuarioClinica.findAll({ ...options, transaction, lock: transaction.LOCK.UPDATE, logging: false }) } });
         } };
+}
+
+async function googleReviewedAnalyticsStatus(req, metadata) {
+    const clinicIds = req.marketingConnectionScopeAuthorization?.clinicIds;
+    if (!clinicIds?.length || !metadata.scope?.scopeKey || !metadata.connection) return null;
+    return require('../services/googleReviewedAnalyticsMapping.service').additionStatus(
+        () => googleAdsMappingScope(req, 'write'),
+        { scopeKey: metadata.scope.scopeKey, connectionId: Number(metadata.connection.id) }
+    );
+}
+
+function sendReviewedAnalyticsError(res, error, connectionStatus = false) {
+    const status = {
+        asset_revoked: 409, provider_unauthorized: 403, scope_denied: 403, operation_denied: 403,
+    };
+    const code = googlePropertyDiscovery.safe(error);
+    if (Object.hasOwn(status, code)) return res.status(status[code]).json(connectionStatus
+        ? { connected: false, reason: code } : { success: false, error: code });
+    if (error?.httpStatus === 400 && code === 'broker_binding_invalid') return res.status(400).json({ success: false, error: code });
+    return sendGooglePropertyDiscoveryError(res, error, connectionStatus);
+}
+
+function googleReviewedAnalyticsScope(input, { query = false } = {}) {
+    const scope = input?.assignment_scope;
+    const idField = scope === 'group' ? 'group_id' : 'clinic_id';
+    const anotherField = scope === 'group' ? 'clinic_id' : 'group_id';
+    const id = input?.[idField];
+    const validId = value => typeof value === (query ? 'string' : 'number')
+        && /^[1-9][0-9]{0,9}$/.test(String(value)) && Number(value) <= 2147483647;
+    return ['clinic', 'group'].includes(scope) && validId(id) && !Object.hasOwn(input, anotherField);
 }
 
 async function googleAdsInventory(req, { capture = false } = {}) {
@@ -1869,6 +1899,14 @@ router.get('/google/connection-status', async (req, res) => {
         const binding = await googleOAuthBroker.bindingFor(metadata.connection?.id, req.query?.google_service);
         if (binding) {
             await authorizeExplicitConnectionScope(req, 'write');
+            if (req.query?.google_service === 'analytics') {
+                try {
+                    const addition = await googleReviewedAnalyticsStatus(req, metadata);
+                    if (addition) return res.json(addition);
+                } catch (error) {
+                    return sendReviewedAnalyticsError(res, error, true);
+                }
+            }
             if (req.query?.google_service === 'search_console') {
                 const addition = await require('../services/googleReviewedSearchConsoleMapping.service')
                     .additionStatus(() => googleAdsMappingScope(req, 'write'));
@@ -1956,7 +1994,17 @@ router.get('/google/assets', async (req, res) => {
 router.get('/google/analytics/connection-status', async (req, res) => {
     res.set('Cache-Control', 'private, no-store');
     try {
-        const inventory = await googlePropertyInventory(req, 'analytics');
+        const metadata = hasRequestedScope(req)
+            ? await resolveGoogleRequestConnection(req, { allowLegacyUserFallback: true, metadataOnly: true }) : null;
+        if (metadata) {
+            try {
+                const addition = await googleReviewedAnalyticsStatus(req, metadata);
+                if (addition) return res.json(addition);
+            } catch (error) {
+                return sendReviewedAnalyticsError(res, error, true);
+            }
+        }
+        const inventory = await googlePropertyInventory(req, 'analytics', metadata);
         const { assignment, scope, source } = inventory.resolved;
         if (inventory.managed !== null) {
             const accounts = googleAnalyticsInventoryAccounts(inventory.managed);
@@ -2001,6 +2049,21 @@ router.get('/google/analytics/connection-status', async (req, res) => {
 router.get('/google/analytics/properties', async (req, res) => {
     res.set('Cache-Control', 'private, no-store');
     try {
+        if (Object.hasOwn(req.query, 'reviewed_addition')) {
+            const allowed = ['reviewed_addition', 'assignment_scope', 'clinic_id', 'group_id'];
+            if (req.query.reviewed_addition !== '1' || Object.keys(req.query).some(key => !allowed.includes(key))
+                || !googleReviewedAnalyticsScope(req.query, { query: true })) {
+                return res.status(400).json({ success: false, error: 'broker_binding_invalid' });
+            }
+            try {
+                const input = await googleAdsMappingScope(req, 'write');
+                const reviewed = await require('../services/googleReviewedAnalyticsMapping.service').inventory(input);
+                return res.json({ success: true, accounts: googleAnalyticsInventoryAccounts(reviewed.properties), inventory_mode: 'broker_grants',
+                    reviewed_properties: reviewed.destinations });
+            } catch (error) {
+                return sendReviewedAnalyticsError(res, error);
+            }
+        }
         const inventory = await googlePropertyInventory(req, 'analytics');
         if (inventory.managed !== null) return res.json({ success: true, accounts: googleAnalyticsInventoryAccounts(inventory.managed), inventory_mode: 'broker_grants' });
 
@@ -2047,6 +2110,23 @@ router.get('/google/analytics/properties', async (req, res) => {
  * body: { mappings: [{ clinicaId, propertyName, propertyDisplayName?, propertyType?, parent?, measurementId? }] }
  */
 router.post('/google/analytics/map-properties', async (req, res) => {
+    if (req.body && Object.hasOwn(req.body, 'reviewed_addition')) {
+        res.set('Cache-Control', 'private, no-store');
+        const allowed = ['reviewed_addition', 'mappings', 'assignment_scope', 'clinic_id', 'group_id',
+            'replace_existing', 'runtime_namespace', '__runtime_namespace'];
+        if (req.body.reviewed_addition !== true || Object.keys(req.query).length
+            || Object.keys(req.body).some(key => !allowed.includes(key)) || !googleReviewedAnalyticsScope(req.body)
+            || (Object.hasOwn(req.body, 'replace_existing') && req.body.replace_existing !== false)) {
+            return res.status(400).json({ success: false, error: 'broker_binding_invalid' });
+        }
+        try {
+            const input = await googleAdsMappingScope(req, 'write');
+            const reviewed = require('../services/googleReviewedAnalyticsMapping.service');
+            return res.json(await reviewed.map(input, { mappings: req.body.mappings }));
+        } catch (error) {
+            return sendReviewedAnalyticsError(res, error);
+        }
+    }
     try {
         const userId = getUserIdFromToken(req);
         if (!userId) return res.status(401).json({ success: false, error: 'Usuario no autenticado' });

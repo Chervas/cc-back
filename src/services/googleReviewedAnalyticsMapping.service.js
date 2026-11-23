@@ -74,20 +74,30 @@ function createReviewedAnalyticsMapping({ models, sessions, readProperty, descri
 
   function pin(input) {
     C.requestedScope(input.scopeKey);
+    const clinicIds = Array.isArray(input.clinicIds) ? input.clinicIds.slice().sort((a, b) => a - b) : null;
     if (!positive(input.actorId) || !positive(input.connectionId) || !UUID.test(input.sessionRef)
       || !Number.isSafeInteger(input.sessionExpiresAt) || input.sessionExpiresAt <= now()
-      || !validIds(input.clinicIds) || typeof input.revalidate !== 'function') fail();
-    return { ...input, clinicIds: input.clinicIds.slice() };
+      || !validIds(clinicIds) || typeof input.revalidate !== 'function') fail();
+    return { ...input, clinicIds };
   }
 
-  async function entries(input) {
+  async function entries({ scopeKey, connectionId }) {
     const values = await descriptors();
     if (!Array.isArray(values) || values.length > 20) fail('broker_configuration_invalid', 503);
     const checked = values.map(value => descriptor(value, now()));
     if (new Set(checked.map(value => value.descriptorId)).size !== checked.length ||
       new Set(checked.map(value => JSON.stringify([value.scopeKey, value.clinicId, value.assetRef]))).size !== checked.length) fail();
-    return checked.filter(value => value.scopeKey === input.scopeKey && value.connectionId === input.connectionId
-      && same(value.clinicIds, input.clinicIds) && value.expiresAtEpochMs > now());
+    return checked.filter(value => value.scopeKey === scopeKey && value.connectionId === connectionId && value.expiresAtEpochMs > now());
+  }
+
+  async function availability(inputOrResolve, scopeHint) {
+    if (!enabled()) return { pinned: null, available: [] };
+    if (scopeHint && !(await entries(scopeHint)).length) return { pinned: null, available: [] };
+    const pinned = pin(typeof inputOrResolve === 'function' ? await inputOrResolve() : inputOrResolve);
+    if (scopeHint && (pinned.scopeKey !== scopeHint.scopeKey || pinned.connectionId !== scopeHint.connectionId)) fail();
+    const available = await entries(pinned);
+    if (available.some(entry => !same(entry.clinicIds, pinned.clinicIds))) fail();
+    return { pinned, available };
   }
 
   async function existing(m, entry, transaction) {
@@ -113,7 +123,7 @@ function createReviewedAnalyticsMapping({ models, sessions, readProperty, descri
     if (!enabled()) fail('broker_cohort_disabled', 503);
     const revalidate = async () => {
       await input.revalidate();
-      if (!(await entries(input)).some(value => same(value, entry)) || !enabled()) fail();
+      if (!same(input.clinicIds, entry.clinicIds) || !(await entries(input)).some(value => same(value, entry)) || !enabled()) fail();
     };
     await revalidate();
     const m = getModels(), options = sqlOptions(transaction);
@@ -160,27 +170,43 @@ function createReviewedAnalyticsMapping({ models, sessions, readProperty, descri
   }
 
   return {
-    async additionStatus(input) {
-      const pinned = pin(input), available = await entries(pinned);
+    async additionStatus(inputOrResolve, scopeHint) {
+      const { pinned, available } = await availability(inputOrResolve, scopeHint);
       if (!available.length) return null;
       return bounded(async deadline => {
-        for (const entry of available) {
-          await transact(transaction => check(pinned, entry, transaction));
-          if (deadline <= now()) fail('broker_discovery_timeout', 503);
-        }
-        return { mode: 'broker_reviewed_addition', connected: false, google_service: 'analytics', inventory_access: 'operator_reviewed_exact_property' };
+        let pending = false;
+        await transact(async transaction => {
+          for (const entry of available) {
+            if (!await check(pinned, entry, transaction)) pending = true;
+            if (deadline <= now()) fail('broker_discovery_timeout', 503);
+          }
+        });
+        return pending ? { mode: 'broker_reviewed_addition', connected: false, google_service: 'analytics',
+          inventory_access: 'operator_reviewed_exact_property' } : null;
       });
     },
     async inventory(input) {
-      const pinned = pin(input), available = await entries(pinned);
+      const { pinned, available } = await availability(input);
+      if (!available.length) return { properties: [], destinations: [] };
       return bounded(async deadline => {
-        const results = new Map();
+        const results = new Map(), verified = [];
         for (const entry of available) {
-          const value = await read(pinned, entry, deadline);
-          if (results.has(value.name) && !same(results.get(value.name), value)) fail('broker_response_invalid', 503);
-          results.set(value.name, value);
+          if (await transact(transaction => check(pinned, entry, transaction))) continue;
+          const property = await read(pinned, entry, deadline);
+          if (results.has(property.name) && !same(results.get(property.name).property, property)) fail('broker_response_invalid', 503);
+          if (!results.has(property.name)) results.set(property.name, { property, clinicIds: [] });
+          verified.push(entry);
         }
-        return [...results.values()];
+        await transact(async transaction => {
+          for (const entry of verified) {
+            if (!await check(pinned, entry, transaction)) results.get(entry.propertyName).clinicIds.push(entry.clinicId);
+            if (deadline <= now()) fail('broker_discovery_timeout', 503);
+          }
+        });
+        const pending = [...results.values()].filter(result => result.clinicIds.length);
+        return { properties: pending.map(result => result.property), destinations: pending.map(({ property, clinicIds }) => ({
+          propertyName: property.name, clinicIds: clinicIds.sort((left, right) => left - right),
+        })) };
       });
     },
     async map(input, payload) {
