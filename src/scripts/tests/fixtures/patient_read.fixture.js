@@ -41,7 +41,8 @@ function patientFixture(options = {}) {
         if (state.readFailure) throw Error('FICTITIOUS_SQL_SECRET');
         return state.empty ? [] : [patient()];
       } },
-    sequelize: { query: async () => [], transaction: async fn => { const rows = []; await fn(rows); state.rows.push(...rows); await state.afterCommit?.(); } },
+    sequelize: { query: async () => [], getQueryInterface: () => ({ tableExists: async () => false }),
+      transaction: async fn => { const rows = []; await fn(rows); state.rows.push(...rows); await state.afterCommit?.(); } },
     ...options.models };
   const repository = options.repository || { health: async () => ({ pending: 0, oldestAgeSeconds: 0 }),
     append: async (event, opts = {}) => { pack(event); if (state.auditFailure) throw Error('FICTITIOUS_SQL_SECRET'); (opts.transaction || state.rows).push(event); } };
@@ -63,6 +64,7 @@ function patientFixture(options = {}) {
     assertUserCanAccessFeature: async ({ clinicId }) => { if (!state.allowed.includes(clinicId)) throw Object.assign(Error('access_policy_forbidden'), { status: 403 }); },
   };
   const controller = source('controllers/paciente.controller.js', { '../../models': models, sequelize, crypto,
+    '../services/patientIncidents.service': require('../../../services/patientIncidents.service'),
     '../services/platformAudit.patientReads': audit, '../lib/phone': require('../../../lib/phone'), '../lib/access-policy': permissions,
     '../lib/patient-name-search': require('../../../lib/patient-name-search'),
     '../lib/patient-profile-fields': require('../../../lib/patient-profile-fields'),

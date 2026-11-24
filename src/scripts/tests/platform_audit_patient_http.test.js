@@ -34,6 +34,15 @@ test('authentication and full consent scope deny without leaking a patient or cr
   f.state.allowed = [71]; assert.equal((await f.get('/901/consents')).status, 403);
   assert(!JSON.stringify(f.state.rows).includes('FICTITIOUS_'));
 });
+test('patient filters remain available without the optional visit tables', async t => {
+  const f = await serverFixture(t);
+  for (const route of ['/?clinica_id=71', '/search?clinica_id=71&q=fictitious']) {
+    const result = await f.get(route + '&incident=attendance');
+    assert.equal(result.status, 200);
+    const clauses = f.state.queries.findLast(query => !query.attributes).where;
+    assert.match(JSON.stringify(clauses[require('sequelize').Op.and]), /CitasPacientes/);
+  }
+});
 test('contact target projection removes foreign clinic links and preserves contact response fields', async t => {
   const f = await serverFixture(t); const result = await f.get('/contact-targets?clinica_id=71&q=patient');
   assert.equal(result.status, 200); assert.equal(result.body.items[0].conversation_id, 81);

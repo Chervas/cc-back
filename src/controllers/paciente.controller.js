@@ -1,4 +1,5 @@
 'use strict';
+const db = require('../../models');
 const patientIncidents = require('../services/patientIncidents.service');
 const {
   Paciente,
@@ -17,7 +18,7 @@ const {
   EconomicBudget,
   EconomicBudgetSignatureRequest,
   sequelize,
-} = require('../../models');
+} = db;
 const { Op, literal, QueryTypes } = require('sequelize');
 const crypto = require('crypto');
 const patientReadAudit = require('../services/platformAudit.patientReads');
