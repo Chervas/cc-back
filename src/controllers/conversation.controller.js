@@ -2243,6 +2243,16 @@ exports.postMessage = async (req, res) => {
       return sendQuickChatCategoryForbidden(res, accessError);
     }
 
+    const incidentRestricted = conversation.channel !== 'internal'
+      && await require('../services/patientIncidents.service').unwantedRecipient({
+        db, clinicId: conversation.clinic_id, patientId: conversation.patient_id, phone: conversation.contact_id, transaction,
+      });
+    if (incidentRestricted && req.body?.patientIncidentAcknowledged !== true && !useTemplate && message_type !== 'template') {
+      await transaction.rollback();
+      return res.status(409).json({ code: 'patient_incident_confirmation_required',
+        message: 'Este paciente está marcado como No deseado. Confirma que el mensaje es de atención.' });
+    }
+
     if (message_type === 'image' || req.body.attachment !== undefined) {
       if (req.quickChatImageUpload !== true) {
         await transaction.rollback(); return res.status(400).json({ error: 'quickchat_image_endpoint_required' });
@@ -2416,6 +2426,16 @@ exports.postMessage = async (req, res) => {
         if (!canUserSelectWhatsappTemplate(templateJson, userId)) {
           await transaction.rollback();
           return res.status(403).json({ error: 'whatsapp_template_owner_forbidden' });
+        }
+        if (incidentRestricted && (String(templateJson.category).toUpperCase() === 'MARKETING' || adSharing)) {
+          await transaction.rollback();
+          return res.status(409).json({ code: 'PATIENT_INCIDENT_COMMERCIAL_BLOCK',
+            message: 'Las comunicaciones comerciales están bloqueadas para este paciente.' });
+        }
+        if (incidentRestricted && req.body?.patientIncidentAcknowledged !== true) {
+          await transaction.rollback();
+          return res.status(409).json({ code: 'patient_incident_confirmation_required',
+            message: 'Este paciente está marcado como No deseado. Confirma que el mensaje es de atención.' });
         }
         canonicalTemplateName = String(templateJson.name || '').trim();
         canonicalTemplateLanguage = String(templateJson.language || '').trim() || 'es';

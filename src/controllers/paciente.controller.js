@@ -1,3 +1,4 @@
+const patientIncidents = require('../services/patientIncidents.service');
 'use strict';
 const {
   Paciente,
@@ -1003,6 +1004,14 @@ exports.getAllPacientes = async (req, res) => {
       ]
     };
 
+    const incidence = patientIncidents.patientFilter(req.query.incident, readableClinicIds);
+    if (incidence) {
+      if (!await canViewSensitivePatientData(req, readableClinicIds)) {
+        return res.status(403).json({ code: 'patient_detail_forbidden' });
+      }
+      whereClause[Op.and] = [literal(incidence)];
+    }
+
     let pacientes;
     let total = null;
     if (isPaginated) {
@@ -1052,6 +1061,7 @@ exports.getAllPacientes = async (req, res) => {
     }
     res.json(items);
   } catch (error) {
+    if (error.code === 'patient_incident_filter_invalid') return res.status(400).json({ code: error.code });
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
     res.status(500).json({ message: 'Error retrieving pacientes', error: 'patient_read_failed' });
@@ -1108,6 +1118,9 @@ exports.searchPacientes = async (req, res) => {
       ]
     };
 
+    const incidence = patientIncidents.patientFilter(req.query.incident, clinicIdsList);
+    if (incidence) whereClause[Op.and].push(literal(incidence));
+
     const pacientes = await Paciente.findAll({
       where: whereClause,
       include: [
@@ -1134,6 +1147,7 @@ exports.searchPacientes = async (req, res) => {
       restrictPacientePayloadToClinics(paciente, clinicIdsList)
     )));
   } catch (error) {
+    if (error.code === 'patient_incident_filter_invalid') return res.status(400).json({ code: error.code });
     const handled = sendAccessPolicyError(error, res);
     if (handled) return handled;
     res.status(500).json({ message: 'Error al buscar pacientes', error: 'patient_read_failed' });
@@ -1310,6 +1324,7 @@ exports.getPacienteById = async (req, res) => {
       ...scopedPatient,
       historialClinicCloud: buildClinicCloudPatientHistory(scopedPatient.camposPersonalizados, { clinics: historyClinics }),
       ...await getPacienteAppointmentBounds(paciente.id_paciente, readableClinicIds),
+      incidents: await patientIncidents.summary({ db, patientId: paciente.id_paciente, clinicIds: readableClinicIds }),
       contact_restrictions: await getActiveContactRestrictionsForPatient({
         clinicIds: readableClinicIds,
         patientId: paciente.id_paciente,

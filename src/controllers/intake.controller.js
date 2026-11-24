@@ -2993,11 +2993,14 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
     phone_hash: normalizedPhone ? hashValue(normalizedPhone) : null
   };
 
+  const deliveryScope = payload.external_source === 'wordpress_elementor' && payload.clinica_id
+    ? { clinica_id: payload.clinica_id } : {};
+
   const createLead = async (transaction = null) => {
     const queryOptions = transaction ? { transaction } : {};
     if (payload.external_source && payload.external_id) {
       const existingExternal = await LeadIntake.findOne({
-        where: { external_source: payload.external_source, external_id: payload.external_id, archived_at: null },
+        where: { ...deliveryScope, external_source: payload.external_source, external_id: payload.external_id, archived_at: null },
         ...queryOptions,
       });
       if (existingExternal) {
@@ -3010,7 +3013,7 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
 
     if (payload.event_id) {
       const existing = await LeadIntake.findOne({
-        where: { event_id: payload.event_id, archived_at: null },
+        where: { ...deliveryScope, event_id: payload.event_id, archived_at: null },
         ...queryOptions,
       });
       if (existing) {
@@ -3023,6 +3026,7 @@ async function dedupeAndCreateLead(leadPayload, rawPayload = {}, attributionStep
 
     if (normalizedPhone || normalizedEmail) {
       const dedupeWhere = {
+        ...deliveryScope,
         archived_at: null,
         created_at: { [Op.gte]: dedupeCutoff },
         [Op.or]: []
@@ -3826,7 +3830,7 @@ exports.ingestLead = asyncHandler(async (req, res) => {
   let formSubmissionEvent = null;
   if (formSubmission && FormSubmissionEvent) {
     try {
-      formSubmissionEvent = await FormSubmissionEvent.create({
+      const attributes = {
         clinic_id: lead?.clinica_id || clinicaIdParsed,
         group_id: lead?.grupo_clinica_id || grupoClinicaIdParsed,
         lead_intake_id: lead?.id || null,
@@ -3841,7 +3845,20 @@ exports.ingestLead = asyncHandler(async (req, res) => {
         fields_json: formSubmission.fields || {},
         payload_json: formSubmission.payload || req.body || {},
         submitted_at: formSubmission.submitted_at || new Date(),
-      });
+      };
+      if (externalSource === 'wordpress_elementor' && lead?.id && eventId) {
+        formSubmissionEvent = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async transaction => {
+          await LeadIntake.findByPk(lead.id, { attributes: ['id'], transaction, lock: transaction.LOCK.UPDATE });
+          const existing = await FormSubmissionEvent.findOne({
+            where: { lead_intake_id: lead.id,
+              [Op.and]: db.Sequelize.where(db.Sequelize.json('payload_json.event_id'), String(eventId)) },
+            transaction,
+          });
+          return existing || FormSubmissionEvent.create(attributes, { transaction });
+        });
+      } else {
+        formSubmissionEvent = await FormSubmissionEvent.create(attributes);
+      }
 
       await enqueueInboundFormSubmissionResume({
         clinicId: lead?.clinica_id || clinicaIdParsed,
@@ -3861,6 +3878,10 @@ exports.ingestLead = asyncHandler(async (req, res) => {
         payload: formSubmission.payload || req.body || {},
       });
     } catch (formErr) {
+      if (externalSource === 'wordpress_elementor') {
+        console.warn('wordpress_elementor_intake_retry_required');
+        return res.status(503).json({ error: 'wordpress_elementor_intake_retry_required' });
+      }
       console.warn('⚠️ No se pudo registrar/reanudar envío de formulario:', formErr.message || formErr);
     }
   }

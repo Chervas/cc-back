@@ -25,6 +25,9 @@ final class CCW_Intake_Bridge
     const INSTALLATION_WINDOW_SECONDS = 3600;
     const INSTALLATION_LIMIT = 120;
 
+    const ELEMENTOR_RETRY = 'ccw_elementor_intake_retry';
+    const ELEMENTOR_OUTBOX = 'ccw_elementor_outbox_';
+
     /** @var CCW_Cache */
     private $cache;
 
@@ -35,9 +38,150 @@ final class CCW_Intake_Bridge
 
     public function register()
     {
+        add_action('elementor_pro/forms/new_record', array($this, 'capture_elementor'), 20);
+        add_action(self::ELEMENTOR_RETRY, array($this, 'retry_elementor'));
+        add_action('wp_head', array($this, 'elementor_capture_marker'), 1);
         add_action('init', array($this, 'rewrite_rules'));
         add_filter('query_vars', array($this, 'query_vars'));
         add_action('template_redirect', array($this, 'handle'), -2000);
+    }
+
+    private function elementor_measurement()
+    {
+        if (!defined('CCW_ELEMENTOR_CAPTURE') || CCW_ELEMENTOR_CAPTURE !== true
+            || !function_exists('sodium_crypto_secretbox') || !CCW_Config::is_configured()) {
+            return null;
+        }
+        $runtime = CCW_Config::runtime_configuration();
+        $measurement = $runtime['measurement'] ?? array();
+        return !empty($measurement['enabled']) && ($measurement['scope_type'] ?? '') === 'clinic'
+            && (int) ($measurement['scope_id'] ?? 0) > 0 && strlen($measurement['hmac_key'] ?? '') >= 16
+            ? $measurement : null;
+    }
+
+    public function elementor_capture_marker()
+    {
+        if ($this->elementor_measurement()) {
+            echo '<meta name="clinicaclick-elementor-capture" content="server">' . "\n";
+        }
+    }
+
+    public function capture_elementor($record)
+    {
+        $measurement = $this->elementor_measurement();
+        if (!$measurement) {
+            return;
+        }
+        $page_url = (string) wp_get_referer();
+        if (!$this->same_origin($page_url, home_url('/'))) {
+            return;
+        }
+        $page_url = preg_split('/[?#]/', $page_url, 2)[0];
+        $fields = array();
+        $contact = array();
+        foreach (array_slice((array) $record->get('fields'), 0, self::MAX_FIELDS, true) as $id => $field) {
+            $type = (string) ($field['type'] ?? '');
+            $value = $field['value'] ?? null;
+            if (!in_array($type, array('text', 'tel', 'email', 'textarea', 'select', 'radio', 'checkbox', 'acceptance'), true)
+                || !is_scalar($value) || !preg_match('/^[a-zA-Z0-9_:-]{1,80}$/', (string) $id)) {
+                continue;
+            }
+            $value = substr(sanitize_textarea_field((string) $value), 0, 900);
+            $label = substr(sanitize_text_field((string) ($field['title'] ?? $id)), 0, 120);
+            if ($value === '') continue;
+            $fields[(string) $id] = $value;
+            $name = (string) $id . ' ' . $label;
+            if ($type === 'email' && empty($contact['email'])) $contact['email'] = sanitize_email($value);
+            if (($type === 'tel' || preg_match('/tel[eé]fono|m[oó]vil|phone/i', $name))
+                && empty($contact['telefono'])) $contact['telefono'] = $value;
+            if ($type === 'text' && preg_match('/nombre|name/i', $name) && empty($contact['nombre'])) $contact['nombre'] = $value;
+            if ($type === 'textarea' && empty($contact['notas'])) $contact['notas'] = $value;
+        }
+        if (empty($contact['email']) && empty($contact['telefono'])) {
+            return;
+        }
+        $form_id = sanitize_key((string) $record->get_form_settings('id'));
+        if (!$form_id && isset($_POST['form_id']) && is_string($_POST['form_id'])) {
+            $form_id = sanitize_key(wp_unslash($_POST['form_id']));
+        }
+        $context = isset($_POST['ccw_form_context']) && is_string($_POST['ccw_form_context'])
+            ? json_decode(substr(wp_unslash($_POST['ccw_form_context']), 0, 5000), true) : array();
+        $context = is_array($context) ? $context : array();
+        $event_id = preg_match('/^[a-f0-9-]{36}$/', (string) ($context['event_id'] ?? ''))
+            ? $context['event_id'] : wp_generate_uuid4();
+        $data = array(
+            'clinic_id' => (int) $measurement['scope_id'], 'domain' => strtolower((string) parse_url($page_url, PHP_URL_HOST)),
+            'page_url' => $page_url, 'source' => 'web', 'source_detail' => 'web_form', 'channel' => 'organic',
+            'external_source' => 'wordpress_elementor', 'external_id' => $event_id,
+            'event_id' => $event_id, 'lead_data' => $contact,
+            'form_submission' => array('page_url' => $page_url, 'form_id' => $form_id,
+                'form_name' => sanitize_text_field((string) $record->get_form_settings('form_name')),
+                'submitted_at' => gmdate('c'), 'fields' => $fields),
+        );
+        $consent = $context['consent'] ?? array();
+        if (is_array($consent)) {
+            foreach (array('analytics_storage','ad_storage','ad_user_data','ad_personalization') as $key) {
+                $data['consent'][$key] = ($consent[$key] ?? null) === 'granted' ? 'granted' : 'denied';
+            }
+        }
+        if (($data['consent']['ad_storage'] ?? null) === 'granted'
+            && ($data['consent']['ad_user_data'] ?? null) === 'granted') {
+            foreach (array('gclid','gbraid','wbraid','fbclid','utm_source','utm_medium','utm_campaign','utm_content','utm_term',
+                'cc_gads_customer_id','cc_gads_campaign_id','cc_gads_ad_id','cc_gads_adgroup_id',
+                'cc_meta_account_id','cc_meta_campaign_id','cc_meta_ad_id','cc_meta_adset_id') as $key) {
+                if (isset($context[$key]) && is_string($context[$key])) {
+                    $data[$key] = substr(sanitize_text_field($context[$key]), 0, 240);
+                }
+            }
+            $data['channel'] = !empty($data['gclid']) || !empty($data['gbraid']) || !empty($data['wbraid'])
+                || !empty($data['fbclid']) || !empty($data['cc_gads_campaign_id']) || !empty($data['cc_meta_campaign_id'])
+                ? 'paid' : 'organic';
+        }
+        $key = self::ELEMENTOR_OUTBOX . $event_id;
+        $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+        $payload = wp_json_encode($data);
+        if (!is_string($payload)) return;
+        $encrypted = base64_encode($nonce . sodium_crypto_secretbox($payload, $nonce, $this->elementor_storage_key()));
+        if (add_option($key, array('payload' => $encrypted, 'until' => time() + DAY_IN_SECONDS, 'attempt' => 0), '', false)) {
+            wp_schedule_single_event(time(), self::ELEMENTOR_RETRY, array($event_id));
+        }
+    }
+
+    public function retry_elementor($event_id)
+    {
+        if (!preg_match('/^[a-f0-9-]{36}$/', (string) $event_id)) return;
+        $key = self::ELEMENTOR_OUTBOX . $event_id;
+        $saved = get_option($key);
+        if (!$saved) return;
+        if ((int) $saved['until'] <= time()) {
+            delete_option($key);
+            return;
+        }
+        $attempt = (int) $saved['attempt'] + 1;
+        $saved['attempt'] = $attempt;
+        wp_schedule_single_event(time() + min(3600, 60 * $attempt * $attempt), self::ELEMENTOR_RETRY, array($event_id));
+        update_option($key, $saved, false);
+        $measurement = $this->elementor_measurement();
+        if (!$measurement) return;
+        $sealed = base64_decode((string) $saved['payload'], true);
+        if (!$sealed || strlen($sealed) <= SODIUM_CRYPTO_SECRETBOX_NONCEBYTES) return;
+        $nonce = substr($sealed, 0, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+        $payload = sodium_crypto_secretbox_open(substr($sealed, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES), $nonce, $this->elementor_storage_key());
+        if (!is_string($payload)) return;
+        $data = json_decode($payload, true);
+        if (!is_array($data) || (int) ($data['clinic_id'] ?? 0) !== (int) $measurement['scope_id']) return;
+        try {
+            $this->forward_event('leads', $data, $event_id, $measurement['hmac_key'], '');
+            delete_option($key);
+            wp_clear_scheduled_hook(self::ELEMENTOR_RETRY, array($event_id));
+        } catch (CCW_Error $error) {
+            // The opaque event persists until acknowledged or expired.
+        }
+    }
+
+    private function elementor_storage_key()
+    {
+        return hash('sha256', wp_salt('auth') . '|' . CCW_Config::installation_id(), true);
     }
 
     public function rewrite_rules()

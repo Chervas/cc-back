@@ -1083,6 +1083,9 @@ async function assertAutomationCommunicationAllowed({ clinicId, patientId = null
 }
 
 async function assertStoredCommunicationAllowed({ clinicId, patientId, phone, scope, includeChannel = false }) {
+  if (scope === 'marketing') {
+    await require('./patientIncidents.service').assertCommercialAllowed({ db, clinicId, patientId, phone });
+  }
   if (!MarketingContactOptOut) return;
   const phoneDigits = normalizePhoneDigits(phone);
   const identityWhere = [];

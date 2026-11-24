@@ -1959,6 +1959,35 @@ async function checkDisponibilidadCanonica({ clinica_id, inicio, fin, doctor_id,
 /**
  * Crear cita para paciente (y lead opcional)
  */
+exports.getAttendanceIncident = asyncHandler(async (req, res) => {
+    const clinicId = normalizeAppointmentClinicId(req.query.clinica_id);
+    await assertAppointmentManageAccess(req, clinicId);
+    const actorId = Number(req.userData?.userId);
+    let patientId = null;
+    const leadId = parsePositiveInt(req.query.lead_id);
+    if (req.query.paciente_id) {
+        const patient = await require('../services/patientPrivacyStatus.service').patientForPrivacyClinic({
+            db, identifier: req.query.paciente_id, clinicId,
+        });
+        if (!await actorCanReadPatientSensitive(req, patient)) return res.status(404).json({ message: 'Paciente no encontrado' });
+        patientId = Number(patient.id_paciente);
+    }
+    if (leadId) {
+        const allowed = await canUserAccessFeature({ actorId, featureKey: 'leads.sensitive.view', clinicId });
+        const lead = allowed ? await LeadIntake.findOne({ where: { id: leadId, clinica_id: clinicId },
+            attributes: ['id', 'clinica_id', 'grupo_clinica_id', 'telefono', 'email', 'nombre', 'created_at'], raw: true }) : null;
+        if (!lead) return res.status(404).json({ message: 'Lead no encontrado' });
+        if (!patientId) {
+            const context = await require('../services/leadPatientContext.service').get(lead);
+            if (context?.relationship === 'existing_patient' && Number(context.clinic_id) === clinicId) {
+                patientId = parsePositiveInt(context.patient_id);
+            }
+        }
+    }
+    const attendance = await require('../services/patientIncidents.service').attendance({ db, clinicIds: [clinicId], patientId, leadId });
+    return res.json({ attendance });
+});
+
 exports.createCita = asyncHandler(async (req, res) => {
     try {
         const {
@@ -2203,6 +2232,18 @@ exports.createCita = asyncHandler(async (req, res) => {
                     resolvedLeadIntakeId = parsePositiveInt(lead?.id) || null;
                 }
 
+                if (!isHistoricalRegistration) {
+                    const attendance = await require('../services/patientIncidents.service').attendance({
+                        db, clinicIds: [clinica_id], patientId: paciente.id_paciente,
+                        leadId: resolvedLeadIntakeId, transaction,
+                    });
+                    if (attendance && req.body?.attendance_incident_ack !== attendance.revision) {
+                        throw Object.assign(new Error('Revisa las últimas citas antes de continuar.'), {
+                            code: 'patient_attendance_confirmation_required', attendance,
+                        });
+                    }
+                }
+
                 // La cita y un cambio explícito de idioma forman una única unidad. Si
                 // falla la actualización del paciente, la transacción elimina también
                 // la cita y ningún flujo puede arrancar con el idioma anterior.
@@ -2386,6 +2427,9 @@ exports.createCita = asyncHandler(async (req, res) => {
         }
         return res.status(201).json(payload);
     } catch (err) {
+        if (err?.code === 'patient_attendance_confirmation_required') {
+            return res.status(409).json({ code: err.code, message: err.message, attendance: err.attendance });
+        }
         if (['appointment_lead_link_changed', 'appointment_lead_patient_mismatch'].includes(err?.code)) {
             return res.status(409).json({ code: err.code, message: err.message });
         }

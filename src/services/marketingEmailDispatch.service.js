@@ -53,6 +53,11 @@ async function assertEmailReviewCanDispatch(message, { recipientEmail = null } =
   const explicitReview = eligibility.nonOperationalClinicCommunication(communication);
   if (explicitReview) eligibility.assertClinicNonOperationalAllowed(Number(current.clinica_id), communication);
   const relatedCampaign = ['marketing_bulk_send', 'marketing_bulk_send_test'].includes(current.related_type);
+  if (current.stream === 'marketing' || relatedCampaign || explicitReview) {
+    await require('./patientIncidents.service').assertCommercialAllowed({
+      db, clinicId: current.clinica_id, patientId: current.paciente_id, email: recipientEmail,
+    });
+  }
   const checkPrivacyRefusal = async (clinicId, patientId) => {
     if (![66, 72].includes(Number(clinicId))) return;
     await require('../lib/bs-privacy-commercial-preferences').assertCommercialAllowed({ db, clinicIds: [Number(clinicId)],

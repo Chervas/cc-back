@@ -20,6 +20,7 @@ router.get('/:id/imported-odontogram', pacienteController.getImportedPatientOdon
 router.get('/:id/imported-catalog', pacienteController.getImportedPatientCatalog);
 router.get('/:id/mobile-verification', require('../controllers/patientMobileVerification.controller').get);
 router.post('/:id/mobile-verification', require('../controllers/patientMobileVerification.controller').resolve);
+router.patch('/:id/incidents', require('../controllers/patientIncidents.controller').set);
 router.get('/:id/communication-preferences', require('../controllers/patientCommunication.controller').get);
 router.post('/:id/communication-preferences', require('../controllers/patientCommunication.controller').set);
 router.get('/:id/clinical-attachments', patientClinicalAttachmentsController.listPatientClinicalAttachments);
