@@ -1984,8 +1984,8 @@ exports.getAttendanceIncident = asyncHandler(async (req, res) => {
             }
         }
     }
-    const attendance = await require('../services/patientIncidents.service').attendance({ db, clinicIds: [clinicId], patientId, leadId });
-    return res.json({ attendance });
+    const incident = await require('../services/patientIncidents.service').bookingIncident({ db, clinicIds: [clinicId], patientId, leadId });
+    return res.json({ incident, attendance: incident?.kind === 'attendance' ? incident : null });
 });
 
 exports.createCita = asyncHandler(async (req, res) => {
@@ -2186,26 +2186,15 @@ exports.createCita = asyncHandler(async (req, res) => {
             clinicTimezone
         });
 
-        if (resourceConflicts.length) {
-            const wantsForce = parseBool(force);
-
-            if (!wantsForce || !canForce) {
-                const firstLegacy = legacyConflicts[0];
-                const reason = (firstLegacy && ['overlap', 'blocked', 'out_of_hours', 'doctor_unavailable'].includes(firstLegacy.type))
-                    ? firstLegacy.type
-                    : 'blocked';
-
-                return res.status(409).json({
-                    reason,
-                    message: 'No hay disponibilidad para el rango solicitado.',
-                    can_force: canForce,
-                    resource_conflicts: resourceConflicts,
-                    // Compatibilidad con el frontend legacy actual
-                    conflicts: legacyConflicts
-                });
-            }
-            // wantsForce && canForce -> seguimos
-        }
+        const firstLegacy = legacyConflicts[0];
+        const legacyConflict = resourceConflicts.length && (!parseBool(force) || !canForce) ? {
+            reason: ['overlap', 'blocked', 'out_of_hours', 'doctor_unavailable'].includes(firstLegacy?.type) ? firstLegacy.type : 'blocked',
+            message: 'No hay disponibilidad para el rango solicitado.',
+            can_force: canForce,
+            resource_conflicts: resourceConflicts,
+            conflicts: legacyConflicts,
+        } : null;
+        if (legacyConflict && !canForce) return res.status(409).json(legacyConflict);
 
         // Patient identity, history number, links and booking either commit
         // together or leave no patient behind after a warning/error/cancel.
@@ -2232,17 +2221,21 @@ exports.createCita = asyncHandler(async (req, res) => {
                     resolvedLeadIntakeId = parsePositiveInt(lead?.id) || null;
                 }
 
-                if (!isHistoricalRegistration) {
-                    const attendance = await require('../services/patientIncidents.service').attendance({
-                        db, clinicIds: [clinica_id], patientId: paciente.id_paciente,
-                        leadId: resolvedLeadIntakeId, transaction,
+                const incident = isHistoricalRegistration ? null : await require('../services/patientIncidents.service').bookingIncident({
+                    db, clinicIds: [clinica_id], patientId: paciente.id_paciente,
+                    leadId: resolvedLeadIntakeId, transaction,
+                });
+                const pendingIncident = incident && req.body?.attendance_incident_ack !== incident.revision ? incident : null;
+                const requireIncidentConfirmation = () => {
+                    if (!pendingIncident) return;
+                    throw Object.assign(new Error('Revisa la incidencia del paciente antes de dar la cita.'), {
+                        code: 'patient_attendance_confirmation_required', bookingIncident: pendingIncident,
                     });
-                    if (attendance && req.body?.attendance_incident_ack !== attendance.revision) {
-                        throw Object.assign(new Error('Revisa las últimas citas antes de continuar.'), {
-                            code: 'patient_attendance_confirmation_required', attendance,
-                        });
-                    }
+                };
+                if (legacyConflict) {
+                    throw Object.assign(new Error(legacyConflict.message), { legacyConflict, bookingIncident: pendingIncident });
                 }
+                if (!bookingEnabled || pastHistoryOnly) requireIncidentConfirmation();
 
                 // La cita y un cambio explícito de idioma forman una única unidad. Si
                 // falla la actualización del paciente, la transacción elimina también
@@ -2326,6 +2319,7 @@ exports.createCita = asyncHandler(async (req, res) => {
                         expectedPlanSha256: req.body?.booking_plan_sha256,
                         visitBirth,
                         persist: async ({ values, existing, transaction, sealedBirth }) => {
+                            requireIncidentConfirmation();
                             // Recheck while holding the canonical patient/resource locks:
                             // two concurrent bookings must not bypass the same-day choice.
                             if (!sealedBirth) await require('../services/appointmentPatientLinks.service').choiceRequired(db,
@@ -2339,6 +2333,12 @@ exports.createCita = asyncHandler(async (req, res) => {
                                 req.body?.same_day_choice, Number(req.userData?.userId), transaction);
                             return created;
                         },
+                    }).catch(error => {
+                        if (pendingIncident && (error.code === 'booking_restriction_confirmation_required'
+                            || error.code === 'booking_unavailable' && error.details?.can_force === true)) {
+                            error.bookingIncident = pendingIncident;
+                        }
+                        throw error;
                     })
                     : await createAppointmentWithPatientLanguage(createOptions);
                 return { cita, visitBirth };
@@ -2427,14 +2427,17 @@ exports.createCita = asyncHandler(async (req, res) => {
         }
         return res.status(201).json(payload);
     } catch (err) {
+        const bookingIncident = err?.bookingIncident ? { booking_incident: err.bookingIncident } : {};
+        if (err?.legacyConflict) return res.status(409).json({ ...err.legacyConflict, ...bookingIncident });
         if (err?.code === 'patient_attendance_confirmation_required') {
-            return res.status(409).json({ code: err.code, message: err.message, attendance: err.attendance });
+            return res.status(409).json({ code: err.code, message: err.message, ...bookingIncident,
+                attendance: err.bookingIncident.kind === 'attendance' ? err.bookingIncident : null });
         }
         if (['appointment_lead_link_changed', 'appointment_lead_patient_mismatch'].includes(err?.code)) {
             return res.status(409).json({ code: err.code, message: err.message });
         }
         if (/^(care_|booking_|appointment_visit_|appointment_consent_|appointment_link_|appointment_same_day_|treatment_not_)/.test(String(err?.code || ''))) {
-            return res.status(err.statusCode || 409).json(bookingErrorPayload(err));
+            return res.status(err.statusCode || 409).json({ ...bookingErrorPayload(err), ...bookingIncident });
         }
         if (err.status === 400 && err.message === 'unsupported_patient_language') {
             return res.status(400).json({

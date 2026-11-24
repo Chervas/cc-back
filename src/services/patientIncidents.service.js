@@ -48,7 +48,9 @@ async function attendanceExpression(db, clinicIds) {
 async function patientFilter({ db, value, clinicIds }) {
   if (!value || value === 'all') return null;
   if (value === 'unwanted') return manualExpression('Paciente.id_paciente');
-  if (value === 'attendance') return attendanceExpression(db, clinicIds);
+  if (value === 'attendance') {
+    return `(NOT (${manualExpression('Paciente.id_paciente')}) AND ${await attendanceExpression(db, clinicIds)})`;
+  }
   throw Object.assign(new Error('Filtro de incidencias inválido'), { status: 400, code: 'patient_incident_filter_invalid' });
 }
 
@@ -85,11 +87,15 @@ async function latestEvent({ db, patientId, transaction }) {
   });
 }
 
+async function bookingIncident(options) {
+  const event = await latestEvent(options);
+  if (liveEvent(event)) return { kind: 'unwanted', label: 'No deseado', revision: `unwanted:${event.id}` };
+  const warning = await attendance(options);
+  return warning ? { ...warning, kind: 'attendance' } : null;
+}
+
 async function summary({ db, patientId, clinicIds, transaction }) {
-  const [event, warning] = await Promise.all([
-    latestEvent({ db, patientId, transaction }),
-    attendance({ db, patientId, clinicIds, transaction }),
-  ]);
+  const event = await latestEvent({ db, patientId, transaction });
   const active = liveEvent(event);
   const mayReadReason = active && clinicScope(clinicIds).includes(Number(event.clinic_id));
   let author = null;
@@ -103,7 +109,7 @@ async function summary({ db, patientId, clinicIds, transaction }) {
         review_id: event.metadata.review_id || null } : {}),
       editable_in_clinic: mayReadReason ? event.clinic_id : null,
     } : null,
-    attendance: warning,
+    attendance: active ? null : await attendance({ db, patientId, clinicIds, transaction }),
   };
 }
 
@@ -152,4 +158,4 @@ async function assertCommercialAllowed(options) {
   });
 }
 
-module.exports = { patientFilter, attendanceIncident, attendance, summary, setUnwanted, unwantedRecipient, assertCommercialAllowed };
+module.exports = { patientFilter, attendanceIncident, attendance, bookingIncident, summary, setUnwanted, unwantedRecipient, assertCommercialAllowed };

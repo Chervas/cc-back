@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const incidents = require('../../services/patientIncidents.service');
 const previous = { id_cita: 1, estado: 'no_asistio', inicio: '2026-10-02T09:00:00Z' };
 const latest = { id_cita: 2, estado: 'reprogramada', inicio: '2026-10-03T10:30:00Z' };
-const restricted = { clinic_id: 72, actor_user_id: 4, occurred_at: new Date(), metadata: { active: true, reason: 'Motivo ficticio' } };
+const restricted = { id: 8, clinic_id: 72, actor_user_id: 4, occurred_at: new Date(), metadata: { active: true, reason: 'Motivo ficticio' } };
 
 test('two latest appointments determine the banner and the acknowledgement', () => {
   const warning = incidents.attendanceIncident([latest, previous]);
@@ -65,6 +65,9 @@ test('reason remains limited to the clinic that recorded it even when block appl
   assert.equal(own.unwanted.editable_in_clinic, 72);
   const other = await incidents.summary({ db, patientId: 17, clinicIds: [66] });
   assert.deepEqual(other.unwanted, { editable_in_clinic: null });
+  assert.equal(own.attendance, null);
+  assert.deepEqual(await incidents.bookingIncident({ db, patientId: 17, clinicIds: [72] }),
+    { kind: 'unwanted', label: 'No deseado', revision: 'unwanted:8' });
   await assert.rejects(incidents.setUnwanted({ db, patientId: 17, clinicId: 66, active: false }), { code: 'patient_incident_other_clinic' });
 });
 
@@ -89,15 +92,15 @@ test('the filters and messages read the actual MySQL history with and without vi
         (3,17,41,72,'cancelada',UTC_TIMESTAMP()-INTERVAL 1 DAY,UTC_TIMESTAMP()-INTERVAL 1 DAY,1,NULL),
         (5,17,41,66,'completada',UTC_TIMESTAMP()-INTERVAL 1 DAY,UTC_TIMESTAMP()-INTERVAL 1 DAY,0,NULL)`);
       await incidents.setUnwanted({ db: models, patientId: 17, clinicId: 72, actorId: 4, active: true, reason: 'Motivo ficticio' });
-      const checkFilter = async value => {
+      const checkFilter = async (value, expected) => {
         const condition = await incidents.patientFilter({ db: models, value, clinicIds: [72] });
         const [rows] = await sql.query(`SELECT id_paciente FROM Pacientes Paciente WHERE ${condition}`);
-        assert.deepEqual(rows.map(row => row.id_paciente), [17]);
+        assert.deepEqual(rows.map(row => row.id_paciente), expected);
       };
       // The deployed CRM schema lacks the visit-package tables. All common
       // entry points must still use attendance data and accept a new contact.
-      await checkFilter('unwanted');
-      await checkFilter('attendance');
+      await checkFilter('unwanted', [17]);
+      await checkFilter('attendance', []);
       await sql.transaction(async transaction => {
         assert.equal(await incidents.attendance({ db: models, clinicIds: [72], patientId: 18, transaction }), null);
         assert.equal((await incidents.attendance({ db: models, clinicIds: [72], patientId: 17, transaction })).label, 'No suele acudir');
@@ -107,12 +110,13 @@ test('the filters and messages read the actual MySQL history with and without vi
       await sql.query('CREATE TABLE AppointmentVisitMembers (appointment_id INT PRIMARY KEY,role VARCHAR(24))');
       await sql.query("INSERT INTO CitasPacientes VALUES (4,17,41,72,'completada',UTC_TIMESTAMP()-INTERVAL 2 DAY,UTC_TIMESTAMP()-INTERVAL 2 DAY,0,NULL)");
       await sql.query("INSERT INTO AppointmentVisitMembers VALUES (4,'prp_extraction')");
-      await checkFilter('attendance');
+      await checkFilter('attendance', []);
       assert.equal((await incidents.attendance({ db: models, clinicIds: [72], leadId: 41 })).label, 'No suele acudir');
       await assert.rejects(incidents.assertCommercialAllowed({ db: models, clinicId: 72, phone: '+34600111222' }), { code: 'PATIENT_INCIDENT_COMMERCIAL_BLOCK' });
       assert.equal(await incidents.unwantedRecipient({ db: models, clinicId: 66, phone: '+34600111222' }), false);
       assert.equal(await incidents.unwantedRecipient({ db: models, clinicId: 72, phone: '+34600111233' }), true);
       await incidents.setUnwanted({ db: models, patientId: 17, clinicId: 72, actorId: 4, active: false });
+      await checkFilter('attendance', [17]);
       assert.equal(await incidents.unwantedRecipient({ db: models, clinicId: 72, patientId: 17 }), false);
       report.checks.push('SQL filters, histories and exact commercial destinations matched synthetic authenticated clinic scope');
     });

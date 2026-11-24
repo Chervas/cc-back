@@ -156,6 +156,47 @@ test('lead booking HTTP: stable occupied-slot confirmation, patient/NHC rollback
             await Promise.allSettled([normal, booking].filter(Boolean));
           }
         });
+        await t.test('occupied booking requires both the dominant patient incident and the availability acknowledgement', async () => {
+          const { DataTypes: D } = require('sequelize');
+          db.PatientOperationalEvent = f.sql.define('PatientOperationalEvent', {
+            id: { type: D.INTEGER, autoIncrement: true, primaryKey: true },
+            patient_id: D.INTEGER, clinic_id: D.INTEGER, event_type: D.STRING, metadata: D.JSON,
+          }, { timestamps: false });
+          await db.PatientOperationalEvent.sync();
+          const incidents = require('../../services/patientIncidents.service');
+          const patient = await db.Paciente.create({ public_id: 'pac_incident_booking_fixture', nombre: 'Paciente ficticio', apellidos: 'Incidencia',
+            telefono_movil: '34600000650', clinica_id: 100 });
+          const patientId = patient.id_paciente;
+          for (const daysAgo of [7, 3]) {
+            const inicio = new Date(Date.now() - daysAgo * 86400000);
+            await db.CitaPaciente.create(f.physical.values({ paciente_id: patientId, estado: 'no_asistio',
+              inicio, fin: new Date(+inicio + 600000) }));
+          }
+          await db.PatientOperationalEvent.create({ patient_id: patientId, clinic_id: 100, event_type: 'patient.incident.unwanted',
+            metadata: { active: true, reason: 'Motivo ficticio' } });
+          const input = f.body({ lead_intake_id: undefined,
+            paciente: { id_paciente: patientId, nombre: patient.nombre, telefono: patient.telefono_movil } });
+          const before = await f.snapshot();
+          const pending = await f.post(input);
+          assert.equal(pending.statusCode, 409, JSON.stringify(pending.body));
+          assert.equal(pending.body.code, 'booking_restriction_confirmation_required');
+          assert.equal(pending.body.booking_incident.kind, 'unwanted');
+          assert.equal(pending.body.booking_incident.events, undefined);
+          assert.equal(pending.body.booking_incident.reason, undefined);
+          const patientOnly = await f.post({ ...input, attendance_incident_ack: pending.body.booking_incident.revision });
+          assert.equal(patientOnly.body.code, 'booking_restriction_confirmation_required');
+          const availability = acknowledge(input, pending);
+          const slotOnly = await f.post(availability);
+          assert.equal(slotOnly.body.code, 'patient_attendance_confirmation_required');
+          assert.deepEqual(await f.snapshot(), before);
+          assert.equal((await f.post({ ...availability, attendance_incident_ack: pending.body.booking_incident.revision })).statusCode, 201);
+
+          await db.PatientOperationalEvent.create({ patient_id: patientId, clinic_id: 100, event_type: 'patient.incident.unwanted',
+            metadata: { active: false } });
+          const warning = await incidents.bookingIncident({ db, patientId, clinicIds: [100] });
+          assert.equal(warning.kind, 'attendance');
+          assert.equal(warning.events.length, 2);
+        });
         context.report.checks.push('Actual createCita controller and patient resolver, native patient/NHC hooks, identity/resource locks and canonical writer over owned MySQL: repeated/cancelled warnings roll back every patient-side write; an exact acknowledgement saves once; downstream failure is atomic; concurrency shares one patient; clinic scope precedes the twenty-contact limit. Native ordinary registration and lead booking interleave under an observed performance_schema NHC wait and both commit without a clinic-FK deadlock. Synthetic ACL and post-commit observer boundaries, zero provider/network/business-DB calls.');
       } finally { await f.close(); }
     }, { performanceSchema: true });
