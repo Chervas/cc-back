@@ -8,26 +8,37 @@ const instant = value => {
   return new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : value.replace(' ', 'T') + 'Z');
 };
 
-function todayCount(lead, attempts, now, start) {
+function mergeLeadContactAttempts(attempts, history) {
   // SQL DATETIME stores seconds, while legacy JSON retains milliseconds.
   // Match mirrored records one-to-one by second, author, channel and reason;
   // retain multiplicity and never count a lifetime aggregate as "today".
   const key = (row, date) => JSON.stringify([Math.floor(+date / 1000),
     row.usuario_id ?? null, row.canal || 'llamada', String(row.motivo || '').replace(/^lead_auto_reply:.+$/, 'lead_auto_reply')]);
-  const counts = new Map(); let total = 0;
-  for (const row of attempts) {
-    const date = instant(row.created_at);
-    if (!(date >= start && date <= now)) continue;
-    const k = key(row, date); counts.set(k, (counts.get(k) || 0) + 1); total++;
+  const unmatched = new Map();
+  const merged = [...attempts];
+  for (const [index, row] of attempts.entries()) {
+    const k = key(row, instant(row.created_at));
+    if (!unmatched.has(k)) unmatched.set(k, []);
+    unmatched.get(k).push(index);
   }
-  for (const row of Array.isArray(lead.historial_contactos) ? lead.historial_contactos : []) {
+  for (const row of Array.isArray(history) ? history : []) {
     if (!row) continue;
-    const date = instant(row.fecha);
-    if (!(date >= start && date <= now)) continue;
-    const k = key(row, date), available = counts.get(k) || 0;
-    if (available) counts.set(k, available - 1); else total++;
+    const k = key(row, instant(row.fecha));
+    const index = unmatched.get(k)?.shift();
+    if (index === undefined) merged.push({ ...row, created_at: row.fecha });
+    else if (!merged[index].notas && row.notas) merged[index] = { ...merged[index], notas: row.notas };
   }
-  return total;
+  return merged;
+}
+
+function todayCount(lead, attempts, now, start) {
+  const inRange = value => {
+    const date = instant(value);
+    return date >= start && date <= now;
+  };
+  const history = Array.isArray(lead.historial_contactos) ? lead.historial_contactos : [];
+  return mergeLeadContactAttempts(attempts.filter(row => inRange(row.created_at)),
+    history.filter(row => inRange(row?.fecha))).length;
 }
 
 async function enrichContactSummary({ models, leads, now = new Date() }) {
@@ -47,4 +58,4 @@ async function enrichContactSummary({ models, leads, now = new Date() }) {
   return leads.map(lead => ({ ...lead, num_contactos_hoy: todayCount(lead, grouped.get(Number(lead.id)) || [], now, start), contactos_hoy_fecha: today }));
 }
 
-module.exports = { enrichContactSummary, todayCount };
+module.exports = { enrichContactSummary, mergeLeadContactAttempts, todayCount };

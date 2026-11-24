@@ -39,6 +39,7 @@ const { extractMetaWebAttribution, WEB_LEAD_SOURCES } = require('../lib/meta-web
 const { resolveWorkspaceWebAdIdentity } = require('../services/campaignWorkspaceWebAdAttribution.service');
 const { resolveMetaWebLeadIdentity } = require('../services/leadAdvertisingIdentity.service');
 const { normalizeCallState, leadCallStateWhere, countLeadCallStates, enrichLeadCallState } = require('../services/leadCallState.service');
+const { enrichContactSummary, mergeLeadContactAttempts } = require('../services/leadContactSummary.service');
 const {
   normalizeGoogleConsent,
 } = require('../services/googleAdsConversionUpload.service');
@@ -2554,7 +2555,7 @@ const enrichLeadsForUi = async (leadRows = []) => {
   const withAppointments = await enrichLeadsWithLinkedAppointments(withPatientMatches);
   const withConversations = await enrichLeadsWithConversationState(withAppointments);
   const withPatientContext = await require('../services/leadPatientContext.service').enrich(withConversations);
-  const withContacts = await require('../services/leadContactSummary.service').enrichContactSummary({ models: db, leads: withPatientContext });
+  const withContacts = await enrichContactSummary({ models: db, leads: withPatientContext });
   const withCalls = await enrichLeadCallState({ models: db, leads: withContacts });
   return require('../services/leadHumanInteraction.service').enrichHumanInteraction({ models: db, leads: withCalls });
 };
@@ -6872,6 +6873,29 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
   }
   if (!(await ensureLeadFeatureAccess(req, res, lead, 'leads.sensitive.view'))) return;
 
+  const [attempts, contactAudits] = await Promise.all([
+    LeadContactAttempt.findAll({
+      where: { lead_intake_id: leadId },
+      attributes: ['id', 'created_at', 'usuario_id', 'canal', 'motivo', 'notas'],
+      order: [['id', 'ASC']],
+      raw: true,
+    }),
+    LeadAttributionAudit.findAll({
+      where: {
+        lead_intake_id: leadId,
+        [Op.and]: literal(`(
+          JSON_UNQUOTE(JSON_EXTRACT(attribution_steps, '$.action')) = 'call_outcome'
+          OR (JSON_UNQUOTE(JSON_EXTRACT(attribution_steps, '$.action')) = 'status_update'
+            AND JSON_CONTAINS_PATH(raw_payload, 'one', '$.notas_internas') = 1)
+        )`),
+      },
+      attributes: ['id', 'created_at', 'attribution_steps', 'raw_payload'],
+      order: [['id', 'ASC']],
+      raw: true,
+    }),
+  ]);
+  const contactAttempts = mergeLeadContactAttempts(attempts, lead.historial_contactos);
+
   if (lead.telefono && lead.clinica_id) {
     await findCanonicalWhatsappConversation({
       clinicId: lead.clinica_id,
@@ -6954,6 +6978,8 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
 
   const actorIds = Array.from(new Set(
     [
+      ...contactAttempts.map((attempt) => Number(attempt.usuario_id)),
+      ...contactAudits.map((audit) => Number(audit.attribution_steps?.userId)),
       ...messages.map((message) => Number(message.sender_id)),
       ...appointments.map((appointment) => Number(toPlain(appointment)?.created_by)),
       ...appointments.map((appointment) => Number(toPlain(appointment)?.updated_by)),
@@ -6970,6 +6996,10 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
       })
     : [];
   const usuariosById = new Map(usuarios.map((usuario) => [Number(usuario.id_usuario), usuario]));
+  const contactActorName = (userId) => {
+    const user = usuariosById.get(Number(userId));
+    return user ? ([user.nombre, user.apellidos].filter(Boolean).join(' ').trim() || 'Usuario') : null;
+  };
 
   const items = [];
   const appointmentsWithStatusHistory = new Set(
@@ -7009,20 +7039,49 @@ exports.getLeadActivity = asyncHandler(async (req, res) => {
     });
   }
 
-  for (const contacto of Array.isArray(lead.historial_contactos) ? lead.historial_contactos : []) {
+  const channelLabels = { llamada: 'Llamada', whatsapp: 'WhatsApp', email: 'Correo electrónico', dm: 'Mensaje directo' };
+  const messageIds = new Set(messages.map((message) => Number(message.id)));
+  for (const [index, contacto] of contactAttempts.entries()) {
+    const automaticReply = /^lead_auto_reply(?::(\d+))?$/.exec(contacto.motivo || '');
+    if (automaticReply && messageIds.has(Number(automaticReply[1] || contacto.message_id))) continue;
+    const channel = normalizeLeadContactChannel(contacto.canal);
+    const reason = automaticReply ? 'Respuesta automática registrada' : formatLeadContactReason(contacto.motivo);
+    const note = automaticReply && contacto.id ? null : cleanString(contacto.notas);
     items.push({
-      id: `lead-contact-${leadId}-${contacto.fecha}`,
+      id: contacto.id ? `lead-attempt-${contacto.id}` : `lead-contact-${leadId}-${index}`,
       leadId: String(leadId),
-      fecha: contacto.fecha || lead.updated_at || lead.created_at,
+      fecha: contacto.created_at || lead.updated_at || lead.created_at,
       tipo: 'lead_contact_attempt',
-      titulo: 'Contacto registrado',
-      descripcion: contacto.notas || formatLeadContactReason(contacto.motivo) || 'Intento de contacto',
-      icono: 'heroicons_outline:phone',
+      titulo: channelLabels[channel] || 'Contacto registrado',
+      descripcion: [reason, note === reason ? null : note].filter(Boolean).join(' · ') || 'Intento de contacto',
+      icono: channel === 'llamada' ? 'heroicons_outline:phone' : 'heroicons_outline:chat-bubble-left-right',
       color: 'warning',
       usuarioId: contacto.usuario_id ? String(contacto.usuario_id) : null,
-      detalles: {
-        motivo: contacto.motivo || null,
-      },
+      usuarioNombre: automaticReply ? 'Sistema' : contactActorName(contacto.usuario_id),
+      detalles: { motivo: contacto.motivo || null, canal: channel },
+    });
+  }
+
+  const callOutcomeLabels = { citado: 'Cita agendada', informacion: 'Solo pidió información', no_contactado: 'No contesta' };
+  for (const audit of contactAudits) {
+    const { action, userId } = audit.attribution_steps || {};
+    if (!(parseInteger(userId) > 0)) continue;
+    const payload = audit.raw_payload || {};
+    const isCall = action === 'call_outcome';
+    const result = isCall ? callOutcomeLabels[payload.outcome] : null;
+    if (isCall && !result) continue;
+    const note = cleanString(isCall ? payload.notes : payload.notas_internas);
+    items.push({
+      id: `lead-contact-audit-${audit.id}`,
+      leadId: String(leadId),
+      fecha: audit.created_at,
+      tipo: isCall ? 'lead_contact_attempt' : 'lead_internal_note',
+      titulo: isCall ? 'Llamada' : (note ? 'Nota interna guardada' : 'Nota interna eliminada'),
+      descripcion: [result, note === result ? null : note].filter(Boolean).join(' · ') || null,
+      icono: isCall ? 'heroicons_outline:phone' : 'heroicons_outline:document-text',
+      color: isCall ? 'warning' : 'info',
+      usuarioId: String(userId),
+      usuarioNombre: contactActorName(userId),
     });
   }
 
@@ -7341,7 +7400,7 @@ exports.registrarContacto = asyncHandler(async (req, res) => {
   }
 
   // Obtener historial actual o inicializar
-  const historial = lead.historial_contactos || [];
+  const historial = Array.isArray(lead.historial_contactos) ? [...lead.historial_contactos] : [];
   
   // Añadir nuevo registro de contacto
   const contactedAt = new Date();
