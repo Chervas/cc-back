@@ -1004,7 +1004,7 @@ exports.getAllPacientes = async (req, res) => {
       ]
     };
 
-    const incidence = patientIncidents.patientFilter(req.query.incident, readableClinicIds);
+    const incidence = await patientIncidents.patientFilter({ db, value: req.query.incident, clinicIds: readableClinicIds });
     if (incidence) {
       if (!await canViewSensitivePatientData(req, readableClinicIds)) {
         return res.status(403).json({ code: 'patient_detail_forbidden' });
@@ -1118,7 +1118,7 @@ exports.searchPacientes = async (req, res) => {
       ]
     };
 
-    const incidence = patientIncidents.patientFilter(req.query.incident, clinicIdsList);
+    const incidence = await patientIncidents.patientFilter({ db, value: req.query.incident, clinicIds: clinicIdsList });
     if (incidence) whereClause[Op.and].push(literal(incidence));
 
     const pacientes = await Paciente.findAll({

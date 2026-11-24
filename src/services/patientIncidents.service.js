@@ -17,31 +17,38 @@ function manualExpression(patientSql) {
 
 const appointmentHistoryDate = "CASE WHEN a.estado = 'reprogramada' THEN LEAST(a.inicio, a.updated_at) ELSE a.inicio END";
 
-function appointmentHistorySql(scopeSql) {
+async function appointmentHistorySql(scopeSql, { db, transaction } = {}) {
+  // Visit packages have their own migration and may be absent in CRM.
+  // Without that table there are no linked extraction rows to exclude.
+  const visitMembersAvailable = await db.sequelize.getQueryInterface().tableExists(
+    'AppointmentVisitMembers', { transaction, logging: false },
+  );
+  const excludeExtractions = visitMembersAvailable
+    ? "AND NOT EXISTS (SELECT 1 FROM AppointmentVisitMembers avm WHERE avm.appointment_id = a.id_cita AND avm.role = 'prp_extraction')"
+    : '';
   return `FROM CitasPacientes a WHERE (${scopeSql})
     AND COALESCE(a.es_provisional, 0) = 0
-    AND NOT EXISTS (SELECT 1 FROM AppointmentVisitMembers avm
-      WHERE avm.appointment_id = a.id_cita AND avm.role = 'prp_extraction')
+    ${excludeExtractions}
     AND a.estado IN (${BOOKING_STATUSES.map(value => `'${value}'`).join(',')})
     AND ${appointmentHistoryDate} BETWEEN DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 YEAR) AND UTC_TIMESTAMP()
     AND NOT (a.estado = 'reprogramada' AND COALESCE(a.reschedule_reason, '') IN ('clinic_schedule','administrative_error'))
     ORDER BY ${appointmentHistoryDate} DESC, a.id_cita DESC`;
 }
 
-function attendanceExpression(clinicIds) {
+async function attendanceExpression(db, clinicIds) {
   const ids = clinicScope(clinicIds);
   if (!ids.length) return 'FALSE';
-  const from = appointmentHistorySql(`a.paciente_id = Paciente.id_paciente AND a.clinica_id IN (${ids.join(',')})`);
+  const from = await appointmentHistorySql(`a.paciente_id = Paciente.id_paciente AND a.clinica_id IN (${ids.join(',')})`, { db });
   const latest = `(SELECT a.estado ${from} LIMIT 1)`;
   const previous = `(SELECT a.estado ${from} LIMIT 1 OFFSET 1)`;
   return `((${latest} = 'cancelada' AND ${previous} = 'cancelada')
     OR (${latest} IN ('no_asistio','reprogramada') AND ${previous} = 'no_asistio'))`;
 }
 
-function patientFilter(value, clinicIds) {
+async function patientFilter({ db, value, clinicIds }) {
   if (!value || value === 'all') return null;
   if (value === 'unwanted') return manualExpression('Paciente.id_paciente');
-  if (value === 'attendance') return attendanceExpression(clinicIds);
+  if (value === 'attendance') return attendanceExpression(db, clinicIds);
   throw Object.assign(new Error('Filtro de incidencias inválido'), { status: 400, code: 'patient_incident_filter_invalid' });
 }
 
@@ -62,7 +69,8 @@ async function attendance({ db, clinicIds, patientId, leadId, transaction }) {
   if (!ids.length || !positive(patientId) && !positive(leadId)) return null;
   const identities = [positive(patientId) ? 'a.paciente_id = :patientId' : '', positive(leadId) ? 'a.lead_intake_id = :leadId' : ''].filter(Boolean);
   const scope = `a.clinica_id IN (:clinicIds) AND (${identities.join(' OR ')})`;
-  const rows = await db.sequelize.query(`SELECT a.id_cita, a.estado, ${appointmentHistoryDate} AS incident_at ${appointmentHistorySql(scope)} LIMIT 2`, {
+  const history = await appointmentHistorySql(scope, { db, transaction });
+  const rows = await db.sequelize.query(`SELECT a.id_cita, a.estado, ${appointmentHistoryDate} AS incident_at ${history} LIMIT 2`, {
     replacements: { clinicIds: ids, patientId: Number(patientId) || null, leadId: Number(leadId) || null },
     type: QueryTypes.SELECT, transaction,
   });
