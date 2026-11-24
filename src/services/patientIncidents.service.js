@@ -121,15 +121,19 @@ async function unwantedRecipient({ db, clinicId, patientId, phone, email, transa
   if (digits) candidates.push(`00${digits}`);
   const address = typeof email === 'string' ? email.trim().toLowerCase() : '';
   if (!candidates.length && !address) return false;
-  const identities = [candidates.length ? "(p.telefono_movil IN (:phones) OR REGEXP_REPLACE(p.telefono_movil, '[^0-9]', '') IN (:phones))" : '', address ? 'LOWER(p.email) = :email' : ''].filter(Boolean);
-  const rows = await db.sequelize.query(`SELECT p.telefono_movil, p.email FROM Pacientes p
+  const identities = [
+    ...(candidates.length ? ['telefono_movil', 'telefono_secundario'].map(field =>
+      `(p.${field} IN (:phones) OR REGEXP_REPLACE(p.${field}, '[^0-9]', '') IN (:phones))`) : []),
+    ...(address ? ['LOWER(p.email) = :email'] : []),
+  ];
+  const rows = await db.sequelize.query(`SELECT p.telefono_movil, p.telefono_secundario, p.email FROM Pacientes p
     WHERE (${identities.join(' OR ')})
       AND (p.clinica_id = :clinicId OR EXISTS (SELECT 1 FROM PacienteClinicas pc
         WHERE pc.paciente_id = p.id_paciente AND pc.clinica_id = :clinicId))
       AND ${manualExpression('p.id_paciente')}`, {
     replacements: { clinicId, phones: candidates, email: address }, type: QueryTypes.SELECT, transaction,
   });
-  return rows.some(row => (digits && normalizePhoneDigits(row.telefono_movil) === digits)
+  return rows.some(row => (digits && [row.telefono_movil, row.telefono_secundario].some(value => normalizePhoneDigits(value) === digits))
     || (address && String(row.email || '').trim().toLowerCase() === address));
 }
 

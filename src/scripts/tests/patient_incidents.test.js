@@ -62,7 +62,7 @@ test('the filters and messages read the actual MySQL history without crossing cl
   { skip: process.env.CAMPAIGN_OPTIMIZATION_MYSQL_TEST !== '1', timeout: 120000 }, async () => {
     const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
     await withIsolatedCampaignMysql(async ({ sql, models, report }) => {
-      await sql.query('CREATE TABLE Pacientes (id_paciente INT PRIMARY KEY, clinica_id INT, telefono_movil VARCHAR(32), email VARCHAR(80))');
+      await sql.query('CREATE TABLE Pacientes (id_paciente INT PRIMARY KEY, clinica_id INT, telefono_movil VARCHAR(32), telefono_secundario VARCHAR(32), email VARCHAR(80))');
       await sql.query('CREATE TABLE PacienteClinicas (paciente_id INT, clinica_id INT)');
       await sql.query('CREATE TABLE CitasPacientes (id_cita INT PRIMARY KEY,paciente_id INT,lead_intake_id INT,clinica_id INT,estado VARCHAR(24),inicio DATETIME,updated_at DATETIME,es_provisional BOOLEAN,reschedule_reason VARCHAR(32))');
       await sql.query('CREATE TABLE AppointmentVisitMembers (appointment_id INT PRIMARY KEY,role VARCHAR(24))');
@@ -73,7 +73,7 @@ test('the filters and messages read the actual MySQL history without crossing cl
         event_type: DataTypes.STRING, source: DataTypes.STRING, metadata: DataTypes.JSON, occurred_at: DataTypes.DATE,
       }, { tableName: 'PatientOperationalEvents', timestamps: false });
       await models.PatientOperationalEvent.sync();
-      await sql.query("INSERT INTO Pacientes VALUES (17,72,'+34 600 111 222','qa@example.test'),(18,66,'+34 600 111 222','other@example.test')");
+      await sql.query("INSERT INTO Pacientes VALUES (17,72,'+34 600 111 222','0034 600 111 233','qa@example.test'),(18,66,'+34 600 111 222',NULL,'other@example.test')");
       await sql.query(`INSERT INTO CitasPacientes VALUES
         (1,17,41,72,'no_asistio',UTC_TIMESTAMP()-INTERVAL 18 DAY,UTC_TIMESTAMP()-INTERVAL 18 DAY,0,NULL),
         (2,17,41,72,'reprogramada',UTC_TIMESTAMP()+INTERVAL 1 DAY,UTC_TIMESTAMP()-INTERVAL 4 DAY,0,'patient_request'),
@@ -90,6 +90,7 @@ test('the filters and messages read the actual MySQL history without crossing cl
       assert.equal(await incidents.attendance({ db: models, clinicIds: [66], leadId: 41 }), null);
       await assert.rejects(incidents.assertCommercialAllowed({ db: models, clinicId: 72, phone: '+34600111222' }), { code: 'PATIENT_INCIDENT_COMMERCIAL_BLOCK' });
       assert.equal(await incidents.unwantedRecipient({ db: models, clinicId: 66, phone: '+34600111222' }), false);
+      assert.equal(await incidents.unwantedRecipient({ db: models, clinicId: 72, phone: '+34600111233' }), true);
       await incidents.setUnwanted({ db: models, patientId: 17, clinicId: 72, actorId: 4, active: false });
       assert.equal(await incidents.unwantedRecipient({ db: models, clinicId: 72, patientId: 17 }), false);
       report.checks.push('SQL filters, histories and exact commercial destinations matched synthetic authenticated clinic scope');

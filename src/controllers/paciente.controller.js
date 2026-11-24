@@ -1,5 +1,5 @@
-const patientIncidents = require('../services/patientIncidents.service');
 'use strict';
+const patientIncidents = require('../services/patientIncidents.service');
 const {
   Paciente,
   Clinica,
