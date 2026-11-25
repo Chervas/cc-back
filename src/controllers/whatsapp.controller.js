@@ -94,6 +94,7 @@ const paymentRecoveryTest = require('../services/whatsappPaymentRecoveryTest.ser
 });
 
 async function handlePaymentRecoveryTest(req, res, send) {
+  res.set('Cache-Control', 'no-store');
   try {
     const input = send ? req.body || {} : req.query || {};
     const result = await paymentRecoveryTest[send ? 'send' : 'get']({ clinicId: Number(input.clinic_id),
@@ -101,6 +102,10 @@ async function handlePaymentRecoveryTest(req, res, send) {
       requestId: input.request_id, ...(send ? { to: input.to } : {}) });
     res.json(result);
   } catch (error) {
+    if (error?.code === 'payment_test_rate_limited' || !send && error?.code === 'rate_limited') {
+      res.set('Retry-After', '60');
+      return res.status(429).json({ error: 'payment_test_rate_limited', retry_after_seconds: 60 });
+    }
     const status = [400, 403, 404, 409].includes(error.statusCode || error.status) ? error.statusCode || error.status : 503;
     const code = /^(payment_test_|payment_probe_)/.test(error.code || '') ? error.code : 'payment_test_unavailable';
     res.status(status).json({ error: code, retry_after_seconds: error.details?.retry_after_seconds || null });

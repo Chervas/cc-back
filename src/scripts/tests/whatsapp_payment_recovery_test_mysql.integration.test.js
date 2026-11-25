@@ -51,19 +51,23 @@ test('payment dialog command uses real SQL locks, JSON replay and isolated nativ
   await models.MarketingPatientContactEvent.sync();
   const normalizeText=value=>String(value||'').trim(), clinic={nombre_clinica:'TESTONLY clinic'};
   const resolveValue=native('resolveVariableValue',{normalizeKey:normalizeText,normalizeText,
-    resolveLastAttendedAppointmentDate:()=>'',CAMPAIGN_SENDER_VARIABLE_KEYS:new Set(['usuario_nombre','nombre_remitente','sender_name']),
+    resolveLastAttendedAppointmentDate:()=>'',isReviewRequestList:()=>false,
+    CAMPAIGN_SENDER_VARIABLE_KEYS:new Set(['usuario_nombre','nombre_remitente','sender_name']),
     resolveReviewDisplayClinicName:()=>clinic.nombre_clinica,resolveReviewSenderName:()=>'',
     resolveCampaignSenderName:list=>list.criteria.sender_name,
     resolvePatientFirstNameForTemplate:()=> 'Prueba'});
   const params=async({item,list})=>template.variables.map(v=>resolveValue(v.name,item,list,clinic));
   const deps={...models,require:name=>{assert.equal(name,'../lib/phone');return require('../../lib/phone');},
     ensureScopeAccess:(list,scope)=>{assert.equal(list.clinica_id,scope.clinicIds[0]);},
+    guardReviewCare:async()=>{},
     normalizeMassSendRecordKind:()=> 'campaign',asPlainObject:value=>value||{},normalizeText,normalizeTemplateUsage:normalizeText,
     isReviewTemplateUsage:()=>false,isCommercialTemplateUsage:()=>false,resolveWhatsappTemplate:async()=>template,
-    isHttpsUrl:()=>false,publicMediaPersonalizationService:{normalizeHexColor:()=>null},
+    isHttpsUrl:()=>false,resolveReviewTeamPhotoSelection:()=>null,publicMediaPersonalizationService:{normalizeHexColor:()=>null},
     assertReviewRequestCommunicationAllowed:async()=>({review:false}),getClinicIdForList:list=>list.clinica_id,
     loadClinicForTemplateVariables:async()=>clinic,resolveWhatsappClinicConfigForList:async()=>({phoneNumberId:'123456',wabaId:'TEST-WABA',originId:1}),
     isWhatsappRoutingConfigAvailable:()=>true,resolveWhatsappTemplateForClinic:async()=>template,
+    templateHasImageHeader:()=>false,normalizeDispatchContext:()=>null,
+    resolveTemplateCommercialFromMetaCategory:()=>false,resolveTemplateUsageFromMetaCategory:(_,usage)=>usage,
     buildMissingVariablesSummary:()=>[],assertTestSendCooldown:()=>{},buildTemplateParams:params,
     buildTemplateComponentsForSend:async()=>[],renderTemplatePreview:async args=>{let text=template.components[0].text;
       (await params(args)).forEach((value,i)=>{text=text.replace('{{'+(i+1)+'}}',value);});return text;},
@@ -82,14 +86,21 @@ test('payment dialog command uses real SQL locks, JSON replay and isolated nativ
   };
   deps.ensureDispatchableCampaignRecord=native('ensureDispatchableCampaignRecord',deps);
   const nativeSend=native('sendTest',deps);
+  let nativeError;
+  const auditedSend = async (...args) => {
+    try { return await nativeSend(...args); }
+    catch (error) { nativeError = error; throw error; }
+  };
   const integration=createService({db:models,authorize:async()=>true,now:()=>new Date('2030-01-02T10:00:00Z'),
     broker:{binding:async()=>({sendEnabled:true})},manual:{current:()=>false},payment:{derivePaymentSnapshot:data=>data.payment},
-    health:{summarizeAssetHealth:()=>({state:'blocked',reason_code:'meta_error_131042_payment_missing',provider_status:'CONNECTED',can_send:false})},bulk:{sendTest:nativeSend}});
+    health:{summarizeAssetHealth:()=>({state:'blocked',reason_code:'meta_error_131042_payment_missing',provider_status:'CONNECTED',can_send:false})},bulk:{sendTest:auditedSend}});
   const actual=await integration.send({...input,requestId:'22222222-2222-4222-8222-222222222222'});
+  assert.ifError(nativeError);
   assert.equal(actual.message_status,'pending');assert.equal(actual.recovered,false);assert.equal(calls,2);
   const stored=await models.Message.findByPk(actual.app_message_id);
   assert.equal(stored.content,actual.preview);assert.equal(stored.sent_at,null);
   assert.equal(stored.metadata.payment_recovery_probe,true);assert.equal(stored.metadata.kind,'mass_campaign_test');
+  assert.equal(stored.metadata.payment_check_only,true);
   assert.equal(await models.MarketingPatientContactEvent.count(),1);
   const diagnostic=await models.MarketingPatientList.findByPk(stored.metadata.list_id);
   const sample=await models.MarketingPatientListItem.findByPk(stored.metadata.item_id);
@@ -110,9 +121,10 @@ test('payment dialog command uses real SQL locks, JSON replay and isolated nativ
   const configuration=createService({db:models,authorize:async()=>true,now:()=>new Date('2030-01-02T10:00:00Z'),
     broker:{binding:async()=>({sendEnabled:true})},manual:{current:()=>false},payment:{derivePaymentSnapshot:data=>data.payment},
     health:{summarizeAssetHealth:()=>({state:'healthy',reason_code:'provider_connected',provider_status:'CONNECTED',can_send:true})},
-    bulk:{sendTest:nativeSend}});
+    bulk:{sendTest:auditedSend}});
   const dedicatedInput={...input,requestId:'33333333-3333-4333-8333-333333333333'};
   const dedicated=await configuration.send(dedicatedInput);
+  assert.ifError(nativeError);
   assert.equal(dedicated.mode,'configuration');assert.equal(dedicated.template_name,template.name);
   assert.equal(dedicated.preview,'Hola, este es un mensaje de prueba de configuración de Clinicaclick para TESTONLY clinic. No es necesario responder.');
   const dedicatedMessage=await models.Message.findByPk(dedicated.app_message_id);

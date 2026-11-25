@@ -2736,7 +2736,7 @@ function buildWhatsappSenderSnapshot(config = null) {
   };
 }
 
-async function resolveWhatsappClinicConfigForList(list, clinicId, body = {}) {
+async function resolveWhatsappClinicConfigForList(list, clinicId, body = {}, { diagnostic = false } = {}) {
   const safeClinicId = Number(clinicId || 0);
   if (!safeClinicId) return null;
   const originId = getRequestedWhatsappSenderOriginId(body, list);
@@ -2770,7 +2770,7 @@ async function resolveWhatsappClinicConfigForList(list, clinicId, body = {}) {
     : asset;
   const routing = resolveWhatsappRouting(effectiveAsset);
   const purpose = getWhatsappRoutingPurposeForList(list);
-  if (routing.role === 'secondary' && !routing.purposes.includes(purpose)) {
+  if (!diagnostic && routing.role === 'secondary' && !routing.purposes.includes(purpose)) {
     const error = new Error('El WhatsApp secundario elegido no está habilitado para este tipo de envío.');
     error.code = 'whatsapp_sender_purpose_not_allowed';
     error.status = 409;
@@ -2784,12 +2784,18 @@ async function resolveWhatsappClinicConfigForList(list, clinicId, body = {}) {
     error.status = 409;
     throw error;
   }
+  if (diagnostic && (!config.authorizedBroker?.sendEnabled || asset.additionalData?.routing_disabled
+    || require('../lib/whatsappManualDisconnect').current(asset, config.authorizedBroker)
+    || config.phoneNumberId !== list.criteria.phone_number_id || config.wabaId !== list.criteria.waba_id
+    || (asset.whatsappAuthorizationId || null) !== list.criteria.authorization_id)) {
+    throw Object.assign(new Error('payment_test_binding_changed'), { code: 'payment_test_binding_changed', status: 409 });
+  }
   return {
     ...config,
     clinicId: safeClinicId,
     clinicaId: safeClinicId,
     whatsapp_channel_role: routing.role,
-    routingPurpose: purpose,
+    routingPurpose: diagnostic ? null : purpose,
     originLabel: asset.waVerifiedName || asset.metaAssetName || config.originLabel || null,
   };
 }
@@ -9159,7 +9165,12 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
   ensureScopeAccess(list, scope);
   await guardReviewCare(scope, list);
   ensureDispatchableCampaignRecord(list, { allowPaymentTest: allowDiagnosticPaymentTest === true });
-  if (list.criteria?.whatsapp_payment_recovery_test === true) {
+  const diagnostic = allowDiagnosticPaymentTest === true && list.source === 'whatsapp_payment_recovery_test'
+    && list.status === 'archived' && list.criteria?.whatsapp_payment_recovery_test === true;
+  if (allowDiagnosticPaymentTest === true && !diagnostic) {
+    throw Object.assign(new Error('payment_test_not_dispatchable'), { code: 'payment_test_not_dispatchable', status: 409 });
+  }
+  if (diagnostic) {
     const criteria = list.criteria;
     const sample = await MarketingPatientListItem.findOne({ where: { id: body.item_id, list_id: list.id } });
     if (body.payment_recovery_probe !== true || body.channel && body.channel !== 'whatsapp'
@@ -9360,7 +9371,7 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
     err.status = 400;
     throw err;
   }
-  const clinicConfig = await resolveWhatsappClinicConfigForList(list, clinicId, body);
+  const clinicConfig = await resolveWhatsappClinicConfigForList(list, clinicId, body, { diagnostic });
   if (!isWhatsappRoutingConfigAvailable(clinicConfig)) {
     const err = new Error(clinicConfig?.routingUnavailable === true
       ? 'whatsapp_secondary_unavailable'
@@ -9465,6 +9476,7 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
       sender_origin_id: clinicConfig.originId || null,
       whatsapp_channel_role: resolveWhatsappChannelRole(clinicConfig),
       payment_recovery_probe: paymentRecoveryProbe,
+      ...(diagnostic ? { payment_check_only: true } : {}),
       ...(reviewTest ? {
         review_test_source_item_id: plainItem.custom_fields?.review_test_source_item_id ?? null,
         review_test_render_fingerprint: plainItem.custom_fields?.review_test_render_fingerprint || null,

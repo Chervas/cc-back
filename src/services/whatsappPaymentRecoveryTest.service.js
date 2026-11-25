@@ -1,6 +1,6 @@
 'use strict';
 
-const { normalizePhoneDigits } = require('../lib/phone');
+const { normalizePhoneDigits, normalizePhoneE164 } = require('../lib/phone');
 const paymentProbe = require('../lib/whatsapp-payment-recovery-probe');
 const { buildWhatsappTemplateVariableContract } = require('../lib/whatsapp-template-contract');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -24,13 +24,11 @@ function createService({ db = require('../../models'), bulk = require('./marketi
     if (!asset || !clinic || !(asset.assignmentScope === 'clinic' && Number(asset.clinicaId) === clinicId
       || asset.assignmentScope === 'group' && Number(asset.grupoClinicaId) === Number(clinic.grupoClinicaId) && Number(clinic.grupoClinicaId)>0)) fail('payment_test_phone_not_found',404);
     const binding = await broker.binding(clinicId,Number(asset.id),asset);
-    const sendingEnabled = binding?.sendEnabled === true && !manual.current(asset,binding);
+    const sendingEnabled = binding?.sendEnabled === true && !asset.additionalData?.routing_disabled && !manual.current(asset,binding);
     const snapshot = health.summarizeAssetHealth(asset);
     const paymentSnapshot = payment.derivePaymentSnapshot(asset.additionalData || {});
     let availability = paymentProbe.availability({asset,health:snapshot,now:now()});
     if (!sendingEnabled) availability = {allowed:false,reason:'payment_probe_sender_unavailable'};
-    const localBinding = await db.WhatsappChannelBinding.findOne({where:{clinic_id:clinicId,asset_id:asset.id,is_active:true},raw:true});
-    if (localBinding?.role === 'secondary' && !(localBinding.purposes || []).includes('bulk_campaigns')) availability = {allowed:false,reason:'payment_probe_purpose_unavailable'};
     const configurationTest = await evidence.createService({db,now}).read(asset,binding);
     const mode = paymentSnapshot.status === 'missing_payment_method' || paymentSnapshot.status === 'active' ? 'recovery' : 'configuration';
     const dedicatedCatalog = await db.WhatsappTemplateCatalog?.findOne({where:{family_key:CONFIGURATION_TEMPLATE_FAMILY,locale:'es',is_active:true},raw:true});
@@ -80,11 +78,12 @@ function createService({ db = require('../../models'), bulk = require('./marketi
     }
     return {list,message};
   }
-  function result(state, previousTest = null) {
+  function result(state, previousTest = null, noMessage = false) {
     const message = plain(previousTest?.message);
     const metadata = object(message?.metadata);
     const error = Array.isArray(metadata.wa_error) ? metadata.wa_error[0] : metadata.error?.error || metadata.error;
     const mode = previousTest?.list.criteria?.payment_test_mode || state.mode;
+    const waiting = metadata.dispatch_wait;
     return { success:true,available:state.availability,health:state.health,payment_status:state.paymentSnapshot.status,
       mode,configuration_test:state.configurationTest,
       delivery_confirmed:state.configurationTest.verified === true
@@ -95,26 +94,52 @@ function createService({ db = require('../../models'), bulk = require('./marketi
         name:state.asset.waVerifiedName || state.clinic.nombre_clinica },
       preview:state.preview,template_name:state.template?.name || null,template_category:state.template?.category || null,
       ...(previousTest ? {request_id:previousTest.list.criteria.request_id,app_message_id:message?.id || null,
-        message_status:message?.status || 'unknown',error_code:Number(error?.code) || null} : {}) };
+        message_status:message?.status || (noMessage ? 'not_sent' : 'unknown'),error_code:Number(error?.code) || null,
+        ...(['waiting','reconciling'].includes(waiting?.state) && message?.status === 'pending'
+          ? { transport_state: waiting.state, next_attempt_at: waiting.next_attempt_at || null } : {})} : {}) };
   }
+  const lockName = assetId => `cc-wa-payment-test:${Number(assetId)}`;
+
   async function get(input) {
     const state = await context(input);
-    return result(state,await previous(input,state.asset,true,state));
+    let stored = await previous(input,state.asset,true,state);
+    let noMessage = false;
+    if (stored && !stored.message) {
+      const [rows] = await db.sequelize.query('SELECT IS_FREE_LOCK(:lock) AS idle', { replacements: { lock: lockName(state.asset.id) } });
+      if (Number(rows[0]?.idle) === 1) {
+        stored = await previous({ ...input, requestId: stored.list.criteria.request_id }, state.asset);
+        noMessage = !!stored && !stored.message;
+      }
+    }
+    const output = result(state, stored, noMessage);
+    if (!input.requestId && output.available.allowed && !output.delivery_confirmed && !output.recovered) {
+      const user = await db.Usuario?.findByPk(input.userId, { attributes: ['telefono'], raw: true });
+      const suggested = normalizePhoneE164(user?.telefono);
+      if (/^\+[1-9][0-9]{9,14}$/.test(suggested || '')) output.suggested_to = suggested;
+    }
+    return output;
   }
   async function send(input) {
     if (typeof input.requestId !== 'string' || !UUID.test(input.requestId)) fail('payment_test_request_invalid',400);
     const to = normalizePhoneDigits(input.to);
     if (typeof input.to !== 'string' || input.to.length > 32 || !/^[+0-9 ()-]+$/.test(input.to)
       || !to || !/^\d{10,15}$/.test(to)) fail('payment_test_phone_invalid',400);
-    const initial = await context(input);
+    const prepare = async () => {
+      try { return await context(input); }
+      catch (error) {
+        if (error?.code === 'rate_limited') fail('payment_test_rate_limited', 429, { retry_after_seconds: 60 });
+        throw error;
+      }
+    };
+    const initial = await prepare();
     return db.sequelize.transaction(async transaction => {
-      const lock = `cc-wa-payment-test:${Number(initial.asset.id)}`;
+      const lock = lockName(initial.asset.id);
       const [rows] = await db.sequelize.query('SELECT GET_LOCK(:lock,0) AS acquired',{replacements:{lock},transaction});
       if (Number(rows[0]?.acquired) !== 1) fail('payment_test_in_progress');
       try {
-        const state = await context(input);
+        const state = await prepare();
         const existing = await previous(input,state.asset);
-        if (existing) return result(state,existing);
+        if (existing) return result(state,existing,!existing.message);
         if (!state.availability.allowed) fail(state.availability.reason,409,state.availability);
         const scope = {scope:'clinic',clinicIds:[input.clinicId]};
         const list = await db.MarketingPatientList.create({name:'Comprobacion de pago WhatsApp',objective_id:'mass_sends',
@@ -134,7 +159,8 @@ function createService({ db = require('../../models'), bulk = require('./marketi
           {allowDiagnosticPaymentTest:true});
         } catch (error) {
           const stored = await previous(input,state.asset);
-          if (!stored?.message) throw error;
+          if (!stored) throw error;
+          if (!stored.message) return result(state, stored, true);
         }
         const current = await context(input);
         return result(current,await previous(input,current.asset));

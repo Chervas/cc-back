@@ -3,6 +3,41 @@ const W = require('../lib/whatsapp-dispatch-wait');
 const db = () => require('../../models');
 const jobs = () => require('./jobRequests.service');
 const TYPE = 'whatsapp_authorized_dispatch_retry';
+const PROBE_MAX_AGE_MS = 10 * 60 * 1000;
+const isPaymentProbe = message => message.metadata?.source === 'marketing_bulk_sends'
+  && message.metadata.kind === 'mass_campaign_test' && message.metadata.payment_recovery_probe === true
+  && message.metadata.payment_check_only === true;
+
+async function assertRetryablePaymentProbe(models, list, message, wait) {
+  const m = message.metadata, c = list?.criteria;
+  const { clinicId, assetId, expectedBinding, message: payload } = wait.intent;
+  const asset = await models.ClinicMetaAsset.findByPk(assetId, { raw: true });
+  const proof = asset?.additionalData?.payment;
+  const created = Date.parse(message.createdAt || '');
+  const fail = () => { throw Object.assign(Error('payment_probe_retry_unavailable'), { code: 'payment_probe_retry_unavailable' }); };
+  if (!asset || asset.additionalData?.routing_disabled
+    || list?.source !== 'whatsapp_payment_recovery_test' || list.status !== 'archived'
+    || c?.whatsapp_payment_recovery_test !== true || message.direction !== 'outbound' || message.message_type !== 'template'
+    || Number(list.clinica_id) !== clinicId || Number(c.sender_origin_id) !== assetId || Number(m.sender_origin_id) !== assetId
+    || c.phone_number_id !== expectedBinding?.phoneId || c.waba_id !== expectedBinding?.wabaId
+    || m.phoneNumberId !== c.phone_number_id || m.wabaId !== c.waba_id
+    || asset?.phoneNumberId !== c.phone_number_id || asset?.wabaId !== c.waba_id
+    || (asset.whatsappAuthorizationId || null) !== c.authorization_id
+    || require('../lib/whatsappManualDisconnect').current(asset, expectedBinding)
+    || payload.type !== 'template' || Number(c.whatsapp_template_id) !== Number(m.template_id)
+    || payload.template?.name !== m.template_name || payload.template?.language?.code !== m.template_language
+    || c.probe_to !== payload.to || m.recipient !== payload.to
+    || Number(proof?.last_probe_message_id) !== Number(message.id)
+    || !Number.isFinite(created) || Date.now() - created < 0 || Date.now() - created >= PROBE_MAX_AGE_MS
+    || Date.parse(proof.last_detected_at || '') > created) fail();
+  const health = require('./whatsappAccountHealth.service').summarizeAssetHealth(asset);
+  const probeAsset = { ...asset, additionalData: { ...asset.additionalData, payment: { ...proof, last_probe_at: null } } };
+  if (!require('../lib/whatsapp-payment-recovery-probe').availability({ asset: probeAsset, health }).allowed) fail();
+  if (!await require('../lib/marketingScopeAccess').hasMarketingClinicScopeAccess({
+    userId: list.created_by, clinicIds: [clinicId], access: 'write',
+  })) fail();
+}
+
 async function defer(error, { transaction: existingTransaction = null } = {}) {
   if (!W.deferred(error) || !error.dispatchIntent || !error.dispatchPayload) throw error;
   const intent = error.dispatchIntent;
@@ -14,7 +49,7 @@ async function defer(error, { transaction: existingTransaction = null } = {}) {
     const now = Date.now();
     const wait = { version: 1, state: error.delivery_unknown ? 'reconciling' : 'waiting', reason: error.code,
       lane: error.dispatchPayload.dispatchLane || 'clinical', created_at: previous?.created_at || new Date(now).toISOString(),
-      expires_at: previous?.expires_at || new Date(now + 86400000).toISOString(),
+      expires_at: previous?.expires_at || new Date(now + (isPaymentProbe(message) ? PROBE_MAX_AGE_MS : 86400000)).toISOString(),
       intent: previous?.intent || intent, send: previous?.send || error.dispatchPayload,
       post_attempt_at: error.dispatchAttemptAt || previous?.post_attempt_at || null,
       next_attempt_at: W.retryAt(message.id, now, error.code).toISOString() };
@@ -61,6 +96,7 @@ async function run(payload, _job, claim) {
   }
   const broker = require('../lib/whatsappAuthorizedBrokerClient');
   const stop = require('../lib/automation-runtime-stop');
+  const diagnostic = isPaymentProbe(message);
   try {
     if (!require('./jobClaim.service').isJobClaim(claim)) throw Object.assign(Error('job_claim_lost'), { code: 'job_claim_lost' });
     await claim?.assert({});
@@ -71,7 +107,7 @@ async function run(payload, _job, claim) {
         wait.state === 'reconciling' ? 'pending' : 'failed');
       return { status: 'failed', retryable: false, error_message: 'whatsapp_dispatch_expired' };
     }
-    if (message.metadata?.source === 'marketing_bulk_sends') {
+    if (message.metadata?.source === 'marketing_bulk_sends' && !diagnostic) {
       const list = await models.MarketingPatientList.findByPk(Number(message.metadata.list_id));
       if (!list || ['archived', 'paused'].includes(list.status) || list.criteria?.dispatch?.cancel_requested
         || list.criteria?.dispatch?.requires_admin_review) {
@@ -128,9 +164,17 @@ async function run(payload, _job, claim) {
         });
         if (!check.allowed) return { status: 'completed', result: { skipped: true, reason: check.reason } };
       }
-      await require('./whatsappAccountHealth.service').assertCanSend({ clinicConfig: config,
-        source: 'whatsapp_dispatch_retry', messageId: message.id, jobId: claim.id });
-      await require('./whatsapp.service').assertRecipientCanReceive({ to: wait.intent.message.to, clinicConfig: config });
+      const whatsapp = require('./whatsapp.service');
+      if (diagnostic) {
+        const list = await models.MarketingPatientList.findByPk(Number(message.metadata.list_id));
+        await assertRetryablePaymentProbe(models, list, message, wait);
+        await whatsapp.assertClinicNonOperationalAllowed(wait.intent.message, config, message);
+        await whatsapp.assertPrivacyCommercialAllowed(wait.intent.message, config, message);
+      } else {
+        await require('./whatsappAccountHealth.service').assertCanSend({ clinicConfig: config,
+          source: 'whatsapp_dispatch_retry', messageId: message.id, jobId: claim.id });
+      }
+      await whatsapp.assertRecipientCanReceive({ to: wait.intent.message.to, clinicConfig: config });
       if (message.metadata.communication_scope) await require('./marketingOptOut.service').assertAutomationCommunicationAllowed({
         clinicId: wait.intent.clinicId, patientId: message.metadata.recipient_patient_id || null,
         phone: wait.intent.message.to, scope: message.metadata.communication_scope });
@@ -143,7 +187,7 @@ async function run(payload, _job, claim) {
         const inbound = await models.Message.findOne({ where: { conversation_id: message.conversation_id, direction: 'inbound' }, order: [['createdAt', 'DESC']], raw: true });
         if (!inbound || Date.now() - new Date(inbound.createdAt).getTime() >= 86400000) throw Object.assign(Error('whatsapp_session_expired'), { code: 'whatsapp_session_expired' });
       }
-      if (message.metadata?.source === 'marketing_bulk_sends') {
+      if (message.metadata?.source === 'marketing_bulk_sends' && !diagnostic) {
         const list = await models.MarketingPatientList.findByPk(Number(message.metadata.list_id));
         const nextAllowed = list && await require('./marketingBulkSends.service').deferredDispatchAllowedAt(list);
         if (!list || ['archived', 'paused'].includes(list.status) || list.criteria?.dispatch?.cancel_requested

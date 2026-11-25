@@ -23,6 +23,7 @@ function fixture({evidence} = {}) {
     Message:{findOne:async({where})=>messages.find(row=>row.metadata.list_id===where['metadata.list_id']&&row.metadata.kind===where['metadata.kind'])},
     sequelize:{transaction:async fn=>fn({}),query:async(sql,{replacements:{lock}})=>{
       if(sql.includes('GET_LOCK')) {if(locks.has(lock))return [[{acquired:0}]];locks.add(lock);return [[{acquired:1}]];}
+      if(sql.includes('IS_FREE_LOCK')) return [[{idle:locks.has(lock)?0:1}]];
       locks.delete(lock);return [[]];}},
   };
   const bulk={sendTest:async(scope,id,body)=>{
@@ -42,6 +43,23 @@ test('GET is read-only and exposes exact sender/preview with no destination or p
   assert.equal(result.available.allowed,true);assert.equal(result.sender.phone,'+34 600 000 002');
   assert.match(result.preview,/prueba, ignora este mensaje/);assert(!JSON.stringify(result).includes('600000001'));
   assert.equal(f.lists.length,0);assert.equal(f.calls.length,0);
+});
+test('preflight throttling is distinguishable from a rate limit while reading an existing send', async () => {
+  const limited = () => Object.assign(new Error('rate_limited'), { code: 'rate_limited' });
+  for (const rateLimitedRead of [1, 2, 3]) {
+    let reads = 0;
+    const f = fixture({ evidence: { createService: () => ({ read: async () => {
+      if (++reads === rateLimitedRead) throw limited();
+      return { verified: false };
+    } }) } });
+    await assert.rejects(f.service.send(input), { code: rateLimitedRead < 3 ? 'payment_test_rate_limited' : 'rate_limited' });
+    assert.equal(f.calls.length, rateLimitedRead < 3 ? 0 : 1);
+    if (rateLimitedRead === 3) {
+      assert.equal((await f.service.get(input)).request_id, input.requestId);
+      await f.service.send(input);
+      assert.equal(f.calls.length, 1);
+    }
+  }
 });
 test('explicit test reuses native transport, archived diagnostic and a nonpatient sample',async()=>{
   const f=fixture(), result=await f.service.send(input);
@@ -167,9 +185,14 @@ test('a lost native response with a durable message is queried instead of resent
   assert.equal((await f.service.send(input)).message_status,'pending');
   await f.service.send(input);assert.equal(f.calls.length,1);
 });
-test('a native failure before message creation leaves a durable nonretryable attempt',async()=>{
+test('a native failure before message creation remains queryable as not sent and does not replay the same request',async()=>{
   const f=fixture();f.db.Message.findOne=async()=>null;f.behavior(async()=>{throw Error('TESTONLY_PREFLIGHT');});
-  await assert.rejects(f.service.send(input));assert.equal((await f.service.send(input)).message_status,'unknown');
+  assert.equal((await f.service.send(input)).message_status,'not_sent');
+  assert.equal((await f.service.get(input)).message_status,'not_sent');
+  assert.equal((await f.service.send(input)).message_status,'not_sent');
+  f.locks.add('cc-wa-payment-test:404');
+  assert.equal((await f.service.get(input)).message_status,'unknown');
+  f.locks.clear();
   assert.equal(f.calls.length,1);assert.equal(f.locks.size,0);
 });
 test('simultaneous attempts never dispatch twice on the same sender',async()=>{
@@ -180,7 +203,6 @@ test('simultaneous attempts never dispatch twice on the same sender',async()=>{
 for(const [name,change,reason] of [
   ['disconnected binding',f=>{f.binding.sendEnabled=false;},'payment_probe_sender_unavailable'],
   ['local manual stop',f=>{f.asset.manualDisconnect=true;},'payment_probe_sender_unavailable'],
-  ['secondary wrong purpose',f=>{f.local.purposes=['review_requests'];},'payment_probe_purpose_unavailable'],
   ['template pending',f=>{f.template.components=[];},'payment_probe_template_unavailable'],
   ['extra button/header',f=>{f.template.components.push({type:'BUTTONS'});},'payment_probe_template_unavailable'],
   ['changed variable semantics',f=>{f.template.variables[0].name='profesional_nombre';},'payment_probe_template_unavailable'],
@@ -190,6 +212,27 @@ for(const [name,change,reason] of [
 ])test(`${name} prevents even preparing a diagnostic send`,async()=>{
   const f=fixture();change(f);await assert.rejects(f.service.send(input),{code:reason});
   assert.equal(f.lists.length,0);assert.equal(f.calls.length,0);
+});
+test('a secondary without bulk permissions can run the single approved diagnostic', async () => {
+  const f=fixture();
+  f.local.purposes=[];
+  f.behavior(message=>{message.metadata.dispatch_wait={state:'waiting',next_attempt_at:now.toISOString()};});
+  const result=await f.service.send(input);
+  assert.equal(result.transport_state,'waiting');
+  assert.equal(result.next_attempt_at,now.toISOString());
+  assert.equal(f.calls.length,1);
+});
+test('the optional recipient suggestion comes from the authorized operator record', async () => {
+  const f=fixture();
+  f.db.Usuario={findByPk:async (id,options)=>{
+    assert.equal(id,input.userId);
+    assert.deepEqual(options.attributes,['telefono']);
+    return {telefono:'600000003'};
+  }};
+  assert.equal((await f.service.get({...input,requestId:undefined})).suggested_to,'+34600000003');
+  assert.equal(f.calls.length,0);
+  f.deny();
+  await assert.rejects(f.service.get({...input,requestId:undefined}),{code:'payment_test_forbidden'});
 });
 test('permission is checked before loading any asset and scope mismatch is rejected',async()=>{
   const f=fixture();f.deny();f.db.ClinicMetaAsset.findOne=()=>{throw Error('must not load asset');};
@@ -219,4 +262,59 @@ test('the ordinary campaign test endpoint cannot replay a diagnostic attempt',as
     ensureScopeAccess:()=>{},guardReviewCare:async()=>{},normalizeMassSendRecordKind:()=> 'campaign'};
   vm.createContext(context);vm.runInContext(guard+'\n'+command,context);
   await assert.rejects(context.sendTest({},1,{payment_recovery_probe:true}),{code:'payment_test_not_dispatchable'});
+});
+
+test('native sender resolution permits the exact active diagnostic on a secondary and leaves campaign routing closed', async () => {
+  const source=fs.readFileSync(require.resolve('../../services/marketingBulkSends.service'),'utf8');
+  const start=source.indexOf('async function resolveWhatsappClinicConfigForList(');
+  const end=source.indexOf('\nfunction isWhatsappRoutingConfigAvailable',start);
+  const asset={id:404,assignmentScope:'clinic',clinicaId:56,whatsappAuthorizationId:'current',additionalData:{}};
+  const config={originId:404,phoneNumberId:'123456',wabaId:'987654',authorizedBroker:{sendEnabled:true}};
+  const list={criteria:{phone_number_id:'123456',waba_id:'987654',authorization_id:'current'}};
+  const context={
+    getRequestedWhatsappSenderOriginId:()=>404,
+    Clinica:{findByPk:async()=>({id_clinica:56})},ClinicMetaAsset:{findOne:async()=>asset},
+    whatsappChannelBindingsService:{listClinicBindings:async()=>[]},
+    resolveWhatsappRouting:()=>({role:'secondary',purposes:[]}),getWhatsappRoutingPurposeForList:()=> 'bulk_campaigns',
+    whatsappService:{getConfigByAssetId:async()=>config},require:()=>({current:()=>null}),
+  };
+  vm.runInNewContext(source.slice(start,end),context);
+  const resolve=context.resolveWhatsappClinicConfigForList;
+  await assert.rejects(resolve(list,56,{}),{code:'whatsapp_sender_purpose_not_allowed'});
+  const probe=await resolve(list,56,{}, {diagnostic:true});
+  assert.equal(probe.routingPurpose,null);
+  assert.equal(probe.phoneNumberId,'123456');
+  asset.whatsappAuthorizationId='replacement';
+  await assert.rejects(resolve(list,56,{}, {diagnostic:true}),{code:'payment_test_binding_changed'});
+});
+
+test('a deferred diagnostic revalidates the single outlet, recipient and existing cooldown claim', async () => {
+  const source=fs.readFileSync(require.resolve('../../services/whatsappDispatchWait.service'),'utf8');
+  const start=source.indexOf('async function assertRetryablePaymentProbe(');
+  const end=source.indexOf('\nasync function defer(',start);
+  const phoneNumberId='123456', wabaId='987654', recipient='34600000001';
+  const now=Date.parse('2030-01-02T10:00:00Z');
+  const asset={id:404,phoneNumberId,wabaId,whatsappAuthorizationId:'current',additionalData:{payment:{last_probe_message_id:50}}};
+  const message={id:50,direction:'outbound',message_type:'template',createdAt:new Date(now-30000).toISOString(),
+    metadata:{sender_origin_id:404,phoneNumberId,wabaId,recipient,template_id:12,template_name:'qa_test',template_language:'es'}};
+  const list={source:'whatsapp_payment_recovery_test',status:'archived',clinica_id:56,created_by:1,
+    criteria:{whatsapp_payment_recovery_test:true,sender_origin_id:404,phone_number_id:phoneNumberId,waba_id:wabaId,
+      authorization_id:'current',probe_to:recipient,whatsapp_template_id:12}};
+  const wait={intent:{clinicId:56,assetId:404,expectedBinding:{phoneId:phoneNumberId,wabaId},
+    message:{type:'template',to:recipient,template:{name:'qa_test',language:{code:'es'}}}}};
+  const context={PROBE_MAX_AGE_MS:600000,Date:class extends Date {static now(){return now;}},require:name=>{
+    if(name.endsWith('whatsappManualDisconnect')) return {current:()=>null};
+    if(name.endsWith('whatsappAccountHealth.service')) return {summarizeAssetHealth:()=>({can_send:true})};
+    if(name.endsWith('whatsapp-payment-recovery-probe')) return {availability:({asset})=>({allowed:asset.additionalData.payment.last_probe_at===null})};
+    if(name.endsWith('marketingScopeAccess')) return {hasMarketingClinicScopeAccess:async()=>true};
+    throw Error('unexpected dependency');
+  }};
+  vm.runInNewContext(source.slice(start,end),context);
+  const models={ClinicMetaAsset:{findByPk:async()=>asset}};
+  const check=context.assertRetryablePaymentProbe;
+  await check(models,list,message,wait);
+  await assert.rejects(check(models,{...list,source:'import'},message,wait),{code:'payment_probe_retry_unavailable'});
+  await assert.rejects(check(models,list,{...message,metadata:{...message.metadata,recipient:'34600000002'}},wait),{code:'payment_probe_retry_unavailable'});
+  asset.additionalData.payment.last_probe_message_id=51;
+  await assert.rejects(check(models,list,message,wait),{code:'payment_probe_retry_unavailable'});
 });
