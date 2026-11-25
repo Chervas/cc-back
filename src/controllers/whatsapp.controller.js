@@ -3924,6 +3924,12 @@ exports.refreshPhoneStatus = async (req, res) => {
     if (err?.statusCode === 403 || err?.code === 'whatsapp_template_clinic_scope_forbidden') {
       return res.status(403).json({ success: false, error: 'forbidden' });
     }
+    if (err?.code === 'rate_limited') {
+      res.set('Retry-After', '60');
+      return res.status(429).json({ success: false, error: 'whatsapp_refresh_rate_limited',
+        retry_after_seconds: 60,
+        message: 'Se han hecho demasiadas comprobaciones de WhatsApp. Espera un minuto y vuelve a intentarlo. Se mantiene el último estado conocido.' });
+    }
     if (['connection_blocked', 'scope_denied', 'whatsapp_authorized_scope_blocked'].includes(err?.code)) {
       return res.status(409).json({ success: false, error: 'whatsapp_refresh_broker_denied',
         message: 'El broker de Clinicaclick no autoriza esta conexión. No se ha podido consultar Meta; este resultado no confirma un bloqueo de Meta.' });

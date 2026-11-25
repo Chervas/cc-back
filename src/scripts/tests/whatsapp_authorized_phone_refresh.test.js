@@ -92,3 +92,43 @@ test('an unavailable response for a replaced authorization cannot mark the new c
     healthService:{summarizeAssetHealth:() => ({}),recordObservationForAsset:async () => null} });
   await assert.rejects(service.refresh({asset:{id:400,whatsappAuthorizationId:'old'},clinicId:59}),{code:'whatsapp_authorized_binding_changed'});
 });
+test('manual refresh reports broker throttling with Retry-After, never a payment or connection failure', async () => {
+  const fs = require('node:fs');
+  const vm = require('node:vm');
+  const source = fs.readFileSync(require.resolve('../../controllers/whatsapp.controller'), 'utf8');
+  const start = source.indexOf('exports.refreshPhoneStatus =');
+  const end = source.indexOf('\nexports.', start + 1);
+  assert(start >= 0 && end > start);
+  const asset = { id: 10, clinicaId: 4, assignmentScope: 'clinic' };
+  const context = {
+    exports: {},
+    MetaConnection: {},
+    ClinicMetaAsset: { findOne: async () => asset },
+    Clinica: { findByPk: async () => ({ id_clinica: 4 }) },
+    getUserClinics: async () => ({ clinicIds: [4], isAggregateAllowed: false }),
+    getUserGroupIds: async () => [],
+    assertWhatsappTemplateClinicAccess: async () => {},
+    require: name => {
+      if (name === '../lib/whatsappAuthorizedBrokerClient') return { binding: async () => ({ assetId: 10 }) };
+      if (name === '../lib/whatsappManualDisconnect') return { current: () => null };
+      throw Error('unexpected_dependency');
+    },
+    whatsappAuthorizedPhoneRefreshService: {
+      refresh: async () => { throw Object.assign(Error('broker_wait'), { code: 'rate_limited' }); },
+    },
+  };
+  vm.runInNewContext(source.slice(start, end), context);
+  const result = {};
+  const res = {
+    set(name, value) { result[name] = value; },
+    status(value) { result.status = value; return this; },
+    json(value) { result.body = value; },
+  };
+  await context.exports.refreshPhoneStatus({ userData: { userId: 20 },
+    params: { phoneNumberId: '222222' }, body: { clinic_id: 4 } }, res);
+  assert.equal(result.status, 429);
+  assert.equal(result['Retry-After'], '60');
+  assert.equal(result.body.error, 'whatsapp_refresh_rate_limited');
+  assert.match(result.body.message, /último estado conocido/);
+  assert.equal(result.body.health, undefined);
+});
