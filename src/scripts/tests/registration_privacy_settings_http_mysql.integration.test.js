@@ -161,7 +161,9 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
     const queued = kioskQueue.items.find(row => row.id === prepared.package_id && row.type === 'consent');
     assert(queued); assert.equal(queued.time_zone, 'America/New_York'); assert.equal(queued.documents[0].title, doc.title);
     assert.equal(doc.personal_data_form.schema_version, registration.IDENTITY_SCHEMA);
-    assert.deepEqual(doc.choice_form.fields.map(row => row.key), ['health_nonmedical', 'commercial', 'financing', 'sms_whatsapp']);
+    assert.equal(doc.choice_form.schema_version, choices.COMMERCIAL_CHOICE_SCHEMA);
+    assert.deepEqual(doc.choice_form.fields.map(row => row.key),
+      ['health_nonmedical', 'commercial', ...choices.COMMERCIAL_CHANNEL_KEYS, 'financing', 'sms_whatsapp']);
     assert(doc.snapshot_html.includes('Sociedad clínica A ficticia')); assert(!doc.snapshot_html.includes('INSTITUTO OBES'));
     const corrected = await expect('POST', `${publicRoute}/documents/${doc.id}/personal-data`, {
       schema_version: registration.IDENTITY_SCHEMA, snapshot_hash: doc.snapshot_hash,
@@ -170,12 +172,14 @@ test('generic intake settings and native editable LOPD: ACL, CAS, legal entities
         telefono: '+34000000003', telefono2: '+34000000004', email: 'patient-qa@example.invalid' },
     }, undefined, 200);
     const current = corrected.documents[0];
+    const answers = { health_nonmedical: 'no', commercial: 'no', commercial_whatsapp: 'no', commercial_email: 'no',
+      commercial_sms: 'no', financing: 'no', sms_whatsapp: 'no' };
     await expect('POST', publicRoute + '/sign', { ...signature,
       document_snapshot_hashes: { [doc.id]: current.snapshot_hash }, document_choices: { [doc.id]: {
-        schema_version: registration.CHOICE_SCHEMA, answers: { health_nonmedical: 'no', commercial: 'no', financing: 'no', sms_whatsapp: 'no' } } } }, undefined, 200);
+        schema_version: choices.COMMERCIAL_CHOICE_SCHEMA, answers } } }, undefined, 200);
     const signed = await db.PatientConsentDocument.findByPk(doc.id);
     assert(signed.snapshot_html.includes('<dt>Teléfono móvil</dt>')); assert(signed.snapshot_html.includes('<dt>Teléfono fijo</dt>'));
-    assert.deepEqual(choices.signedConsentChoiceAnswers(signed), { health_nonmedical: 'no', commercial: 'no', financing: 'no', sms_whatsapp: 'no' });
+    assert.deepEqual(choices.signedConsentChoiceAnswers(signed), answers);
     const frozen = JSON.stringify(signed.toJSON());
     setting = await expect('PUT', route, { patient_intake: { tablet_branding: { source: 'clinic', logo_url: null, logo_background: 'light' } },
       expected_version: setting.version }, owner, 200);
