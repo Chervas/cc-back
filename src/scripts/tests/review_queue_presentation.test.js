@@ -24,6 +24,20 @@ test('attention explains who paused the queue and retains its real quality thres
  assert.equal(queueAttention({paused_reason:'paused_by_user'},'paused').source,'user');assert.equal(queueAttention({},'held_meta').source,'meta');assert.equal(queueAttention({},'sending'),null);assert.equal(queueAttention({last_error:'bad_recipient'},'completed'),null);
 });
 
+test('a resumable identity failure remains visible among ongoing review queues without starting again', () => {
+ const failed = { id:'marketing:8', status:'failed', status_group:'error', pending:3617, can_resume:true };
+ const decision = { requires_admin_review:true, admin_resolution:{decision:'authorized'} };
+ const attention = queueAttention(decision, 'failed', {failedIdentity:true});
+ assert.equal(attention.source, 'platform');
+ assert.equal(attention.automatic, false);
+ assert.equal(attention.requires_admin_review, false);
+ assert.equal(queueAttention({requires_admin_review:true}, 'failed', {failedIdentity:true}).requires_admin_review, true);
+ assert.equal(liveQueue(failed, {group:true}), true);
+ assert.equal(liveQueue({...failed,can_resume:false}, {group:true}), false);
+ assert.equal(liveQueue({...failed,pending:0}), false);
+ assert.equal(queueAttention(decision, 'failed'), null);
+});
+
 test('group lifecycle tabs distinguish live blocked queues from finished ones and omit unstarted group campaigns',()=>{
  const {queuePage}=require('../../services/reviewOverview.service');const rows=[{id:'marketing:1',status:'waiting_next_batch',status_group:'active',started:true,failed:10},{id:'marketing:2',status:'paused_quality',status_group:'paused',pending:10,attention:{source:'platform'}},{id:'marketing:3',status:'completed',status_group:'history',failed:30},{id:'marketing:4',status:'scheduled',status_group:'active',started:false}];
  const page=queuePage(rows,{group:true,layout:'lifecycle'});assert.equal(page.total,2);assert.equal(page.counts.inactive,1);assert.equal(page.counts.issues,1);assert.equal(queuePage(rows,{group:true,layout:'lifecycle',view:'inactive'}).items[0].id,'marketing:3');

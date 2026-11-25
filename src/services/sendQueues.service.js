@@ -297,7 +297,7 @@ function listClinicIds(row) {
 async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, reviewOnly = false, includeHistory = false, queueId = null }) {
   if (!clinicIds.length) return [];
   const groupIds = Array.from(clinicsByGroupId.keys());
-  const rows = await db.MarketingPatientList.findAll({
+  const lists = await db.MarketingPatientList.findAll({
     where: {
       ...(queueId ? { id:Number(String(queueId).split(':')[1]) } : {}),
       ...(reviewOnly ? { [Op.and]: [db.Sequelize.literal(`objective_id='mass_sends' ${includeHistory ? '' : "AND status<>'archived'"} AND
@@ -312,6 +312,8 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
     ...(reviewOnly ? {} : { limit: 250 }),
     raw: true,
   });
+  const { projectDispatchJobs, canResumeIdentityConflict } = require('./marketingBulkSends.service');
+  const rows = await projectDispatchJobs(lists);
   const rowIds = rows.map((row) => Number(row.id)).filter(Number.isInteger);
   const needsEmailStats = !reviewOnly || rows.some(r=>Array.isArray(r.criteria?.channels)?r.criteria.channels.includes('email'):r.channel==='email');
   const directScopeListIds=rows.filter(r=>clinicIds.includes(Number(r.clinica_id))).map(r=>Number(r.id));
@@ -382,12 +384,16 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
     const failed = whatsappFailed + emailFailed;
     const pending = whatsappPending + emailPending;
     const group = statusGroup(effectiveStatus);
+    const failedIdentity = !preferEmail && canResumeIdentityConflict(dispatch);
     const statusCopy = preferEmail && effectiveStatus === 'awaiting_delivery'
       ? {
           label: 'Entregando emails',
           explanation: 'Los emails ya están en la cola segura. Clinicaclick espera la aceptación o el error del proveedor antes de cerrarla.',
         }
-      : statusPresentation(effectiveStatus);
+      : failedIdentity ? {
+          label: 'Envío interrumpido',
+          explanation: 'El teléfono de un destinatario no coincidía con su conversación. Al reanudar se excluirán los destinatarios con ese conflicto.',
+        } : statusPresentation(effectiveStatus);
     const cadence = describeDispatchCadence(dispatch);
     const presentation = marketingQueuePresentation(row, dispatch);
     const templateSnapshot = dispatch.template_snapshot || row.template_snapshot || {};
@@ -437,7 +443,7 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
       ...(reviewOnly ? {
         title: row.name || dispatch.label || 'Solicitud de reseñas',
         pause_reason: dispatch.paused_reason || dispatch.last_error || null,
-        attention: require('../lib/review-queue-presentation').queueAttention(dispatch,effectiveStatus),
+        attention: require('../lib/review-queue-presentation').queueAttention(dispatch,effectiveStatus,{failedIdentity}),
         delivery_plan: require('../lib/review-queue-presentation').deliveryPlan(dispatch,{pending,status:effectiveStatus}),
         processed: Math.min(total, processed),
         started: !!(latestDate(row.last_sent_at, stats.last_sent_at, stats.email_last_sent_at)
@@ -453,9 +459,9 @@ async function marketingQueues({ clinicIds, clinicNameById, clinicsByGroupId, re
         excluded: Math.max(0, numberValue(counters.total, total) - total),
         schedule_source: businessHours.source || dispatch.time_mode || null,
       } : {}),
-      error: humanizeQueueReason(dispatch.paused_reason || dispatch.last_error || row.safety_gates?.reason),
+      error: failedIdentity ? statusCopy.explanation : humanizeQueueReason(dispatch.paused_reason || dispatch.last_error || row.safety_gates?.reason),
       can_pause: group === 'active' && pending > 0,
-      can_resume: group === 'paused' && pending > 0 && !cannotResume,
+      can_resume: (group === 'paused' || failedIdentity) && pending > 0 && !cannotResume,
       action_scope: actionScope,
       created_at: row.created_at,
       last_sent_at: latestDate(row.last_sent_at, stats.last_sent_at, stats.email_last_sent_at),

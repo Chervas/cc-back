@@ -74,10 +74,10 @@ function deliveryPlan(dispatch={}, {now=new Date(),pending=Infinity,status='send
   return {min_per_day:Math.min(...capacities),max_per_day:Math.max(...capacities),planned_today:todayPlanned,planned_day:plannedDay,planned_for_day:plannedForDay,
     batch_size:batch,delay_minutes:delay,by_weekday:byWeekday,timezone,estimate:true};
 }
-function queueAttention(dispatch={}, status='') {
+function queueAttention(dispatch={}, status='', {failedIdentity=false}={}) {
   const reason=String(dispatch.paused_reason||dispatch.last_error||'');
   const paused=status==='paused'||status.startsWith('paused_')||['held_meta','waiting_template_approval','waiting_approval','pause_requested','blocked'].includes(status);
-  if(TERMINAL.has(status)||!paused)return null;
+  if(!failedIdentity && (TERMINAL.has(status)||!paused))return null;
   const source=reason==='paused_by_user'?'user':/payment|billing|131042/.test(reason)?'configuration':/by_meta|meta_|template_quality_assessment/.test(reason)||status==='held_meta'?'meta'
     : /routing|config|template_not_approved|phone|connection|account|payment|billing/.test(reason)?'configuration':'platform';
   const admin=dispatch.requires_admin_review===true&&dispatch.admin_resolution?.decision!=='authorized';
@@ -87,6 +87,7 @@ function queueAttention(dispatch={}, status='') {
     sample_sent:Number(dispatch.quality_snapshot?.sent)||null};
 }
 function liveQueue(row,{group=false}={}) {
+  if(row.status==='failed' && row.can_resume===true)return Number(row.pending)>0;
   if(TERMINAL.has(row.status))return false;
   if(row.status_group==='active')return !group||!!row.started;
   return Number(row.pending)>0;

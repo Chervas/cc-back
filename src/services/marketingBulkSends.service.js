@@ -10304,6 +10304,9 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     err.details = { dispatch_status: dispatchStatus, admin_resolution: dispatch.admin_resolution };
     throw err;
   }
+  if (canResumeIdentityConflict(dispatch) && dispatch.requires_admin_review === true && adminDecision !== 'authorized') {
+    throw Object.assign(new Error('Esta cola requiere revisión antes de poder volver a enviarse.'), { status: 409 });
+  }
   if (['held_meta', 'paused_review', 'awaiting_delivery'].includes(dispatchStatus)) {
     const err = new Error(
       dispatchStatus === 'held_meta'
@@ -11960,6 +11963,8 @@ module.exports = {
   upsertAdminBulkSendSettings,
   removeCampaign,
   reconcileDispatchJobState,
+  projectDispatchJobs,
+  canResumeIdentityConflict,
   __testing: {
     buildItemsFromRows,
     serializeItem,

@@ -120,6 +120,30 @@ test('the campaign collection projects an interrupted job without persisting or 
   assert.equal(jobs.mock.callCount(), 1);
 });
 
+test('the review dashboard shows the real interrupted status and keeps the existing review decision', async t => {
+  const message = 'El teléfono de destino no coincide con la conversación. Revisa la ficha antes de enviar.';
+  const record = row(8, 'campaign', { status: 'sending', channel: 'whatsapp', criteria: {
+    review_request: true, dispatch: { status: 'sending', job_id: 98, requires_admin_review: true,
+      admin_resolution: { decision: 'authorized' } },
+  } });
+  t.mock.method(db.Clinica, 'findAll', async () => [{ id_clinica: 21, nombre_clinica: 'Clínica de QA', grupoClinicaId: 7 }]);
+  t.mock.method(db.MarketingPatientList, 'findAll', async () => [record]);
+  t.mock.method(db.JobRequest, 'findAll', async () => [{ id: 98, status: 'failed', error_message: message }]);
+  t.mock.method(db.sequelize, 'query', async () => [{ list_id: 8, eligible: 3620, processed: 3, pending: 3617, failed: 0 }]);
+  const { listReviewQueues } = require('../../services/sendQueues.service');
+  const { queuePage } = require('../../services/reviewOverview.service');
+  const queues = await listReviewQueues({ userId: 1, scopeRaw: 'all' });
+  const [result] = queuePage(queues, { layout: 'lifecycle' }).items;
+  assert.equal(result.status, 'failed');
+  assert.equal(result.status_label, 'Envío interrumpido');
+  assert.equal(result.pending, 3617);
+  assert.equal(result.can_resume, true);
+  assert.equal(result.attention.requires_admin_review, false);
+  assert.equal(result.attention.automatic, false);
+  assert.equal(result.action_scope, '21');
+  assert.equal(record.status, 'sending');
+});
+
 test('page sizes 10/25/50, defaults, out-of-range pages and string null kind use the same filtered count', async t => {
   repository(t, [...Array.from({ length: 60 }, (_, index) => row(index + 1, 'campaign')), row(101, 'null'), row(102, 'RECIPIENT_LIST')]);
   for (const size of [10, 25, 50]) {
