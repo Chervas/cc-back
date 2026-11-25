@@ -1,13 +1,20 @@
 'use strict';
 
+const { col, fn, where } = require('sequelize');
+
 const clean = (value) => String(value || '').trim().toLowerCase();
 const present = (value) => value !== undefined && value !== null && String(value).trim() !== '';
 const text = (value) => present(value) ? String(value).trim() : null;
 
 const GOOGLE_UTM_SOURCES = new Set(['google', 'googleads', 'google_ads', 'adwords']);
 const PAID_UTM_MEDIA = new Set(['cpc', 'ppc', 'paid', 'paid_search', 'paidsearch', 'display']);
+const EMAIL_CONTACT_SOURCES = ['web', 'whatsapp', 'call_click'];
+const BULK_EMAIL_UTM_SOURCE = 'envios_masivos';
+const PAID_ID_FIELDS = ['gclid', 'gbraid', 'wbraid', 'google_ads_customer_id', 'google_ads_campaign_id', 'fbclid', 'ttclid'];
 const MARKETING_ORIGIN_LABELS = Object.freeze({
   web: 'Web',
+  email: 'Email',
+  bulk_email: 'Envío masivo',
   google_ads: 'Google Ads',
   meta_ads: 'Meta Ads',
   tiktok_ads: 'TikTok Ads',
@@ -45,11 +52,14 @@ const resolveLeadMarketingOrigin = (lead = {}) => {
   if (present(lead.ttclid)) return 'tiktok_ads';
 
   const source = clean(lead.source);
+  const utmMedium = clean(lead.utm_medium);
+  const utmSource = clean(lead.utm_source);
+  if (EMAIL_CONTACT_SOURCES.includes(source) && utmMedium === 'email') {
+    return utmSource === BULK_EMAIL_UTM_SOURCE ? 'bulk_email' : 'email';
+  }
   if (lead.external_source === 'meta_leadgen' && clean(lead.channel) === 'organic' && !source) return 'meta_form';
   if (source && source !== 'web') return source;
 
-  const utmSource = clean(lead.utm_source);
-  const utmMedium = clean(lead.utm_medium);
   if (GOOGLE_UTM_SOURCES.has(utmSource)) {
     return PAID_UTM_MEDIA.has(utmMedium) ? 'google_ads' : 'seo';
   }
@@ -79,6 +89,8 @@ const resolveLeadContactMethod = (lead = {}) => {
   return source || 'unknown';
 };
 
+const normalizedColumn = (name) => fn('LOWER', fn('TRIM', fn('COALESCE', col(`LeadIntake.${name}`), '')));
+
 const buildMarketingOriginWhere = (source, Op) => {
   const normalized = clean(source);
   if (!normalized || !Op) return null;
@@ -104,6 +116,18 @@ const buildMarketingOriginWhere = (source, Op) => {
   if (normalized === 'tiktok_ads') {
     return { [Op.or]: [{ source: 'tiktok_ads' }, { ttclid: { [Op.ne]: null } }] };
   }
+  if (normalized === 'email' || normalized === 'bulk_email') {
+    return {
+      source: { [Op.in]: EMAIL_CONTACT_SOURCES },
+      [Op.and]: [
+        where(normalizedColumn('utm_medium'), 'email'),
+        where(normalizedColumn('utm_source'), normalized === 'bulk_email'
+          ? BULK_EMAIL_UTM_SOURCE
+          : { [Op.ne]: BULK_EMAIL_UTM_SOURCE }),
+        ...PAID_ID_FIELDS.map((name) => where(normalizedColumn(name), '')),
+      ],
+    };
+  }
   if (normalized === 'web') {
     return {
       source: 'web',
@@ -114,7 +138,11 @@ const buildMarketingOriginWhere = (source, Op) => {
       google_ads_campaign_id: null,
       fbclid: null,
       ttclid: null,
+      [Op.and]: [where(normalizedColumn('utm_medium'), { [Op.ne]: 'email' })],
     };
+  }
+  if (EMAIL_CONTACT_SOURCES.includes(normalized)) {
+    return { source: normalized, [Op.and]: [where(normalizedColumn('utm_medium'), { [Op.ne]: 'email' })] };
   }
   return { source: normalized };
 };

@@ -73,15 +73,21 @@ function hexColor(value, fallback) {
   return /^#[0-9a-f]{6}$/.test(normalized) ? normalized : fallback;
 }
 
-function safeHttpsUrl(value, { required = false } = {}) {
+function safeTemplateUrl(value, { required = false, allowTelephone = false } = {}) {
   const normalized = clean(value);
   if (!normalized && !required) return null;
+  if (allowTelephone) {
+    const telephone = emailHtml.telephoneUrl(normalized);
+    if (telephone) return telephone;
+  }
   try {
     const parsed = new URL(normalized);
     if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error();
     return parsed.toString();
   } catch {
-    fail('email_template_url_invalid', 400, 'Las imágenes y botones deben usar una URL HTTPS válida.');
+    fail('email_template_url_invalid', 400, allowTelephone
+      ? 'El botón debe usar una URL HTTPS o un número válido, por ejemplo tel:+34910000000.'
+      : 'Introduce una URL HTTPS válida para la imagen.');
   }
 }
 
@@ -90,15 +96,15 @@ function normalizeBlock(raw = {}) {
   if (!BLOCKS.has(type)) fail('email_template_block_invalid', 400, 'La plantilla contiene un bloque no permitido.');
   if (type === 'divider') return { type };
   if (type === 'image') {
-    return { type, url: safeHttpsUrl(raw.url, { required: true }), alt: clean(raw.alt)?.slice(0, 160) || '' };
+    return { type, url: safeTemplateUrl(raw.url, { required: true }), alt: clean(raw.alt)?.slice(0, 160) || '' };
   }
   const text = clean(raw.text)?.slice(0, type === 'text' ? 5000 : 220);
   if (!text) fail('email_template_block_text_required', 400, 'Completa el contenido de todos los bloques.');
-  if (type === 'button') return { type, text, url: safeHttpsUrl(raw.url, { required: true }) };
+  if (type === 'button') return { type, text, url: safeTemplateUrl(raw.url, { required: true, allowTelephone: true }) };
   return { type, text };
 }
 
-function inactiveDraftUrl(value) {
+function inactiveDraftUrl(value, { allowTelephone = false } = {}) {
   const normalized = clean(value);
   if (normalized && normalized.length > 2048) {
     fail('email_template_url_invalid', 400, 'La URL del borrador no puede superar 2048 caracteres.');
@@ -106,7 +112,7 @@ function inactiveDraftUrl(value) {
   // Older editors used this inert placeholder for an unfinished block. It is
   // stored only as inactive draft data; active block validation still rejects it.
   if (normalized === 'https://') return normalized;
-  return safeHttpsUrl(normalized);
+  return safeTemplateUrl(normalized, { allowTelephone });
 }
 
 function normalizeInactiveBlock(raw) {
@@ -120,7 +126,7 @@ function normalizeInactiveBlock(raw) {
     return { type, url: inactiveDraftUrl(raw.url), alt: clean(raw.alt)?.slice(0, 160) || '' };
   }
   const text = clean(raw.text)?.slice(0, type === 'text' ? 5000 : 220) || '';
-  return type === 'button' ? { type, text, url: inactiveDraftUrl(raw.url) } : { type, text };
+  return type === 'button' ? { type, text, url: inactiveDraftUrl(raw.url, { allowTelephone: true }) } : { type, text };
 }
 
 function normalizeDesign(raw = {}) {
@@ -134,7 +140,7 @@ function normalizeDesign(raw = {}) {
     background_color: hexColor(raw.background_color, DEFAULT_DESIGN.background_color),
     content_color: hexColor(raw.content_color, DEFAULT_DESIGN.content_color),
     text_color: hexColor(raw.text_color, DEFAULT_DESIGN.text_color),
-    logo_url: raw.content_mode === 'html' ? inactiveDraftUrl(raw.logo_url) : safeHttpsUrl(raw.logo_url),
+    logo_url: raw.content_mode === 'html' ? inactiveDraftUrl(raw.logo_url) : safeTemplateUrl(raw.logo_url),
     show_clinicaclick_branding: raw.show_clinicaclick_branding !== false,
   };
   if (raw.content_mode === 'html') {
@@ -195,7 +201,10 @@ function renderTemplateDocument({ subject, preheader, layoutKey, design }) {
 
 function textFromDesign(design) {
   if (design.content_mode === 'html') return emailHtml.textFromHtml(emailHtml.compileHtmlSource(design.html_source));
-  return design.blocks.filter(block => ['heading', 'text', 'button'].includes(block.type)).map(block => block.text).join('\n\n');
+  return design.blocks.filter(block => ['heading', 'text', 'button'].includes(block.type)).map(block => {
+    const telephone = block.type === 'button' && emailHtml.telephoneUrl(block.url);
+    return telephone ? `${block.text} (${telephone})` : block.text;
+  }).join('\n\n');
 }
 
 function normalizeTemplateContent(body = {}) {
@@ -445,7 +454,7 @@ async function defaultDesignForScope(scope) {
     const clinic = await db.Clinica.findByPk(descriptor.clinica_id, { attributes: ['url_avatar'], raw: true });
     const candidate = clean(clinic?.url_avatar);
     if (candidate) {
-      try { logoUrl = safeHttpsUrl(candidate); } catch (_) { logoUrl = null; }
+      try { logoUrl = safeTemplateUrl(candidate); } catch (_) { logoUrl = null; }
     }
   }
   return { ...DEFAULT_DESIGN, logo_url: logoUrl, blocks: DEFAULT_DESIGN.blocks.map(block => ({ ...block })) };

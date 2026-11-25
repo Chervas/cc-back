@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { Op } = require('sequelize');
 const {
   resolveLeadMarketingOrigin,
   resolveLeadContactMethod,
@@ -14,17 +15,26 @@ assert.equal(resolveLeadMarketingOrigin({ source: 'web', google_ads_campaign_id:
 assert.equal(resolveLeadMarketingOrigin({ source: 'web', fbclid: 'fbclid-real' }), 'meta_ads');
 assert.equal(resolveLeadMarketingOrigin({ source: 'web', utm_source: 'google', utm_medium: 'organic' }), 'seo');
 assert.equal(resolveLeadMarketingOrigin({ source: 'web', channel: 'organic' }), 'web');
+assert.equal(resolveLeadMarketingOrigin({ source: 'web', utm_medium: ' Email ', utm_source: ' boletin ' }), 'email');
+assert.equal(resolveLeadMarketingOrigin({ source: 'web', utm_medium: ' EMAIL ', utm_source: ' Envios_Masivos ' }), 'bulk_email');
+assert.equal(resolveLeadMarketingOrigin({ source: 'whatsapp', utm_medium: 'email', utm_source: 'envios_masivos' }), 'bulk_email');
+assert.equal(resolveLeadMarketingOrigin({ source: 'call_click', utm_medium: 'email' }), 'email');
+assert.equal(resolveLeadMarketingOrigin({ source: 'whatsapp', utm_source: 'envios_masivos' }), 'whatsapp');
+assert.equal(resolveLeadMarketingOrigin({ source: 'web', utm_medium: 'email', gclid: 'confirmed-ad-click' }), 'google_ads');
+assert.equal(resolveLeadMarketingOrigin({ source: 'meta_ads', utm_medium: 'email' }), 'meta_ads');
 
 assert.equal(resolveLeadContactMethod({ source: 'web', source_detail: 'tel_modal' }), 'web_phone');
 assert.equal(resolveLeadContactMethod({ source: 'web', source_detail: 'chatbot' }), 'web_chat');
 assert.equal(resolveLeadContactMethod({ source: 'web', source_detail: 'web_form' }), 'web_form');
 assert.equal(resolveLeadContactMethod({ source: 'meta_ads', source_detail: 'leadgen_form:123' }), 'platform_form');
+assert.equal(resolveLeadContactMethod({ source: 'whatsapp', utm_medium: 'email' }), 'whatsapp');
 
-const Op = { or: Symbol('or'), ne: Symbol('ne') };
 const googleWhere = buildMarketingOriginWhere('google_ads', Op);
 assert.ok(Array.isArray(googleWhere[Op.or]));
 assert.ok(googleWhere[Op.or].some((condition) => condition.gclid));
-assert.deepEqual(buildMarketingOriginWhere('web', Op), {
+const webWhere = buildMarketingOriginWhere('web', Op);
+assert.equal(webWhere[Op.and].length, 1);
+assert.deepEqual(Object.fromEntries(Object.entries(webWhere)), {
   source: 'web',
   gclid: null,
   gbraid: null,
@@ -84,5 +94,7 @@ assert.match(createdDescription, /^Contacto: Teléfono de la web$/m);
 assert.match(createdDescription, /^Origen: Google Ads$/m);
 assert.match(createdDescription, /^Página de entrada: https:\/\/www\.propdental\.es\/pedir-hora\/$/m);
 assert.doesNotMatch(createdDescription, /Origen: web por teléfono/);
+assert.match(buildLeadCreatedDescription({ source: 'whatsapp', utm_source: 'envios_masivos', utm_medium: 'email' }),
+  /^Contacto: WhatsApp\nOrigen: Envío masivo$/);
 
 console.log('lead_attribution_view.test.js OK');

@@ -31,6 +31,11 @@ function httpsUrl(value, { allowVariables = false } = {}) {
   } catch { return null; }
 }
 
+function telephoneUrl(value) {
+  const raw = String(value || '').trim();
+  return /^tel:\+?[0-9]{3,15}$/i.test(raw) ? raw.toLowerCase() : null;
+}
+
 const RESPONSIVE_CSS = 'table{max-width:100%}img{max-width:100%}'
   + '@media screen and (max-width:640px){'
   + '.cc-e-fluid{width:100% !important;max-width:100% !important;box-sizing:border-box !important}'
@@ -125,9 +130,14 @@ function sanitizeEmailHtml(value, { allowVariables = false } = {}) {
             && !['alt', 'title'].includes(key) && /\{\{|\}\}/.test(next[key])) delete next[key];
         }
         if (next.href !== undefined) {
-          const url = httpsUrl(next.href, { allowVariables });
-          if (url) { next.href = url; next.rel = 'noopener noreferrer'; next.target = '_blank'; }
-          else delete next.href;
+          const telephone = telephoneUrl(next.href);
+          const url = telephone || httpsUrl(next.href, { allowVariables });
+          if (url) {
+            next.href = url;
+            next.rel = 'noopener noreferrer';
+            if (telephone) delete next.target;
+            else next.target = '_blank';
+          } else delete next.href;
         }
         if (next.src !== undefined) {
           const url = httpsUrl(next.src, { allowVariables });
@@ -204,7 +214,7 @@ function textFromHtml(value) {
     onOpenTag(tag, attributes) {
       if (breaks.has(tag)) parts.push('\n');
       if (tag === 'img' && attributes.alt) parts.push(attributes.alt);
-      if (tag === 'a') links.push(httpsUrl(attributes.href, { allowVariables: true }));
+      if (tag === 'a') links.push(telephoneUrl(attributes.href) || httpsUrl(attributes.href, { allowVariables: true }));
     },
     onCloseTag(tag) {
       if (tag === 'a') { const url = links.pop(); if (url) parts.push(` (${url})`); }
@@ -239,4 +249,4 @@ function assertContentBudget(content) {
   }
 }
 
-module.exports = { sanitizeEmailHtml, validateHtmlSourceCode, compileHtmlSource, textFromHtml, httpsUrl, hasVisibleSystemLink, assertContentBudget, MAX_SOURCE_BYTES };
+module.exports = { sanitizeEmailHtml, validateHtmlSourceCode, compileHtmlSource, textFromHtml, httpsUrl, telephoneUrl, hasVisibleSystemLink, assertContentBudget, MAX_SOURCE_BYTES };

@@ -170,6 +170,7 @@ const {
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
+const DERIVED_MARKETING_ORIGINS = new Set(['meta_form', 'email', 'bulk_email']);
 const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado']);
 const DEDUPE_WINDOW_HOURS = parseInt(process.env.INTAKE_DEDUPE_WINDOW_HOURS || '24', 10);
 const LEAD_COMPETITION_STATS_CACHE_TTL_MS = Math.max(
@@ -814,7 +815,7 @@ const buildLeadStatsWhereFromRequest = async (
 
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
-  if (source && (SOURCES.has(source) || source === 'meta_form')) {
+  if (source && (SOURCES.has(source) || DERIVED_MARKETING_ORIGINS.has(source))) {
     const originWhere = buildMarketingOriginWhere(source, Op);
     if (originWhere) where[Op.and] = [...(where[Op.and] || []), originWhere];
   }
@@ -6624,7 +6625,7 @@ const buildLeadListPayload = async (query = {}, context = {}) => {
   await applyLeadScopeWhere(where, { ...query, clinicId: clinicIdRaw, groupId: groupIdRaw }, context.userId);
   if (campanaIdParsed !== null) where.campana_id = campanaIdParsed;
   if (channel && CHANNELS.has(channel)) where.channel = channel;
-  if (source && (SOURCES.has(source) || source === 'meta_form')) {
+  if (source && (SOURCES.has(source) || DERIVED_MARKETING_ORIGINS.has(source))) {
     const originWhere = buildMarketingOriginWhere(source, Op);
     if (originWhere) where[Op.and] = [...(where[Op.and] || []), originWhere];
   }

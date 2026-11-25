@@ -261,6 +261,27 @@ test('URL and attribute variables are escaped and revalidated after substitution
   assert.match(safe.html, /Ana &amp; Luis/);
 });
 
+test('telephone destinations survive HTML and block previews only as direct dial links', () => {
+  const source = '<img src="tel:+34910000000"><a href="TEL:+34910000000">Llamar</a>'
+    + '<a href="tel:+34910000000?x=1">Consulta</a><a href="tel:%2B34910000000">Codificado</a>'
+    + '<a href="{{destino}}">Teléfono variable</a>';
+  const input = draft(source, { subject: 'Contacto', variables: { destino: 'tel:910000001' } });
+  const rendered = marketing.previewTemplate(input);
+  assert.equal((rendered.html.match(/href="tel:/g) || []).length, 2);
+  assert.match(rendered.html, /href="tel:\+34910000000"[^>]*>Llamar/);
+  assert.match(rendered.html, /href="tel:910000001"[^>]*>Teléfono variable/);
+  assert.match(rendered.text, /Llamar \(tel:\+34910000000\)/);
+  assert.doesNotMatch(rendered.html, /src="tel:|href="tel:[^"]*\?|href="tel:%|href="tel:[^"]+"[^>]*target=/);
+  assert.equal(require('../../lib/marketing-email-engagement').staticLinks(rendered.html).has('tel:+34910000000'), false);
+
+  const blocks = { name: 'Prueba', subject: 'Contacto', design: { blocks: [{ type: 'button', text: 'Llamar', url: 'tel:+34910000000' }] } };
+  const button = marketing.previewTemplate(blocks);
+  assert.match(button.html, /href="tel:\+34910000000"/);
+  assert.match(button.text, /tel:\+34910000000/);
+  const invalidImage = { ...blocks, design: { blocks: [{ type: 'image', url: 'tel:+34910000000' }] } };
+  assert.throws(() => marketing.previewTemplate(invalidImage), { code: 'email_template_url_invalid' });
+});
+
 test('mandatory visible footer survives forged hidden footer text and incomplete source markup', () => {
   const preview = marketing.previewTemplate(draft('<div style="display:none">Dejar de recibir estas comunicaciones</div><div style="position:fixed;z-index:9999"><table><tr><td>Hola {{nombre}}', { subject: 'Hola', preheader: 'Preheader único' }));
   assert.equal((preview.html.match(/Dejar de recibir estas comunicaciones/g) || []).length, 1);
@@ -400,6 +421,7 @@ test('persisted campaign create/update/prepare preserve explicit empty preheader
   const item = { id: 5, list_id: stored.list.id, name: 'Ana García', clinica_id: 21, email: 'ana@example.test', status: 'ready', selected: true, channel_status: {}, async update(next) { Object.assign(this, next); return this; } };
   stored.setItems([item]);
   t.mock.method(provider, 'publicConfig', () => ({ provider: 'mock', enabled: true, marketingEnabled: true }));
+  t.mock.method(delivery, 'findActiveSuppression', async () => null);
   t.mock.method(marketing, 'issueUnsubscribe', async () => 'https://example.test/email/baja');
   t.mock.method(bulk, 'assertReviewRequestCommunicationAllowed', async () => ({ review: false }));
   let sent;
