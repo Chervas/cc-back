@@ -655,11 +655,20 @@ class WhatsAppService {
         // Classify explicit intent and the actual approved template category,
         // never media filenames, folders or examples containing "reviews".
         let commercial = require('./marketingOptOut.service').isMarketingOutboundMessage?.(message) === true;
+        const metadata = message?.metadata;
+        const nativeReview = metadata?.source === 'marketing_bulk_sends' && metadata.dispatch_context === 'review_request'
+            && message.conversation_id && metadata.list_id && metadata.item_id && !metadata.test_send;
+        let reviewBinding = null;
         if (payload.type === 'template') {
             const template = await db.WhatsappTemplate.findOne({ where: { waba_id: String(clinicConfig.wabaId || ''),
                 name: payload.template?.name, language: payload.template?.language?.code },
-            attributes: ['id', 'category', 'catalog_template_id'], raw: true });
+            attributes: ['id', 'name', 'status', 'category', 'catalog_template_id'], raw: true });
             const metaMarketing = String(template?.category || '').toUpperCase() === 'MARKETING';
+            if (nativeReview && metadata.kind === 'mass_campaign_send'
+                && String(template?.status || '').toUpperCase() === 'APPROVED'
+                && require('../lib/whatsapp-template-workflow').isReviewWorkflowWhatsappTemplate(template)) {
+                reviewBinding = { whatsappTemplateId: template.id, whatsappWabaId: clinicConfig.wabaId };
+            }
             if (!commercial && Number(template?.catalog_template_id) > 0) {
                 const catalog = await db.WhatsappTemplateCatalog.findByPk(template.catalog_template_id, { attributes: ['category', 'family_key'], raw: true });
                 const category = String(catalog?.category || '').toUpperCase();
@@ -671,8 +680,15 @@ class WhatsAppService {
                     && /^clinicaclick_(?:confirmacion_datos_cita_(?:(?:24|48|hoy)(?:_sin_respuesta)?|reprogramada_(?:24|48|hoy))|recordatorio_(?:dia_antes(?:_sin_respuesta)?|mismo_dia(?:_primera_visita(?:_acceso_dificil)?)?)|aviso_cita_sin_confirmar_noche)$/.test(String(catalog?.family_key || ''));
                 commercial = !operationalCatalog && (category === 'MARKETING' || metaMarketing);
             } else commercial ||= metaMarketing;
+        } else if (payload.type === 'text' && nativeReview && metadata.trigger_message_id
+            && ['review_google_link_followup', 'review_private_feedback_request', 'review_private_feedback_ack'].includes(metadata.kind)) {
+            reviewBinding = { whatsappOriginMessageId: metadata.trigger_message_id };
         }
-        if (!commercial) return;
+        const verifiedWhatsappReview = reviewBinding && (await require('./marketingBulkSends.service').assertReviewRequestCommunicationAllowed({
+            list: { id: metadata.list_id }, item: { id: metadata.item_id }, conversation: { id: message.conversation_id },
+            channel: 'whatsapp', deliveryClinicId: clinicId, whatsappRecipient: payload.to, ...reviewBinding,
+        })).verifiedWhatsappReview === true;
+        if (!commercial && !verifiedWhatsappReview) return;
         await require('./whatsappContactIdentity.service').assertPhoneEndpointCurrent(payload.to,clinicConfig,{commercial:true});
         let patientId = null;
         if (message?.conversation_id) {
@@ -686,6 +702,7 @@ class WhatsAppService {
             patientIds: patientId ? [patientId] : null, phone: payload.to });
         await require('./marketingOptOut.service').assertStoredCommunicationAllowed({
             clinicId, patientId, phone: payload.to, scope: 'marketing',
+            ...(verifiedWhatsappReview ? { reviewRequest: true, includeChannel: true } : {}),
         });
     }
 

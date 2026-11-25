@@ -15,6 +15,31 @@ require.cache[identityModule] = { id: identityModule, filename: identityModule, 
 } };
 const optOut = require('../../services/marketingOptOut.service');
 
+test('verified review selection and transport ignore only an advertising import without a later withdrawal', async t => {
+  const queries = [];
+  const capture = async ({ where }) => {
+    queries.push(db.sequelize.getQueryInterface().queryGenerator.selectQuery('MarketingContactOptOuts', { where })
+      .replaceAll('`MarketingContactOptOuts`.', ''));
+    return null;
+  };
+  t.mock.method(db.MarketingContactOptOut, 'findAll', async options => { await capture(options); return []; });
+  t.mock.method(db.MarketingContactOptOut, 'findOne', capture);
+  t.mock.method(require('../../services/patientIncidents.service'), 'assertCommercialAllowed', async () => {});
+  t.mock.method(require('../../lib/bs-privacy-commercial-preferences'), 'commercialRefusals',
+    async () => ({ patientIds: new Set(), phoneDigits: new Set() }));
+  await optOut.getActiveOptOutSetsForScope({ clinicIds: [44] }, null, { reviewRequest: true });
+  const contact = { clinicId: 44, patientId: 6, phone: '+34600000001', scope: 'marketing' };
+  await optOut.assertStoredCommunicationAllowed({ ...contact, reviewRequest: true, includeChannel: true });
+  await optOut.assertStoredCommunicationAllowed(contact);
+  for (const query of queries.slice(0, 2)) {
+    assert.match(query, /`scope` = 'care'/);
+    assert.match(query, /NOT \(`source` = 'cliniccloud_publicidad_legacy' AND `inbound_message_id` IS NULL AND `trigger_message_id` IS NULL\)/);
+  }
+  assert.match(queries[1], /`scope` = 'whatsapp_channel'/);
+  assert.match(queries[2], /`scope` = 'marketing'/);
+  assert.doesNotMatch(queries[2], /cliniccloud_publicidad_legacy/);
+});
+
 test('a new template gets the mandatory language-specific button without replacing approved links', () => {
   const body = { type: 'BODY', text: 'Hola' };
   const original = [body, { type: 'BUTTONS', buttons: [

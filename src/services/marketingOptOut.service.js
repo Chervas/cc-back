@@ -36,6 +36,7 @@ const COMMERCIAL_TEMPLATE_USAGES = new Set([
 ]);
 const COMMERCIAL_TEMPLATE_CATEGORIES = new Set(['marketing']);
 const REVIEW_TEMPLATE_USAGES = new Set(['solicitud_resena', 'resena', 'review_request', 'reviews']);
+const ADVERTISING_ONLY_OPT_OUT_SOURCE = 'cliniccloud_publicidad_legacy';
 
 function cleanString(value) {
   return value === undefined || value === null ? '' : String(value).trim();
@@ -1015,7 +1016,19 @@ async function applyInboundOptOutIfNeeded({ clinicId, conversation, inboundMessa
   });
 }
 
-async function getActiveOptOutSetsForScope(scope, transaction = null) {
+function marketingRestrictionWhere(reviewRequest) {
+  // The imported "Publicidad" field is narrower than an unqualified BAJA.
+  // An incoming withdrawal may have updated an imported row in place.
+  if (!reviewRequest) return { scope: 'marketing' };
+  return { [Op.or]: [
+    { scope: 'care' },
+    { scope: 'marketing', [Op.not]: {
+      source: ADVERTISING_ONLY_OPT_OUT_SOURCE, inbound_message_id: null, trigger_message_id: null,
+    } },
+  ] };
+}
+
+async function getActiveOptOutSetsForScope(scope, transaction = null, { reviewRequest = false } = {}) {
   if (!MarketingContactOptOut) {
     return { patientIds: new Set(), phoneDigits: new Set() };
   }
@@ -1027,7 +1040,7 @@ async function getActiveOptOutSetsForScope(scope, transaction = null) {
     where: {
       clinica_id: { [Op.in]: clinicIds },
       channel: 'whatsapp',
-      scope: 'marketing',
+      ...marketingRestrictionWhere(reviewRequest),
       status: 'active',
     },
     attributes: ['paciente_id', 'phone_digits'],
@@ -1082,7 +1095,7 @@ async function assertAutomationCommunicationAllowed({ clinicId, patientId = null
     phone, scope: normalizedScope, includeChannel: true });
 }
 
-async function assertStoredCommunicationAllowed({ clinicId, patientId, phone, scope, includeChannel = false }) {
+async function assertStoredCommunicationAllowed({ clinicId, patientId, phone, scope, includeChannel = false, reviewRequest = false }) {
   if (scope === 'marketing') {
     await require('./patientIncidents.service').assertCommercialAllowed({ db, clinicId, patientId, phone });
   }
@@ -1092,12 +1105,13 @@ async function assertStoredCommunicationAllowed({ clinicId, patientId, phone, sc
   if (patientId > 0) identityWhere.push({ paciente_id: patientId });
   if (phoneDigits) identityWhere.push({ phone_digits: phoneDigits });
   if (!clinicId || !identityWhere.length) return;
+  const purpose = scope === 'marketing' ? marketingRestrictionWhere(reviewRequest) : { scope };
   const restriction = await MarketingContactOptOut.findOne({
     where: {
       clinica_id: clinicId,
       channel: 'whatsapp',
       status: 'active',
-      [Op.or]: [{ scope, [Op.or]: identityWhere },
+      [Op.or]: [{ [Op.and]: [purpose, { [Op.or]: identityWhere }] },
         ...(includeChannel && phoneDigits ? [{ scope: 'whatsapp_channel', phone_digits: phoneDigits }] : [])],
     },
     order: [['updated_at', 'DESC']],

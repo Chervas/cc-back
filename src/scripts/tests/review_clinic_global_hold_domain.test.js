@@ -32,10 +32,12 @@ function harness() {
         if (name === '../../models') return db;
         if (name === 'crypto' || name === 'sequelize') return require(name);
         if (name === '../lib/whatsappAppointmentEligibility') return eligibility;
+        if (name === '../lib/phone') return require('../../lib/phone');
         if (name === '../lib/review-care-snapshot') return require('../../lib/review-care-snapshot');
         if (name === '../lib/review-attribution-hold') return require('../../lib/review-attribution-hold');
         if (name === '../lib/marketing-import-care-date') return require('../../lib/marketing-import-care-date');
         if (name === '../lib/bs-privacy-commercial-preferences') return { assertCommercialAllowed: async () => true };
+        if (name === './patientIncidents.service') return { assertCommercialAllowed: async () => {} };
         if (name === './marketingBulkSends.service') return bulk;
         if (name === './marketingEmailDispatch.service') return email || serviceStub;
         if (name.startsWith('../lib/')) return {};
@@ -119,6 +121,80 @@ test('review purpose recognizes stored boolean/string/usage/dispatch variants wi
   const result = await h.bulk.assertReviewRequestCommunicationAllowed(normal);
   assert.equal(result.review, false);
   assert.equal(h.calls.provider, 0); assert.equal(h.calls.write, 0);
+});
+
+test('the advertising-only distinction uses the approved template and the stored review recipient', async () => {
+  const h = harness();
+  const scope = h.seed(44, { review_request: true, whatsapp_template_id: 30 }, {
+    item: { paciente_id: 8, selected: true, status: 'ready', phone: '+34600000001' },
+  });
+  const dispatch = overrides => h.bulk.assertReviewRequestCommunicationAllowed({
+    ...scope, channel: 'whatsapp', whatsappTemplateId: 30, whatsappRecipient: '34600000001', ...overrides,
+  });
+  assert.equal((await dispatch()).verifiedWhatsappReview, true);
+  assert.equal((await dispatch({ whatsappRecipient: '34600000002' })).verifiedWhatsappReview, false);
+  assert.equal((await dispatch({ whatsappTemplateId: 31 })).verifiedWhatsappReview, false);
+  scope.item.exclusion_reason = 'review_refusal';
+  assert.equal((await dispatch()).verifiedWhatsappReview, false);
+  scope.item.exclusion_reason = null;
+  scope.list.criteria.review_gift_enabled = true;
+  assert.equal((await dispatch()).verifiedWhatsappReview, false);
+  assert.equal(h.calls.provider, 0);
+  assert.equal(h.calls.write, 0);
+});
+
+test('WhatsApp uses the review preference only for a bound approved review template', async () => {
+  const h = harness();
+  const scope = h.seed(44, { review_request: true, whatsapp_template_id: 30 }, {
+    item: { paciente_id: 8, selected: true, status: 'ready', phone: '+34600000001' },
+  });
+  const conversation = { id: 3, clinic_id: 44, patient_id: 8 };
+  h.conversations.set(3, conversation);
+  const template = { id: 30, status: 'APPROVED', category: 'MARKETING', catalog_template_id: 32 };
+  const checks = [];
+  const dependencies = {
+    './marketingOptOut.service': {
+      isMarketingOutboundMessage: () => true,
+      assertStoredCommunicationAllowed: async input => checks.push(input),
+    },
+    './whatsappContactIdentity.service': { assertPhoneEndpointCurrent: async () => {} },
+    '../lib/bs-privacy-commercial-preferences': { assertCommercialAllowed: async () => {} },
+    '../lib/whatsapp-template-workflow': require('../../lib/whatsapp-template-workflow'),
+    './marketingBulkSends.service': h.bulk,
+  };
+  const source = fs.readFileSync(require.resolve('../../services/whatsapp.service'), 'utf8');
+  const start = source.indexOf('    async assertPrivacyCommercialAllowed(');
+  const end = source.indexOf('    async dispatchMessage(', start);
+  const sender = vm.runInNewContext('({' + source.slice(start, end) + '})', {
+    db: { WhatsappTemplate: { findOne: async () => template }, Conversation: { findByPk: async () => conversation } },
+    require: name => {
+      assert(Object.hasOwn(dependencies, name));
+      return dependencies[name];
+    },
+  });
+  const payload = { type: 'template', to: '34600000001', template: { name: 'fictitious', language: { code: 'es' } } };
+  const message = { conversation_id: 3, metadata: {
+    source: 'marketing_bulk_sends', kind: 'mass_campaign_send', dispatch_context: 'review_request',
+    list_id: scope.list.id, item_id: scope.item.id,
+  } };
+  const config = { clinicId: 44, wabaId: '123' };
+  await sender.assertPrivacyCommercialAllowed(payload, config, message);
+  await sender.assertPrivacyCommercialAllowed({ ...payload, to: '34600000002' }, config, message);
+  template.catalog_template_id = null;
+  await sender.assertPrivacyCommercialAllowed(payload, config, message);
+  h.chatMessages.set(90, { conversation_id: 3, direction: 'outbound', status: 'sent', metadata: {
+    ...message.metadata, recipient: payload.to, template_usage: 'solicitud_resena', wamid: 'wamid.fictitious',
+  } });
+  const reply = { ...message, metadata: { ...message.metadata, kind: 'review_google_link_followup', trigger_message_id: 90 } };
+  await sender.assertPrivacyCommercialAllowed({ type: 'text', to: payload.to }, config, reply);
+  h.chatMessages.get(90).metadata.item_id += 1;
+  await sender.assertPrivacyCommercialAllowed({ type: 'text', to: payload.to }, config, reply);
+  assert.equal(checks[0].reviewRequest, true);
+  assert.equal(checks[0].includeChannel, true);
+  assert.equal(checks[1].reviewRequest, undefined);
+  assert.equal(checks[2].reviewRequest, undefined);
+  assert.equal(checks[3].reviewRequest, true);
+  assert.equal(checks[4].reviewRequest, undefined);
 });
 
 test('real stored clinic/recipient defeat caller clinic spoofing and group first-clinic fallback', async () => {

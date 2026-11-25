@@ -1591,9 +1591,9 @@ function mergeCriteria(list, patch) {
   };
 }
 
-async function applyMarketingOptOutExclusions(itemPayloads, scope, transaction = null) {
+async function applyMarketingOptOutExclusions(itemPayloads, scope, transaction = null, { reviewRequest = false } = {}) {
   if (!Array.isArray(itemPayloads) || !itemPayloads.length) return itemPayloads;
-  const optOutSets = await marketingOptOutService.getActiveOptOutSetsForScope(scope, transaction);
+  const optOutSets = await marketingOptOutService.getActiveOptOutSetsForScope(scope, transaction, { reviewRequest });
   return itemPayloads.map((item) => {
     if (String(item.status || '').startsWith('excluded')) return item;
     if (!marketingOptOutService.isContactOptedOut({
@@ -1606,7 +1606,8 @@ async function applyMarketingOptOutExclusions(itemPayloads, scope, transaction =
     return {
       ...item,
       status: 'excluded_opt_out',
-      reason: 'Baja comercial solicitada por WhatsApp en una campaña anterior',
+      reason: reviewRequest ? 'Restricción de contacto aplicable a solicitudes de reseña'
+        : 'Baja comercial solicitada por WhatsApp en una campaña anterior',
       exclusion_reason: 'opt_out',
       selected: false,
     };
@@ -1621,10 +1622,16 @@ async function revalidateDispatchExclusions(list, items, scope, template, transa
     await guardReviewCare(scope, list, items, { background: true });
     careHeld = await require('./reviewCareContext.service').current().heldPatientIds(items.map(item => Number(item.paciente_id)));
   }
-  const marketing = isReviewRequestList(list)
+  const reviewRequest = isReviewRequestList(list);
+  const reviewPreference = reviewRequest && require('../lib/whatsapp-template-workflow').isReviewWorkflowWhatsappTemplate({
+    name: template?.name,
+    catalog_template_id: template?.catalog_template_id,
+  }) && !reviewOffersGift(list);
+  const marketing = reviewRequest
     || resolveTemplateCommercialFromMetaCategory(template, list.criteria?.template_commercial === true
       || isCommercialTemplateUsage(list.criteria?.template_usage));
-  const optOutSets = marketing ? await marketingOptOutService.getActiveOptOutSetsForScope(scope, transaction) : null;
+  const optOutSets = marketing
+    ? await marketingOptOutService.getActiveOptOutSetsForScope(scope, transaction, { reviewRequest: reviewPreference }) : null;
   const blockedWhatsapp = await marketingOptOutService.getBlockedWhatsappNumbersForScope(scope, transaction);
   const hasEmail = normalizeChannels(list.criteria?.channels || list.action_mode || list.channel || 'whatsapp').includes('email');
   const patientIds = items.map((item) => Number(item.paciente_id || 0)).filter((id) => Number.isInteger(id) && id > 0);
@@ -1662,7 +1669,8 @@ async function revalidateDispatchExclusions(list, items, scope, template, transa
       ? 'whatsapp_channel_refused' : (hasMarketingOptOut ? 'opt_out' : 'no_contactar');
     const reason = importHeld ? 'Comunicaciones retenidas en la importación.' : whatsappBlocked
       ? 'La persona ha solicitado no recibir mensajes en este número de WhatsApp'
-      : hasMarketingOptOut ? 'Baja comercial solicitada antes del envío'
+      : hasMarketingOptOut ? (reviewRequest ? 'Restricción de contacto aplicable a solicitudes de reseña'
+        : 'Baja comercial solicitada antes del envío')
         : 'Paciente con comunicaciones rechazadas antes del envío';
     // Email uses the same audience row but has independent consent and delivery.
     // A WhatsApp refusal must never deselect the person for email.
@@ -2486,14 +2494,19 @@ function isReviewRequestList(list) {
     });
 }
 
+function reviewOffersGift(list) {
+  return ['true', '1'].includes(String(list?.criteria?.review_gift_enabled || '').toLowerCase());
+}
+
 /** Reseñas are a non-operational clinic purpose, regardless of channel or patient origin.
  * Re-read persisted recipient/list scope: a group sender or caller clinic is not
  * authority to release another clinic's recipient. No patient or clinical DML. */
 async function assertReviewRequestCommunicationAllowed({ list, item = null, conversation = null,
-  forceReview = false, templateName = null, channel = null, deliveryClinicId = null, triggerMessage = null } = {}) {
+  forceReview = false, templateName = null, channel = null, deliveryClinicId = null, triggerMessage = null,
+  whatsappTemplateId = null, whatsappRecipient = null, whatsappWabaId = null, whatsappOriginMessageId = null } = {}) {
   const eligibility = require('../lib/whatsappAppointmentEligibility');
   const storedList = list?.id ? await MarketingPatientList.findByPk(list.id, {
-    attributes: ['id', 'criteria', 'scope_type', 'clinica_id', 'clinic_ids', 'grupo_clinica_id', 'created_by'],
+    attributes: ['id', 'criteria', 'template_snapshot', 'scope_type', 'clinica_id', 'clinic_ids', 'grupo_clinica_id', 'created_by'],
   }) : null;
   const review = forceReview || isReviewRequestList(storedList) || isReviewRequestList(list)
     || eligibility.nonOperationalClinicCommunication({ templateName }) === true;
@@ -2505,7 +2518,8 @@ async function assertReviewRequestCommunicationAllowed({ list, item = null, conv
   if (!storedList) deniedScope();
   const bound = item?.id ? await MarketingPatientListItem.findOne({
     where: { id: item.id, list_id: storedList.id },
-    attributes: ['id', 'list_id', 'clinica_id', 'paciente_id', 'custom_fields', 'status', 'selected', 'dispatch_status'],
+    attributes: ['id', 'list_id', 'clinica_id', 'paciente_id', 'phone', 'custom_fields', 'status', 'selected', 'dispatch_status',
+      'opt_out_at', 'exclusion_reason'],
   }) : null;
   if (item?.id && !bound) deniedScope();
   require('../lib/review-attribution-hold').assertReviewAttributionClear(bound);
@@ -2569,13 +2583,42 @@ async function assertReviewRequestCommunicationAllowed({ list, item = null, conv
     assertClinic(Number(deliveryClinicId));
     if (positive(deliveryClinicId) !== clinicId) deniedScope();
   }
+  const currentConversation = conversation?.id
+    ? await Conversation.findByPk(conversation.id, { attributes: ['id', 'clinic_id', 'patient_id'] }) : null;
   if (conversation?.id) {
-    const current = await Conversation.findByPk(conversation.id, { attributes: ['id', 'clinic_id'] });
-    if (!current) deniedScope();
-    assertClinic(Number(current.clinic_id));
-    if (Number(current.clinic_id) !== clinicId) deniedScope();
+    if (!currentConversation) deniedScope();
+    assertClinic(Number(currentConversation.clinic_id));
+    if (Number(currentConversation.clinic_id) !== clinicId) deniedScope();
   }
-  return { review: true, clinicId };
+  if (whatsappTemplateId == null && whatsappOriginMessageId == null) return { review: true, clinicId };
+  const phone = normalizePhoneDigits(whatsappRecipient);
+  const eligible = isReviewRequestList(storedList) && !!bound?.paciente_id
+    && !!bound.selected && bound.status === 'ready' && !bound.opt_out_at && !bound.exclusion_reason
+    && !!phone && phone === normalizePhoneDigits(bound.phone)
+    && (!currentConversation || Number(currentConversation.patient_id) === Number(bound.paciente_id))
+    && !reviewOffersGift(storedList);
+  if (!eligible) return { review: true, clinicId, verifiedWhatsappReview: false };
+  if (whatsappOriginMessageId != null) {
+    const origin = await Message.findByPk(whatsappOriginMessageId, {
+      attributes: ['conversation_id', 'direction', 'status', 'metadata'],
+    });
+    const metadata = asPlainObject(origin?.metadata);
+    const accepted = ['sent', 'delivered', 'read'].includes(origin?.status)
+      || (origin?.status === 'pending' && metadata.provider_acceptance_status === 'accepted');
+    const sameReview = !!currentConversation && Number(origin?.conversation_id) === Number(currentConversation.id)
+      && origin.direction === 'outbound' && accepted
+      && metadata.source === 'marketing_bulk_sends' && !isBulkSendTestMessage(origin)
+      && (isReviewRatingTriggerMessage(origin) || metadata.kind === 'review_private_feedback_request')
+      && Number(metadata.list_id) === Number(storedList.id) && Number(metadata.item_id) === Number(bound.id)
+      && phone === normalizePhoneDigits(metadata.recipient) && !!metadata.wamid;
+    return { review: true, clinicId, verifiedWhatsappReview: sameReview };
+  }
+  const expectedTemplateId = getListWhatsappTemplateId(storedList);
+  if (Number(whatsappTemplateId) === expectedTemplateId) return { review: true, clinicId, verifiedWhatsappReview: true };
+  // Group sends can use the approved counterpart from the recipient's WABA.
+  const expected = multi && whatsappWabaId && expectedTemplateId ? await WhatsappTemplate.findByPk(expectedTemplateId) : null;
+  const counterpart = expected && await resolveWhatsappTemplateForClinic(expected, clinicId, { wabaId: whatsappWabaId });
+  return { review: true, clinicId, verifiedWhatsappReview: Number(whatsappTemplateId) === Number(counterpart?.id) };
 }
 
 function getWhatsappRoutingPurposeForList(list) {
@@ -3923,7 +3966,7 @@ async function buildReviewItemsFromImportedList(scope, body = {}) {
       reason: 'El contacto importado no está vinculado a una ficha de paciente de la clínica.' };
   });
   return sortReviewRequestItemsByRecentCare(
-    await applyMarketingOptOutExclusions(await prepareReviewItemsForExclusions(items, scope, body), scope)
+    await applyMarketingOptOutExclusions(await prepareReviewItemsForExclusions(items, scope, body), scope, null, { reviewRequest: true })
   );
 }
 
@@ -6850,7 +6893,7 @@ async function createCampaign(scope, body = {}, userId = null) {
     }
     if (isReviewRequest || (recordKind === 'campaign' && templateCommercial
       && channels.includes('whatsapp') && !channels.includes('email'))) {
-      itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, effectiveScope, transaction);
+      itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, effectiveScope, transaction, { reviewRequest: isReviewRequest });
     }
     if (isReviewRequest && effectiveScope?.scope === 'group') {
       const clinicStatuses = await buildReviewClinicStatuses(effectiveScope, {
@@ -7394,7 +7437,7 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
       }
       if (isReviewRequestList(list) || (nextCriteria.record_kind === 'campaign' && nextCriteria.template_commercial === true
         && effectiveChannels.includes('whatsapp') && !effectiveChannels.includes('email'))) {
-        itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction);
+        itemPayloads = await applyMarketingOptOutExclusions(itemPayloads, scope, transaction, { reviewRequest: isReviewRequestList(list) });
       }
 
       const existingRows = await MarketingPatientListItem.findAll({
