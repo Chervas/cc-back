@@ -10,6 +10,7 @@ const { createHash } = require('node:crypto');
 const { connectOperatorDatabase, databaseOptions } = require('../lib/cliniccloud-import/operator-database');
 const { parseArgs, writePrivateJson, readBytes, PRIVATE_ROOT } = require('../lib/cliniccloud-import/io');
 const registration = require('../lib/registration-privacy-template');
+const choices = require('../lib/consent-document-choices');
 const settings = require('../lib/registration-privacy-configuration');
 const digital = require('../lib/bs-privacy-digital-template');
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
@@ -38,13 +39,26 @@ async function capture(connection, lock = false) {
   if (versions.length > 202) fail('VERSION_LIMIT_EXCEEDED');
   return { database: identity[0].database_name, clinics, templates, versions };
 }
-function entries(before) {
+function entries(before, variant = 'settings') {
   const body = registration.bsDraft();
   return CLINICS.map(id => {
     const clinic = before.clinics.find(row => Number(row.id_clinica) === id), template = before.templates.find(row => Number(row.clinic_id) === id);
     if (!clinic || template?.status !== 'active' || template.purpose !== 'data_protection' || !template.is_default || template.blocking_policy !== 'hard') fail('ACTIVE_APPROVED_TEMPLATE_REQUIRED');
     const versions = before.versions.filter(row => Number(row.clinic_template_id) === Number(template.id));
     const published = versions.find(row => row.status === 'published' && row.locale === 'es');
+    if (variant === 'commercial-channels') {
+      const bodyJson = settings.object(published?.body_json);
+      if (!registration.schema(bodyJson) || !published?.body_html) fail('ACTIVE_REGISTRATION_PRIVACY_VERSION_REQUIRED');
+      const form = choices.validateForm(bodyJson.consent_form);
+      const already = form.schema_version === choices.COMMERCIAL_CHOICE_SCHEMA;
+      if (!already && !form.fields.some(field => field.key === 'commercial')) fail('EXISTING_COMMERCIAL_QUESTION_REQUIRED');
+      const nextForm = already ? form : choices.commercialChannelForm(form.fields);
+      return { clinic_id: id, template_id: Number(template.id), create_version: !already,
+        version: already ? Number(published.version) : Math.max(...versions.map(row => Number(row.version))) + 1,
+        body: { title: published.title, body_html: published.body_html, body_json: { ...bodyJson, consent_form: nextForm } },
+        variable_schema: { ...settings.object(published.variable_schema), consent_form: nextForm },
+        expected_published_id: Number(published.id) };
+    }
     const already = published && hash(settings.object(published.body_json)) === hash(body.body_json) && published.body_html === body.body_html;
     if (!already && !require('../lib/registration-privacy-paper').isApprovedPaperFamilyVersion(published)) fail('APPROVED_LEGAL_SOURCE_REQUIRED');
     const intake = { ...settings.object(settings.object(clinic.configuracion).patient_intake), privacy_enabled: true,
@@ -56,17 +70,21 @@ function entries(before) {
       body, expected_published_id: Number(published.id) };
   });
 }
-function makePlan(before, target, actorId) {
+function makePlan(before, target, actorId, variant = 'settings') {
   if (!Number.isSafeInteger(actorId) || actorId <= 0) fail('ACTOR_REQUIRED');
+  if (variant === 'commercial-channels') return { schema_version: VERSION, target, actor_id: actorId, variant,
+    before, before_sha256: hash(before), entries: entries(before, variant) };
+  if (variant !== 'settings') fail('VARIANT_INVALID');
   return { schema_version: VERSION, target, actor_id: actorId, before, before_sha256: hash(before),
     entries: entries(before), source_sha256: hash(registration.bsDraft()), policy: {
       clinics: CLINICS, additive_versions_only: true, signed_documents_unchanged: true, no_messages: true,
       import_holds_unchanged: true, old_sms_not_whatsapp: true, additional_documents_empty: true, medical_questionnaire_disabled: true } };
 }
 async function execute({ connection, plan, approvedHash, backupPath, dryRun = true, saveBackup = writePrivateJson }) {
-  if (!plan || plan.schema_version !== VERSION || hash(plan) !== approvedHash || hash(registration.bsDraft()) !== plan.source_sha256
+  if (!plan || plan.schema_version !== VERSION || hash(plan) !== approvedHash
+    || (plan.variant !== 'commercial-channels' && hash(registration.bsDraft()) !== plan.source_sha256)
     || !['crm', 'dev'].includes(plan.target) || hash(plan.before) !== plan.before_sha256
-    || hash(plan.entries) !== hash(entries(plan.before))) fail('EXACT_REVIEWED_PLAN_REQUIRED');
+    || hash(plan.entries) !== hash(entries(plan.before, plan.variant))) fail('EXACT_REVIEWED_PLAN_REQUIRED');
   const [[guard]] = await connection.query('SELECT GET_LOCK(?,0) AS acquired', [LOCK]);
   if (Number(guard.acquired) !== 1) fail('OPERATOR_BUSY');
   let transaction = false;
@@ -85,25 +103,28 @@ async function execute({ connection, plan, approvedHash, backupPath, dryRun = tr
       if (entry.create_version) {
         const [result] = await connection.query("INSERT INTO ClinicConsentTemplateVersions (clinic_template_id,version,locale,title,body_json,body_html,variable_schema,status,published_at,created_by,createdAt,updatedAt) VALUES (?,?,'es',?,?,?,?,'published',UTC_TIMESTAMP(),?,UTC_TIMESTAMP(),UTC_TIMESTAMP())",
           [entry.template_id, entry.version, entry.body.title, JSON.stringify(entry.body.body_json), entry.body.body_html,
-            JSON.stringify({ consent_form: entry.body.body_json.consent_form }), plan.actor_id]);
+            JSON.stringify(entry.variable_schema || { consent_form: entry.body.body_json.consent_form }), plan.actor_id]);
         if (result.affectedRows !== 1) fail('VERSION_INSERT_FAILED');
         inserted.push(Number(result.insertId));
       }
-      const [updated] = await connection.query('UPDATE Clinicas SET configuracion=? WHERE id_clinica=?',
-        [JSON.stringify(entry.configuration), entry.clinic_id]);
-      if (updated.affectedRows !== 1) fail('CLINIC_UPDATE_FAILED');
+      if (entry.configuration) {
+        const [updated] = await connection.query('UPDATE Clinicas SET configuracion=? WHERE id_clinica=?',
+          [JSON.stringify(entry.configuration), entry.clinic_id]);
+        if (updated.affectedRows !== 1) fail('CLINIC_UPDATE_FAILED');
+      }
     }
     const after = await capture(connection, true);
     if (before.versions.some(old => !after.versions.some(row => Number(row.id) === Number(old.id) && hash(row) === hash(old)))) fail('HISTORICAL_VERSION_CHANGED');
     if (hash(before.templates) !== hash(after.templates)) fail('TEMPLATE_HEADERS_CHANGED');
     if (dryRun) await connection.rollback(); else await connection.commit(); transaction = false;
     return { schema_version: VERSION + ':receipt', mode: dryRun ? 'rolled_back_dry_run' : 'applied',
-      plan_sha256: hash(plan), created_versions: inserted.length, clinics: CLINICS, source_sha256: plan.source_sha256 };
+      plan_sha256: hash(plan), created_versions: inserted.length, clinics: CLINICS,
+      ...(plan.variant ? { variant: plan.variant } : { source_sha256: plan.source_sha256 }) };
   } catch (error) { if (transaction) await connection.rollback(); throw error; }
   finally { await connection.query('SELECT RELEASE_LOCK(?)', [LOCK]); }
 }
 async function main(args) {
-  const options = parseArgs(args, ['--mode', '--target', '--actor-id', '--output', '--plan', '--approved-plan-sha256', '--backup']);
+  const options = parseArgs(args, ['--mode', '--target', '--actor-id', '--output', '--plan', '--approved-plan-sha256', '--backup', '--variant']);
   const target = options['--target'], mode = options['--mode'] || 'plan';
   if (!['plan', 'dry-run', 'apply'].includes(mode)) fail('MODE_INVALID');
   const configuration = databaseOptions(target), connection = await connectOperatorDatabase(target);
@@ -112,7 +133,7 @@ async function main(args) {
       await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
       const before = await capture(connection); await connection.rollback();
       if (before.database !== configuration.database) fail('DATABASE_CHANGED');
-      const plan = makePlan(before, target, Number(options['--actor-id'])); writePrivateJson(options['--output'], plan);
+      const plan = makePlan(before, target, Number(options['--actor-id']), options['--variant']); writePrivateJson(options['--output'], plan);
       return { mode, plan_sha256: hash(plan), clinics: CLINICS, created_versions: plan.entries.filter(row => row.create_version).length };
     }
     const plan = privateInput(options['--plan']);

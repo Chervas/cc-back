@@ -51,8 +51,9 @@ function legacyDocument(answer = 'no') {
   return { doc, version };
 }
 
-function standardDocument(withBlocks = false) {
+function standardDocument(withBlocks = false, withChannels = false) {
   const registration = require('../../lib/registration-privacy-template'), source = registration.standardDraft();
+  if (withChannels) source.body_json.consent_form = choices.commercialChannelForm(source.body_json.consent_form.fields);
   const template = { id: 110, clinic_id: 88, purpose: 'data_protection' }, version = { id: 120,
     clinic_template_id: 110, locale: 'es', status: 'published', ...source };
   const blocks = require('../../lib/consent-document-blocks');
@@ -77,6 +78,21 @@ function standardDocument(withBlocks = false) {
   doc.snapshot_hash = choices.choiceSnapshotHash(snapshot, doc.snapshot_html);
   return { doc, version, template };
 }
+
+test('a signed selection of WhatsApp only blocks promotional Email without blocking WhatsApp or changing care', async () => {
+  const { doc, version, template } = standardDocument(false, true);
+  const snapshot = doc.snapshot_json, evidence = snapshot.signature_evidence.consent_choices;
+  Object.assign(evidence.answers, { commercial: 'yes', commercial_whatsapp: 'yes', sms_whatsapp: 'yes' });
+  const baseHtml = require('../../lib/registration-privacy-template').render(version, snapshot.context);
+  doc.snapshot_html = choices.appendSignedChoiceHtml(baseHtml, doc, evidence);
+  doc.snapshot_hash = choices.choiceSnapshotHash(snapshot, doc.snapshot_html);
+  const db = { Sequelize: S, PatientConsentDocument: { findAll: async () => [doc] },
+    ClinicConsentTemplateVersion: { findAll: async () => [version] }, ClinicConsentTemplate: { findAll: async () => [template] } };
+  const options = { db, clinicIds: [88], patientIds: [130], now };
+  assert.deepEqual((await helper.commercialRefusals({ ...options, channel: 'email' })).documentIds, [140]);
+  assert.deepEqual((await helper.commercialRefusals({ ...options, channel: 'whatsapp' })).documentIds, []);
+  assert.deepEqual((await helper.channelRefusals(options)).documentIds, []);
+});
 
 test('ordered signed folios project commercial and SMS/WhatsApp No without mutating evidence or interpreting free answers', async () => {
   const { doc, version, template } = standardDocument(true), frozen = JSON.stringify(doc);
@@ -280,6 +296,7 @@ test('actual email boundary uses persisted marketing patient/recipient scope, wh
     require: name => {
       if (name === '../lib/whatsappAppointmentEligibility') return require('../../lib/whatsappAppointmentEligibility');
       if (name === '../lib/bs-privacy-commercial-preferences') return helper;
+      if (name === './patientIncidents.service') return { assertCommercialAllowed: async () => {} };
       throw Error('unexpected_dependency');
     },
   });

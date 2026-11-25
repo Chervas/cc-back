@@ -47,6 +47,22 @@ test('new choices have one explicit SMS/WhatsApp answer, never reinterpret legac
   }
   assert.equal(choices.validateForm(digital.buildBsPrivacyDigitalHtml().consent_form).schema_version, 'bs-lopd-choices/v1');
 });
+test('commercial choices require a coherent explicit answer for each channel and freeze the displayed clinic name', () => {
+  const form = choices.commercialChannelForm(registration.form().fields);
+  const doc = { id: 1, snapshot_json: { version: { body_json: { consent_form: form } }, context: { clinica: { nombre: 'BS Medical' } } } };
+  const answers = { commercial: 'yes', commercial_whatsapp: 'yes', commercial_email: 'no', commercial_sms: 'no', sms_whatsapp: 'no' };
+  const evidence = value => choices.documentChoiceEvidence(doc, {
+    document_choices: { 1: { schema_version: form.schema_version, answers: value } },
+  });
+  assert.equal(choices.publicDocumentChoices(doc).choice_form.fields[0].label,
+    '¿Quieres recibir ofertas y novedades de BS Medical por WhatsApp, email y SMS?');
+  assert.deepEqual(evidence(answers).answers, answers);
+  assert.match(choices.appendSignedChoiceHtml('', doc, evidence(answers)), /novedades de BS Medical/);
+  assert.throws(() => evidence({ commercial: 'yes', sms_whatsapp: 'no' }));
+  assert.throws(() => evidence({ ...answers, commercial: 'no' }));
+  assert.throws(() => evidence({ ...answers, commercial_whatsapp: 'no' }));
+  assert.doesNotThrow(() => evidence({ ...answers, commercial: 'no', commercial_whatsapp: 'no' }));
+});
 test('BS new version preserves the approved legal clauses after exact factual variable resolution', () => {
   const source = registration.bsDraft();
   const context = { responsable: { razon_social: 'INSTITUTO OBES ALICANTE S.L.', cif: 'B54847090',

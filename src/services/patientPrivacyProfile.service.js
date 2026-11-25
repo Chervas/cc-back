@@ -36,6 +36,15 @@ async function view({ db, patientId, clinicId, transaction }) {
   const state = privacy.privacyStateFromContext({ appointment: { paciente_id: patientId, clinica_id: clinicId }, context });
   const doc = state.state === 'signed' ? context.documents.find(row => Number(row.id) === state.document_id) : null;
   const available = !!doc && identity.isIdentityDocument(doc) && doc.snapshot_json?.patient_identity?.confirmed === true;
+  const signedChoices = available ? choices.signedConsentChoiceAnswers(doc) : null;
+  const signedChannels = choices.COMMERCIAL_CHANNEL_KEYS.every(key => ['yes', 'no'].includes(signedChoices?.[key]));
+  const historical = !signedChannels && signedChoices?.commercial !== 'no' && db.PatientOperationalEvent
+    ? plain(await db.PatientOperationalEvent.findOne({ where: { patient_id: patientId, clinic_id: clinicId,
+      event_type: 'patient.commercial_channels_attested', source: 'clinic_historical_attestation' },
+      attributes: ['metadata', 'occurred_at'], order: [['occurred_at', 'DESC'], ['id', 'DESC']], transaction })) : null;
+  const attested = Array.isArray(historical?.metadata?.channels) ? historical.metadata.channels : null;
+  const answer = attested ? { ...signedChoices, commercial: 'yes', ...Object.fromEntries(
+    choices.COMMERCIAL_CHANNEL_KEYS.map(key => [key, attested.includes(key.slice('commercial_'.length)) ? 'yes' : 'no'])) } : signedChoices;
   const values = available ? identity.contextValues(doc.snapshot_json.context) : {};
   const fields = available ? specs.map(([key, source, label, contact = false]) => ({ key, label,
     current: currentValue(patient, key), proposed: text(values[source]), contact,
@@ -44,8 +53,9 @@ async function view({ db, patientId, clinicId, transaction }) {
   return { available, privacy_state: state.state, document: available ? { id: Number(doc.id), public_id: doc.public_id, title: doc.title,
     signed_at: new Date(doc.signed_at).toISOString(), snapshot_hash: doc.snapshot_hash } : null,
   patient_version: patientVersion(patient), fields,
-  commercial_choice: available ? choices.signedConsentChoiceAnswers(doc)?.commercial || null : null,
-  choice_answers: available ? choices.signedConsentChoiceAnswers(doc) : null };
+  commercial_choice: answer?.commercial || null,
+  choice_answers: answer,
+  ...(attested ? { commercial_evidence: { kind: 'historical_attestation', recorded_at: historical.occurred_at } } : {}) };
 }
 
 async function groupClinicIds(db, clinicId, transaction) {

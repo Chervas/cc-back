@@ -149,7 +149,7 @@ function renderVersion(version, context, { answers = {}, choiceEvidence = null }
     if (block.type === 'fields') return '<section class="consent-custom-fields"' + attr + '>' + (block.title ? '<h3>' + escape(block.title) + '</h3>' : '')
       + '<dl>' + block.fields.map(field => '<div><dt>' + escape(field.label) + '</dt><dd>' + escape(fieldValue(field)) + '</dd></div>').join('') + '</dl></section>';
     if (block.type === 'decisions') return '<section class="consent-document-decisions"' + attr + '><h3>Autorizaciones</h3><ul>'
-      + choices.validateForm(body.consent_form).fields.map(field => '<li><p>' + escape(field.label) + '</p><p><strong>'
+      + choices.validateForm(body.consent_form).fields.map(field => '<li><p>' + escape(choices.choiceLabel(field, context, body.consent_form.schema_version)) + '</p><p><strong>'
         + (choiceEvidence?.answers?.[field.key] === 'yes' ? '☑ Sí · ☐ No' : choiceEvidence?.answers?.[field.key] === 'no' ? '☐ Sí · ☑ No' : '☐ Sí · ☐ No')
         + '</strong></p></li>').join('') + '</ul></section>';
     return ''; // The actual signature/receipt is emitted by the document shell.

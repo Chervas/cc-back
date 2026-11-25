@@ -116,6 +116,7 @@ exports.standard = async (req, res, next) => { try {
   const clinic = plain(await db.Clinica.findByPk(clinicId));
   if (!clinic) throw fail('clinic_not_found', 404);
   const body = require('../lib/registration-privacy-template').standardDraft(clinic);
+  body.body_json.consent_form = require('../lib/consent-document-choices').commercialChannelForm(body.body_json.consent_form.fields);
   const template = await require('../services/consentimientos.service').createClinicTemplate({ clinic_id: clinicId,
     name: body.title, purpose: 'data_protection', status: 'draft', version_status: 'draft', is_default: false,
     blocking_policy: 'hard', validity_mode: 'manual', ...body }, actorId);

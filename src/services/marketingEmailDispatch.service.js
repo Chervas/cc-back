@@ -60,9 +60,9 @@ async function assertEmailReviewCanDispatch(message, { recipientEmail = null } =
     });
   }
   const checkPrivacyRefusal = async (clinicId, patientId) => {
-    if (![66, 72].includes(Number(clinicId))) return;
+    if (!Number(clinicId)) return;
     await require('../lib/bs-privacy-commercial-preferences').assertCommercialAllowed({ db, clinicIds: [Number(clinicId)],
-      patientIds: Number(patientId) > 0 ? [Number(patientId)] : null, email: recipientEmail });
+      patientIds: Number(patientId) > 0 ? [Number(patientId)] : null, email: recipientEmail, channel: 'email' });
   };
   if (current.stream === 'marketing' || relatedCampaign) await checkPrivacyRefusal(current.clinica_id, current.paciente_id);
   // Other domains may legitimately use a list_id; it is not campaign authority

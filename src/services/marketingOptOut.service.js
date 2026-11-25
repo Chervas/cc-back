@@ -1089,7 +1089,7 @@ async function assertAutomationCommunicationAllowed({ clinicId, patientId = null
 
   const normalizedScope = cleanString(scope).toLowerCase() === 'marketing' ? 'marketing' : 'care';
   if (normalizedScope === 'marketing') await require('../lib/bs-privacy-commercial-preferences').assertCommercialAllowed({
-    db, clinicIds: [normalizedClinicId], patientIds: normalizedPatientId > 0 ? [normalizedPatientId] : null, phone,
+    db, clinicIds: [normalizedClinicId], patientIds: normalizedPatientId > 0 ? [normalizedPatientId] : null, phone, channel: 'whatsapp',
   });
   await assertStoredCommunicationAllowed({ clinicId: normalizedClinicId, patientId: normalizedPatientId,
     phone, scope: normalizedScope, includeChannel: true });

@@ -231,6 +231,12 @@ test('only the same published registration family with byte-exact clauses/choice
   const extraQuestions = clone(current); extraQuestions.body_json.document_blocks.blocks.splice(-1, 0,
     { id: 'questions', type: 'fields', fields: [{ key: 'extra', type: 'text', label: 'Dato nuevo', required: true }] });
   assert.equal((await gate.approvedPrivacyVersions({ db: {}, template, version: extraQuestions, publishedVersions: [old] })).has(19), false);
+  const channels = { ...clone(old), id: 21, version: 2 };
+  channels.body_json.consent_form = choices.commercialChannelForm(old.body_json.consent_form.fields);
+  const afterChannelUpgrade = await gate.approvedPrivacyVersions({ db: {}, template, version: channels, publishedVersions: [channels, old, ...invalid] });
+  assert(gate.isValidSignedPrivacyDocument({ ...request, approvedVersions: afterChannelUpgrade }));
+  assert.equal(afterChannelUpgrade.has(14), false, 'A change to the legal clauses is not equivalent');
+  assert.equal(choices.signedConsentChoiceAnswers(doc).commercial_whatsapp, undefined);
 });
 
 function harness({ documents = [fixture()], conflict = false } = {}) {

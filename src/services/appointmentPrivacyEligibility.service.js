@@ -18,9 +18,12 @@ async function approvedPrivacyVersions({ db, template, version, transaction, pub
   if (registration.schema(version.body_json) || require('../lib/consent-document-blocks').versionBlocks(version, template)) {
     const approved = new Map([[Number(version.id), { version, registration: true }]]);
     const layoutOnly = require('../lib/consent-document-blocks').unchangedPrivacyLayout(version, template);
+    const choices = require('../lib/consent-document-choices');
+    const { consent_form: currentForm, ...currentBody } = object(version.body_json);
+    const hasCommercialChannels = currentForm?.schema_version === choices.COMMERCIAL_CHOICE_SCHEMA;
     // New channel choices never reinterpret old SMS answers. Existing verified
     // BS evidence remains equivalent only for the unchanged legal notice gate.
-    if (template.catalog_key === FINAL_PRIVACY_KEY || layoutOnly) {
+    if (template.catalog_key === FINAL_PRIVACY_KEY || layoutOnly || hasCommercialChannels) {
       const previous = publishedVersions || await db.ClinicConsentTemplateVersion.findAll({ where: {
         clinic_template_id: Number(template.id), status: 'published', locale: 'es' },
       order: [['version', 'DESC'], ['id', 'DESC']], limit: 101, transaction });
@@ -28,6 +31,14 @@ async function approvedPrivacyVersions({ db, template, version, transaction, pub
       for (const raw of previous) {
         const old = plain(raw), digital = require('../lib/bs-privacy-digital-template');
         if (Number(old.clinic_template_id) !== Number(template.id) || old.status !== 'published' || old.locale !== 'es') continue;
+        const { consent_form: previousForm, ...previousBody } = object(old.body_json);
+        if (hasCommercialChannels && Number(old.version) < Number(version.version) && registration.schema(old.body_json)
+          && previousForm?.schema_version === 'cc-registration-choices/v2' && Array.isArray(previousForm.fields)
+          && old.body_html === version.body_html && JSON.stringify(canonical(previousBody)) === JSON.stringify(canonical(currentBody))
+          && JSON.stringify(canonical(choices.commercialChannelForm(previousForm.fields))) === JSON.stringify(canonical(currentForm))) {
+          approved.set(Number(old.id), { version: old, registration: true });
+          continue;
+        }
         if (Number(old.id) !== Number(version.id) && Number(old.version) < Number(version.version) && layoutOnly && registration.schema(old.body_json)
           && old.body_html === version.body_html
           && JSON.stringify(canonical(object(old.body_json).consent_form)) === JSON.stringify(canonical(object(version.body_json).consent_form))

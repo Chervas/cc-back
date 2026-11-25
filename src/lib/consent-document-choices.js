@@ -3,6 +3,14 @@
 // Bounded, versioned consent choices, not a form builder or a marketing grant.
 // Read the patient's issued snapshot only, never the mutable live template.
 const CHOICE_SCHEMA_VERSION = 'bs-lopd-choices/v1';
+const COMMERCIAL_CHOICE_SCHEMA = 'cc-registration-choices/v3';
+const COMMERCIAL_CHANNEL_FIELDS = Object.freeze({
+  commercial_whatsapp: 'WhatsApp',
+  commercial_email: 'Email',
+  commercial_sms: 'SMS',
+});
+const COMMERCIAL_CHANNEL_KEYS = Object.keys(COMMERCIAL_CHANNEL_FIELDS);
+const COMMERCIAL_LABEL = '¿Quieres recibir ofertas y novedades de {{clinica.nombre}} por WhatsApp, email y SMS?';
 const CHOICE_HASH_ALGORITHM = 'sha256-canonical-json/v1';
 const CHOICE_KEYS = Object.freeze(['health_nonmedical', 'commercial', 'financing', 'sms']);
 const CHOICE_LABELS = Object.freeze({
@@ -29,14 +37,19 @@ const sameKeys = (value, expected) => record(value) && Object.keys(value).length
   && expected.every(key => own(value, key));
 
 function validateForm(raw) {
-  if (raw?.schema_version === 'cc-registration-choices/v2') {
+  if (['cc-registration-choices/v2', COMMERCIAL_CHOICE_SCHEMA].includes(raw?.schema_version)) {
+    const hasChannels = raw.schema_version === COMMERCIAL_CHOICE_SCHEMA;
     const allowed = ['health_nonmedical', 'commercial', 'financing', 'sms_whatsapp'];
+    if (hasChannels) allowed.push(...COMMERCIAL_CHANNEL_KEYS);
     if (!sameKeys(raw, ['schema_version', 'fields']) || !Array.isArray(raw.fields) || !raw.fields.length
       || raw.fields.length > allowed.length || new Set(raw.fields.map(field => field?.key)).size !== raw.fields.length) throw invalidSchema();
+    if (hasChannels && !['commercial', ...COMMERCIAL_CHANNEL_KEYS].every(key => raw.fields.some(field => field?.key === key))) throw invalidSchema();
     return { schema_version: raw.schema_version, fields: raw.fields.map(field => {
       if (!sameKeys(field, ['key', 'type', 'required', 'label']) || !allowed.includes(field.key)
         || field.type !== 'yes_no' || field.required !== true || typeof field.label !== 'string'
         || !field.label.trim() || field.label.length > 1000 || /[\u0000-\u001f<>]/.test(field.label)) throw invalidSchema();
+      if (hasChannels && ((field.key === 'commercial' && field.label !== COMMERCIAL_LABEL)
+        || (own(COMMERCIAL_CHANNEL_FIELDS, field.key) && field.label !== COMMERCIAL_CHANNEL_FIELDS[field.key]))) throw invalidSchema();
       return { ...field };
     }) };
   }
@@ -72,6 +85,8 @@ function validateChoiceEntry(form, entry) {
     if (answer !== 'yes' && answer !== 'no') throw invalidAnswers();
     answers[field.key] = answer;
   }
+  if (form.schema_version === COMMERCIAL_CHOICE_SCHEMA &&
+    (answers.commercial === 'yes') !== COMMERCIAL_CHANNEL_KEYS.some(key => answers[key] === 'yes')) throw invalidAnswers();
   return { schema_version: form.schema_version, answers };
 }
 
@@ -120,14 +135,31 @@ function payloadForDocument(document, payload = {}) {
 
 function publicDocumentChoices(document) {
   const form = getConsentChoiceForm(document);
+  if (form?.schema_version === COMMERCIAL_CHOICE_SCHEMA) {
+    const context = object(plain(document)?.snapshot_json).context;
+    form.fields = form.fields.map(field => ({ ...field, label: choiceLabel(field, context, form.schema_version) }));
+  }
   return form ? { choice_form: form, choice_answers: signedConsentChoiceAnswers(document) } : {};
+}
+
+function choiceLabel(field, context, schema) {
+  if (schema !== COMMERCIAL_CHOICE_SCHEMA || field.key !== 'commercial') return field.label;
+  return COMMERCIAL_LABEL.replace('{{clinica.nombre}}', () => String(context?.clinica?.nombre || '').trim() || 'la clínica');
+}
+
+function commercialChannelForm(fields) {
+  if (!fields.some(field => field.key === 'commercial')) return { schema_version: 'cc-registration-choices/v2', fields };
+  const channelFields = Object.entries(COMMERCIAL_CHANNEL_FIELDS).map(([key, label]) => ({ key, label, type: 'yes_no', required: true }));
+  return { schema_version: COMMERCIAL_CHOICE_SCHEMA, fields: fields.flatMap(field =>
+    field.key === 'commercial' ? [{ ...field, label: COMMERCIAL_LABEL }, ...channelFields] : [field]) };
 }
 
 function appendSignedChoiceHtml(original, document, evidence) {
   if (!evidence) return original;
   const form = getConsentChoiceForm(document), canonical = validateChoiceEntry(form, evidence);
   const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
-  const fields = form.fields.map(field => `<li><p>${escape(field.label)}</p><p><strong>${canonical.answers[field.key] === 'yes' ? '☑ Sí · ☐ No' : '☐ Sí · ☑ No'}</strong></p></li>`).join('\n');
+  const context = object(plain(document)?.snapshot_json).context;
+  const fields = form.fields.map(field => `<li><p>${escape(choiceLabel(field, context, form.schema_version))}</p><p><strong>${canonical.answers[field.key] === 'yes' ? '☑ Sí · ☐ No' : '☐ Sí · ☑ No'}</strong></p></li>`).join('\n');
   return String(original || '') + '\n<section class="consent-choice-evidence" data-consent-choice-schema="' + form.schema_version
     + '"><h2>Opciones indicadas al firmar</h2><ul>' + fields + '</ul></section>';
 }
@@ -143,4 +175,5 @@ function choiceSnapshotHash(snapshot, renderedHtml) {
 
 module.exports = { CHOICE_SCHEMA_VERSION, CHOICE_HASH_ALGORITHM, CHOICE_KEYS, CHOICE_LABELS, validateForm, getConsentChoiceForm,
   validateDocumentChoiceMap, documentChoiceEvidence, signedConsentChoiceAnswers,
-  payloadForDocument, publicDocumentChoices, appendSignedChoiceHtml, choiceSnapshotHash };
+  payloadForDocument, publicDocumentChoices, appendSignedChoiceHtml, choiceSnapshotHash,
+  COMMERCIAL_CHOICE_SCHEMA, COMMERCIAL_CHANNEL_KEYS, commercialChannelForm, choiceLabel };

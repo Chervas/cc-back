@@ -699,7 +699,7 @@ class WhatsAppService {
             patientId = Number(conversation.patient_id) || null;
         }
         await require('../lib/bs-privacy-commercial-preferences').assertCommercialAllowed({ db, clinicIds: [clinicId],
-            patientIds: patientId ? [patientId] : null, phone: payload.to });
+            patientIds: patientId ? [patientId] : null, phone: payload.to, channel: verifiedWhatsappReview ? null : 'whatsapp' });
         await require('./marketingOptOut.service').assertStoredCommunicationAllowed({
             clinicId, patientId, phone: payload.to, scope: 'marketing',
             ...(verifiedWhatsappReview ? { reviewRequest: true, includeChannel: true } : {}),

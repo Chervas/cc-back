@@ -77,7 +77,7 @@ function isVerifiedCommercialRefusal(document, now = new Date(), sourceVersion =
   return verifiedSignedChoices(document, { now, sourceVersion, sourceTemplate })?.commercial === 'no';
 }
 
-async function verifiedRefusals({ db, clinicIds = [], patientIds = null, phone = null, phones = null, email = null, transaction = null, now = new Date(), choiceKey = 'commercial' }) {
+async function verifiedRefusals({ db, clinicIds = [], patientIds = null, phone = null, phones = null, email = null, transaction = null, now = new Date(), choiceKey = 'commercial', channel = null }) {
   const result = { patientIds: new Set(), phoneDigits: new Set(), documentIds: [] };
   const requested = [...new Set(clinicIds.map(Number).filter(id => Number.isSafeInteger(id) && id > 0))];
   if (!requested.length) return result;
@@ -112,6 +112,7 @@ async function verifiedRefusals({ db, clinicIds = [], patientIds = null, phone =
   // bounded BS evidence set in that uncommon case, then match full identity.
   const matchSignedPhone = targetPhones.length > 0 && (choiceKey === 'sms_whatsapp' || !selected?.length);
   const matchSignedEmail = !!normalizedEmail && !selected?.length;
+  const channelKey = choiceKey === 'commercial' && choices.COMMERCIAL_CHANNEL_KEYS.find(key => key === `commercial_${channel}`);
   const where = { clinica_id: { [Op.in]: scopes }, purpose: 'data_protection', status: 'signed', revoked_at: null,
     ...(selected?.length ? { paciente_id: { [Op.in]: selected } } : {}) };
   if (choiceKey === 'sms_whatsapp' && targetPhones.length) {
@@ -133,7 +134,8 @@ async function verifiedRefusals({ db, clinicIds = [], patientIds = null, phone =
   if (rows.length >= limit) throw Object.assign(new Error('privacy_commercial_review_required'), { code: 'privacy_commercial_review_required', statusCode: 409 });
   const documents = rows.map(plain).filter(row => scopes.includes(Number(row.clinica_id))), legacyCandidates = documents.filter(doc => {
     const candidate = signedChoiceCandidate(doc, now);
-    return (candidate?.answers[choiceKey] === 'no' || choiceKey === 'sms_whatsapp' && candidate?.answers[choiceKey] === 'yes')
+    return (candidate?.answers[choiceKey] === 'no' || choiceKey === 'sms_whatsapp' && candidate?.answers[choiceKey] === 'yes'
+      || channelKey && candidate?.answers[channelKey])
       && !digital.isApprovedPrivacyPresentation({ bodyHtml: digital.buildBsPrivacyDigitalHtml().html,
       bodyJson: record(candidate.snapshot.version).body_json });
   });
@@ -159,17 +161,22 @@ async function verifiedRefusals({ db, clinicIds = [], patientIds = null, phone =
       for (const raw of templates) { const source = plain(raw); sourceTemplates.set(Number(source.id), source); }
     }
   }
-  const verified = documents.map(doc => ({ doc, answer: verifiedSignedChoices(doc, { now, sourceVersion: legacyVersions.get(Number(doc.clinic_template_version_id)), sourceTemplate: sourceTemplates.get(Number(doc.clinic_template_id)) })?.[choiceKey] }))
-    .filter(({ doc, answer }) => ['yes', 'no'].includes(answer)
+  const verified = documents.map(doc => {
+    const answers = verifiedSignedChoices(doc, { now, sourceVersion: legacyVersions.get(Number(doc.clinic_template_version_id)),
+      sourceTemplate: sourceTemplates.get(Number(doc.clinic_template_id)) });
+    return { doc, answer: answers?.[choiceKey], channelAnswer: channelKey && answers?.[channelKey] };
+  }).filter(({ doc, answer }) => ['yes', 'no'].includes(answer)
     && (!matchSignedPhone || matchPhones.has(normalizePhoneDigits(record(doc.snapshot_json).context?.paciente?.telefono)))
     && (!matchSignedEmail || String(record(doc.snapshot_json).context?.paciente?.email || '').trim().toLowerCase() === normalizedEmail));
   const latest = new Map();
-  if (choiceKey === 'sms_whatsapp') for (const item of verified.sort((a, b) =>
+  if (choiceKey === 'sms_whatsapp' || channelKey) for (const item of verified.sort((a, b) =>
     new Date(b.doc.signed_at).getTime() - new Date(a.doc.signed_at).getTime() || Number(b.doc.id) - Number(a.doc.id))) {
+    if (channelKey && !item.channelAnswer) continue;
     const doc = item.doc, identity = `${doc.clinica_id}:${doc.paciente_id}:${normalizePhoneDigits(record(doc.snapshot_json).context?.paciente?.telefono)}`;
     if (!latest.has(identity)) latest.set(identity, item);
   }
-  const valid = (choiceKey === 'sms_whatsapp' ? [...latest.values()] : verified).filter(item => item.answer === 'no').map(item => item.doc);
+  const valid = new Set((choiceKey === 'sms_whatsapp' ? [...latest.values()] : verified).filter(item => item.answer === 'no').map(item => item.doc));
+  if (channelKey) for (const item of latest.values()) if (item.channelAnswer === 'no') valid.add(item.doc);
   for (const doc of valid) {
     result.patientIds.add(Number(doc.paciente_id)); result.documentIds.push(Number(doc.id));
     const signedPhone = record(doc.snapshot_json).context?.paciente?.telefono;
@@ -177,7 +184,7 @@ async function verifiedRefusals({ db, clinicIds = [], patientIds = null, phone =
   }
   // Phone matching must also protect a phone-only queued job whose patient_id
   // is missing; do not infer that another patient's new number is consented.
-  if (phone && valid.length) {
+  if (phone && valid.size) {
     const digits = normalizePhoneDigits(phone); if (digits) result.phoneDigits.add(digits);
   }
   return result;
