@@ -208,6 +208,7 @@ router.get('/review-requests/activity', marketingBulkSendsController.getReviewAc
 router.get('/review-requests/automation-status', marketingBulkSendsController.getReviewRequestAutomationStatus);
 router.patch('/review-requests/automation', marketingBulkSendsController.setReviewRequestAutomation);
 router.get('/bulk-sends/campaigns', marketingBulkSendsController.listCampaigns);
+router.get('/bulk-sends/patient-audience', marketingBulkSendsController.previewCurrentPatientAudience);
 router.post('/bulk-sends/campaigns', marketingBulkSendsController.createCampaign);
 router.get('/bulk-sends/campaigns/:id', marketingBulkSendsController.getCampaign);
 router.get('/bulk-sends/campaigns/:id/recipients', marketingBulkSendsController.listRecipients);

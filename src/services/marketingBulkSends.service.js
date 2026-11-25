@@ -2210,7 +2210,7 @@ async function revalidateItemsForChannels(items, channels, transaction = null) {
   return items;
 }
 
-function buildItemsFromRows(rows, body, channels) {
+function buildItemsFromRows(rows, body, channels, { reusableAppend = false } = {}) {
   const columnMapping = inferColumnMapping(rows, body.column_mapping || {});
   const importMetadata = buildImportMetadata(body);
   const customFieldsSchema = withImportTrackingSchema(buildCustomFieldSchema(rows, columnMapping, body.custom_fields_schema || []));
@@ -2222,14 +2222,18 @@ function buildItemsFromRows(rows, body, channels) {
     const fullName = readImportValue(row, columnMapping, 'name')
       || [readImportValue(row, columnMapping, 'first_name'), readImportValue(row, columnMapping, 'last_name')].filter(Boolean).join(' ');
     const nameInfo = splitFullName(fullName || 'Contacto importado', nameFormat);
-    const phoneDigits = normalizePhoneDigits(readImportValue(row, columnMapping, 'phone'));
+    const importedPhone = normalizePhoneDigits(readImportValue(row, columnMapping, 'phone'));
+    const phoneDigits = reusableAppend && !(importedPhone?.length >= 8) ? null : importedPhone;
     const phone = phoneDigits ? `+${phoneDigits}` : null;
-    const email = readImportValue(row, columnMapping, 'email') || null;
+    const importedEmail = readImportValue(row, columnMapping, 'email') || null;
+    const email = reusableAppend && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(importedEmail || '') ? null : importedEmail;
     const importedClinic = readImportValue(row, columnMapping, 'clinic') || null;
     const customFields = buildCustomFields(row, columnMapping, customFieldsSchema);
     const importedCare = readImportedCareDate(row, columnMapping, body);
-    const missing = missingRequiredFields({ channels, name: nameInfo.name, phoneDigits, email });
-    const dedupeKey = buildItemDedupeKeyForChannels({ channels, name: nameInfo.name, phoneDigits, email });
+    const missing = reusableAppend
+      ? (phoneDigits?.length >= 8 || email ? [] : ['teléfono o email'])
+      : missingRequiredFields({ channels, name: nameInfo.name, phoneDigits, email });
+    const dedupeKey = reusableAppend ? null : buildItemDedupeKeyForChannels({ channels, name: nameInfo.name, phoneDigits, email });
     let status = missing.length ? 'excluded_missing_required' : 'ready';
     let reason = missing.length ? `Faltan campos: ${missing.join(', ')}` : 'Contacto importado listo';
     let exclusionReason = missing.length ? 'missing_required' : null;
@@ -2279,31 +2283,65 @@ function buildItemsFromRows(rows, body, channels) {
   return { items, columnMapping, customFieldsSchema, nameFormat, importMetadata };
 }
 
-async function buildItemsFromCurrentPatients(scope, body, channels = normalizeChannels(body?.channels)) {
+function currentPatientsWhere(scope) {
+  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  if (!clinicIds.length) {
+    throw Object.assign(new Error('Selecciona una clínica o grupo para consultar pacientes.'), { status: 400 });
+  }
+  return { clinica_id: { [Op.in]: clinicIds }, fecha_baja: null };
+}
+
+function currentPatientContact(patient) {
+  const phoneDigits = normalizePhoneDigits(patient.telefono_movil);
+  return {
+    phone: phoneDigits?.length >= 8 ? patient.telefono_movil : null,
+    email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeText(patient.email)) ? normalizeText(patient.email) : null,
+  };
+}
+
+async function previewCurrentPatientAudience(scope) {
+  const where = currentPatientsWhere(scope);
+  const rows = await Paciente.findAll({ where, attributes: ['telefono_movil', 'email'], raw: true });
+  const counts = { total: rows.length, with_email: 0, with_phone: 0, with_contact: 0 };
+  for (const row of rows) {
+    const { email, phone } = currentPatientContact(row);
+    if (email) counts.with_email++;
+    if (phone) counts.with_phone++;
+    if (email || phone) counts.with_contact++;
+  }
+  return counts;
+}
+
+async function buildItemsFromCurrentPatients(scope, body, channels = normalizeChannels(body?.channels), transaction = null) {
   if (isReviewRequestBody(body)) {
     return buildItemsForReviewRequest(scope, body);
   }
 
-  const clinicIds = Array.isArray(scope?.clinicIds) ? scope.clinicIds.filter(Number.isInteger) : [];
+  const where = currentPatientsWhere(scope);
+  const filter = body.patient_contact_filter || 'all';
+  if (!['all', 'email', 'phone'].includes(filter)) {
+    throw Object.assign(new Error('La condición de contacto no es válida.'), { status: 400 });
+  }
   const rows = await Paciente.findAll({
-    where: {
-      ...(clinicIds.length ? { clinica_id: { [Op.in]: clinicIds } } : {}),
-      fecha_baja: null,
-    },
+    where,
     attributes: ['id_paciente', 'clinica_id', 'nombre', 'apellidos', 'telefono_movil', 'email'],
-    limit: Math.min(Math.max(Number(body.limit || 500), 1), 2000),
+    order: [['id_paciente', 'ASC']],
+    raw: true,
+    transaction,
+    ...(body.limit != null ? { limit: Math.min(Math.max(Number(body.limit) || 500, 1), 2000) } : {}),
   });
-  return rows.map((patient) => {
+  const isReusableList = normalizeMassSendRecordKind(body.record_kind || body.recordKind) === 'recipient_list';
+  return rows.flatMap((patient) => {
+    const { phone, email } = currentPatientContact(patient);
+    if ((filter === 'phone' && !phone) || (filter === 'email' && !email)) return [];
     const name = [patient.nombre, patient.apellidos].filter(Boolean).join(' ').trim() || 'Paciente';
-    const phone = patient.telefono_movil || null;
-    const email = patient.email || null;
-    const missing = missingRequiredFields({
-      channels: normalizeChannels(channels),
+    const missing = isReusableList ? (phone || email ? [] : ['teléfono o email']) : missingRequiredFields({
+      channels,
       name,
       phoneDigits: normalizePhoneDigits(phone),
       email: normalizeText(email),
     });
-    return {
+    return [{
       paciente_id: patient.id_paciente,
       clinica_id: patient.clinica_id || null,
       name,
@@ -2313,12 +2351,12 @@ async function buildItemsFromCurrentPatients(scope, body, channels = normalizeCh
       treatment_id: null,
       last_visit_at: null,
       status: missing.length ? 'excluded_missing_required' : 'ready',
-      reason: missing.length ? `Faltan campos: ${missing.join(', ')}` : 'Paciente actual incluido por condición',
+      reason: missing.length ? `Faltan campos: ${missing.join(', ')}` : 'Paciente actual incluido en la selección',
       exclusion_reason: missing.length ? 'missing_required' : null,
       selected: !missing.length,
       custom_fields: {},
       missing_variables: [],
-    };
+    }];
   });
 }
 
@@ -6928,7 +6966,10 @@ async function createCampaign(scope, body = {}, userId = null) {
       columnMapping = sourceCriteria.column_mapping || {};
       customFieldsSchema = Array.isArray(sourceList.custom_fields_schema) ? sourceList.custom_fields_schema : [];
     } else if (source === 'existing_patients_condition') {
-      itemPayloads = await buildItemsFromCurrentPatients(effectiveScope, body, channels);
+      itemPayloads = await buildItemsFromCurrentPatients(effectiveScope, body, channels, transaction);
+      if (recordKind === 'recipient_list' && !isReviewRequest && !itemPayloads.length) {
+        throw Object.assign(new Error('Ya no hay pacientes con esta selección. Actualiza el recuento antes de guardar.'), { status: 409 });
+      }
     } else {
       const importResult = buildItemsFromRows(rows, body, channels);
       itemPayloads = importResult.items;
@@ -7004,6 +7045,8 @@ async function createCampaign(scope, body = {}, userId = null) {
         opt_out_text: templateCommercial ? normalizeText(body.opt_out_text) : null,
         consent_acknowledged: !!body.consent_acknowledged,
         list_source: source,
+        ...(source === 'existing_patients_condition' && !isReviewRequest
+          ? { patient_contact_filter: body.patient_contact_filter || 'all' } : {}),
         review_request: isReviewRequest,
         review_source: isReviewRequest ? reviewSource : null,
         review_import_list_id: isReviewRequest ? reviewImportListId : null,
@@ -7063,7 +7106,10 @@ async function createCampaign(scope, body = {}, userId = null) {
 
     if (itemPayloads.length) {
       itemPayloads = itemPayloads.map(item => careSnapshots.bindCareSnapshot(item, list.id));
-      await MarketingPatientListItem.bulkCreate(itemPayloads.map((item) => ({ ...item, list_id: list.id })), { transaction });
+      for (let start = 0; start < itemPayloads.length; start += 1000) {
+        const batch = itemPayloads.slice(start, start + 1000);
+        await MarketingPatientListItem.bulkCreate(batch.map((item) => ({ ...item, list_id: list.id })), { transaction });
+      }
     }
 
     if (sourceListId && normalizeText(body.active_segment_id || body.segment_id)) {
@@ -7146,12 +7192,99 @@ function getListItemDedupeKey(item) {
   return name ? `name:${name}` : null;
 }
 
-function mergeCustomFieldSchemas(existingSchema = [], incomingSchema = []) {
+const appendImportMetadata = new Set([
+  'fecha_importacion', 'fecha_importacion_texto', 'lote_importacion', 'import_care_date',
+  'nombre', 'apellido', 'apellidos', 'nombre_completo',
+]);
+
+function missingImportValue(value) {
+  return value == null || (typeof value === 'string' && !value.trim());
+}
+
+function appendContactIndex(items, field, normalize) {
+  const index = new Map();
+  const add = item => {
+    const value = normalize(item[field]);
+    if (!value) return;
+    const matches = index.get(value) || new Set();
+    matches.add(item);
+    index.set(value, matches);
+  };
+  for (const item of items) add(item);
+  return { index, add };
+}
+
+async function mergeRecipientListImport(incoming, existing, transaction) {
+  const normalizeEmail = value => normalizeText(value).toLowerCase();
+  const contacts = existing.map(row => ({ ...row.get({ plain: true }), row }));
+  const byEmail = appendContactIndex(contacts, 'email', normalizeEmail);
+  const byPhone = appendContactIndex(contacts, 'phone', normalizePhoneDigits);
+  const newItems = [];
+  const rejected = [];
+  const enriched = new Set();
+  const plans = new Map();
+
+  for (const item of incoming) {
+    if (String(item.status || '').startsWith('excluded')) {
+      rejected.push(item);
+      continue;
+    }
+    const email = normalizeEmail(item.email);
+    const phone = normalizePhoneDigits(item.phone);
+    const emailMatches = byEmail.index.get(email);
+    const phoneMatches = [...(byPhone.index.get(phone) || [])]
+      .filter(match => !email || !normalizeEmail(match.email));
+    const matches = emailMatches?.size ? [...emailMatches] : phoneMatches;
+    if (!matches.length) {
+      byEmail.add(item);
+      byPhone.add(item);
+      newItems.push(item);
+      continue;
+    }
+    const [match] = matches;
+    const originalEmail = normalizeEmail(match.email);
+    const compatible = matches.length === 1 && (!email || !originalEmail || email === originalEmail);
+    if (compatible) {
+      const patch = {};
+      for (const field of ['phone', 'email']) {
+        if (missingImportValue(match[field]) && !missingImportValue(item[field])) patch[field] = item[field];
+      }
+      const customFields = { ...(match.custom_fields || {}) };
+      for (const [field, value] of Object.entries(careSnapshots.stripCareSnapshot(item.custom_fields) || {})) {
+        if (!appendImportMetadata.has(field) && missingImportValue(customFields[field]) && !missingImportValue(value)) {
+          customFields[field] = value;
+          patch.custom_fields = customFields;
+        }
+      }
+      if (Object.keys(patch).length) {
+        if (match.row) {
+          plans.set(match.row, { ...plans.get(match.row), ...patch });
+          enriched.add(match.id);
+        }
+        Object.assign(match, patch);
+        byEmail.add(match);
+        byPhone.add(match);
+        continue;
+      }
+    }
+    rejected.push({
+      ...item,
+      status: 'excluded_duplicate',
+      reason: compatible ? 'El contacto ya existe en la lista' : 'La coincidencia no identifica a un solo contacto',
+      exclusion_reason: 'duplicado',
+      selected: false,
+    });
+  }
+  for (const [item, patch] of plans) await item.update(patch, { transaction });
+  return { newItems, rejected, enriched: enriched.size };
+}
+
+function mergeCustomFieldSchemas(existingSchema = [], incomingSchema = [], { preserveExisting = false } = {}) {
   const fields = new Map();
   for (const field of [...(Array.isArray(existingSchema) ? existingSchema : []), ...(Array.isArray(incomingSchema) ? incomingSchema : [])]) {
     if (!field || typeof field !== 'object') continue;
     const key = normalizeKey(field.key || field.name || field.variable);
-    if (!key) continue;
+    if (!key || (preserveExisting && fields.has(key))) continue;
     fields.set(key, {
       key,
       label: normalizeText(field.label) || key.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' '),
@@ -7488,9 +7621,22 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   let appendedCount = 0;
   let appendedReady = 0;
   let appendedExcluded = 0;
+  let appendedEnriched = 0;
   let appendImportSummary = null;
 
   await db.sequelize.transaction(async (transaction) => {
+    let lockedList = list;
+    if (appendRows.length) {
+      lockedList = await MarketingPatientList.findByPk(list.id, { transaction, lock: transaction.LOCK.UPDATE });
+      ensureScopeAccess(lockedList, scope);
+      if (lockedList.status === 'archived') {
+        throw Object.assign(new Error('La lista de destinatarios está archivada'), { status: 409 });
+      }
+      const lastUpdate = row => new Date(row.updatedAt || row.updated_at || 0).getTime();
+      if (lastUpdate(lockedList) !== lastUpdate(list)) {
+        throw Object.assign(new Error('La lista cambió durante la importación. Vuelve a cargarla e inténtalo de nuevo.'), { status: 409 });
+      }
+    }
     if (requestedStatus === 'archived') {
       const preservedRecipientListId = await preserveRecipientListOnArchive(list, userId, transaction);
       if (preservedRecipientListId) {
@@ -7508,7 +7654,8 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
         custom_fields_schema: body.custom_fields_schema || list.custom_fields_schema || nextCriteria.custom_fields_schema || [],
         name_format: body.name_format || nextCriteria.name_format || 'auto',
       };
-      const importResult = buildItemsFromRows(appendRows, importBody, effectiveChannels);
+      const enrichRecipientList = nextCriteria.record_kind === 'recipient_list' && !isReviewRequestList(list);
+      const importResult = buildItemsFromRows(appendRows, importBody, effectiveChannels, { reusableAppend: enrichRecipientList });
       let itemPayloads = importResult.items;
       itemPayloads = await attachExistingPatientContext(itemPayloads, scope, transaction);
       if (Number(list.criteria?.review_care_version) === 1) {
@@ -7522,34 +7669,45 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
 
       const existingRows = await MarketingPatientListItem.findAll({
         where: { list_id: list.id },
-        attributes: ['paciente_id', 'name', 'phone', 'email'],
-        raw: true,
+        attributes: ['id', 'paciente_id', 'name', 'phone', 'email', 'custom_fields'],
+        order: [['id', 'ASC']],
+        raw: !enrichRecipientList,
         transaction,
       });
-      const existingKeys = new Set(existingRows.map(getListItemDedupeKey).filter(Boolean));
-      itemPayloads = itemPayloads.map((item) => {
-        if (String(item.status || '').startsWith('excluded')) return item;
-        const key = getListItemDedupeKey(item);
-        if (key && existingKeys.has(key)) {
-          return {
-            ...item,
-            status: 'excluded_duplicate',
-            reason: 'Duplicado con un contacto ya existente en la lista',
-            exclusion_reason: 'duplicado',
-            selected: false,
-          };
-        }
-        if (key) existingKeys.add(key);
-        return item;
-      });
-
-      const readyItemPayloads = itemPayloads.filter((item) => item.status === 'ready');
-      const rejectedItemPayloads = itemPayloads.filter((item) => String(item.status || '').startsWith('excluded'));
+      let readyItemPayloads;
+      let rejectedItemPayloads;
+      if (enrichRecipientList) {
+        const merged = await mergeRecipientListImport(itemPayloads, existingRows, transaction);
+        readyItemPayloads = merged.newItems;
+        rejectedItemPayloads = merged.rejected;
+        appendedEnriched = merged.enriched;
+      } else {
+        const existingKeys = new Set(existingRows.map(getListItemDedupeKey).filter(Boolean));
+        itemPayloads = itemPayloads.map((item) => {
+          if (String(item.status || '').startsWith('excluded')) return item;
+          const key = getListItemDedupeKey(item);
+          if (key && existingKeys.has(key)) {
+            return {
+              ...item,
+              status: 'excluded_duplicate',
+              reason: 'Duplicado con un contacto ya existente en la lista',
+              exclusion_reason: 'duplicado',
+              selected: false,
+            };
+          }
+          if (key) existingKeys.add(key);
+          return item;
+        });
+        readyItemPayloads = itemPayloads.filter((item) => item.status === 'ready');
+        rejectedItemPayloads = itemPayloads.filter((item) => String(item.status || '').startsWith('excluded'));
+      }
       appendedCount = itemPayloads.length;
       appendedReady = readyItemPayloads.length;
       appendedExcluded = rejectedItemPayloads.length;
       appendImportSummary = {
-        ...buildImportSummary(itemPayloads, importResult.importMetadata),
+        ...buildImportSummary([...readyItemPayloads, ...rejectedItemPayloads], importResult.importMetadata),
+        total: appendedCount,
+        updated_existing: appendedEnriched,
         imported_items: readyItemPayloads.map(serializeImportResultItem),
         discarded_items: rejectedItemPayloads.map(serializeImportResultItem),
       };
@@ -7561,13 +7719,14 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
         );
       }
 
-      if (readyItemPayloads.length) {
+      if (readyItemPayloads.length || appendedEnriched) {
         nextCriteria.column_mapping = importResult.columnMapping;
         nextCriteria.import_date_format = importBody.import_date_format || 'dmy';
         nextCriteria.import_excel_date_system = importBody.import_excel_date_system || '1900';
         nextCriteria.name_format = importResult.nameFormat;
-        updatePayload.custom_fields_schema = mergeCustomFieldSchemas(list.custom_fields_schema || [], importResult.customFieldsSchema || []);
-        updatePayload.condition_summary = 'Lista externa importada para campaña puntual, con contactos añadidos posteriormente.';
+        updatePayload.custom_fields_schema = mergeCustomFieldSchemas(lockedList.custom_fields_schema || [], importResult.customFieldsSchema || [],
+          { preserveExisting: enrichRecipientList });
+        if (!enrichRecipientList) updatePayload.condition_summary = 'Lista externa importada para campaña puntual, con contactos añadidos posteriormente.';
       }
       updatePayload.exclusion_summary = list.exclusion_summary || 'Sin exclusiones detectadas.';
     }
@@ -7590,6 +7749,7 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
         appended_count: appendedCount,
         appended_ready: appendedReady,
         appended_excluded: appendedExcluded,
+        appended_enriched: appendedEnriched,
         counters,
       },
       occurred_at: new Date(),
@@ -11956,6 +12116,7 @@ module.exports = {
   assertReviewRequestCommunicationAllowed,
   deferredDispatchAllowedAt,
   listCampaigns,
+  previewCurrentPatientAudience,
   createCampaign,
   getCampaign,
   updateCampaign,

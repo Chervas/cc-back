@@ -48,9 +48,10 @@ whatsapp.dispatchMessage = async payload => {
   providerPayloads.push(structuredClone(payload));
   return { messages: [{ id: `qa-${providerPayloads.length}`, message_status: 'accepted' }] };
 };
-db.sequelize.transaction = async callback => callback({});
+db.sequelize.transaction = async callback => callback({ LOCK: { UPDATE: 'UPDATE' } });
 db.MarketingPatientList.findByPk = async id => Number(id) === list.id ? list : null;
 db.MarketingPatientList.update = async patch => { Object.assign(list, patch); };
+db.MarketingPatientListItem.bulkCreate = async () => { assert.fail('Unexpected recipient writes'); };
 db.MarketingPatientListItem.findAll = async ({ where, limit } = {}) => {
   assert.equal(where.list_id, list.id);
   return limit ? items.slice(0, limit) : items;
@@ -163,6 +164,84 @@ test('a separate custom variable with an underscore also keeps per-contact value
   assert.deepEqual(providerPayloads.map(payload => payload.template.components[0].parameters[1]), [
     { type: 'text', text: '03/12/2026' }, { type: 'text', text: '29/02/2028' },
   ]);
+});
+
+test('appending to a reusable list completes an existing contact without overwriting values or reopening a baja', async t => {
+  reset();
+  list.criteria = { record_kind: 'recipient_list', channels: ['email'] };
+  const previous = model({
+    id: 10021, list_id: list.id, name: 'Nombre original', email: 'CLIENTE@example.test',
+    status: 'excluded_opt_out', selected: false, exclusion_reason: 'opt_out',
+    custom_fields: { ciudad: 'Alicante', lote_importacion: 'original' },
+  });
+  const existing = model({
+    id: 10022, list_id: list.id, name: 'Otro contacto', email: 'otro@example.test',
+    phone: '+34612345670', status: 'ready', custom_fields: {},
+  });
+  items = [previous, existing];
+  t.mock.method(db.Paciente, 'findAll', async () => []);
+  t.mock.method(db.MarketingPatientListItem, 'bulkCreate', async rows => {
+    items.push(...rows.map((row, index) => model({ ...row, id: 10100 + index })));
+  });
+  const append = {
+    append_rows: [
+      { Nombre: 'Nombre cambiado', Email: 'cliente@example.test', Tel: '612345670', Ciudad: 'Madrid', Pedido: '25/11/2026' },
+      { Nombre: 'Nuevo', Email: 'nuevo@example.test', Tel: '612345670' },
+      { Nombre: 'Solo teléfono', Tel: '612345671' },
+    ],
+    import_batch_id: 'nuevo-lote',
+    column_mapping: { name: 'Nombre', email: 'Email', phone: 'Tel' },
+    custom_fields_schema: [
+      { key: 'ciudad', source_column: 'Ciudad' },
+      { key: 'pedido', source_column: 'Pedido' },
+    ],
+  };
+  const first = (await service.updateCampaign(scope, list.id, append)).import_result;
+  assert.deepEqual([first.total, first.imported, first.updated_existing, first.discarded], [3, 2, 1, 0]);
+  assert.equal(items.length, 4);
+  assert.equal(previous.phone, '+34612345670');
+  assert.equal(previous.email, 'CLIENTE@example.test');
+  assert.equal(previous.name, 'Nombre original');
+  assert.equal(previous.status, 'excluded_opt_out');
+  assert.equal(previous.selected, false);
+  assert.deepEqual(previous.custom_fields, { ciudad: 'Alicante', lote_importacion: 'original', pedido: '25/11/2026' });
+  assert(first.imported_items.every(item => item.custom_fields.lote_importacion === 'nuevo-lote'));
+
+  const repeated = (await service.updateCampaign(scope, list.id, append)).import_result;
+  assert.deepEqual([repeated.imported, repeated.updated_existing, repeated.discarded], [0, 0, 3]);
+  assert.equal(items.length, 4);
+});
+
+test('patient preview and list creation cover all current patients and share contact filters', async t => {
+  reset();
+  const patients = Array.from({ length: 1101 }, (_, index) => ({
+    id_paciente: 1 + index, clinica_id: 9001, nombre: 'Paciente ficticio',
+    telefono_movil: index % 2 === 0 ? `+346${String(index).padStart(8, '0')}` : null,
+    email: index % 2 === 1 ? `paciente${index}@example.test` : null,
+  }));
+  t.mock.method(db.Paciente, 'findAll', async options => {
+    assert.deepEqual(options.where.clinica_id[db.Sequelize.Op.in], [9001]);
+    assert.equal(options.where.fecha_baja, null);
+    assert.equal(options.limit, undefined);
+    return patients;
+  });
+  const batches = [];
+  t.mock.method(db.MarketingPatientListItem, 'bulkCreate', async rows => batches.push(rows));
+  t.mock.method(db.MarketingPatientList, 'create', async data => {
+    list = model({ ...data, id: 5002 });
+    return list;
+  });
+  assert.deepEqual(await service.previewCurrentPatientAudience(scope),
+    { total: 1101, with_email: 550, with_phone: 551, with_contact: 1101 });
+  await assert.rejects(service.previewCurrentPatientAudience({ clinicIds: [] }), { status: 400 });
+  const payload = { record_kind: 'recipient_list', list_source: 'current_patients', channels: ['whatsapp'] };
+  await service.createCampaign(scope, payload);
+  assert.deepEqual(batches.map(batch => batch.length), [1000, 101]);
+  assert.equal(list.counters.ready, 1101);
+  batches.length = 0;
+  await service.createCampaign(scope, { ...payload, patient_contact_filter: 'email' });
+  assert.equal(list.counters.ready, 550);
+  assert(batches[0].every(item => item.email && !item.phone));
 });
 
 test('an outside clinic scope cannot save, prepare or test the fictitious campaign', async () => {

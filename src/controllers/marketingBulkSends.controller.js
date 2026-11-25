@@ -298,9 +298,28 @@ exports.setReviewRequestAutomation = async (req, res) => {
   }
 };
 
+exports.previewCurrentPatientAudience = async (req, res) => {
+  try {
+    const scope = await resolveScope(req);
+    if (!scope.clinicIds?.length
+      || !await hasMarketingClinicScopeAccess({ userId: req.userData?.userId, clinicIds: scope.clinicIds, access: 'read' })) {
+      throw Object.assign(new Error('No tienes acceso a los pacientes de estas clínicas'), { status: 403 });
+    }
+    res.set('Cache-Control', 'no-store');
+    return res.json(await marketingBulkSendsService.previewCurrentPatientAudience(scope));
+  } catch (error) {
+    return sendError(res, error, 'Error consultando el resumen de pacientes');
+  }
+};
+
 exports.createCampaign = async (req, res) => {
   try {
     const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    if (String(req.body?.list_source || req.body?.source || '').trim() === 'current_patients'
+      && (!scope.clinicIds?.length
+        || !await hasMarketingClinicScopeAccess({ userId: req.userData?.userId, clinicIds: scope.clinicIds, access: 'write' }))) {
+      throw Object.assign(new Error('No tienes permiso para crear una lista con estos pacientes'), { status: 403 });
+    }
     const result = await marketingBulkSendsService.createCampaign(scope, req.body || {}, req.userData?.userId || null);
     return res.status(201).json(result);
   } catch (error) {
@@ -347,6 +366,10 @@ exports.updateRecipient = async (req, res) => {
 exports.updateCampaign = async (req, res) => {
   try {
     const scope = await resolveScopeFromRequest(req, { allowAll: false });
+    if (Array.isArray(req.body?.append_rows) && req.body.append_rows.length
+      && !await hasMarketingClinicScopeAccess({ userId: req.userData?.userId, clinicIds: scope.clinicIds, access: 'write' })) {
+      throw Object.assign(new Error('No tienes permiso para añadir contactos a esta lista'), { status: 403 });
+    }
     const result = await marketingBulkSendsService.updateCampaign(scope, req.params.id, req.body || {}, req.userData?.userId || null);
     return res.json(result);
   } catch (error) {
