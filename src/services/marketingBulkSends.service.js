@@ -19,7 +19,7 @@ const {
 const { CARE_DATE_IMPORT_ALIASES, inferCareDateColumn, readImportedCareDate } = require('../lib/marketing-import-care-date');
 const careSnapshots = require('../lib/review-care-snapshot');
 const { matchesReviewTemplateMedia } = require('../lib/review-template-media');
-const { usesExplicitDispatchWindow } = require('../lib/marketing-dispatch-window');
+const { usesExplicitDispatchWindow, normalizeWhatsappDispatchWindow } = require('../lib/marketing-dispatch-window');
 const { normalizeReviewSenderName, requireReviewSenderName } = require('../lib/review-sender-policy');
 const { resolveWhatsappChannelRole, resolveWhatsappRouting } = require('../lib/whatsapp-channel-role');
 const { findCanonicalWhatsappConversation } = require('../lib/canonical-conversation');
@@ -6987,6 +6987,8 @@ async function createCampaign(scope, body = {}, userId = null) {
         channels,
         ...scheduleCriteria,
         ...(whatsappCadence !== undefined ? { whatsapp_cadence: whatsappCadence } : {}),
+        ...(recordKind === 'campaign' && !isReviewRequest && channels.includes('whatsapp') && body.whatsapp_dispatch_window !== undefined
+          ? { whatsapp_dispatch_window: normalizeWhatsappDispatchWindow(body.whatsapp_dispatch_window) } : {}),
         template_usage: templateUsage,
         template_commercial: templateCommercial,
         capture_whatsapp_info_leads: recordKind === 'campaign' && !isReviewRequest && templateCommercial
@@ -7425,6 +7427,13 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
       throw Object.assign(new Error('Modifica el ritmo de una cola activa desde el estado del envío.'), { status: 409 });
     }
     nextCriteria.whatsapp_cadence = require('../lib/marketing-whatsapp-cadence').draftCadence(body);
+  }
+  if (body.whatsapp_dispatch_window !== undefined) {
+    ensureDispatchableCampaignRecord(list);
+    if (!whatsappDraftEditable || isReviewRequestList(list) || !draftWhatsapp) {
+      throw Object.assign(new Error('El horario de WhatsApp solo se puede cambiar antes de iniciar el envío.'), { status: 409 });
+    }
+    nextCriteria.whatsapp_dispatch_window = normalizeWhatsappDispatchWindow(body.whatsapp_dispatch_window);
   }
   if (
     body.link_tracking !== undefined ||
@@ -8116,7 +8125,15 @@ async function hydrateDispatchBusinessHoursForList(list, scope = {}, businessHou
 
 async function resolveDispatchBusinessHoursForList(list, scope = {}, dispatch = {}) {
   const normalized = normalizeBusinessHours(dispatch.business_hours || {});
-  if (usesExplicitDispatchWindow(dispatch)) {
+  const window = !isReviewRequestList(list) && normalizeDispatchContext(dispatch.context) !== 'welcome'
+    ? list?.criteria?.whatsapp_dispatch_window : null;
+  if (window?.mode === 'custom') {
+    return normalizeBusinessHours({
+      start_time: window.start_time, end_time: window.end_time, timezone: channelSchedules.TIMEZONE,
+      allowed_weekdays: window.include_weekends ? [1, 2, 3, 4, 5, 6, 7] : [1, 2, 3, 4, 5], source: 'custom',
+    });
+  }
+  if (!window && usesExplicitDispatchWindow(dispatch)) {
     return normalized;
   }
   return hydrateDispatchBusinessHoursForList(list, scope, normalized);
@@ -8671,6 +8688,14 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   }
   const whatsappCadence = channels.includes('whatsapp') && !isReviewRequest && !isWelcomeDispatch
     ? require('../lib/marketing-whatsapp-cadence').draftCadence(body, list.criteria) : undefined;
+  let whatsappWindow;
+  if (body.whatsapp_dispatch_window !== undefined) {
+    if (!channels.includes('whatsapp') || isReviewRequest || isWelcomeDispatch
+      || !['draft', 'prepared'].includes(list.status) || getDispatchConfig(list).job_id) {
+      throw Object.assign(new Error('El horario de WhatsApp solo se puede cambiar antes de iniciar el envío.'), { status: 409 });
+    }
+    whatsappWindow = normalizeWhatsappDispatchWindow(body.whatsapp_dispatch_window);
+  }
   const hasExplicitReviewSender = body.review_sender_name !== undefined || body.reviewSenderName !== undefined;
   if (isReviewRequest && hasExplicitReviewSender) {
     requireReviewSenderName(body.review_sender_name ?? body.reviewSenderName);
@@ -8899,6 +8924,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       scheduled_at: list.criteria?.scheduled_at || null,
       ...scheduleCriteria,
       ...(whatsappCadence !== undefined ? { whatsapp_cadence: whatsappCadence } : {}),
+      ...(whatsappWindow ? { whatsapp_dispatch_window: whatsappWindow } : {}),
       dispatch_config: dispatchConfig,
       dispatch: {
         ...dispatchConfig,
@@ -11107,12 +11133,15 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
   const batchIndex = Number(dispatch.last_batch_index || 0) + 1;
   let sent = 0;
   let failed = 0;
+  let attempted = 0;
   let heldByMeta = false;
   for (const item of filteredFreshBatch) {
+    if (list.criteria?.whatsapp_dispatch_window && !isWithinBusinessHours(new Date(), dispatch.business_hours)) break;
     const currentList = await MarketingPatientList.findByPk(list.id);
     if (!currentList || String(currentList.status || '').toLowerCase() === 'archived' || getDispatchConfig(currentList).cancel_requested === true) {
       break;
     }
+    attempted += 1;
     const plainItem = item.get ? item.get({ plain: true }) : item;
     const itemClinicId = Number(plainItem.clinica_id || clinicId || 0) || null;
     let itemClinic = clinic;
@@ -11218,7 +11247,7 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
     channel: 'whatsapp',
     payload: {
       batch_index: batchIndex,
-      attempted: filteredFreshBatch.length,
+      attempted,
       sent,
       failed,
       counters: countersAfter,

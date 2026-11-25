@@ -98,6 +98,27 @@ test('genuine mixed dispatch enqueues distinct channel dates and never sends a m
   await assert.rejects(bulk.updateCampaign(scope, f.list.id, { channel_schedules: bundle(null, at.email) }, 3), { code: 'channel_schedule_already_queued' });
 });
 
+test('the saved manual WhatsApp window moves the first batch into its Madrid schedule and leaves email unchanged', async t => {
+  const due = new Date(Date.now() + 7 * 86400000);
+  due.setUTCHours(12, 0, 0, 0);
+  if (due.getUTCDay() === 0 || due.getUTCDay() === 6) due.setUTCDate(due.getUTCDate() + (due.getUTCDay() === 6 ? 2 : 1));
+  const at = due.toISOString();
+  const f = await create(t, bundle(at, at));
+  const window = { mode: 'custom', start_time: '14:30', end_time: '17:00', include_weekends: false };
+  await bulk.updateCampaign(scope, f.list.id, { whatsapp_dispatch_window: window, whatsapp_cadence: { batch_size: 12, delay_ms: 300000 } }, 3);
+  await bulk.prepareCampaign(scope, f.list.id, {}, 3);
+  await bulk.startCampaignDispatch(scope, f.list.id, {}, 3);
+  const whatsapp = f.queued.find(job => job.type !== email.JOB_TYPE);
+  const emailJob = f.queued.find(job => job.type === email.JOB_TYPE);
+  const clock = new Intl.DateTimeFormat('en-GB', {hour:'2-digit',minute:'2-digit',hourCycle:'h23',timeZone:'Europe/Madrid'});
+  assert.equal(clock.format(whatsapp.nextRunAt), '14:30');
+  assert.equal(emailJob.nextRunAt.toISOString(), at);
+  assert.deepEqual(f.list.criteria.whatsapp_dispatch_window, window);
+  assert.equal(f.list.criteria.dispatch.batch_size, 12);
+  assert.equal(f.list.criteria.dispatch.delay_ms, 300000);
+  await assert.rejects(bulk.updateCampaign(scope, f.list.id, { whatsapp_dispatch_window: { mode: 'clinic_hours' } }, 3), { status: 409 });
+});
+
 test('expired or conflicting channel intent fails before either job is enqueued', async t => {
   const at = dates(), f = await create(t, bundle(at.whatsapp, new Date(Date.now() - 1000).toISOString()));
   await bulk.prepareCampaign(scope, f.list.id, {}, 3);
@@ -201,6 +222,7 @@ for (const scenario of [
       f.list.criteria.dispatch.status = scenario.whatsappStatus;
       f.list.criteria.dispatch.job_id = 66;
     }
+    if (scenario.alreadyRunning) t.mock.method(db.JobRequest, 'findByPk', async id => ({ id, status: 'waiting' }));
     f.list.email_dispatch = { status: 'paused', job_id: 55 };
     const result = await bulk.resumeCampaignDispatch(scope, f.list.id, {}, 3);
     assert.equal(f.queued.length, 1);
