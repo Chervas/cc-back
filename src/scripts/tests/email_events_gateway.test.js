@@ -56,7 +56,10 @@ test('campaign engagement tags leave personalized and service links outside trac
   assert.match(engagement.tagLinks(html, links, ['https://example.test/menu?utm_campaign=noviembre']),
     /href="https:\/\/example.test\/menu\?utm_campaign=noviembre" ses:no-track/);
   assert.equal(engagement.settings('ordinary', { EMAIL_MARKETING_ENGAGEMENT_CONFIGURATION_SET: 'ordinary' }), null);
-  assert.equal(engagement.settings('ordinary', { EMAIL_MARKETING_ENGAGEMENT_CONFIGURATION_SET: 'campaign-engagement' }), 'campaign-engagement');
+  assert.equal(engagement.settings('ordinary', {
+    EMAIL_MARKETING_ENGAGEMENT_CONFIGURATION_SET: 'campaign-engagement',
+    EMAIL_MARKETING_ENGAGEMENT_PILOT_LIST_ID: '12',
+  }, { id: 12 }), 'campaign-engagement');
 });
 
 test('authenticated SES engagement records only mapped campaign links without rematerializing deliveries', async () => {

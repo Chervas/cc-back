@@ -5,10 +5,26 @@ const { parseDocument, DomUtils } = require('htmlparser2');
 
 const { VERSION, LINK_TAG } = require('./marketing-email-engagement-contract');
 
-function settings(baseSet, env = process.env) {
+function utcTimestamp(value) {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return NaN;
+  const timestamp = Date.parse(value);
+  const canonical = value.includes('.') ? value : value.replace('Z', '.000Z');
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === canonical ? timestamp : NaN;
+}
+
+function settings(baseSet, env = process.env, list = null) {
   const name = String(env.EMAIL_MARKETING_ENGAGEMENT_CONFIGURATION_SET || '').trim();
   if (!name || name === baseSet || !/^[A-Za-z0-9_-]{1,64}$/.test(name)) return null;
-  return name;
+  const listId = Number(list?.id);
+  if (!Number.isSafeInteger(listId) || listId <= 0) return null;
+  // A configured pilot always takes precedence over rollout. Neither mode
+  // modifies existing outbox rows, campaign recipients, or dispatch cadence.
+  const pilot = String(env.EMAIL_MARKETING_ENGAGEMENT_PILOT_LIST_ID || '').trim();
+  if (pilot) return /^[1-9]\d*$/.test(pilot) && Number.isSafeInteger(Number(pilot)) && listId === Number(pilot) ? name : null;
+  const from = utcTimestamp(env.EMAIL_MARKETING_ENGAGEMENT_CAMPAIGNS_FROM);
+  const created = utcTimestamp(list.created_at);
+  return Number.isFinite(from) && Number.isFinite(created) && created >= from ? name : null;
 }
 
 function reportUrl(value) {

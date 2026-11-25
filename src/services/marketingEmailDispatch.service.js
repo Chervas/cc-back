@@ -538,7 +538,7 @@ async function queueItem({ list, item, sender, template, scopeKey }) {
   assertTemplateVariables(template, variables, list);
   const providerConfig = emailProvider.getConfig();
   const configurationSet = !reviewScope.review && providerConfig.provider === 'ses' && engagement.settings(
-    emailProvider.mapStreamToConfigurationSet('marketing', providerConfig)
+    emailProvider.mapStreamToConfigurationSet('marketing', providerConfig), process.env, list
   );
   const trackedLinks = configurationSet ? engagement.staticLinks(template.rendered_html) : null;
   const result = await emailDelivery.queueEmail({
