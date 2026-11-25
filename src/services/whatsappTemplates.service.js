@@ -99,8 +99,9 @@ function normalizeTemplateComponentsForMeta(value) {
   const components = parseMaybeJson(value) || [];
   if (!Array.isArray(components)) return [];
 
-  return components.map((component) => {
-    if (!component || typeof component !== 'object') return component;
+  return components.map((stored) => {
+    if (!stored || typeof stored !== 'object') return stored;
+    const { campaign_image: _campaignImage, ...component } = stored;
     const type = String(component.type || '').trim().toUpperCase();
     if (type !== 'BODY' || typeof component.text !== 'string') {
       return { ...component };
@@ -2309,6 +2310,7 @@ async function createCustomTemplateWithLease({
   displayName,
   bodyText,
   headerImageUrl = null,
+  campaignImage = null,
   category = 'UTILITY',
   language = DEFAULT_LANGUAGE,
   variables = [],
@@ -2424,11 +2426,13 @@ async function createCustomTemplateWithLease({
     throw error;
   }
   const template = preparedTemplate.template;
+  const { withCampaignImage } = require('../lib/whatsapp-campaign-image');
+  const localComponents = withCampaignImage(template.components, campaignImage);
 
   const row = existingRow || await WhatsappTemplate.create({
     waba_id: safeWabaId, clinic_id: safeClinicId, name: safeTechnicalName,
     display_name: safeDisplayName, language, category: safeCategory,
-    status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, components: template.components,
+    status: WHATSAPP_TEMPLATE_STATUS.LOCAL_PENDING, components: localComponents,
     variables: annotateTemplateVariables(contract.variables, safeTemplateUsage),
     created_by_user_id: safeCreatedByUserId, origin: 'custom',
     rejection_reason: 'custom_submission_not_started', is_active: true,
@@ -2461,7 +2465,7 @@ async function createCustomTemplateWithLease({
 
   await row.update({
     status: WHATSAPP_TEMPLATE_STATUS.PENDING,
-    components: template.components,
+    components: localComponents,
     variables: annotateTemplateVariables(contract.variables, safeTemplateUsage),
     created_by_user_id: safeCreatedByUserId,
     meta_template_id: metaTemplateId,
@@ -3334,14 +3338,14 @@ async function syncTemplatesForWaba({ wabaId, accessToken }) {
     payload.pending_since_at = remoteIsPending
       ? (existing?.pending_since_at || now)
       : null;
-    let syncedRow = null;
-    if (existing) {
-      await existing.update(payload);
-      syncedRow = existing;
-    } else {
-      syncedRow = await WhatsappTemplate.create(payload);
-    }
-    if (payload.is_active) {
+    const syncedRow = await db.sequelize.transaction(async transaction => {
+      const current = await WhatsappTemplate.findByPk(existing.id, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!current) return null;
+      const { imageHeader, withCampaignImage } = require('../lib/whatsapp-campaign-image');
+      payload.components = withCampaignImage(payload.components, imageHeader(current.components)?.campaign_image);
+      return current.update(payload, { transaction });
+    });
+    if (syncedRow && payload.is_active) {
       await require('./whatsappDeliveryGovernance.service').reconcileCurrentTemplateState({ template: syncedRow, occurredAt: now });
       if (cleanString(syncedRow.quality_score).toUpperCase() !== 'RED') {
         await notifyBulkSendsTemplateApproval(syncedRow);

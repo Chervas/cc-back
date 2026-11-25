@@ -170,7 +170,7 @@ const {
 
 const CHANNELS = new Set(['paid', 'organic', 'unknown']);
 const SOURCES = new Set(['meta_ads', 'google_ads', 'web', 'whatsapp', 'call_click', 'tiktok_ads', 'seo', 'direct', 'local_services']);
-const DERIVED_MARKETING_ORIGINS = new Set(['meta_form', 'email', 'bulk_email']);
+const DERIVED_MARKETING_ORIGINS = new Set(['meta_form', 'email', 'bulk_email', 'bulk_whatsapp']);
 const STATUSES = new Set(['nuevo', 'contactado', 'esperando_info', 'info_recibida', 'cualificado', 'citado', 'acudio_cita', 'convertido', 'descartado']);
 const DEDUPE_WINDOW_HOURS = parseInt(process.env.INTAKE_DEDUPE_WINDOW_HOURS || '24', 10);
 const LEAD_COMPETITION_STATS_CACHE_TTL_MS = Math.max(
@@ -719,8 +719,16 @@ const redactLeadForPrivacy = (lead) => {
 
 const protectLeadRowsForRequest = async (req, rows = []) => {
   const enriched = await require('../services/leadPatientAttention.service').enrich(rows, { actorId: req.userData?.userId });
-  return Promise.all(enriched.map(async lead => await canAccessLeadFeature(req, lead, 'leads.sensitive.view')
+  const visible = await Promise.all(enriched.map(async lead => await canAccessLeadFeature(req, lead, 'leads.sensitive.view')
     ? toPlain(lead) : redactLeadForPrivacy(lead)));
+  return require('../services/leadPatientNameProjection.service').fillExistingPatientNames(visible, {
+    canSeePatientDetails: clinicId => canAccessLeadFeature(req, { clinica_id: clinicId }, 'patients.sensitive.view'),
+    loadPatients: ids => Paciente.findAll({
+      where: { id_paciente: { [Op.in]: ids } },
+      attributes: ['id_paciente', 'clinica_id', 'telefono_movil', 'nombre', 'apellidos'],
+      include: [{ model: PacienteClinica, as: 'clinicasVinculadas', attributes: ['clinica_id'] }],
+    }),
+  });
 };
 
 const canSearchSensitiveLeadFields = async (query, userId) => {

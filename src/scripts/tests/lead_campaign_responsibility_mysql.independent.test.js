@@ -20,7 +20,8 @@ test('independent campaign responsibility: persisted native proofs, exact clinic
   sql.define('Paciente', { id_paciente: { type: D.INTEGER, primaryKey: true } }, { tableName: 'Pacientes', timestamps: false });
   for (const file of ['usuario', 'campana', 'leadintake', 'leadattributionaudit', 'leadcontactattempt', 'citapaciente',
     'conversation', 'message', 'patientoperationalevent', 'PatientDirectionSetting', 'PatientDirectionAssignment',
-    'externalcampaigninventory', 'externalcampaignassignment', 'clinicgoogleadsaccount', 'googleadsadinventory']) {
+    'externalcampaigninventory', 'externalcampaignassignment', 'clinicgoogleadsaccount', 'googleadsadinventory',
+    'marketingpatientlist']) {
     const model = require('../../../models/' + file)(sql, D); db[model.name] = model;
   }
   db.PatientOperationalEvent.options.indexes.forEach((index, i) => { index.name = 'campaign_responsibility_event_' + i; });
@@ -132,6 +133,33 @@ test('independent campaign responsibility: persisted native proofs, exact clinic
   await audit(google, { advertising_identity: { version: 1, verified_by: 'google_ads_api', provider: 'google_ads',
     clinic_id: 72, account_id: '1234567890', campaign_id: '810', form_id: '802' } }, { lead_id: googleNativeId });
   await audit(google, { type: 'lead_patient_context', lead_patient_context: { version: 1, relationship: 'new_contact' } });
+  const massCampaign = (medium, scope, criteria = {}) => db.MarketingPatientList.create({
+    name: 'Envío ficticio', objective_id: 'mass_sends', ...scope,
+    criteria: { record_kind: 'campaign', channels: [medium], template_commercial: true,
+      capture_whatsapp_info_leads: medium === 'whatsapp', ...criteria },
+  });
+  const mailing = await massCampaign('email', { scope_type: 'clinic', clinica_id: 72 });
+  const whatsapp = await massCampaign('whatsapp', { scope_type: 'group', grupo_clinica_id: 48, clinic_ids: [66, 72] });
+  const otherClinic = await massCampaign('email', { scope_type: 'clinic', clinica_id: 66 });
+  const review = await massCampaign('whatsapp', { scope_type: 'clinic', clinica_id: 72 }, { review_request: true });
+  const massLead = async (label, campaign, medium, expected, { wrongHash = false, missingProof = false } = {}) => {
+    const phone = '346000000' + String(cases.length).padStart(2, '0');
+    const row = await lead(label, {
+      external_source: medium === 'email' ? 'marketing_email_whatsapp' : 'bulk_whatsapp_reply',
+      utm_medium: medium, channel: 'unknown', source: 'whatsapp', telefono: phone,
+      grupo_clinica_id: 48, external_id: wrongHash ? H('wrong proof') : H(JSON.stringify([72, campaign.id, phone])),
+    }, expected);
+    if (!missingProof) await audit(row, {
+      [medium === 'email' ? 'email_bulk_send' : 'whatsapp_bulk_send']: { campaign_id: campaign.id },
+    }, { message_id: cases.length });
+    return row;
+  };
+  const existingMailingLead = await massLead('mailing reply with exact local campaign receipt', mailing, 'email', true);
+  await massLead('WhatsApp campaign reply with exact group campaign receipt', whatsapp, 'whatsapp', true);
+  await massLead('mailing campaign belongs to another clinic', otherClinic, 'email', false);
+  await massLead('mailing origin without verified audit', mailing, 'email', false, { missingProof: true });
+  await massLead('mailing receipt that does not match the lead contact fingerprint', mailing, 'email', false, { wrongHash: true });
+  await massLead('review campaign cannot claim direction', review, 'whatsapp', false);
   const service = createLeadCampaignResponsibilityService(db);
   let selects = 0;
   const logging = sql.options.logging; sql.options.logging = message => { if (/SELECT/.test(message)) selects++; };
@@ -150,6 +178,12 @@ test('independent campaign responsibility: persisted native proofs, exact clinic
   const context = relationship => ({ relationship, patient_id: relationship === 'existing_patient' ? 100 : null, request_kind: 'commercial' });
   const attention = createLeadPatientAttentionService(db, { contexts: { get: async row => row.patient_context },
     authorize: async () => true, isAdmin: () => false, campaignResponsibility: service });
+  const previousMailingLead = { ...existingMailingLead.toJSON(), patient_context: context('existing_patient') };
+  const [mailingAttention] = await attention.enrich([previousMailingLead], { actorId: 44 });
+  assert.equal(mailingAttention.patient_attention.state, 'pending_review');
+  assert.equal(mailingAttention.patient_attention.responsibility, 'director');
+  assert.equal(mailingAttention.patient_attention.can_decide, true);
+  assert.equal(mailingAttention.channel, 'unknown', 'direction does not turn an owned mailing into paid acquisition');
   const existing = { ...paid.row.toJSON(), patient_context: context('existing_patient') };
   let projected = (await attention.enrich([existing], { actorId: 44 }))[0];
   assert.equal(projected.patient_attention.state, 'pending_review');
@@ -209,4 +243,17 @@ test('independent campaign responsibility: persisted native proofs, exact clinic
   assert.equal(await db.Message.count(), 0, 'all projections leave messages/events absent');
   assert.equal(await db.PatientDirectionAssignment.count(), 0, 'all projections leave assignment storage absent');
   report.checks.push('Independent real QuickChat predicate agrees with explicit clinic transfer and organic responsibility; projections create no message, assignment, provider operation or data repair.');
+
+  const reused = await db.Conversation.create({
+    clinic_id: 72, lead_id: existingMailingLead.id, patient_id: 100, channel: 'whatsapp',
+  });
+  await db.Message.create({ conversation_id: reused.id, message_type: 'event', status: 'sent', direction: 'outbound',
+    automation_delivery_key: `temporary-patient-direction:handoff:${reused.id}`, sent_at: new Date('2026-10-07T12:00:00Z'),
+    metadata: { source: 'temporary_patient_direction', kind: 'temporary_patient_direction_handoff',
+      clinic_id: 72, director_user_id: 44, patient_id: 100 },
+  });
+  const [laterRequest] = await attention.enrich([previousMailingLead], { actorId: 44 });
+  assert.equal(laterRequest.patient_attention.state, 'pending_review');
+  assert.equal(laterRequest.patient_attention.responsibility, 'director');
+  assert.equal(await db.Message.count(), 1, 'the old handoff is retained without consuming the later campaign reply');
 }));

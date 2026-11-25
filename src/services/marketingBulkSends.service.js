@@ -72,6 +72,27 @@ const {
 } = db;
 
 const OBJECTIVE_ID = 'mass_sends';
+const { imageHeader, resolveCampaignImage } = require('../lib/whatsapp-campaign-image');
+
+function campaignImageMissing() {
+  return Object.assign(new Error('Añade una imagen de WhatsApp antes de preparar el envío.'), {
+    status: 409, code: 'whatsapp_campaign_image_required',
+  });
+}
+
+async function campaignImageForSelection(list, templateId, assetId, template = null) {
+  const saved = list?.criteria?.whatsapp_header_image;
+  const chosen = assetId === undefined
+    ? (Number(saved?.template_id) === Number(templateId) ? saved.asset_id : null)
+    : assetId;
+  const resolvedId = chosen ?? imageHeader(template?.components)?.campaign_image?.asset_id;
+  if (resolvedId == null) return null;
+  const clinicIds = Array.isArray(list?.clinic_ids) ? list.clinic_ids : [];
+  const image = await resolveCampaignImage(db.PublicMediaAsset, resolvedId, {
+    clinicIds: [...clinicIds, list?.clinica_id].filter(Boolean), groupId: list?.grupo_clinica_id,
+  });
+  return { ...image, template_id: Number(templateId) };
+}
 const REQUIRED_SEND_GATES = ['frozen_audience', 'opt_out', 'capping', 'approved_template', 'audit', 'cancelable_queue'];
 const CHANNELS = new Set(['whatsapp', 'email', 'managed_calls']);
 const STANDARD_FIELDS = new Set(['name', 'first_name', 'last_name', 'phone', 'email']);
@@ -728,25 +749,18 @@ function shouldMaterializeStatus(item, mappedStatus) {
   return false;
 }
 
-async function reconcileDispatchJobState(list, dependencies = {}) {
-  const JobRequestModel = dependencies.JobRequest || JobRequest;
-  if (!list || !JobRequestModel) return { reconciled: false, reason: 'missing_context' };
+function liveDispatchJobId(list) {
   const dispatch = getDispatchConfig(list);
   const jobId = Number(dispatch?.job_id || 0);
-  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template', 'paused_config']);
+  const liveStatuses = new Set(['queued', 'sending', 'scheduled', 'waiting_next_batch', 'awaiting_delivery',
+    'waiting_template_approval', 'paused', 'paused_quality', 'paused_limit', 'paused_template', 'paused_config']);
   const currentStatus = String(dispatch?.status || list?.status || '').toLowerCase();
-  if (!jobId || !liveStatuses.has(currentStatus)) {
-    return { reconciled: false, reason: 'not_live' };
-  }
+  return jobId && liveStatuses.has(currentStatus) ? jobId : null;
+}
 
-  const job = await JobRequestModel.findByPk(jobId, {
-    attributes: ['id', 'status', 'error_message', 'completed_at', 'updated_at'],
-  });
-  if (!job || !['failed', 'cancelled'].includes(String(job.status || '').toLowerCase())) {
-    return { reconciled: false, reason: 'job_still_live' };
-  }
-
-  const nextStatus = job.status === 'cancelled' ? 'cancelled' : 'failed';
+function terminalDispatchProjection(list, job) {
+  if (!job || !['failed', 'cancelled'].includes(job.status)) return null;
+  const nextStatus = job.status;
   const completedAt = job.completed_at || job.updated_at || new Date();
   const terminalPatch = {
     status: nextStatus,
@@ -757,14 +771,48 @@ async function reconcileDispatchJobState(list, dependencies = {}) {
     next_allowed_at: null,
   };
   const criteria = list.criteria || {};
-  await list.update({
+  return {
     status: nextStatus,
     criteria: mergeCriteria(list, {
       dispatch: mergeDispatchConfigs(criteria.dispatch || {}, terminalPatch),
       dispatch_config: mergeDispatchConfigs(criteria.dispatch_config || {}, terminalPatch),
     }),
+  };
+}
+
+async function reconcileDispatchJobState(list, dependencies = {}) {
+  const JobRequestModel = dependencies.JobRequest || JobRequest;
+  if (!list || !JobRequestModel) return { reconciled: false, reason: 'missing_context' };
+  const jobId = liveDispatchJobId(list);
+  if (!jobId) return { reconciled: false, reason: 'not_live' };
+  const job = await JobRequestModel.findByPk(jobId, { attributes: ['id', 'status', 'error_message', 'completed_at', 'updated_at'] });
+  const patch = terminalDispatchProjection(list, job);
+  if (!patch) return { reconciled: false, reason: 'job_still_live' };
+  if (dependencies.JobRequest) {
+    await list.update(patch);
+    return { reconciled: true, status: patch.status, job_id: jobId };
+  }
+  return db.sequelize.transaction(async transaction => {
+    const current = await MarketingPatientList.findByPk(list.id, { transaction, lock: transaction.LOCK.UPDATE });
+    if (!current || liveDispatchJobId(current) !== jobId) return { reconciled: false, reason: 'queue_changed' };
+    const terminal = terminalDispatchProjection(current, job);
+    await current.update(terminal, { transaction });
+    return { reconciled: true, status: terminal.status, job_id: jobId };
   });
-  return { reconciled: true, status: nextStatus, job_id: jobId };
+}
+
+async function projectDispatchJobs(lists) {
+  const ids = [...new Set(lists.map(liveDispatchJobId).filter(Boolean))];
+  if (!ids.length) return lists;
+  const jobs = await JobRequest.findAll({
+    where: { id: { [Op.in]: ids }, status: { [Op.in]: ['failed', 'cancelled'] } },
+    attributes: ['id', 'status', 'error_message', 'completed_at', 'updated_at'], raw: true,
+  });
+  const byId = new Map(jobs.map(job => [Number(job.id), job]));
+  return lists.map(list => {
+    const patch = terminalDispatchProjection(list, byId.get(liveDispatchJobId(list)));
+    return patch ? { ...(list.get ? list.get({ plain: true }) : list), ...patch } : list;
+  });
 }
 
 async function reconcileListMessageState(list, scope = {}) {
@@ -6738,7 +6786,7 @@ async function listCampaigns(scope, options = {}) {
     // previews belong to the unchanged legacy statistics response below.
     return {
       success: true,
-      items: lists.map(list => serializeCampaign(list)),
+      items: (await projectDispatchJobs(lists)).map(list => serializeCampaign(list)),
       pagination: { page: pagination.page, page_size: pagination.page_size, total: Number(count) },
     };
   }
@@ -6785,7 +6833,7 @@ async function listCampaigns(scope, options = {}) {
     if (bucket.length < 5) bucket.push(row);
   }
   await hydrateListTemplateSnapshots(lists);
-  const items = lists.map((list) => serializeCampaign(list, { itemsPreview: previewByList.get(list.id) || [] }));
+  const items = (await projectDispatchJobs(lists)).map((list) => serializeCampaign(list, { itemsPreview: previewByList.get(list.id) || [] }));
   const aggregate = items.reduce((acc, item) => {
     const counters = item.counters || {};
     acc.total_lists += 1;
@@ -6830,6 +6878,10 @@ async function createCampaign(scope, body = {}, userId = null) {
   const reviewImportListId = parseReviewImportListId(body);
   const reviewThreshold = 5;
   const effectiveScope = isReviewRequest ? applyReviewClinicFilter(scope, body) : scope;
+  const campaignTemplateId = Number(body.whatsapp_template_id || body.template_id || 0) || null;
+  const campaignImage = recordKind === 'campaign' && !isReviewRequest && channels.includes('whatsapp') && campaignTemplateId
+    ? await campaignImageForSelection(serializeScope(effectiveScope), campaignTemplateId, body.whatsapp_header_image_asset_id)
+    : null;
   const reviewSenderName = isReviewRequest
     ? requireReviewSenderName(body.review_sender_name || body.reviewSenderName)
     : null;
@@ -6937,8 +6989,11 @@ async function createCampaign(scope, body = {}, userId = null) {
         ...(whatsappCadence !== undefined ? { whatsapp_cadence: whatsappCadence } : {}),
         template_usage: templateUsage,
         template_commercial: templateCommercial,
+        capture_whatsapp_info_leads: recordKind === 'campaign' && !isReviewRequest && templateCommercial
+          && channels.includes('whatsapp') && body.capture_whatsapp_info_leads === true,
         sender_name: campaignSenderName || null,
-        whatsapp_template_id: Number(body.whatsapp_template_id || body.template_id || 0) || null,
+        whatsapp_template_id: campaignTemplateId,
+        whatsapp_header_image: campaignImage,
         sender_origin_id: getRequestedWhatsappSenderOriginId(body),
         email_template_id: Number(body.email_template_id || 0) || null,
         email_sender_identity_id: Number(body.email_sender_identity_id || 0) || null,
@@ -7309,6 +7364,22 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   if (listName) nextCriteria.list_name = listName;
   if (campaignName) nextCriteria.campaign_name = campaignName;
   if (channels) nextCriteria.channels = channels;
+  const whatsappDraftEditable = ['draft', 'prepared'].includes(list.status) && !getDispatchConfig(list).job_id;
+  const draftWhatsapp = normalizeChannels(nextCriteria.channels || list.action_mode || list.channel).includes('whatsapp');
+  if (whatsappDraftEditable && normalizeMassSendRecordKind(nextCriteria.record_kind, 'campaign') === 'campaign'
+    && !isReviewRequestList(list)) {
+    if (body.capture_whatsapp_info_leads !== undefined || !draftWhatsapp) {
+      nextCriteria.capture_whatsapp_info_leads = draftWhatsapp && body.capture_whatsapp_info_leads === true;
+    }
+    const nextTemplateId = body.whatsapp_template_id ?? body.template_id ?? nextCriteria.whatsapp_template_id;
+    if (Number(nextTemplateId) !== Number(nextCriteria.whatsapp_header_image?.template_id)) {
+      nextCriteria.whatsapp_header_image = null;
+    }
+    if (body.whatsapp_header_image_asset_id !== undefined) {
+      nextCriteria.whatsapp_header_image = draftWhatsapp && nextTemplateId
+        ? await campaignImageForSelection(list, nextTemplateId, body.whatsapp_header_image_asset_id) : null;
+    }
+  }
   if (body.whatsapp_template_id !== undefined || body.template_id !== undefined) {
     nextCriteria.whatsapp_template_id = Number(body.whatsapp_template_id || body.template_id || 0) || null;
     if ((body.whatsapp_template_id || body.template_id)
@@ -7570,6 +7641,7 @@ function buildTemplateSnapshot(template) {
     rejection_reason: plain.rejection_reason || null,
     language: plain.language || 'es',
     body: extractBodyText(plain.components),
+    has_image_header: templateHasImageHeader(plain),
     variables: buildWhatsappTemplateVariableContract(plain),
     captured_at: new Date().toISOString(),
   };
@@ -8197,6 +8269,7 @@ function getDispatchProgress(list, counters = null, accountQuality = null) {
   return {
     ...config,
     status,
+    can_resume_identity_conflict: canResumeIdentityConflict(config),
     job_id: config.job_id || null,
     sent,
     delivered: Number(currentCounters.delivered || 0),
@@ -8432,11 +8505,17 @@ async function buildTemplateComponentsForSend({
   ownerId = null,
   userId = null,
   bulkOptOutMode = null,
+  reviewImage = isReviewRequestList(list),
+  campaignImage = list?.criteria?.whatsapp_header_image,
 }) {
   const components = [];
   const bodyParams = Array.isArray(params) ? params : [];
-  if (templateHasImageHeader(template)) {
-    const photoUrl = await resolveReviewHeaderPhotoUrl({
+  const hasImageHeader = templateHasImageHeader(template);
+  if (!reviewImage && campaignImage && !hasImageHeader) {
+    throw Object.assign(new Error('La plantilla del emisor debe conservar la cabecera de imagen preparada.'), { status: 409 });
+  }
+  if (hasImageHeader) {
+    const photoUrl = reviewImage ? await resolveReviewHeaderPhotoUrl({
       list,
       item,
       clinic,
@@ -8447,7 +8526,8 @@ async function buildTemplateComponentsForSend({
       ownerType,
       ownerId,
       userId,
-    });
+    }) : campaignImage?.url;
+    if (!photoUrl) throw campaignImageMissing();
     components.push({
       type: 'header',
       parameters: [
@@ -8574,6 +8654,18 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const templateUsage = resolveTemplateUsageFromMetaCategory(template, requestedTemplateUsage);
   const templateCommercial = resolveTemplateCommercialFromMetaCategory(template, requestedTemplateCommercial);
   const isReviewRequest = isReviewRequestList(list) || isReviewRequestBody(body) || isReviewTemplateUsage(templateUsage);
+  if (!isReviewRequest && !isWelcomeDispatch && getDispatchConfig(list).job_id
+    && (body.whatsapp_header_image_asset_id !== undefined || body.capture_whatsapp_info_leads !== undefined)) {
+    throw Object.assign(new Error('La imagen y la recepción de leads quedan fijadas al iniciar el envío.'), { status: 409 });
+  }
+  const campaignImage = !isReviewRequest && !isWelcomeDispatch && needsWhatsappTemplate && templateHasImageHeader(template)
+    ? await campaignImageForSelection(list, template.id, body.whatsapp_header_image_asset_id === undefined
+      && Number(list.criteria?.whatsapp_header_image?.template_id) === Number(selectedTemplateId)
+      ? list.criteria.whatsapp_header_image.asset_id : body.whatsapp_header_image_asset_id, template)
+    : null;
+  if (!isReviewRequest && !isWelcomeDispatch && needsWhatsappTemplate && templateHasImageHeader(template) && !campaignImage) {
+    throw campaignImageMissing();
+  }
   if (body.whatsapp_cadence !== undefined && (!['draft', 'prepared'].includes(list.status) || getDispatchConfig(list).job_id)) {
     throw Object.assign(new Error('Modifica el ritmo de una cola activa desde el estado del envío.'), { status: 409 });
   }
@@ -8747,6 +8839,11 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       email_preheader: campaignEmailPreheader(body, list.criteria?.email_preheader ?? null),
       template_usage: templateUsage,
       template_commercial: templateCommercial,
+      ...(!isWelcomeDispatch ? {
+        whatsapp_header_image: campaignImage,
+        capture_whatsapp_info_leads: !isReviewRequest && needsWhatsappTemplate && templateCommercial
+          && (body.capture_whatsapp_info_leads ?? list.criteria?.capture_whatsapp_info_leads) === true,
+      } : {}),
       sender_name: campaignSenderName || null,
       opt_out_text: templateCommercial ? normalizeText(body.opt_out_text || list.criteria?.opt_out_text) : null,
       consent_acknowledged: !!(body.consent_acknowledged ?? list.criteria?.consent_acknowledged),
@@ -9115,6 +9212,8 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
   }
   assertTestSendCooldown({ clinicId, targetPhone });
   const params = await buildTemplateParams({ template, item: plainItem, list, clinic });
+  const campaignImage = !reviewTest && templateHasImageHeader(template)
+    ? await campaignImageForSelection(list, selectedTemplateId, body.whatsapp_header_image_asset_id, template) : null;
   const templateComponents = await buildTemplateComponentsForSend({
     template,
     params,
@@ -9126,6 +9225,8 @@ async function sendTest(scope, campaignId, body = {}, { allowDiagnosticPaymentTe
     reviewTeamPhotoOverlayColor: reviewTeamPhotoOverlayColorForSelection,
     ownerType: 'review_request_test',
     ownerId: item.id,
+    reviewImage: reviewTest,
+    campaignImage,
     bulkOptOutMode: !reviewTest && (normalizeDispatchContext(body.dispatch_context || list.criteria?.dispatch?.context) || 'campaign') === 'campaign'
       ? 'test' : null,
   });
@@ -9804,6 +9905,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     : rawDispatchOverride;
   const dispatch = await getDispatchConfigForList(list, dispatchOverride);
   const context = requestedContext || normalizeDispatchContext(dispatch.context);
+  const isCampaignDispatch = !isReviewRequestList(list) && (!context || context === 'campaign');
   const filter = buildDispatchFilterFromBody(body, context) || getDispatchItemFilter(dispatch);
   const channels = Array.isArray(list.criteria?.channels)
     ? list.criteria.channels
@@ -9885,6 +9987,13 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     err.status = 409;
     throw err;
   }
+  const preparedImage = list.criteria?.whatsapp_header_image;
+  if (isCampaignDispatch && (preparedImage || templateHasImageHeader(template))) {
+    if (!templateHasImageHeader(template)) throw campaignImageMissing();
+    if (!preparedImage || Number(preparedImage.template_id) !== Number(template.id)) throw campaignImageMissing();
+    const currentImage = await campaignImageForSelection(list, template.id, preparedImage.asset_id);
+    if (currentImage.url !== preparedImage.url) throw campaignImageMissing();
+  }
 
   const counters = await getDispatchScopedCounters(list, filter);
   const remaining = await countDispatchRemainingItems(list.id, filter);
@@ -9909,6 +10018,8 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     filter,
     whatsapp_template_id: template?.id || null,
     template_snapshot: buildTemplateSnapshot(template),
+    whatsapp_header_image: isCampaignDispatch ? list.criteria?.whatsapp_header_image || null : null,
+    capture_whatsapp_info_leads: isCampaignDispatch && list.criteria?.capture_whatsapp_info_leads === true,
     sender_origin_id: clinicConfig.originId || null,
     sender_snapshot: buildWhatsappSenderSnapshot(clinicConfig),
     job_id: null,
@@ -10131,6 +10242,7 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
   ensureScopeAccess(list, scope);
   await guardReviewCare(scope, list, [], { background: !scope.reviewCareAuthority });
   ensureDispatchableCampaignRecord(list);
+  if ((await reconcileDispatchJobState(list)).reconciled) await list.reload();
   const channels = Array.isArray(list.criteria?.channels)
     ? list.criteria.channels
     : normalizeChannels(list.action_mode || list.channel);
@@ -10209,7 +10321,8 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     err.status = 403;
     throw err;
   }
-  if (!['paused', 'cancelled', 'scheduled', 'sending', 'prepared'].includes(String(list.status || '').toLowerCase())) {
+  if (!['paused', 'cancelled', 'scheduled', 'sending', 'prepared'].includes(String(list.status || '').toLowerCase())
+    && !canResumeIdentityConflict(dispatch)) {
     const err = new Error('Esta campaña no se puede retomar desde su estado actual.');
     err.status = 409;
     throw err;
@@ -10276,6 +10389,9 @@ async function resumeCampaignDispatch(scope, campaignId, body = {}, actor = null
     cancel_requested: false,
     stop_action: null,
     paused_reason: null,
+    last_error: null,
+    failed_at: null,
+    job_status: null,
     resumed_at: new Date().toISOString(),
     next_allowed_at: nextRunAt ? nextRunAt.toISOString() : null,
     delivery_governance: deliveryGate,
@@ -10420,6 +10536,11 @@ function extractProviderError(error) {
   };
 }
 
+function canResumeIdentityConflict(dispatch) {
+  return dispatch.status === 'failed' && dispatch.job_status === 'failed'
+    && dispatch.last_error === 'El teléfono de destino no coincide con la conversación. Revisa la ficha antes de enviar.';
+}
+
 async function sendDispatchItem({
   list,
   item,
@@ -10448,17 +10569,34 @@ async function sendDispatchItem({
     groupId: list.group_id || null,
     ownerType: 'review_request',
     ownerId: item.id,
+    campaignImage: dispatch.whatsapp_header_image,
     bulkOptOutMode: dispatchContext === 'campaign' && !isReviewRequestList(list) ? 'send' : null,
   });
   const previewText = await renderTemplatePreview({ template, item: plainItem, list, clinic });
-  const conversation = await findCanonicalWhatsappConversation({
-    requireExactContact: true,
-    clinicId: clinicConfig.clinicId || getClinicIdForList(list),
-    contactId: item.phone,
-    patientId: item.paciente_id || null,
-    createIfMissing: true,
-    lastMessageAt: new Date(),
-  });
+  let conversation;
+  try {
+    conversation = await findCanonicalWhatsappConversation({
+      requireExactContact: true,
+      clinicId: clinicConfig.clinicId || getClinicIdForList(list),
+      contactId: item.phone,
+      patientId: item.paciente_id || null,
+      createIfMissing: true,
+      lastMessageAt: new Date(),
+    });
+  } catch (error) {
+    if (error?.code !== 'whatsapp_contact_identity_conflict') throw error;
+    await item.update({
+      status: 'excluded_whatsapp_identity_conflict',
+      selected: false,
+      exclusion_reason: 'whatsapp_contact_identity_conflict',
+      reason: error.message,
+      dispatch_status: 'failed',
+      failed_at: new Date(),
+      last_error_code: error.code,
+      last_error_message: error.message,
+    });
+    return { sent: false, error_code: error.code };
+  }
   const templateUsage = resolveTemplateUsageFromMetaCategory(template, list.criteria?.template_usage || 'promocion');
   const templateCommercial = resolveTemplateCommercialFromMetaCategory(template,
     list.criteria?.template_commercial === true || isCommercialTemplateUsage(templateUsage));
@@ -10474,6 +10612,11 @@ async function sendDispatchItem({
       ...(messageKind ? { kind: messageKind } : {}),
       source: 'marketing_bulk_sends',
       dispatch_context: dispatchContext || 'campaign',
+      ...(dispatchContext === 'campaign' && templateCommercial && !isReviewRequestList(list)
+        && dispatch.capture_whatsapp_info_leads === true ? {
+          capture_whatsapp_info_leads: true,
+          delivery_clinic_id: clinicConfig.clinicId || getClinicIdForList(list),
+        } : {}),
       list_id: list.id,
       item_id: item.id,
       objective_id: OBJECTIVE_ID,
@@ -10998,6 +11141,17 @@ async function runDispatchJob(payload = {}, jobRequest = null) {
         failed_at: new Date(),
         last_error_code: 'template_not_approved_for_clinic',
         last_error_message: 'No hay plantilla WhatsApp aprobada compatible con la clínica del contacto.',
+      });
+      continue;
+    }
+    if ((!context || context === 'campaign') && !isReviewRequestList(list)
+      && templateHasImageHeader(itemTemplate) !== !!dispatch.whatsapp_header_image) {
+      failed += 1;
+      await item.update({
+        dispatch_status: 'failed',
+        failed_at: new Date(),
+        last_error_code: 'whatsapp_campaign_image_mismatch',
+        last_error_message: 'La plantilla de esta clínica no coincide con la cabecera preparada.',
       });
       continue;
     }

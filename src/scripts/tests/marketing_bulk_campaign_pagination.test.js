@@ -97,6 +97,29 @@ test('group OR scope and review/type AND filters reach SQL before LIMIT with sta
   assert.equal(calls[0].where[Op.and].length, 4);
 });
 
+test('the campaign collection projects an interrupted job without persisting or restarting the queue', async t => {
+  const message = 'El teléfono de destino no coincide con la conversación. Revisa la ficha antes de enviar.';
+  const interrupted = row(1, 'campaign', { status: 'sending', criteria: {
+    record_kind: 'campaign', dispatch: { status: 'sending', job_id: 98 },
+  } });
+  const scheduled = row(2, 'campaign', { status: 'scheduled', criteria: {
+    record_kind: 'campaign', dispatch: { status: 'scheduled', job_id: 99 },
+  } });
+  repository(t, [interrupted, scheduled]);
+  const jobs = t.mock.method(db.JobRequest, 'findAll', async options => {
+    assert.deepEqual(options.where.id[Op.in].sort(), [98, 99]);
+    return [{ id: 98, status: 'failed', error_message: message, completed_at: new Date('2026-11-04T15:55:40Z') }];
+  });
+  const result = await bulk.listCampaigns(clinic, { context: 'mass_sends', record_kind: 'campaign', page_size: 10 });
+  assert.equal(result.items[0].dispatch.status, 'scheduled');
+  assert.equal(result.items[1].dispatch.status, 'failed');
+  assert.equal(result.items[1].dispatch.can_resume_identity_conflict, true);
+  assert.equal(result.items[1].dispatch.last_error, message);
+  assert.equal(interrupted.status, 'sending');
+  assert.equal(interrupted.criteria.dispatch.status, 'sending');
+  assert.equal(jobs.mock.callCount(), 1);
+});
+
 test('page sizes 10/25/50, defaults, out-of-range pages and string null kind use the same filtered count', async t => {
   repository(t, [...Array.from({ length: 60 }, (_, index) => row(index + 1, 'campaign')), row(101, 'null'), row(102, 'RECIPIENT_LIST')]);
   for (const size of [10, 25, 50]) {

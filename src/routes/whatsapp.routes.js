@@ -25,7 +25,8 @@ router.use((req, res, next) => {
   // Local, audited administrative decision only. It never enqueues or sends;
   // resume still performs the existing sender/template/quality preflight.
   const queueReview = req.method === 'POST' && /^\/compliance\/admin\/queues\/[1-9][0-9]*\/resolve$/.test(path);
-  if (queueReview || templateRoute || authorizedProfileRefresh || authorizedPaymentTest || authorizedDisconnect || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
+  const templateImage = req.method === 'PATCH' && /^\/templates\/[1-9][0-9]*\/campaign-image$/.test(path);
+  if (queueReview || templateRoute || templateImage || authorizedProfileRefresh || authorizedPaymentTest || authorizedDisconnect || req.method === 'PUT' && ['/routing','/routing/secondary'].includes(path)) return next();
   return authMiddleware(req, res, () => metaQuarantine.middleware(req, res));
 });
 
@@ -40,6 +41,7 @@ router.get('/templates', authMiddleware, whatsappController.listTemplatesForClin
 router.get('/templates/:id/status', authMiddleware, whatsappController.getTemplateStatusForClinic);
 router.post('/templates/sync', authMiddleware, whatsappController.syncTemplates);
 router.post('/templates/custom', authMiddleware, whatsappController.createCustomTemplate);
+router.patch('/templates/:id/campaign-image', authMiddleware, whatsappController.setTemplateCampaignImage);
 router.post('/templates/create-from-catalog', authMiddleware, whatsappController.createTemplatesFromCatalog);
 router.delete('/templates/:id', authMiddleware, whatsappController.deleteTemplate);
 

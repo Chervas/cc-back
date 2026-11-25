@@ -15,6 +15,7 @@ const MARKETING_ORIGIN_LABELS = Object.freeze({
   web: 'Web',
   email: 'Email',
   bulk_email: 'Envío masivo',
+  bulk_whatsapp: 'Envío masivo · WhatsApp',
   google_ads: 'Google Ads',
   meta_ads: 'Meta Ads',
   tiktok_ads: 'TikTok Ads',
@@ -54,6 +55,7 @@ const resolveLeadMarketingOrigin = (lead = {}) => {
   const source = clean(lead.source);
   const utmMedium = clean(lead.utm_medium);
   const utmSource = clean(lead.utm_source);
+  if (source === 'whatsapp' && lead.external_source === 'bulk_whatsapp_reply') return 'bulk_whatsapp';
   if (EMAIL_CONTACT_SOURCES.includes(source) && utmMedium === 'email') {
     return utmSource === BULK_EMAIL_UTM_SOURCE ? 'bulk_email' : 'email';
   }
@@ -116,6 +118,12 @@ const buildMarketingOriginWhere = (source, Op) => {
   if (normalized === 'tiktok_ads') {
     return { [Op.or]: [{ source: 'tiktok_ads' }, { ttclid: { [Op.ne]: null } }] };
   }
+  if (normalized === 'bulk_whatsapp') {
+    return {
+      source: 'whatsapp', external_source: 'bulk_whatsapp_reply',
+      [Op.and]: PAID_ID_FIELDS.map((name) => where(normalizedColumn(name), '')),
+    };
+  }
   if (normalized === 'email' || normalized === 'bulk_email') {
     return {
       source: { [Op.in]: EMAIL_CONTACT_SOURCES },
@@ -142,7 +150,11 @@ const buildMarketingOriginWhere = (source, Op) => {
     };
   }
   if (EMAIL_CONTACT_SOURCES.includes(normalized)) {
-    return { source: normalized, [Op.and]: [where(normalizedColumn('utm_medium'), { [Op.ne]: 'email' })] };
+    return { source: normalized, [Op.and]: [
+      where(normalizedColumn('utm_medium'), { [Op.ne]: 'email' }),
+      ...(normalized === 'whatsapp'
+        ? [where(normalizedColumn('external_source'), { [Op.ne]: 'bulk_whatsapp_reply' })] : []),
+    ] };
   }
   return { source: normalized };
 };

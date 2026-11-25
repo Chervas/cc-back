@@ -18,6 +18,7 @@ test('a full page of imported-patient HOLDs cannot starve a later ordinary reply
   if(name==='../lib/whatsappInboxHealth')return {...require('../../lib/whatsappInboxHealth'),read:()=>snapshot};
   if(name==='../../models')return db;
   if(name==='./whatsappContactIdentity.service')return {reviewSupersededInbound:async()=>false};
+  if(name==='./marketingWhatsappReplyLead.service')return require('../../services/marketingWhatsappReplyLead.service');
   if(name==='./automationInboundMessage.service')return {enqueueInboundDispatch:async({inboundMessage})=>sent.push(inboundMessage.id)};
   throw Error(name);
  }};

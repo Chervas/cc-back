@@ -82,15 +82,17 @@ async function searchClause(term, clinicIds) {
     const rows = await q(`SELECT DISTINCT COALESCE(l.canonical_id,i.conversation_id) id FROM WhatsappContactIdentities i LEFT JOIN WhatsappConversationLinks l ON l.conversation_id=i.conversation_id AND l.clinic_id=i.clinic_id WHERE (${predicate})${scope} LIMIT 1000`, [...values, ...(clinicIds || [])]);
     return rows.map(r => Number(r.id));
 }
-async function recentMessages(conversations) {
+async function recentMessages(conversations, { hideUnansweredBulk = false } = {}) {
     if (!conversations.length || !await enabled())
         return new Map();
     const ids = conversations.map(c => Number(c.id));
+    const ordinary = hideUnansweredBulk ? `AND NOT ${require('../lib/quickchat-bulk-visibility').bulkOutboundSql('m')}` : '';
     const rows = await queryFor()(`SELECT * FROM (
     SELECT m.id,m.conversation_id,m.direction,m.content,m.message_type,m.status,m.sent_at,m.createdAt,m.metadata,
       l.canonical_id,ROW_NUMBER() OVER(PARTITION BY l.canonical_id ORDER BY COALESCE(m.sent_at,m.createdAt) DESC,m.id DESC) history_rank
     FROM WhatsappConversationLinks l JOIN Messages m ON m.conversation_id=l.conversation_id
-    WHERE l.canonical_id IN (${ids.map(() => '?').join(',')})
+    JOIN Conversations c ON c.id = l.canonical_id AND c.clinic_id = l.clinic_id
+    WHERE l.canonical_id IN (${ids.map(() => '?').join(',')}) ${ordinary}
   ) history WHERE history_rank<=6 ORDER BY canonical_id,history_rank`, ids);
     const result = new Map();
     for (const row of rows) {

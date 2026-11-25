@@ -19,6 +19,7 @@ const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-owne
 const { isReviewWorkflowWhatsappTemplate } = require('../lib/whatsapp-template-workflow');
 const { findCurrentConversation } = require('../services/patientWhatsappContactChange.service');
 const { normalizePhoneE164 } = require('../lib/phone');
+const { bulkOutboundSql, quickChatActivitySql } = require('../lib/quickchat-bulk-visibility');
 const {
   extractWhatsappTemplateDisplayButtons,
 } = require('../lib/whatsapp-template-display');
@@ -1368,6 +1369,7 @@ exports.listConversations = async (req, res) => {
     const searchQuery = String(req.query.q || req.query.search || '').trim();
     const patientId = req.query.patient_id ? Number(req.query.patient_id) : null;
     const leadId = req.query.lead_id ? Number(req.query.lead_id) : null;
+    const hideUnansweredBulk = req.query.hide_unanswered_bulk === '1' && !searchQuery && !patientId && !leadId;
     const limit = Math.min(100, Math.max(20, Number.parseInt(req.query.limit || '50', 10) || 50));
     const offset = Math.max(0, Number.parseInt(req.query.offset || '0', 10) || 0);
 
@@ -1509,10 +1511,17 @@ exports.listConversations = async (req, res) => {
       where[Op.and] = [...(where[Op.and] || []), identityMatches?.length ? {[Op.or]:[searchClause,{id:{[Op.in]:identityMatches}}]} : searchClause];
     }
 
-    if(await contactIdentity.enabled())where[Op.and]=[...(where[Op.and]||[]),db.Sequelize.literal('NOT EXISTS (SELECT 1 FROM WhatsappConversationLinks wi WHERE wi.conversation_id=`Conversation`.`id` AND wi.clinic_id=`Conversation`.`clinic_id` AND wi.canonical_id<>wi.conversation_id)')];
+    const linkedHistory = await contactIdentity.enabled();
+    if(linkedHistory)where[Op.and]=[...(where[Op.and]||[]),db.Sequelize.literal('NOT EXISTS (SELECT 1 FROM WhatsappConversationLinks wi WHERE wi.conversation_id=`Conversation`.`id` AND wi.clinic_id=`Conversation`.`clinic_id` AND wi.canonical_id<>wi.conversation_id)')];
     const conversationsPlusOne = await Conversation.findAll({
       where,
-      order: [['last_message_at', 'DESC'], ['createdAt', 'DESC'], ['id', 'DESC']],
+      ...(hideUnansweredBulk ? {
+        attributes: { include: [[db.Sequelize.literal(quickChatActivitySql({ linkedHistory })), 'quickchat_activity_at']] },
+        having: db.Sequelize.literal('`quickchat_activity_at` IS NOT NULL'),
+        subQuery: false,
+      } : {}),
+      order: [hideUnansweredBulk ? [db.Sequelize.literal('`quickchat_activity_at`'), 'DESC'] : ['last_message_at', 'DESC'],
+        ['createdAt', 'DESC'], ['id', 'DESC']],
       limit: limit + 1,
       offset,
       include: [
@@ -1525,6 +1534,7 @@ exports.listConversations = async (req, res) => {
           limit: 6,
           order: messageChronologicalOrder('DESC'),
           attributes: ['id', 'direction', 'content', 'message_type', 'status', 'sent_at', 'createdAt', 'metadata'],
+          ...(hideUnansweredBulk ? { where: db.Sequelize.literal(`NOT ${bulkOutboundSql('Message')}`) } : {}),
         },
       ],
     });
@@ -1533,7 +1543,7 @@ exports.listConversations = async (req, res) => {
 
     const conversationIds = conversations.map((c) => c.id);
     const pendingStates = await contactIdentity.aggregatePending(conversations,getPendingReplyStatesByConversationIds,userId);
-    const sharedRecent = await contactIdentity.recentMessages(conversations);
+    const sharedRecent = await contactIdentity.recentMessages(conversations, { hideUnansweredBulk });
 
     const rawPayload = await Promise.all(conversations.map(async (c) => {
       const data = c.toJSON();
@@ -1544,6 +1554,8 @@ exports.listConversations = async (req, res) => {
       data.lastMessage = recentMessages.find((message) => !isTechnicalWhatsappFailureNotice(message))
         || recentMessages[0]
         || null;
+      if (hideUnansweredBulk) data.last_message_at = data.quickchat_activity_at;
+      delete data.quickchat_activity_at;
       delete data.messages;
       const pendingState = pendingStates.get(Number(data.id));
       data.unread_count = pendingState?.unreadCount ?? 0;

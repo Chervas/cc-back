@@ -27,6 +27,7 @@ async function tick() {
   for (const row of rows) {
     try {
       let emailReply = null;
+      let campaignReply = null;
       let didDispatch = false;
       await db.sequelize.transaction(async transaction => {
         const message = await db.Message.findByPk(row.id, { transaction, lock: transaction.LOCK.UPDATE });
@@ -49,15 +50,20 @@ async function tick() {
           ? await require('./marketingEmailWhatsappAttribution.service').attributeEmailWhatsappReply({
             db, message, conversation, binding: b, transaction,
           }) : null;
+        campaignReply = await require('./marketingWhatsappReplyLead.service').attributeCampaignInfoReply({
+          db, message, conversation, binding: b, transaction,
+        });
         await require('./automationInboundMessage.service').enqueueInboundDispatch({ inboundMessage: message,
           conversation, clinicId: b.clinicId, channel: 'whatsapp', providerMessageId: message.metadata.wamid }, { transaction });
         await message.update({ metadata: { ...message.metadata, automatic_actions_allowed: true,
           ...(emailReply ? { email_campaign_attribution: emailReply.attribution } : {}),
+          ...(campaignReply ? { whatsapp_campaign_attribution: campaignReply.attribution } : {}),
           fresh_inbound_authorization_id: b.authorizationId, fresh_inbound_dispatched_at: new Date().toISOString() } }, { transaction });
         didDispatch = true;
       });
       if (didDispatch) dispatched++;
       if (emailReply?.lead) require('./leadCreatedRealtime.service').publishLeadCreated(emailReply);
+      if (campaignReply?.lead) require('./leadCreatedRealtime.service').publishLeadCreated(campaignReply);
     } catch { held++; }
   }
   return { dispatched, held };

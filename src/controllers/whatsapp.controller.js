@@ -1791,6 +1791,33 @@ exports.syncTemplates = async (req, res) => {
   }
 };
 
+exports.setTemplateCampaignImage = async (req, res) => {
+  try {
+    const templateId = Number(req.params.id);
+    const clinicId = Number(req.body?.clinic_id);
+    const userId = req.userData?.userId;
+    await assertWhatsappTemplateClinicAccess({ clinicId, userId });
+    const { imageHeader, withCampaignImage, resolveCampaignImage } = require('../lib/whatsapp-campaign-image');
+    const image = await resolveCampaignImage(db.PublicMediaAsset, req.body?.asset_id, { clinicIds: [clinicId] });
+    const saved = await db.sequelize.transaction(async transaction => {
+      const template = await WhatsappTemplate.findByPk(templateId, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!template || !template.is_active || Number(template.clinic_id) !== clinicId
+        || !isWhatsappTemplateOwnedByUser(template, userId) || isSystemWhatsappTemplate(template)
+        || isReviewWorkflowWhatsappTemplate(template)
+        || !imageHeader(template.components)) return false;
+      await template.update({ components: withCampaignImage(
+        Array.isArray(template.components) ? template.components : JSON.parse(template.components), image
+      ) }, { transaction });
+      return true;
+    });
+    return saved ? res.json({ image }) : res.status(404).json({ error: 'template_image_unavailable' });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.code : 'template_image_update_failed',
+    });
+  }
+};
+
 exports.deleteTemplate = async (req, res) => {
   try {
     const id = Number(req.params.id || 0);
@@ -1993,6 +2020,11 @@ exports.createCustomTemplate = async (req, res) => {
     }
 
     const { createCustomTemplateForClinic } = require('../services/whatsappTemplates.service');
+    const campaignImage = req.body?.header_image_asset_id != null
+      ? await require('../lib/whatsapp-campaign-image').resolveCampaignImage(
+        require('../../models').PublicMediaAsset, req.body.header_image_asset_id, { clinicIds: clinicId ? [clinicId] : [] }
+      )
+      : null;
     const replacementIds = [...new Set([
       ...(Array.isArray(req.body?.replace_template_ids) ? req.body.replace_template_ids : []),
       req.body?.replace_template_id || req.body?.replaceTemplateId,
@@ -2019,7 +2051,8 @@ exports.createCustomTemplate = async (req, res) => {
           accessToken: asset.waAccessToken,
           displayName: req.body?.display_name || req.body?.nombre || req.body?.name,
           bodyText: req.body?.body_text || req.body?.contenido || req.body?.body,
-          headerImageUrl: req.body?.header_image_url || req.body?.headerImageUrl || null,
+          headerImageUrl: campaignImage?.url || req.body?.header_image_url || req.body?.headerImageUrl || null,
+          campaignImage,
           category: req.body?.category || (req.body?.template_commercial ? 'MARKETING' : 'UTILITY'),
           language: req.body?.language || 'es',
           variables: req.body?.variables || [],

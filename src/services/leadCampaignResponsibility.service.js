@@ -3,8 +3,7 @@
 // Local, read-only campaign evidence. Presentation labels, UTM names and click
 // identifiers are not ownership evidence. Keep one SQL predicate for the bulk
 // projection and the paginated QuickChat filter so they cannot disagree.
-// Receipt shapes are the persisted contracts of metaLeadAttributionView,
-// leadAdvertisingIdentity, meta-web-attribution and web-ad-attribution.
+// Receipts come from provider attribution or a verified response to a bulk campaign.
 const positive = value => Number.isSafeInteger(Number(value)) && Number(value) > 0;
 
 function campaignResponsibilitySql(alias = 'LeadIntake') {
@@ -27,6 +26,27 @@ function campaignResponsibilitySql(alias = 'LeadIntake') {
   const present = object => `(${object} IS NOT NULL AND JSON_TYPE(${object}) <> 'NULL')`;
   const sameLead = audit => `${audit}.lead_intake_id = ${field('id')}`;
   const raw = (audit, name) => scalar(audit, 'raw_payload', name);
+  const bulkCampaign = (receiptName, medium) => {
+    const object = json('crb', 'attribution_steps', receiptName);
+    const config = name => `JSON_EXTRACT(crl.criteria, '$.${name}')`;
+    const requiredFlag = config(medium === 'email' ? 'template_commercial' : 'capture_whatsapp_info_leads');
+    return `(${field('source')} = 'whatsapp' AND ${field('utm_medium')} = '${medium}'
+      AND ${field('telefono')} REGEXP '^[1-9][0-9]{8,14}$'
+      AND EXISTS (SELECT 1 FROM LeadAttributionAudits crb JOIN MarketingPatientLists crl
+        ON crl.id = CAST(${sf(object, 'campaign_id')} AS UNSIGNED)
+        WHERE ${sameLead('crb')} AND ${positiveInteger(object, 'campaign_id')}
+        AND JSON_TYPE(${json('crb', 'raw_payload', 'message_id')}) = 'INTEGER'
+        AND ${raw('crb', 'message_id')} REGEXP '^[1-9][0-9]*$'
+        AND crl.objective_id = 'mass_sends'
+        AND COALESCE(JSON_UNQUOTE(${config('record_kind')}), 'campaign') = 'campaign'
+        AND COALESCE(LOWER(JSON_UNQUOTE(${config('review_request')})), 'false') NOT IN ('true','1')
+        AND JSON_TYPE(${requiredFlag}) = 'BOOLEAN' AND JSON_UNQUOTE(${requiredFlag}) = 'true'
+        AND JSON_CONTAINS(${config('channels')}, JSON_QUOTE('${medium}')) = 1
+        AND ((crl.scope_type = 'clinic' AND crl.clinica_id = ${field('clinica_id')})
+          OR (crl.scope_type = 'group' AND crl.grupo_clinica_id = ${field('grupo_clinica_id')}
+            AND JSON_CONTAINS(crl.clinic_ids, CAST(${field('clinica_id')} AS JSON)) = 1))
+        AND SHA2(CONCAT('[', ${field('clinica_id')}, ',', crl.id, ',"', ${field('telefono')}, '"]'), 256) = ${field('external_id')}))`;
+  };
   const nativeMeta = audit => {
     const object = identity(audit);
     return `(${version(object, 1)} AND ${sf(object, 'verified_by')} = 'meta_graph'
@@ -144,6 +164,8 @@ function campaignResponsibilitySql(alias = 'LeadIntake') {
     WHEN ${field('external_source')} = 'google_lead_form' THEN
       (${field('source')} = 'google_ads' AND ${field('external_id')} REGEXP '^[a-f0-9]{64}$'
         AND ${proof(nativeGoogle, googleRelevant, 'google_ads')})
+    WHEN ${field('external_source')} = 'marketing_email_whatsapp' THEN ${bulkCampaign('email_bulk_send', 'email')}
+    WHEN ${field('external_source')} = 'bulk_whatsapp_reply' THEN ${bulkCampaign('whatsapp_bulk_send', 'whatsapp')}
     ELSE (EXISTS (SELECT 1 FROM Campanas crc WHERE crc.id_campana = ${field('campana_id')} AND crc.clinica_id = ${field('clinica_id')})
       OR ((${legacyGoogle} OR EXISTS (SELECT 1 FROM LeadAttributionAudits crw
         WHERE ${sameLead('crw')} AND (${webIdentity('crw')} OR ${webAdIdentity('crw')})))

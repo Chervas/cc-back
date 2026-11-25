@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 require('./fixtures/campaign_offline_runtime.cjs');
 const health=require('../../lib/whatsappInboxHealth'),fresh=require('../../lib/whatsappFreshInboundEligibility');
 function fixture({hold=false,beforeCut=false,reaction=false,review=false,affected=false,unscoped=false,stale=false,
- content=null,campaignReply=null}={}) {
+ content=null,campaignReply=null,whatsappReply=null}={}) {
  const now=Date.now(),cut=new Date(now-60000).toISOString();
  const b={clinicId:2,assetId:4,phoneId:'123',wabaId:'456',sendEnabled:true,authorizationId:'synthetic'};
  const config={bindings:[b],messageNotBefore:new Date(now-86400000).toISOString()};
@@ -27,6 +27,9 @@ function fixture({hold=false,beforeCut=false,reaction=false,review=false,affecte
   if(name==='./whatsappContactIdentity.service')return {reviewSupersededInbound:async()=>false};
   if(name==='./marketingEmailWhatsappAttribution.service')return {attributeEmailWhatsappReply:async input=>{
    assert.equal(input.binding,b);attributionChecks++;return campaignReply;
+  }};
+  if(name==='./marketingWhatsappReplyLead.service')return {attributeCampaignInfoReply:async input=>{
+   assert.equal(input.binding,b);return whatsappReply;
   }};
   if(name==='./leadCreatedRealtime.service')return {publishLeadCreated:result=>{
    assert.equal(committed,true);publications.push(result);
@@ -75,4 +78,14 @@ test('campaign references keep ordinary dispatch and publish attribution after c
  const held=fixture({hold:true,content,campaignReply});
  await held.run();
  assert.equal(held.attributionChecks,0);
+});
+
+test('INFO keeps the inbound workflow and publishes the attributed lead after commit', async () => {
+ const whatsappReply = { lead: { id: 42, clinica_id: 2 }, duplicate: false, attribution: { lead_id: 42, campaign_id: 52 } };
+ const f = fixture({ content: 'INFO', whatsappReply });
+ await f.run();
+ await f.run();
+ assert.equal(f.dispatched, 1);
+ assert.deepEqual(f.publications, [whatsappReply]);
+ assert.deepEqual(f.message.metadata.whatsapp_campaign_attribution, whatsappReply.attribution);
 });
