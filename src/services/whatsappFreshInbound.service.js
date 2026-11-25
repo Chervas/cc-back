@@ -26,6 +26,8 @@ async function tick() {
   let dispatched = 0, held = 0;
   for (const row of rows) {
     try {
+      let emailReply = null;
+      let didDispatch = false;
       await db.sequelize.transaction(async transaction => {
         const message = await db.Message.findByPk(row.id, { transaction, lock: transaction.LOCK.UPDATE });
         const conversation = message && await db.Conversation.findByPk(message.conversation_id, { transaction });
@@ -43,12 +45,19 @@ async function tick() {
           && !await require('../lib/whatsappImportedAppointmentOperations').permitsReply(conversation, message, db, transaction)) { held++; return; }
         const current = await broker.binding(b.clinicId, b.assetId);
         if (JSON.stringify(current) !== JSON.stringify(b) || JSON.stringify(broker.configuration()) !== JSON.stringify(config)) throw Error('whatsapp_fresh_inbound_scope_changed');
+        emailReply = message.metadata.provider_type === 'text' && /(?:^|\n)Ref\. CC-/i.test(message.content || '')
+          ? await require('./marketingEmailWhatsappAttribution.service').attributeEmailWhatsappReply({
+            db, message, conversation, binding: b, transaction,
+          }) : null;
         await require('./automationInboundMessage.service').enqueueInboundDispatch({ inboundMessage: message,
           conversation, clinicId: b.clinicId, channel: 'whatsapp', providerMessageId: message.metadata.wamid }, { transaction });
         await message.update({ metadata: { ...message.metadata, automatic_actions_allowed: true,
+          ...(emailReply ? { email_campaign_attribution: emailReply.attribution } : {}),
           fresh_inbound_authorization_id: b.authorizationId, fresh_inbound_dispatched_at: new Date().toISOString() } }, { transaction });
-        dispatched++;
+        didDispatch = true;
       });
+      if (didDispatch) dispatched++;
+      if (emailReply?.lead) require('./leadCreatedRealtime.service').publishLeadCreated(emailReply);
     } catch { held++; }
   }
   return { dispatched, held };

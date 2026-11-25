@@ -1,6 +1,7 @@
 'use strict';
 
 const { Op, fn, col, literal } = require('sequelize');
+const { REFERENCE_PREFIX: EMAIL_WHATSAPP_REFERENCE_PREFIX } = require('../services/marketingEmailWhatsappAttribution.service');
 const db = require('../../models');
 const { resolveClinicScope, buildAssetScopeWhere } = require('../lib/clinicScope');
 const webEventsService = require('../services/webEvents.service');
@@ -964,6 +965,7 @@ async function aggregateWhatsappWebOrigins(scope, range) {
     where: {
       ...scopedWhere('clinic_id', scope),
       ...buildSequelizeDateWhere('createdAt', range),
+      ref: { [Op.notLike]: `${EMAIL_WHATSAPP_REFERENCE_PREFIX}%` },
     },
     raw: true,
   });
@@ -2801,6 +2803,7 @@ async function aggregateWebPages(scope, range, seoPages = [], loadedLeads = null
                     0 AS formularios
                FROM WhatsAppWebOrigins
               WHERE createdAt >= :startTs AND createdAt < :endTs ${whatsappClinicSql}
+                AND ref NOT LIKE '${EMAIL_WHATSAPP_REFERENCE_PREFIX}%'
               GROUP BY COALESCE(NULLIF(page_url, ''), 'Sin página')
        ) x
       GROUP BY url

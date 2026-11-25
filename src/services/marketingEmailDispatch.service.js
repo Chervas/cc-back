@@ -12,6 +12,7 @@ const { resolveLastAttendedAppointmentDate } = require('../lib/marketing-templat
 const publicLinks = require('../lib/marketingEmailPublicLinks');
 const engagement = require('../lib/marketing-email-engagement');
 const channelSchedules = require('../lib/marketing-channel-schedules');
+const { decorateEmailWhatsappLinks } = require('./marketingEmailWhatsappAttribution.service');
 
 const JOB_TYPE = 'marketing_bulk_email_dispatch';
 const DEFAULT_BATCH_SIZE = Math.max(1, Number.parseInt(process.env.MARKETING_EMAIL_BATCH_SIZE || '100', 10) || 100);
@@ -475,10 +476,16 @@ function composeCampaignContext({ list, item, clinic, template, links = publicLi
   };
 }
 
-function prepareMessageContext({ list, item, clinic, template, scopeKey, unsubscribeUrl, trackedLinks }) {
+function prepareMessageContext({ list, item, clinic, template, scopeKey, unsubscribeUrl, trackedLinks, attributeWhatsapp = false }) {
   return async ({ publicId, recipientHash, transaction }) => {
     const links = publicLinks.messageLinks({ publicId, recipientHash, scopeKey, unsubscribeUrl });
     const context = composeCampaignContext({ list, item, clinic, template, links });
+    if (attributeWhatsapp) {
+      const body = await decorateEmailWhatsappLinks({ db, body: { html: context.body_html, text: context.body_text },
+        list, clinic, transaction });
+      context.body_html = body.html;
+      context.body_text = body.text;
+    }
     const rendered = emailTemplates.renderMarketingCampaign(context);
     if (trackedLinks) {
       rendered.html = engagement.tagLinks(rendered.html, trackedLinks, [
@@ -567,7 +574,9 @@ async function queueItem({ list, item, sender, template, scopeKey }) {
         engagement_links: Object.fromEntries([...trackedLinks.values()].map(({ id, url }) => [id, url])),
       } : {}),
     },
-  }, { prepareTemplateContext: prepareMessageContext({ list, item, clinic, template, scopeKey, unsubscribeUrl, trackedLinks }) });
+  }, { prepareTemplateContext: prepareMessageContext({
+    list, item, clinic, template, scopeKey, unsubscribeUrl, trackedLinks, attributeWhatsapp: !reviewScope.review,
+  }) });
   await item.update({
     email_message_id: result.emailMessage.id,
     channel_status: mergeEmailStatus(item, { status: 'queued', email_message_id: result.emailMessage.id, queued_at: new Date().toISOString() }),
