@@ -143,7 +143,18 @@ function createInstagramExtension({ store, settings: configured, autoSlot, envir
       }
     }, retainedFlowIds: () => {
       const live = current(row);
-      return [live.row.flow, live.credential.versionId];
+      // The OAuth journal keeps a confirmed page credential staged. Only a matching
+      // active extension on another page of this enrollment proves it is finished.
+      const confirmedPages = store.db.prepare(`
+        SELECT extension.id
+        FROM meta_marketing_instagram_extensions AS extension
+        JOIN meta_marketing_oauth_flows AS oauth ON oauth.id = extension.id
+        WHERE extension.connection = ? AND extension.tenant = ? AND extension.enrollment = ?
+          AND extension.page <> ? AND extension.state = 'active'
+          AND oauth.lane = 'instagram_extension' AND oauth.state = 'staged'
+          AND oauth.secret_digest = extension.candidate_digest
+      `).all(request.connectionRef, request.tenantRef, live.row.id, settings.parentPageId);
+      return [live.row.flow, live.credential.versionId, ...confirmedPages.map(page => page.id)];
     } });
 
     function availableInstagram(instagramId) {

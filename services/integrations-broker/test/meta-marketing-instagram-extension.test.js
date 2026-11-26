@@ -13,7 +13,7 @@ const { createMetaMarketingOAuth } = require('../src/meta-marketing-oauth');
 const { createMetaMarketingOAuthSecrets } = require('../src/meta-marketing-oauth-secrets');
 const { createInstagramExtension } = require('../src/meta-marketing-instagram-extension');
 
-function fixture(t, group = false, automatic = false) {
+function fixture(t, group = false, automatic = false, twoPages = false) {
   const now = Date.now();
   const store = {
     db: new DatabaseSync(':memory:'),
@@ -50,6 +50,9 @@ function fixture(t, group = false, automatic = false) {
       redirectUri: 'https://gateway.invalid/oauth/meta/marketing/callback', scopes: ['ads_read','pages_read_engagement','public_profile'] } };
   const requestFields = { tenantRef: 'clinic:10', connectionRef: binding.connectionRef, assetRef: 'meta-enroll:' + settings.scopeKey };
   const candidateBinding = I.derive(binding, settings);
+  const siblingSettings = twoPages && I.config({ ...settings, parentPageId: '32',
+    secretArn: settings.secretArn.replace('/page-30/', '/page-32/'), slotVersionId: 'd'.repeat(32) }, environment, accountId);
+  const slots = siblingSettings ? [candidateBinding, I.derive(binding, siblingSettings)] : [candidateBinding];
   const roles = E.roles(environment);
   const gateway = { id: roles.gateway };
   const control = { id: roles.control };
@@ -59,14 +62,15 @@ function fixture(t, group = false, automatic = false) {
   const metadata = { appId: '20', subjectId: '21', tokenType: 'USER', scopes: candidateBinding.metaMarketingOAuth.scopes,
     expiresAt: now + 3600000, dataAccessExpiresAt: null, granularScopes: [] };
   const assets = E.assets([{ assetRef: 'meta-facebook_page:30', kind: 'facebook_page', id: '30', parentPageId: null },
-    { assetRef: 'meta-ad_account:31', kind: 'ad_account', id: '31', parentPageId: null }]);
+    { assetRef: 'meta-ad_account:31', kind: 'ad_account', id: '31', parentPageId: null },
+    ...(twoPages ? [{ assetRef: 'meta-facebook_page:32', kind: 'facebook_page', id: '32', parentPageId: null }] : [])]);
   const credential = { versionId: randomUUID(), epoch: 0, digest: 'a'.repeat(64), metadata: { ...metadata, scopes: binding.metaMarketingOAuth.scopes } };
   const row = { id: randomUUID(), tenant: requestFields.tenantRef, scope: requestFields.assetRef, connection: binding.connectionRef,
     flow: credential.versionId, state: 'active' };
   const retained = [];
   const versionsByArn = new Map();
   const seed = (arn, versionId, body) => versionsByArn.set(arn, new Map([[versionId, { body: JSON.stringify(body), stages: ['AWSCURRENT'] }]]));
-  for (const slot of [binding, candidateBinding]) {
+  for (const slot of [binding, ...slots]) {
     const config = slot.metaMarketingOAuth;
     seed(slot.secretArn, config.slotVersionId, { version: 1, provider: 'meta-marketing-oauth-slot', connectionRef: slot.connectionRef,
       scopeKey: config.scopeKey, clinicSetDigest: C.clinicDigest(config), appId: config.appId });
@@ -89,14 +93,14 @@ function fixture(t, group = false, automatic = false) {
         return { ARN: arn, VersionId, VersionStages: [...version.stages], SecretString: version.body };
       }
       case 'PutSecretValueCommand':
-        assert.equal(arn, settings.secretArn);
+        assert.ok(slots.some(slot => slot.secretArn === arn));
         assert.deepEqual(VersionStages, ['AWSPENDING']);
         versions.set(ClientRequestToken, { body: SecretString, stages: [...VersionStages] });
         return { ARN: arn, VersionId: ClientRequestToken, VersionStages };
       case 'ListSecretVersionIdsCommand':
         return { ARN: arn, Versions: [...versions.keys()].map(VersionId => ({ VersionId })) };
       case 'UpdateSecretVersionStageCommand':
-        assert.equal(arn, settings.secretArn);
+        assert.ok(slots.some(slot => slot.secretArn === arn));
         assert.equal(command.input.RemoveFromVersionId, undefined);
         assert.match(VersionStage, /^CC_META_CREDENTIAL_[a-f0-9]{32}$/);
         versions.get(MoveToVersionId).stages.push(VersionStage);
@@ -117,17 +121,18 @@ function fixture(t, group = false, automatic = false) {
   let allocations = 0;
   const autoSlot = automatic && (async (source,page,prepare) => {
     assert.equal(source,binding);
-    assert.equal(page,'30');
+    assert.ok(page === '30' || (twoPages && page === '32'));
     if (prepare) { prepare(); allocations++; }
-    return settings;
+    return page === '32' ? siblingSettings : settings;
   });
   const extension = createInstagramExtension({ store, oauth, secrets, settings:automatic?[]:settings, autoSlot, environment, now: () => now,
     resolveBinding: () => binding, resolvePolicy: () => policy, enrollment: { renewalAuthority: () => ({ row, binding, assets, credential }) },
-    readCandidate: async ({ authorize }) => {
+    readCandidate: async ({ authorize, parentPageId }) => {
       authorize();
       if (rejection) throw rejection;
-      return { asset: { id: '40' }, assetSetDigest: 'd'.repeat(64),
-        profile: { assetRef: 'meta-instagram_business:40', kind: 'instagram_business', id: '40', name: 'Navae ficticia', username: 'test_navae' } };
+      const id = parentPageId === '32' ? '41' : '40';
+      return { asset: { id }, assetSetDigest: 'd'.repeat(64),
+        profile: { assetRef: 'meta-instagram_business:' + id, kind: 'instagram_business', id, name: 'Navae ficticia', username: 'test_navae' } };
     },
   });
   t.after(() => { extension.close(); oauth.close(); });
@@ -306,4 +311,21 @@ test('a self-service slot is prepared only for the current confirmed Facebook pa
   await delayed.abort();
   await assert.rejects(delayed.begin(),{code:'scope_denied'});
   assert.equal(f.allocations,1);
+});
+
+test('a confirmed group page remains active while a second page completes its own consent', async t => {
+  const f = fixture(t, true, true, true);
+  const first = f.attempt();
+  await first.begin();
+  const medical = await first.finish();
+  const blocked = f.attempt();
+  await assert.rejects(blocked.begin({ parentPageId: '32' }), { code: 'oauth_flow_busy' });
+  await blocked.abort();
+  assert.equal((await first.confirm(medical.candidate.digest)).status, 'active');
+  const capilar = f.attempt();
+  await capilar.begin({ parentPageId: '32' });
+  const staged = await capilar.finish();
+  assert.equal(staged.candidate.profile.id, '41');
+  assert.equal((await capilar.confirm(staged.candidate.digest, '41')).status, 'active');
+  assert.equal((await first.status()).candidate.profile.id, '40');
 });
