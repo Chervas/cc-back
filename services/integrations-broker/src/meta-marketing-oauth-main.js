@@ -36,8 +36,14 @@ function validateConfig(config) {
   if (config && Object.hasOwn(config,'assetDiscovery')) { fields.push('assetDiscovery'); if(typeof config.assetDiscovery!=='boolean')fail('invalid_request'); }
   if (config && Object.hasOwn(config,'assetEnrollment')) { fields.push('assetEnrollment'); if(typeof config.assetEnrollment!=='boolean'||config.assetEnrollment&&!config.assetDiscovery)fail('invalid_request'); }
   if (config && Object.hasOwn(config,'credentialRenewal')) {fields.push('credentialRenewal');if(typeof config.credentialRenewal!=='boolean'||config.credentialRenewal&&config.assetEnrollment!==true)fail('invalid_request');}
+  if(config&&Object.hasOwn(config,'instagramSelfService')){
+    fields.push('instagramSelfService');
+    const options=config.instagramSelfService;
+    if(!C.exact(options,'maxSlots')||!Number.isInteger(options.maxSlots)||options.maxSlots<1||options.maxSlots>1000
+        ||config.credentialRenewal!==true||config.assetEnrollment!==true||config.standby===true)fail('invalid_request');
+  }
   if(config&&Object.hasOwn(config,'instagramExtension')){
-    fields.push('instagramExtension');Instagram.config(config.instagramExtension,config.environment,ACCOUNT);
+    fields.push('instagramExtension');Instagram.targets(config.instagramExtension,config.environment,ACCOUNT);
     if(config.credentialRenewal!==true||config.assetEnrollment!==true||config.standby===true)fail('invalid_request');
   }
   if(config&&Object.hasOwn(config,'userCredentialHealth')){fields.push('userCredentialHealth');const v=config.userCredentialHealth;
@@ -106,8 +112,7 @@ function validateConfig(config) {
     const b=C.bindingFor(bindings[0]);if(b.clinicIds.length!==1||scope!=='clinic:'+b.clinicIds[0]||!X.REQUIRED_SCOPES.every(s=>b.scopes.includes(s)))fail('invalid_request');
   }
   if ([...slots].some(arn=>apps.has(arn))) fail('invalid_request');
-  if(config.instagramExtension){
-    const settings=config.instagramExtension;
+  for(const settings of config.instagramExtension ? Instagram.targets(config.instagramExtension,config.environment,ACCOUNT) : []){
     if(slots.has(settings.secretArn)||apps.has(settings.secretArn)||settings.secretArn===config.leadAds?.verifyTokenRef.secretArn)fail('invalid_request');
     const binding=policy.connections.find(value=>C.bindingFor(value).scopeKey===settings.scopeKey);
     if(binding)Instagram.derive(binding,settings);
@@ -160,8 +165,11 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
         ...(config.admission.adsReadScopeKeys?{admissionAdsReadScopeKeys:config.admission.adsReadScopeKeys}:{})}:{})});
     if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment});
     const resolveInstagramBinding=ref=>config.policy.connections.find(value=>value.connectionRef===ref)||admission?.resolveBinding(ref);
+    const instagramTargets=config.instagramExtension?Instagram.targets(config.instagramExtension,config.environment,ACCOUNT):[];
     const resolveInstagramPolicy=(request,principal,base)=>{
-      const settings=config.instagramExtension,binding=resolveInstagramBinding(request.connectionRef);
+      const binding=resolveInstagramBinding(request.connectionRef);
+      const scopeKey=binding&&C.bindingFor(binding).scopeKey;
+      const settings=instagramTargets.find(target=>target.scopeKey===scopeKey)||(config.instagramSelfService&&{scopeKey});
       if(!settings||!binding)fail('scope_denied');
       Instagram.authorize({request,principal,binding},config.environment,settings);
       const grant={principalId:principal.id,tenantRef:request.tenantRef,connectionRef:request.connectionRef,
@@ -169,10 +177,12 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
       return {...base,connections:base.connections.some(value=>value.connectionRef===binding.connectionRef)
         ?base.connections:[...base.connections,binding],grants:[...base.grants,grant]};
     };
-    if(config.instagramExtension){
+    if(config.instagramExtension||config.instagramSelfService){
+      const autoSlot=config.instagramSelfService&&require('./meta-marketing-instagram-slots').createInstagramSlots({
+        store,client:aws.secrets,environment:config.environment,account:ACCOUNT,limit:config.instagramSelfService.maxSlots});
       const readCandidate=require('./meta-marketing-instagram-candidate-read-http').createMetaMarketingInstagramCandidateReadHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
       instagram=require('./meta-marketing-instagram-extension').createInstagramExtension({store,enrollment,oauth,secrets,
-        settings:config.instagramExtension,environment:config.environment,readCandidate,resolveBinding:resolveInstagramBinding,resolvePolicy:resolveInstagramPolicy,now:adsNow});
+        settings:instagramTargets,autoSlot,environment:config.environment,readCandidate,resolveBinding:resolveInstagramBinding,resolvePolicy:resolveInstagramPolicy,now:adsNow});
     }
     if(businessConfigs(config).length||config.userCredentialHealth){const businessHttp=businessConfigs(config).length?require('./meta-marketing-business-issuer-http').createIssuerHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})}):null;
       if(businessConfigs(config).length)business=require('./meta-marketing-business').createMetaMarketingBusiness({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,config:businessRegistry(config)});

@@ -14,7 +14,9 @@ const hashPattern = /^[a-f0-9]{64}$/;
 const disabled = () => ({ enabled: false });
 const view = (status, flowId = null, candidate = null) => ({ enabled: true, status, flowId, candidate });
 const plain = row => row?.get ? row.get({ plain: true }) : row;
-const actor = row => ({ scopeKey: row.scope_key, actorId: Number(row.actor_user_id), sessionRef: row.session_ref, sessionExpiresAt: row.session_expires_at });
+const destinationKey = input => input.scopeKey.startsWith('group:') ? 'clinic:' + input.destinationClinicId : input.scopeKey;
+const actor = row => ({ scopeKey: row.scope_key,
+  ...(row.scope_key.startsWith('group:') ? { destinationClinicId: Number(row.reserved_scope?.split(':')[1]) } : {}), actorId: Number(row.actor_user_id), sessionRef: row.session_ref, sessionExpiresAt: row.session_expires_at });
 const ownedBy = (row, input) => Number(row.actor_user_id) === input.actorId && row.session_ref === input.sessionRef;
 const safeName = (value, length) => typeof value === 'string' && !!value.trim() && value.length <= length && !/[\u0000-\u001f\u007f]/.test(value);
 
@@ -27,17 +29,115 @@ function configuration(environment = process.env) {
   if (environment.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED !== 'true') return null;
   const scopeKey = environment.META_MARKETING_INSTAGRAM_EXTENSION_SCOPE;
   const parentPageId = environment.META_MARKETING_INSTAGRAM_EXTENSION_PAGE;
-  if (!/^clinic:[1-9][0-9]{0,9}$/.test(scopeKey) || !C.positive(Number(scopeKey.slice(7))) || !M.graphId(parentPageId)) fail();
-  return { scopeKey, parentPageId };
+  const legacy = scopeKey || parentPageId;
+  if (legacy && (!/^clinic:[1-9][0-9]{0,9}$/.test(scopeKey) || !C.positive(Number(scopeKey.slice(7))) || !M.graphId(parentPageId))) fail();
+  if (!environment.META_MARKETING_INSTAGRAM_EXTENSION_TARGETS) {
+    if (!legacy && environment.META_MARKETING_INSTAGRAM_EXTENSION_SELF_SERVICE_ENABLED === 'true') return [];
+    if (!legacy) fail();
+    return { scopeKey, parentPageId };
+  }
+  let targets;
+  try { targets = JSON.parse(environment.META_MARKETING_INSTAGRAM_EXTENSION_TARGETS); } catch { fail(); }
+  if (!Array.isArray(targets) || !targets.length || targets.length > 1000) fail();
+  if (legacy && !targets.some(item => item?.scopeKey === scopeKey && item.parentPageId === parentPageId)) {
+    targets.push({ scopeKey, clinicId: Number(scopeKey.slice(7)), parentPageId });
+  }
+  const clinics = new Set(), pages = new Set();
+  for (const item of targets) {
+    if (!C.exact(item, 'scopeKey,parentPageId,clinicId') || !C.positive(item.clinicId)
+        || !/^(clinic|group):[1-9][0-9]{0,9}$/.test(item.scopeKey) || !C.positive(Number(item.scopeKey.split(':')[1]))
+        || item.scopeKey.startsWith('clinic:') && item.scopeKey !== 'clinic:' + item.clinicId
+        || !M.graphId(item.parentPageId) || clinics.has(item.clinicId) || pages.has(item.parentPageId)) fail();
+    clinics.add(item.clinicId);
+    pages.add(item.parentPageId);
+  }
+  return targets;
+}
+
+function targetList(settings) {
+  const configured = settings();
+  return Array.isArray(configured) ? configured : configured ? [configured] : [];
+}
+
+function targetsFor(row, business, settings = configuration) {
+  if (!row || row.state !== 'active' || business) return [];
+  // An invalid optional extension must never make the primary enrollment look disconnected.
+  let configured;
+  try { configured = targetList(settings); } catch { return []; }
+  return configured.filter(target => target.scopeKey === row.scope_key
+    && (row.scope_key.startsWith('clinic:') || row.clinicIds.includes(target.clinicId))
+    && row.selected.some(asset => asset.kind === 'facebook_page' && asset.id === target.parentPageId)
+    && !row.selected.some(asset => asset.kind === 'instagram_business' && asset.parentPageId === target.parentPageId));
 }
 
 function availableFor(row, business, settings = configuration) {
-  let configured;
-  try { configured = settings(); } catch { return false; }
-  return Boolean(configured && row.state === 'active' && !business && row.scope_key === configured.scopeKey
-    && row.clinicIds.length === 1
-    && row.selected.some(asset => asset.kind === 'facebook_page' && asset.id === configured.parentPageId)
-    && !row.selected.some(asset => asset.kind === 'instagram_business' && asset.parentPageId === configured.parentPageId));
+  try { return targetsFor(row, business, settings).length > 0; } catch { return false; }
+}
+
+const selfServiceEnabled = () => process.env.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED === 'true'
+  && process.env.META_MARKETING_INSTAGRAM_EXTENSION_SELF_SERVICE_ENABLED === 'true';
+
+// Intersect a confirmed enrollment with the effective Facebook destination. Ambiguous
+// assignments must be resolved in the mapping wizard before requesting provider consent.
+async function destinationsFor({ models, row, committed, transaction, settings = configuration, selfService = selfServiceEnabled }) {
+  if (!row || row.state !== 'active' || committed.business) return [];
+  const automatic = selfService();
+  const allowed = targetsFor(row, committed.business, settings);
+  if (!automatic && !allowed.length) return [];
+  const pages = row.selected.filter(asset => asset.kind === 'facebook_page'
+    && !row.selected.some(ig => ig.kind === 'instagram_business' && ig.parentPageId === asset.id));
+  if (!pages.length) return [];
+  const scopeKey = row.scope_key;
+  if (scopeKey.startsWith('clinic:')) {
+    if (!automatic) return allowed;
+    if (allowed.length) return allowed;
+    return pages.length === 1 ? [{scopeKey, clinicId:row.clinicIds[0], parentPageId:pages[0].id}] : [];
+  }
+  const options = {transaction, raw:true, logging:false};
+  const groupId = Number(scopeKey.slice(6));
+  const mappings = await models.ClinicMetaAsset.findAll({...options, attributes:['id','metaAssetId'],
+    where:{id:row.mappingIds, metaConnectionId:row.meta_connection_id, assignmentScope:'group', grupoClinicaId:groupId,
+      isActive:true, assetType:'facebook_page', metaAssetId:pages.map(page=>page.id)}});
+  if (!mappings.length) return [];
+  const group = await models.GrupoClinica.findByPk(groupId,{...options,attributes:['facebook_assignment_mode','facebook_primary_asset_id']});
+  if (!group) return [];
+  const pageByMapping = new Map(mappings.map(m=>[Number(m.id),String(m.metaAssetId)]));
+  const primary = group.facebook_assignment_mode === 'group' && group.facebook_primary_asset_id != null;
+  const shares = primary ? [] : await models.GroupAssetClinicAssignment.findAll({...options, attributes:['clinicaId','assetId'],
+    where:{grupoClinicaId:groupId, assetType:'meta.facebook_page',clinicaId:row.clinicIds,assetId:[...pageByMapping.keys()]}});
+  return row.clinicIds.flatMap(clinicId=>{
+    const ids = primary ? [Number(group.facebook_primary_asset_id)] : shares.filter(s=>Number(s.clinicaId)===clinicId).map(s=>Number(s.assetId));
+    const eligible = [...new Set(ids.map(id=>pageByMapping.get(id)).filter(Boolean))];
+    if (eligible.length !== 1 || !automatic && !allowed.some(t=>t.clinicId===clinicId && t.parentPageId===eligible[0])) return [];
+    return [{scopeKey,clinicId,parentPageId:eligible[0]}];
+  });
+}
+
+async function savedGroupDestinations({models,row,committed,targets,transaction,now}) {
+  if (!targets.length || !row.scope_key.startsWith('group:')) return targets;
+  const journals = await models.MetaMarketingInstagramExtension.findAll({transaction,raw:true,logging:false,
+    attributes:['reserved_scope','structure_hash','selected_instagram_id','selected_candidate_digest','confirmed_at'],
+    where:{enrollment_id:row.enrollment_id, connection_ref:row.connection_ref,scope_key:row.scope_key,status:'active',
+      reserved_scope:targets.map(target=>'clinic:'+target.clinicId)}});
+  if (!journals.length) return targets;
+  const assetDigest=F.assetSetDigest(row.selected);
+  const saved = new Map();
+  for (const target of targets) {
+    const j=journals.find(item=>item.reserved_scope==='clinic:'+target.clinicId);
+    const structureHash=C.hash(JSON.stringify([committed.digest,target.parentPageId,assetDigest,row.meta_user_id]));
+    if (j && j.structure_hash===structureHash && hashPattern.test(j.selected_candidate_digest||'')
+        && j.confirmed_at && Number.isFinite(+j.confirmed_at) && +j.confirmed_at<=+now && M.graphId(j.selected_instagram_id)) {
+      saved.set(target.clinicId,j.selected_instagram_id);
+    }
+  }
+  if (!saved.size) return targets;
+  const removed=await models.MetaMarketingBrokerRevocation.findAll({transaction,raw:true,logging:false,attributes:['asset_ref'],
+    where:{asset_ref:[...saved.values()].map(id=>'meta-instagram_business:'+id)}});
+  const revoked=new Set(removed.map(entry=>entry.asset_ref));
+  return targets.map(target=>{
+    const id=saved.get(target.clinicId);
+    return id && !revoked.has('meta-instagram_business:'+id) ? {...target,savedInstagramId:id} : target;
+  });
 }
 
 function authUrl(raw, source, state) {
@@ -71,26 +171,49 @@ function receipt(data, row, now) {
   return structuredClone(data);
 }
 
-function createService({ models, sessions, client, now = () => new Date(), returnOrigin = C.frontendOrigin(), settings = configuration } = {}) {
+function createService({ models, sessions, client, now = () => new Date(), returnOrigin = C.frontendOrigin(), settings = configuration, selfService = selfServiceEnabled } = {}) {
   const scope = require('./metaMarketingOAuthScope.service').createScope({ models, sessions, now });
   const order = createOrder({ models, authorize: scope.authorize, unavailable: fail });
   const credentials = F.createEffectiveCredentials({ models, now });
   const bindings = require('./metaMarketingEnrollmentBinding.service').createBindings({ models, sessions, now });
   const Rows = models.MetaMarketingInstagramExtension;
   const lock = transaction => ({ transaction, lock: transaction.LOCK.UPDATE, logging: false });
-  const configured = input => { const value = settings(); return value?.scopeKey === input.scopeKey ? value : null; };
+  const configured = input => targetList(settings).find(target => target.scopeKey === input.scopeKey
+    && (!input.scopeKey.startsWith('group:') || target.clinicId === input.destinationClinicId));
 
   async function capture(input, enrollment, transaction) {
-    const target = configured(input);
-    if (!target || !enrollment) fail('meta_instagram_connection_required', 409);
+    let target = configured(input);
+    if ((!target && !selfService()) || !enrollment) fail('meta_instagram_connection_required', 409);
     const row = E.request(plain(await models.MetaMarketingEnrollmentRequest.findByPk(enrollment.enrollment_id, lock(transaction))));
     const binding = await bindings.committed(row.enrollment_id, transaction).catch(credentialFailure);
+    if (!target) {
+      target = (await destinationsFor({models,row,committed:binding,transaction,settings,selfService})).find(t=>
+        t.scopeKey === input.scopeKey && (!input.scopeKey.startsWith('group:') || t.clinicId === input.destinationClinicId));
+    }
+    if (!target) fail('meta_instagram_scope_changed', 409);
     const source = plain(await models.MetaMarketingOAuthRequest.findByPk(row.flow_id, lock(transaction)));
     const credential = await credentials.resolve(row, source, transaction).catch(credentialFailure);
-    if (row.scope_key !== target.scopeKey || row.clinicIds.length !== 1 || source.app_id !== row.app_id
+    if (row.scope_key !== target.scopeKey || binding.business || source.app_id !== row.app_id
         || credential.metadata.tokenType !== 'USER' || !row.selected.some(asset => asset.kind === 'facebook_page' && asset.id === target.parentPageId)
         || row.selected.some(asset => asset.kind === 'instagram_business' && asset.parentPageId === target.parentPageId)) {
       fail('meta_instagram_scope_changed', 409);
+    }
+    if (input.scopeKey.startsWith('group:')) {
+      if (!row.clinicIds.includes(input.destinationClinicId)) fail('meta_instagram_scope_forbidden', 403);
+      const groupId = Number(row.scope_key.slice(6));
+      const page = plain(await models.ClinicMetaAsset.findOne({ ...lock(transaction), attributes: ['id'],
+        where: { metaConnectionId: row.meta_connection_id, assetType: 'facebook_page', metaAssetId: target.parentPageId,
+          assignmentScope: 'group', grupoClinicaId: groupId, isActive: true } }));
+      if (!page || !row.mappingIds.includes(Number(page.id))) fail('meta_instagram_scope_changed', 409);
+      const group = plain(await models.GrupoClinica.findByPk(groupId, { ...lock(transaction),
+        attributes: ['facebook_assignment_mode', 'facebook_primary_asset_id'] }));
+      if (!group) fail('meta_instagram_scope_changed', 409);
+      if (group.facebook_assignment_mode === 'group' && group.facebook_primary_asset_id != null) {
+        if (Number(group.facebook_primary_asset_id) !== Number(page.id)) fail('meta_instagram_scope_changed', 409);
+      } else if (!await models.GroupAssetClinicAssignment.findOne({ ...lock(transaction), attributes: ['id'],
+        where: { grupoClinicaId: groupId, clinicaId: input.destinationClinicId, assetType: 'meta.facebook_page', assetId: page.id } })) {
+        fail('meta_instagram_scope_changed', 409);
+      }
     }
     const payload = { enrollmentId: row.enrollment_id, parentPageId: target.parentPageId, assetSetDigest: F.assetSetDigest(row.selected),
       epoch: credential.epoch, versionId: credential.versionId, credentialDigest: credential.digest };
@@ -106,16 +229,23 @@ function createService({ models, sessions, client, now = () => new Date(), retur
   }
 
   const inScope = (input, work) => order.scope(input, { active: true }, work);
-  const current = (input, transaction) => Rows.findOne({ where: { reserved_scope: input.scopeKey }, ...lock(transaction) });
+  const current = (input, transaction) => Rows.findOne({ where: { reserved_scope: destinationKey(input), scope_key: input.scopeKey }, ...lock(transaction) });
   async function unassigned(instagramId, transaction) {
     if (await models.ClinicMetaAsset.findOne({ ...lock(transaction), attributes: ['id'],
       where: { assetType: 'instagram_business', metaAssetId: instagramId, isActive: true } })) fail('meta_instagram_scope_changed', 409);
   }
   async function call(row, name, payload) {
     const requestId = name === 'begin' ? row.flow_id : randomUUID();
+    let tenantRef = row.scope_key;
+    if (row.scope_key.startsWith('group:')) {
+      const enrollment = plain(await models.MetaMarketingEnrollmentRequest.findByPk(row.enrollment_id, {
+        attributes: ['clinic_ids', 'scope_key', 'connection_ref'], logging: false }));
+      if (!enrollment || enrollment.scope_key !== row.scope_key || enrollment.connection_ref !== row.connection_ref) fail('meta_instagram_scope_changed', 409);
+      tenantRef = 'clinic:' + E.clinics(enrollment.clinic_ids)[0];
+    }
     let result;
     try {
-      result = await client.execute({ requestId, operation: I.OPERATIONS[name], tenantRef: row.scope_key, connectionRef: row.connection_ref,
+      result = await client.execute({ requestId, operation: I.OPERATIONS[name], tenantRef, connectionRef: row.connection_ref,
         assetRef: 'meta-enroll:' + row.scope_key, payload }, { timeoutMs: 30000 });
     } catch (error) {
       if (error?.code === 'rate_limited') fail('meta_instagram_rate_limited', 429);
@@ -146,7 +276,7 @@ function createService({ models, sessions, client, now = () => new Date(), retur
   async function savedAssignment(input, previous, expectedAuthorityHash) {
     return inScope(input, async ({ transaction, enrollment }) => {
       const row = await current(input, transaction);
-      if (!row || row.status !== 'active' || row.scope_key !== input.scopeKey || row.reserved_scope !== input.scopeKey
+      if (!row || row.status !== 'active' || row.scope_key !== input.scopeKey || row.reserved_scope !== destinationKey(input)
           || row.flow_id !== previous.flow_id || row.selected_instagram_id !== previous.selected_instagram_id
           || row.selected_candidate_digest !== previous.selected_candidate_digest || !M.graphId(row.selected_instagram_id)
           || !hashPattern.test(row.selected_candidate_digest || '') || !row.confirmed_at
@@ -165,7 +295,7 @@ function createService({ models, sessions, client, now = () => new Date(), retur
   }
 
   async function cancel(input, id, denied = false) {
-    if (!configured(input)) return disabled();
+    if (!selfService() && !configured(input)) return disabled();
     const row = await inScope(input, async ({ transaction }) => {
       const journal = await current(input, transaction);
       if (!journal || journal.flow_id !== id) fail('meta_instagram_scope_changed', 409);
@@ -193,7 +323,7 @@ function createService({ models, sessions, client, now = () => new Date(), retur
 
   return {
     async overview(input) {
-      if (!configured(input)) return disabled();
+      if (!selfService() && !configured(input)) return disabled();
       const local = await inScope(input, async ({ transaction, enrollment }) => {
         const row = await current(input, transaction);
         if (!row) { await capture(input, enrollment, transaction); return null; }
@@ -233,7 +363,7 @@ function createService({ models, sessions, client, now = () => new Date(), retur
       });
     },
     async begin(input) {
-      if (!configured(input)) return disabled();
+      if (!selfService() && !configured(input)) return disabled();
       const state = randomBytes(32).toString('base64url');
       const captured = await inScope(input, async ({ transaction, enrollment }) => {
         const authority = await capture(input, enrollment, transaction);
@@ -245,7 +375,7 @@ function createService({ models, sessions, client, now = () => new Date(), retur
         // supplies its current lifetime. The Owner also enforces its own slot deadline.
         const expires = Math.min(+startedAt + 600000, sessionExpiry, authority.credentialExpiresAt ?? Infinity);
         if (!Number.isSafeInteger(expires) || expires <= +startedAt) fail('meta_instagram_expired', 409);
-        const row = await Rows.create({ flow_id: randomUUID(), scope_key: input.scopeKey, reserved_scope: input.scopeKey,
+        const row = await Rows.create({ flow_id: randomUUID(), scope_key: input.scopeKey, reserved_scope: destinationKey(input),
           enrollment_id: authority.payload.enrollmentId, authority_hash: authority.authorityHash, structure_hash: authority.structureHash,
           connection_ref: authority.row.connection_ref,
           state_hash: C.hash(state), actor_user_id: input.actorId, session_ref: input.sessionRef, session_expires_at: input.sessionExpiresAt,
@@ -273,8 +403,12 @@ function createService({ models, sessions, client, now = () => new Date(), retur
     async callback({ state, code, denied }) {
       if (!C.STATE.test(state) || !denied && (typeof code !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(code))) fail('meta_oauth_state_invalid', 400);
       const row = plain(await Rows.findOne({ where: { state_hash: C.hash(state) }, logging: false }));
-      if (!row || !configured(actor(row))) fail('meta_oauth_state_invalid', 400);
+      if (!row || !selfService() && !configured(actor(row))) fail('meta_oauth_state_invalid', 400);
       const result = { returnOrigin, requestId: row.flow_id, instagramExtension: true };
+      if (row.scope_key.startsWith('group:')) {
+        result.instagramGroupId = Number(row.scope_key.slice(6));
+        result.instagramClinicId = actor(row).destinationClinicId;
+      }
       if (denied) { try { await cancel(actor(row), row.flow_id, true); } catch {} return result; }
       const shouldExchange = await inScope(actor(row), async ({ transaction, enrollment }) => {
         const journal = await current(actor(row), transaction);
@@ -293,7 +427,7 @@ function createService({ models, sessions, client, now = () => new Date(), retur
       return result;
     },
     async confirm(input, id, { instagramId, candidateDigest }) {
-      if (!configured(input)) return disabled();
+      if (!selfService() && !configured(input)) return disabled();
       const row = await inScope(input, async ({ transaction, enrollment }) => {
         const journal = await current(input, transaction);
         if (!journal || journal.flow_id !== id || !['processing','active'].includes(journal.status)
@@ -321,6 +455,6 @@ function instance() {
     client: require('./metaMarketingOAuthClient.service').createClient() });
 }
 
-module.exports = { createService, configuration, availableFor, authUrl, receipt,
+module.exports = { createService, configuration, availableFor, targetsFor, destinationsFor, savedGroupDestinations, authUrl, receipt,
   ...Object.fromEntries(['overview','begin','confirm','cancel'].map(name => [name, (...args) => instance()[name](...args)])),
 };

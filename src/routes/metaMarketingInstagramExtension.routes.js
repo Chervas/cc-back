@@ -16,15 +16,19 @@ function createRouter({ service = require('../services/metaMarketingInstagramExt
       const claims = await sessions.verify(require('../services/accessSession.service').bearer(req.headers.authorization));
       if (claims.sessionVersion !== 1 || !C.UUID.test(claims.jti) || !C.positive(claims.userId)) C.fail('meta_instagram_session_required', 401);
       const body = req.body === undefined ? {} : req.body;
-      const id = req.query.clinic_id;
-      if (Object.keys(req.query).join(',') !== 'clinic_id' || typeof id !== 'string'
+      const group = Object.hasOwn(req.query, 'group_id');
+      const id = group ? req.query.group_id : req.query.clinic_id;
+      const destination = req.query.destination_clinic_id;
+      const keys = Object.keys(req.query).sort().join(',');
+      if (keys !== (group ? 'destination_clinic_id,group_id' : 'clinic_id')
+          || group && (typeof destination !== 'string' || !/^[1-9][0-9]{0,9}$/.test(destination) || !C.positive(Number(destination))) || typeof id !== 'string'
           || !/^[1-9][0-9]{0,9}$/.test(id) || !C.positive(Number(id))
           || !C.exact(body, name === 'confirm' ? 'instagramId,candidateDigest' : '')
           || (['confirm','cancel'].includes(name) && !C.UUID.test(req.params.id))
           || (name === 'confirm' && (!graphId(body.instagramId) || typeof body.candidateDigest !== 'string' || !/^[a-f0-9]{64}$/.test(body.candidateDigest)))) {
         C.fail('meta_instagram_invalid', 400);
       }
-      const input = { scopeKey: 'clinic:' + id, actorId: claims.userId, sessionRef: claims.jti, sessionExpiresAt: new Date(claims.exp * 1000) };
+      const input = { scopeKey: (group ? 'group:' : 'clinic:') + id, ...(group ? { destinationClinicId: Number(destination) } : {}), actorId: claims.userId, sessionRef: claims.jti, sessionExpiresAt: new Date(claims.exp * 1000) };
       return res.json(await (name === 'confirm' ? service.confirm(input, req.params.id, body) : service[name](input, req.params.id)));
     } catch (error) {
       const invalidSession = ['JsonWebTokenError','TokenExpiredError','NotBeforeError'].includes(error?.name);

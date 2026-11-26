@@ -111,6 +111,31 @@ test('reads only the pinned page and linked professional Instagram through the s
   for (const secret of [CANDIDATE_TOKEN, APP_SECRET, calls[2].proof]) assert(!output.includes(secret));
 });
 
+test('a group read binds the owner tenant, group, full membership and selected parent page', async () => {
+  function groupFixture() {
+    const f = setup();
+    for (const binding of [f.authority.binding, f.input.binding]) {
+      Object.assign(binding.metaMarketingOAuth, { scopeKey: 'group:29', clinicIds: [71, 72] });
+    }
+    f.authority.row.scope = 'meta-enroll:group:29';
+    f.input.scopeKey = 'group:29';
+    return f;
+  }
+  const valid = groupFixture();
+  assert.equal((await valid.read(valid.input)).profile.username, 'fixture_clinic');
+  for (const change of [
+    f => { f.input.scopeKey = 'group:30'; },
+    f => { f.input.binding.metaMarketingOAuth.clinicIds = [71, 73]; },
+    f => { f.input.clinicId = 72; },
+    f => { f.input.parentPageId = '999'; },
+  ]) {
+    const f = groupFixture();
+    change(f);
+    await assert.rejects(f.read(f.input), { code: 'scope_denied' });
+    assert.deepEqual(f.calls, []);
+  }
+});
+
 test('rejects a foreign clinic or parent, a changed selection, and reuse of the active slot before a provider read', async () => {
   for (const change of [
     input => { input.clinicId = 72; }, input => { input.parentPageId = '402'; },

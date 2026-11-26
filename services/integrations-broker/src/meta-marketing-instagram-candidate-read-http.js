@@ -14,14 +14,15 @@ const { tokenText } = require('./whatsapp-secrets');
 
 function candidateAuthority(authority, binding, candidate, input, now) {
   const { row, binding: active, assets, credential } = authority || {};
-  const scopeKey = 'clinic:' + input.clinicId;
-  if (row?.state !== 'active' || row.id !== input.enrollmentId || row.tenant !== scopeKey
+  const scopeKey = input.scopeKey;
+  if (row?.state !== 'active' || row.id !== input.enrollmentId || row.tenant !== 'clinic:' + input.clinicId
       || row.scope !== 'meta-enroll:' + scopeKey || !active || row.connection !== active.connectionRef
       || active.connectionRef !== binding.connectionRef || active.secretArn === binding.secretArn) fail('scope_denied');
   const current = C.bindingFor(active);
   const proposed = C.bindingFor(binding);
   const required = [...new Set([...current.scopes, 'instagram_basic'])].sort();
-  if (current.scopeKey !== scopeKey || proposed.scopeKey !== scopeKey || proposed.appId !== current.appId
+  if (current.scopeKey !== scopeKey || proposed.scopeKey !== scopeKey || current.clinicIds[0] !== input.clinicId
+      || C.clinicDigest(current) !== C.clinicDigest(proposed) || proposed.appId !== current.appId
       || proposed.appVersionId !== current.appVersionId || binding.clientSecretArn !== active.clientSecretArn
       || proposed.redirectUri !== current.redirectUri || binding.expiresAt <= now
       || JSON.stringify([...proposed.scopes].sort()) !== JSON.stringify(required)) fail('scope_denied');
@@ -48,7 +49,7 @@ function createMetaMarketingInstagramCandidateReadHttp({ request, timeoutMs, now
         || !Buffer.isBuffer(token) || !tokenText(token.toString('utf8'))
         || !Buffer.isBuffer(appSecret) || !/^[a-f0-9]{32}$/.test(appSecret.toString('ascii'))) fail('invalid_request');
     const candidate = C.metadata(metadata, binding);
-    const target = { enrollmentId, clinicId, parentPageId, expectedAssetSetDigest };
+    const target = { enrollmentId, clinicId, parentPageId, expectedAssetSetDigest, scopeKey: input.scopeKey ?? 'clinic:' + clinicId };
     const initial = candidateAuthority(authorize(), binding, candidate, target, now());
     const parent = { kind: 'instagram_business', parentPageId };
     const check = () => {

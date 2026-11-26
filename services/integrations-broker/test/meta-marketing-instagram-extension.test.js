@@ -13,7 +13,7 @@ const { createMetaMarketingOAuth } = require('../src/meta-marketing-oauth');
 const { createMetaMarketingOAuthSecrets } = require('../src/meta-marketing-oauth-secrets');
 const { createInstagramExtension } = require('../src/meta-marketing-instagram-extension');
 
-function fixture(t) {
+function fixture(t, group = false, automatic = false) {
   const now = Date.now();
   const store = {
     db: new DatabaseSync(':memory:'),
@@ -40,13 +40,15 @@ function fixture(t) {
   const secretPath = '/clinicaclick/integrations/prod/meta-marketing/staging/';
   const prefix = 'arn:aws:secretsmanager:eu-west-3:' + accountId + ':secret:' + secretPath;
   const kmsKeyArn = 'arn:aws:kms:eu-west-3:' + accountId + ':key/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-  const settings = I.config({ scopeKey: 'clinic:10', parentPageId: '30', secretArn: prefix + 'instagram-extension/clinic-10/candidate-abcdef',
+  const scopeKey = group ? 'group:29' : 'clinic:10';
+  const directory = group ? 'group-29/page-30' : 'clinic-10';
+  const settings = I.config({ scopeKey, parentPageId: '30', secretArn: prefix + 'instagram-extension/' + directory + '/candidate-abcdef',
     slotVersionId: 'a'.repeat(32), expiresAt: now + 86400000 }, environment, '000000000001');
   const binding = { provider: C.PROVIDER, connectionRef: 'connection:test', secretArn: prefix + 'candidate-abcdef',
     clientSecretArn: prefix + 'app-abcdef', expiresAt: now + 86400000, initialState: 'active',
-    metaMarketingOAuth: { appId: '20', scopeKey: settings.scopeKey, clinicIds: [10], appVersionId: 'b'.repeat(32), slotVersionId: 'c'.repeat(32),
+    metaMarketingOAuth: { appId: '20', scopeKey: settings.scopeKey, clinicIds: group ? [10, 11] : [10], appVersionId: 'b'.repeat(32), slotVersionId: 'c'.repeat(32),
       redirectUri: 'https://gateway.invalid/oauth/meta/marketing/callback', scopes: ['ads_read','pages_read_engagement','public_profile'] } };
-  const requestFields = { tenantRef: settings.scopeKey, connectionRef: binding.connectionRef, assetRef: 'meta-enroll:' + settings.scopeKey };
+  const requestFields = { tenantRef: 'clinic:10', connectionRef: binding.connectionRef, assetRef: 'meta-enroll:' + settings.scopeKey };
   const candidateBinding = I.derive(binding, settings);
   const roles = E.roles(environment);
   const gateway = { id: roles.gateway };
@@ -59,7 +61,7 @@ function fixture(t) {
   const assets = E.assets([{ assetRef: 'meta-facebook_page:30', kind: 'facebook_page', id: '30', parentPageId: null },
     { assetRef: 'meta-ad_account:31', kind: 'ad_account', id: '31', parentPageId: null }]);
   const credential = { versionId: randomUUID(), epoch: 0, digest: 'a'.repeat(64), metadata: { ...metadata, scopes: binding.metaMarketingOAuth.scopes } };
-  const row = { id: randomUUID(), tenant: settings.scopeKey, scope: requestFields.assetRef, connection: binding.connectionRef,
+  const row = { id: randomUUID(), tenant: requestFields.tenantRef, scope: requestFields.assetRef, connection: binding.connectionRef,
     flow: credential.versionId, state: 'active' };
   const retained = [];
   const versionsByArn = new Map();
@@ -112,7 +114,14 @@ function fixture(t) {
     return work(Buffer.from('FICTITIOUS_EXTENSION_TEST'), metadata, signal);
   } };
   const oauth = createMetaMarketingOAuth({ store, policy, secrets, http, now: () => now });
-  const extension = createInstagramExtension({ store, oauth, secrets, settings, environment, now: () => now,
+  let allocations = 0;
+  const autoSlot = automatic && (async (source,page,prepare) => {
+    assert.equal(source,binding);
+    assert.equal(page,'30');
+    if (prepare) { prepare(); allocations++; }
+    return settings;
+  });
+  const extension = createInstagramExtension({ store, oauth, secrets, settings:automatic?[]:settings, autoSlot, environment, now: () => now,
     resolveBinding: () => binding, resolvePolicy: () => policy, enrollment: { renewalAuthority: () => ({ row, binding, assets, credential }) },
     readCandidate: async ({ authorize }) => {
       authorize();
@@ -141,7 +150,7 @@ function fixture(t) {
   const ordinaryBegin = id => oauth.execute({ binding, principal: gateway, policy, request: { ...requestFields, requestId: id,
     operation: C.OPERATIONS.begin, payload: { state: randomBytes(32).toString('base64url'), scopeDigest: 'f'.repeat(64),
       clinicSetDigest: C.clinicDigest(binding.metaMarketingOAuth), expiresAt: now + 600000 } } });
-  return { attempt, binding, credential, store, get exchanges() { return exchanges; }, retain: retained, exec, ordinaryBegin,
+  return { attempt, binding, credential, store, get allocations(){return allocations;}, get exchanges() { return exchanges; }, retain: retained, exec, ordinaryBegin,
     set rejection(value) { rejection = value; }, set afterRetainDescribe(value) { afterRetainDescribe = value; } };
 }
 
@@ -262,4 +271,35 @@ test('explicit retention conflicts are rejected immediately after observing the 
     assert.equal(f.retain.length, 1);
     assert.equal(f.store.db.prepare('SELECT state FROM meta_marketing_instagram_extensions WHERE id=?').get(a.flowId).state, 'staged');
   }
+});
+
+
+test('a group candidate belongs to the group and its page while using the enrollment tenant for transport', async t => {
+  const f = fixture(t, true);
+  const a = f.attempt();
+  assert.equal((await a.begin()).status, 'awaiting');
+  const staged = await a.finish();
+  assert.equal(staged.status, 'staged');
+  assert.equal((await a.confirm(staged.candidate.digest)).status, 'active');
+  const b = f.attempt();
+  await assert.rejects(b.begin({parentPageId:'999'}), {code:'scope_denied'});
+  assert.equal((await a.status()).status, 'active');
+});
+
+test('a self-service slot is prepared only for the current confirmed Facebook page and credential', async t => {
+  const f=fixture(t,true,true), a=f.attempt();
+  assert.equal((await a.status()).status,'not_found');
+  await assert.rejects(a.begin({parentPageId:'42'}),{code:'scope_denied'});
+  await assert.rejects(a.begin({epoch:99}),{code:'scope_denied'});
+  assert.equal(f.allocations,0);
+  assert.equal((await a.begin()).status,'awaiting');
+  assert.equal(f.allocations,1);
+  const staged = await a.finish();
+  assert.equal((await a.confirm(staged.candidate.digest)).status,'active');
+  assert.equal((await a.status()).candidate.profile.username,'test_navae');
+  assert.equal(f.allocations,1);
+  const delayed=f.attempt();
+  await delayed.abort();
+  await assert.rejects(delayed.begin(),{code:'scope_denied'});
+  assert.equal(f.allocations,1);
 });

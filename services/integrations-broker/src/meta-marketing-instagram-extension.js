@@ -6,7 +6,8 @@ const C = require('./meta-marketing-oauth-contract');
 const I = require('./meta-marketing-instagram-extension-contract');
 const { assetSetDigest, retentionStage } = require('./meta-marketing-credential-renewal-contract');
 
-function createInstagramExtension({ store, settings, environment, oauth, secrets, enrollment, readCandidate, resolveBinding, resolvePolicy, now = Date.now }) {
+function createInstagramExtension({ store, settings: configured, autoSlot, environment, oauth, secrets, enrollment, readCandidate, resolveBinding, resolvePolicy, now = Date.now }) {
+  const targets = Array.isArray(configured) ? configured : [configured];
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_instagram_extensions (
     id TEXT PRIMARY KEY, enrollment TEXT NOT NULL, tenant TEXT NOT NULL, connection TEXT NOT NULL, page TEXT NOT NULL,
     base_digest TEXT NOT NULL, candidate_binding_digest TEXT NOT NULL, scope_digest TEXT NOT NULL,
@@ -14,12 +15,15 @@ function createInstagramExtension({ store, settings, environment, oauth, secrets
     state_hash TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL, state TEXT NOT NULL,
     candidate_digest TEXT, instagram_id TEXT, selection_digest TEXT, credential_expires_at INTEGER,
     CHECK(state IN ('awaiting','staged','active','aborted')));
-    CREATE UNIQUE INDEX IF NOT EXISTS meta_instagram_extension_live ON meta_marketing_instagram_extensions(tenant)
-      WHERE state <> 'aborted';
     CREATE UNIQUE INDEX IF NOT EXISTS meta_instagram_extension_physical ON meta_marketing_instagram_extensions(instagram_id)
       WHERE state = 'active';
     CREATE TABLE IF NOT EXISTS meta_marketing_instagram_extension_cancellations (
       id TEXT PRIMARY KEY, tenant TEXT NOT NULL, connection TEXT NOT NULL);`);
+  store.transaction(() => {
+    store.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS meta_instagram_extension_page_live
+      ON meta_marketing_instagram_extensions(connection,page) WHERE state <> 'aborted';
+      DROP INDEX IF EXISTS meta_instagram_extension_live;`);
+  });
   const running = new Map();
   let closed = false;
   const get = id => store.db.prepare('SELECT * FROM meta_marketing_instagram_extensions WHERE id=?').get(id);
@@ -27,13 +31,16 @@ function createInstagramExtension({ store, settings, environment, oauth, secrets
   const tombstone = id => store.db.prepare('SELECT * FROM meta_marketing_instagram_extension_cancellations WHERE id=?').get(id);
 
   async function execute({ request, binding, principal, policy }) {
-    I.authorize({ request, binding, principal }, environment, settings);
     const operation = Object.keys(I.OPERATIONS).find(name => I.OPERATIONS[name] === request.operation);
     if (!operation) fail('operation_denied');
     const p = request.payload;
     I.validators[operation](p);
     const id = operation === 'begin' ? request.requestId : p.flowId;
     let row = get(id);
+    const scopeKey = C.bindingFor(binding).scopeKey;
+    const page = operation === 'begin' ? p.parentPageId : row?.page;
+    let settings = targets.find(target => target.scopeKey === scopeKey && (!page || target.parentPageId === page));
+    I.authorize({ request, binding, principal }, environment, settings || (autoSlot && {scopeKey}));
     if (row && (row.tenant !== request.tenantRef || row.connection !== request.connectionRef)) fail('scope_denied');
     if (!row && operation === 'status') {
       const cancelled = tombstone(id);
@@ -44,7 +51,45 @@ function createInstagramExtension({ store, settings, environment, oauth, secrets
     if (!row && !['begin','abort'].includes(operation)) fail('scope_denied');
     if (closed) fail('connection_blocked');
     const getBase = () => resolveBinding(request.connectionRef);
-    const base = getBase(), candidateBinding = I.derive(base, settings);
+    const base = getBase();
+    if (!settings && autoSlot && page) {
+      const authorizeNewSlot = () => {
+        const live = enrollment.renewalAuthority(p.enrollmentId, base);
+        store.connection(request.connectionRef, now());
+        store.assertAssetActive(request);
+        if (closed || C.fingerprint(getBase()) !== C.fingerprint(base)
+            || live.row.state !== 'active' || live.row.scope !== request.assetRef || live.row.connection !== request.connectionRef
+            || live.row.tenant !== request.tenantRef || live.credential.metadata.tokenType !== 'USER'
+            || live.credential.epoch !== p.epoch || live.credential.versionId !== p.versionId || live.credential.digest !== p.credentialDigest
+            || assetSetDigest(live.assets) !== p.assetSetDigest || !live.assets.some(asset => asset.kind === 'facebook_page' && asset.id === page)
+            || targets.some(target => target.parentPageId === page && target.scopeKey !== scopeKey)
+            || !C.bindingFor(base).scopes.includes('pages_read_engagement')
+            || p.expiresAt <= now() || p.expiresAt > Math.min(now()+600000, base.expiresAt)
+            || [live.credential.metadata.expiresAt,live.credential.metadata.dataAccessExpiresAt].some(expiry => expiry !== null && expiry <= now())
+            || flow(id) || tombstone(id) || store.backlog().pending >= policy.maxBacklog) fail('scope_denied');
+      };
+      if (operation === 'begin' && !row) authorizeNewSlot();
+      const auditAllocation = () => store.appendAudit(eventFor(request, principal, resolvePolicy(request,principal,policy),
+        'integration.requested','accepted','meta_instagram_slot_preparation',now()));
+      settings = await autoSlot(base,page,operation === 'begin' && !row ? authorizeNewSlot : null,auditAllocation);
+    }
+    if (!row && operation === 'abort') {
+      // Cancellation can overtake a delayed begin. Bind the tombstone to the caller's actual connection.
+      store.transaction(() => {
+        if (flow(id)) fail('scope_denied');
+        const earlier=tombstone(id);
+        if (earlier && (earlier.tenant !== request.tenantRef || earlier.connection !== request.connectionRef)) fail('scope_denied');
+        if (!earlier) {
+          if (store.backlog().pending >= policy.maxBacklog) fail('audit_unavailable');
+          store.appendAudit(eventFor(request,principal,resolvePolicy(request,principal,policy),'integration.completed','denied','meta_instagram_extension_cancelled',now()));
+          store.db.prepare('INSERT INTO meta_marketing_instagram_extension_cancellations(id,tenant,connection) VALUES (?,?,?)')
+            .run(id, request.tenantRef, request.connectionRef);
+        }
+      });
+      return {requestId:request.requestId,replayed:false,data:{flowId:id,status:'aborted',candidate:null}};
+    }
+    if (!settings) fail('scope_denied');
+    const candidateBinding = I.derive(base, settings);
     const baseDigest = C.fingerprint(base), candidateBindingDigest = C.fingerprint(candidateBinding);
     const previous = running.get(id);
     if (operation !== 'abort' && (previous || running.size)) fail('oauth_flow_busy');
@@ -118,7 +163,7 @@ function createInstagramExtension({ store, settings, environment, oauth, secrets
       const proof = await secrets.withCandidate(candidateBinding, candidate, candidate.secret_digest, async borrowed => {
         authorize();
         const result = await readCandidate({ ...borrowed, binding: candidateBinding, enrollmentId: pin.enrollment,
-          clinicId: I.clinicId(pin.tenant), parentPageId: pin.page, expectedAssetSetDigest: pin.asset_digest, signal, authorize });
+          clinicId: I.clinicId(pin.tenant), scopeKey, parentPageId: pin.page, expectedAssetSetDigest: pin.asset_digest, signal, authorize });
         authorize();
         if (!result) fail('scope_denied');
         availableInstagram(result.asset.id);
@@ -149,7 +194,7 @@ function createInstagramExtension({ store, settings, environment, oauth, secrets
             return previous;
           }
           if (flow(id) || tombstone(id)) fail('idempotency_conflict');
-          if (store.db.prepare("SELECT 1 FROM meta_marketing_instagram_extensions WHERE tenant=? AND state<>'aborted'").get(pins.tenant)) fail('oauth_flow_busy');
+          if (store.db.prepare("SELECT 1 FROM meta_marketing_instagram_extensions WHERE connection=? AND page=? AND state<>'aborted'").get(pins.connection, pins.page)) fail('oauth_flow_busy');
           log('integration.requested', 'accepted', 'meta_instagram_extension_requested');
           const scopeDigest = C.hash(JSON.stringify(['meta-instagram-extension', id, pins]));
           const values = { id, ...pins, scope_digest: scopeDigest, state: 'awaiting' };
@@ -168,16 +213,7 @@ function createInstagramExtension({ store, settings, environment, oauth, secrets
           const saved = get(id);
           const localFlow = flow(id);
           if (localFlow && (localFlow.lane !== 'instagram_extension' || localFlow.config_digest !== candidateBindingDigest)) fail('scope_denied');
-          if (!saved) {
-            const cancelled = tombstone(id);
-            if (cancelled && (cancelled.tenant !== request.tenantRef || cancelled.connection !== request.connectionRef)) fail('scope_denied');
-            if (!cancelled) {
-              log('integration.completed', 'denied', 'meta_instagram_extension_cancelled');
-              store.db.prepare('INSERT INTO meta_marketing_instagram_extension_cancellations(id,tenant,connection) VALUES (?,?,?)')
-                .run(id, request.tenantRef, request.connectionRef);
-            }
-            return false;
-          }
+          if (!saved) fail('oauth_flow_interrupted');
           if (saved.state === 'aborted') return true;
           log('integration.completed', 'denied', 'meta_instagram_extension_cancelled');
           store.db.prepare("UPDATE meta_marketing_instagram_extensions SET state='aborted' WHERE id=?").run(id);

@@ -9,8 +9,6 @@ const { graphId } = require('./meta-marketing-contract');
 function extendInstagramSelection({ scopeKey, selected, expectedAssetSetDigest, parentPageId, instagramId }) {
   if (!isScopeKey(scopeKey) || !graphId(parentPageId) || !graphId(instagramId)
       || typeof expectedAssetSetDigest !== 'string' || !/^[a-f0-9]{64}$/.test(expectedAssetSetDigest)) fail('invalid_request');
-  if (!scopeKey.startsWith('clinic:')) fail('scope_denied');
-
   const current = assets(selected);
   if (assetSetDigest(current) !== expectedAssetSetDigest) fail('idempotency_conflict');
   if (!current.some(asset => asset.kind === 'facebook_page' && asset.id === parentPageId)) fail('scope_denied');

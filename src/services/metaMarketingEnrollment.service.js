@@ -151,18 +151,25 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
         const row=await current(enrollment.enrollment_id,transaction),proposed=await destinations.read(row,transaction);
         let selection=project(row,proposed),discovery={mode:row.state==='active'?'unavailable':'pending'};
         const capability=proposed?{groupDestinationPlanVersion:DESTINATION_VERSION}:row.state==='revoked'?await groupCapability(input,transaction,row.connection_ref):{};
-        let instagramExtensionAvailable=false,displayAssets;
+        let instagramExtensionAvailable=false,instagramDestinations=[],displayAssets;
         if(row.state==='active')try{
           const committed=await bindings.committed(row.enrollment_id,transaction);
           if(enabled()&&discoveryEnabled()){
             const {displayAssets:cached,...capability}=await inventory().describe(input,row,transaction)||{mode:'unavailable'};
             discovery=capability;displayAssets=cached;
           }
-          instagramExtensionAvailable=discovery?.mode==='active'&&process.env.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED==='true'
-            &&require('./metaMarketingInstagramExtension.service').availableFor(row,committed.business);
+          if(discovery?.mode==='active'&&process.env.META_MARKETING_INSTAGRAM_EXTENSION_ENABLED==='true')try{
+            const instagram=require('./metaMarketingInstagramExtension.service');
+            const targets=await instagram.destinationsFor({models,row,committed,transaction});
+            instagramExtensionAvailable=targets.length>0;
+            if(row.scope_key.startsWith('group:')){
+              const saved=await instagram.savedGroupDestinations({models,row,committed,targets,transaction,now:now()});
+              instagramDestinations=saved.map(({clinicId,parentPageId,savedInstagramId})=>({clinicId,parentPageId,...(savedInstagramId?{savedInstagramId}:{})}));
+            }
+          }catch(error){if(overviewDeadlock(error)||[401,403].includes(error.httpStatus))throw error;}
         }
         catch(error){if(overviewDeadlock(error)||[401,403].includes(error.httpStatus))throw error;selection={...selection,connected:false,attentionRequired:true,lastError:safe(error)};}
-        return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',discovery,...capability,...(instagramExtensionAvailable?{instagramExtensionAvailable:true}:{}),selection:{...selection,
+        return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',discovery,...capability,...(instagramExtensionAvailable?{instagramExtensionAvailable:true}:{}),...(instagramDestinations.length?{instagramDestinations}:{}),selection:{...selection,
           canConfirm:enabled()&&row.state==='prepared'&&Number(row.actor_user_id)===input.actorId&&row.session_ref===input.sessionRef
             &&+row.session_expires_at===+input.sessionExpiresAt&&+row.session_expires_at>+now(),canCancel:!['revoke_pending','revoked'].includes(row.state)},
           ...(displayAssets&&selection.connected?{displayAssets}:{})};

@@ -20,8 +20,17 @@ test('the proposal retains both existing assets and appends only the linked Inst
   assert.equal(proposal.assetSetDigest, assetSetDigest(proposal.selected));
 });
 
-test('rejects a group, a page outside the grant, or a stale selection', () => {
-  for (const patch of [{ scopeKey: 'group:28' }, { parentPageId: '402' }]) {
+test('a group proposal preserves both pages and adds only the profile of the selected page', () => {
+  const secondPage = { ...facebookPage, id: '402', assetRef: 'meta-facebook_page:402' };
+  const current = [...selected, secondPage];
+  const proposed = extendInstagramSelection({ ...input, scopeKey: 'group:28', selected: current,
+    expectedAssetSetDigest: assetSetDigest(current), parentPageId: '402' });
+  assert.equal(proposed.asset.parentPageId, '402');
+  assert.deepEqual(proposed.selected.filter(asset => asset.kind !== 'instagram_business'), [adAccount, facebookPage, secondPage]);
+});
+
+test('rejects a page outside the grant or a stale selection for either scope', () => {
+  for (const patch of [{ scopeKey: 'group:28', parentPageId: '402' }, { parentPageId: '402' }]) {
     assert.throws(() => extendInstagramSelection({ ...input, ...patch }), { code: 'scope_denied' });
   }
   for (const patch of [{ selected: [facebookPage] }, { expectedAssetSetDigest: 'a'.repeat(64) }]) {

@@ -2,7 +2,6 @@
 // Owner-only empty-slot preparation. No provider call, token, asset enrollment,
 // reader grant or modification of a pre-existing static connection occurs here.
 const {randomUUID}=require('node:crypto');
-const {CreateSecretCommand,DescribeSecretCommand,GetSecretValueCommand}=require('@aws-sdk/client-secrets-manager');
 const C=require('./meta-marketing-oauth-contract'),P=require('./meta-marketing-admission-contract');
 const D=require('./meta-marketing-discovery-contract');
 const E=require('./meta-marketing-enrollment-contract');
@@ -12,7 +11,6 @@ const enrollmentOperations=[E.OPERATIONS.prepare,E.OPERATIONS.activate,E.OPERATI
 const {authenticate}=require('./auth'),{request:validateRequest}=require('./contracts');
 const {validatePolicy}=require('./policy'),{canonical}=require('./canonical');
 const {eventFor}=require('./audit'),{BrokerError,fail}=require('./errors');
-const {SECRET_KEY}=require('./google-main');
 function validateAdmissionPolicy(policy,settings){
   const config=P.validateSettings(settings);if(!config?.enabled)return null;
   const base=structuredClone(validatePolicy(policy));
@@ -106,36 +104,7 @@ function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date
         :[C.OPERATIONS.status,C.OPERATIONS.abort,...(enrollment?[E.OPERATIONS.status,E.OPERATIONS.revoke]:[])]}));
     return {...liveBase,connections:[...liveBase.connections,binding],grants:[...liveBase.grants,...grants]};
   }
-  const tagsFor=row=>[{Key:'ManagedBy',Value:'clinicaclick-meta-marketing-admission'},
-    {Key:'ClinicaclickScope',Value:row.scope},{Key:'Purpose',Value:'candidate'}];
-  const placeholderFor=row=>({version:1,provider:'meta-marketing-oauth-slot',connectionRef:row.connection,
-    scopeKey:row.scope,clinicSetDigest:C.hash(row.clinic_ids),appId:config.appId});
-  const validArn=(value,row)=>typeof value==='string'&&value.startsWith(P.ARN_PREFIX+row.name+'-')
-    &&/^[A-Za-z0-9]{6}$/.test(value.slice((P.ARN_PREFIX+row.name+'-').length));
-  async function observe(row,signal){
-    let metadata;
-    try{metadata=await client.send(new DescribeSecretCommand({SecretId:row.arn||row.name}),{abortSignal:signal});}
-    catch(error){if(error?.name==='ResourceNotFoundException')return null;throw error;}
-    if(signal.aborted||!validArn(metadata.ARN,row)||metadata.Name!==row.name||metadata.KmsKeyId!==SECRET_KEY||metadata.DeletedDate
-      ||!metadata.VersionIdsToStages?.[row.version_id]?.includes('AWSCURRENT')
-      ||Object.entries(metadata.VersionIdsToStages).some(([id,stages])=>id!==row.version_id&&stages.includes('AWSCURRENT'))
-      ||tagsFor(row).some(tag=>!metadata.Tags?.some(value=>value.Key===tag.Key&&value.Value===tag.Value)))fail('secret_unavailable');
-    const value=await client.send(new GetSecretValueCommand({SecretId:metadata.ARN,VersionId:row.version_id,VersionStage:'AWSCURRENT'}),{abortSignal:signal});
-    try{
-      if(signal.aborted||value.ARN!==metadata.ARN||value.VersionId!==row.version_id||!value.VersionStages?.includes('AWSCURRENT')
-        ||typeof value.SecretString!=='string'||Buffer.byteLength(value.SecretString)>2048
-        ||canonical(JSON.parse(value.SecretString))!==canonical(placeholderFor(row)))fail('secret_unavailable');
-      return metadata.ARN;
-    }finally{delete value.SecretString;value.SecretBinary?.fill?.(0);}
-  }
-  async function ensureSlot(row,signal){
-    let arn=await observe(row,signal);if(arn)return arn;
-    if(row.state==='ready')fail('secret_unavailable');
-    let createError;
-    try{await client.send(new CreateSecretCommand({Name:row.name,KmsKeyId:SECRET_KEY,ClientRequestToken:row.version_id,
-      SecretString:JSON.stringify(placeholderFor(row)),Tags:tagsFor(row)}),{abortSignal:signal});}catch(error){createError=error;}
-    arn=await observe(row,signal);if(!arn)throw createError||new BrokerError('secret_unavailable');return arn;
-  }
+  const ensureSlot=require('./meta-marketing-candidate-slot').candidateSlot(client,'clinicaclick-meta-marketing-admission',config.appId);
   async function prepare(raw,headers){
     if(!Buffer.isBuffer(raw)||raw.length>32768)fail('invalid_request');
     let request;try{request=validateRequest(JSON.parse(raw.toString('utf8')));}catch{fail('invalid_request');}
