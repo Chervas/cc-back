@@ -148,7 +148,7 @@ class WhatsAppService {
      * Obtiene credenciales y phoneNumberId por clínica desde ClinicMetaAssets
      */
     async getClinicConfig(clinicId, options = {}) {
-        const asset = await this.resolvePhoneAssetByClinic(clinicId, options);
+        const asset = await this.resolvePhoneAssetByClinic(clinicId, options.primaryOnly ? {} : options);
 
         if (asset?.whatsappAuthorizedBinding) return this.authorizedConfig(asset, Number(clinicId));
 
@@ -166,6 +166,9 @@ class WhatsAppService {
                 routingPurpose: asset.routing_purpose || null,
             };
         }
+
+        // A WABA record cannot establish which phone is the clinic's primary.
+        if (options.primaryOnly) return null;
 
         const waba = await this.resolveWabaAssetByClinic(clinicId);
 

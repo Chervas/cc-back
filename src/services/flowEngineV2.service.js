@@ -3162,7 +3162,44 @@ async function resolveSpecificSenderConfig({ senderOriginId, clinicId }) {
   };
 }
 
-async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
+function usesPrimaryForAppointmentConfirmation(config, context, execution, appointmentId) {
+  if (resolveAutomationCommunicationScope(config, context) !== 'care') return false;
+  if (resolveWhatsappRoutingPurpose(config, context, { appointmentId }) === 'review_requests') return false;
+  const appointmentConfirmationTemplate = /^clinicaclick_(?:confirmacion_(?:cita|datos_cita)|cita_reprogramada_peticion_paciente|recordatorio_dia_antes)(?:_|$)/i;
+  const configuredTemplates = [
+    config?.catalog_family_key, config?.template_name,
+    config?.fallback_catalog_family_key, config?.fallback_template_name,
+  ];
+  if (configuredTemplates.some(template => appointmentConfirmationTemplate.test(cleanString(resolveTemplateValue(template, context))))) {
+    return true;
+  }
+  return !!appointmentId && (
+    ['appointment_created', 'appointment_rescheduled', 'appointment_confirmed'].includes(execution?.trigger_type)
+    || require('../lib/appointment-single-notice-flow').scoped(execution?.templateVersion)
+  );
+}
+
+async function resolveWhatsAppSenderConfig({ config, contentConfig = config, context, clinicId, execution = null }) {
+  const appointmentId = toIntOrNull(
+    context?.cita?.id_cita
+    || context?.appointment?.id_cita
+    || context?.appointment?.id
+    || context?.trigger?.data?.appointment_id
+    || (execution?.trigger_entity_type === 'appointment' ? execution.trigger_entity_id : null)
+  );
+  const domain = toLowerSafe(config?.domain || context?.runtime?.domain);
+  if (!domain.includes('consent') && usesPrimaryForAppointmentConfirmation(contentConfig, context, execution, appointmentId)) {
+    const primary = await whatsappService.getClinicConfig(clinicId, { primaryOnly: true });
+    if (!isWhatsappRoutingConfigAvailable(primary)) {
+      throw new Error('whatsapp_appointment_primary_unavailable');
+    }
+    return {
+      sender_mode: 'clinic_default',
+      sender_origin_id: primary.originId,
+      clinic_config: primary,
+    };
+  }
+
   const senderMode = toLowerSafe(resolveTemplateValue(config?.sender_mode, context)) || 'clinic_default';
   if (senderMode === 'specific_origin') {
     const senderOriginId = toIntOrNull(resolveTemplateValue(config?.sender_origin_id, context));
@@ -3193,12 +3230,6 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
     || context?.patient_id
     || context?.trigger?.data?.patient_id
   );
-  const appointmentId = toIntOrNull(
-    context?.cita?.id_cita
-    || context?.appointment?.id_cita
-    || context?.appointment?.id
-    || context?.trigger?.data?.appointment_id
-  );
   const phone = cleanString(
     context?.lead?.telefono
     || context?.paciente?.telefono_movil
@@ -3206,7 +3237,6 @@ async function resolveWhatsAppSenderConfig({ config, context, clinicId }) {
     || context?.patient?.phone
     || context?.recipient?.phone
   );
-  const domain = toLowerSafe(config?.domain || context?.runtime?.domain);
   const routingPurpose = resolveWhatsappRoutingPurpose(config, context, { leadId, appointmentId });
   const purpose = domain.includes('consent')
     ? 'consent'
@@ -4131,7 +4161,7 @@ async function handleSendWhatsapp(node, context, runtime) {
   let useDurableAccessGuidanceTransport = mobileProtocol;
   const getSenderData = async () => {
     if (!senderData) {
-      senderData = await resolveWhatsAppSenderConfig({ config, context: templateContext, clinicId });
+      senderData = await resolveWhatsAppSenderConfig({ config, contentConfig, context: templateContext, clinicId, execution });
     }
     return senderData;
   };

@@ -7,8 +7,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const { selectWhatsappPhoneAsset, isWhatsappRoutingConfigAvailable } = require('../../lib/whatsapp-channel-role');
+const { evaluateWhatsappServiceWindow } = require('../../services/whatsappServiceWindow.service');
 const templateLocale = require('../../lib/whatsapp-template-locale');
 const source = fs.readFileSync(require.resolve('../../services/flowEngineV2.service'), 'utf8');
+const whatsappSource = fs.readFileSync(require.resolve('../../services/whatsapp.service'), 'utf8');
+const clinicConfigMethod = whatsappSource.match(/^    async getClinicConfig\([\s\S]*?^    }/m)?.[0];
+assert(clinicConfigMethod);
 
 function extract(name) {
   const start = source.search(new RegExp(`\\n(?:async )?function ${name}\\(`));
@@ -19,13 +23,22 @@ function extract(name) {
   return rest.slice(0, end);
 }
 
-function fixture({ primaryAvailable = true, secondaryAvailable = true } = {}) {
+function fixture({ primaryAvailable = true, secondaryAvailable = true, directorActive = false } = {}) {
   const primary = { id: 1, phoneNumberId: 'clinic-phone', wabaId: 'clinic-waba', waAccessToken: 'synthetic' };
   const secondary = { id: 2, phoneNumberId: 'group-phone', wabaId: 'group-waba', waAccessToken: secondaryAvailable ? 'synthetic' : null,
     routing_binding_id: 20, routing_binding_role: 'secondary', additionalData: { routing: {
       role: 'secondary', purposes: ['lead_first_contact', 'review_requests', 'bulk_campaigns'], unavailable_action: 'pause',
     } } };
   const policies = [];
+  const clinicRequests = [];
+  const whatsappService = vm.runInNewContext(`({ ${clinicConfigMethod} })`);
+  whatsappService.resolvePhoneAssetByClinic = async (clinicId, options) => {
+    clinicRequests.push({ clinicId, purpose: options?.purpose });
+    return selectWhatsappPhoneAsset({ clinicAssets: primaryAvailable ? [primary] : [], groupAssets: [secondary], purpose: options?.purpose });
+  };
+  whatsappService.resolveWabaAssetByClinic = async () => ({
+    id: 9, phoneNumberId: 'legacy-waba-phone', waAccessToken: 'synthetic',
+  });
   const sandbox = {
     ...templateLocale,
     cleanString: value => String(value || '').trim(),
@@ -33,9 +46,19 @@ function fixture({ primaryAvailable = true, secondaryAvailable = true } = {}) {
     toIntOrNull: value => Number(value) || null,
     resolveTemplateValue: value => value,
     isWhatsappRoutingConfigAvailable,
+    whatsappService,
+    require: name => {
+      assert.equal(name, '../lib/appointment-single-notice-flow');
+      return require('../../lib/appointment-single-notice-flow');
+    },
     resolveSpecificSenderConfig: async ({ senderOriginId }) => ({ originId: senderOriginId, phoneNumberId: 'specific-phone', accessToken: 'synthetic' }),
     patientDirectionService: { resolveOutboundPolicy: async options => {
       policies.push(options);
+      if (directorActive) return {
+        mode: 'patient_director',
+        clinicConfig: { originId: 4, phoneNumberId: 'director-phone', wabaId: 'director-waba', accessToken: 'synthetic' },
+        metadata: { patient_direction_assignment_id: 17 },
+      };
       const asset = selectWhatsappPhoneAsset({ clinicAssets: primaryAvailable ? [primary] : [], groupAssets: [secondary], purpose: options.purpose });
       return { mode: 'clinic_default', clinicConfig: asset ? {
         originId: asset.id, clinicId: options.clinicId, phoneNumberId: asset.phoneNumberId,
@@ -44,15 +67,74 @@ function fixture({ primaryAvailable = true, secondaryAvailable = true } = {}) {
     } },
   };
   vm.createContext(sandbox);
-  for (const name of ['resolveWhatsappRoutingPurpose', 'resolveWhatsAppSenderConfig',
+  for (const name of ['resolveAutomationCommunicationScope', 'resolveWhatsappRoutingPurpose',
+    'usesPrimaryForAppointmentConfirmation', 'resolveWhatsAppSenderConfig',
     'normalizeWhatsappTemplateComponents', 'extractWhatsappTemplateBodyText', 'normalizeTemplateBodyForComparison',
     'getWhatsappTemplateCatalogBodyText', 'matchesCurrentCatalogBody', 'isTemplateBlockedForSend',
     'getWhatsappTemplateWabaId', 'scoreWhatsappTemplateCandidate', 'selectBestWhatsappTemplateCandidate']) {
     vm.runInContext(extract(name), sandbox);
   }
-  return { policies, selectTemplate: sandbox.selectBestWhatsappTemplateCandidate,
-    send: (context = {}, config = {}) => sandbox.resolveWhatsAppSenderConfig({ config, context, clinicId: 10 }) };
+  return { policies, clinicRequests, selectTemplate: sandbox.selectBestWhatsappTemplateCandidate,
+    send: (context = {}, config = {}, extra = {}) => sandbox.resolveWhatsAppSenderConfig({ config, context, clinicId: 10, ...extra }) };
 }
+
+test('appointment confirmation and automated replies use the primary with an active Director assignment', async () => {
+  const { send, policies, clinicRequests } = fixture({ directorActive: true });
+  const context = { appointment: { id: 100 }, lead: { id: 200 } };
+  const executions = [
+    { trigger_type: 'appointment_created' },
+    { trigger_type: 'appointment_rescheduled' },
+    { trigger_type: 'appointment_reminder_window', templateVersion: {
+      trigger_type: 'appointment_reminder_window', template_key: 'recordatorio_y_confirmacion_bed4b6__clinic_10',
+    } },
+  ];
+  for (const execution of executions) {
+    const result = await send(context, { message_mode: 'manual' }, { execution });
+    assert.equal(result.clinic_config.phoneNumberId, 'clinic-phone');
+    assert.equal(result.patient_direction, undefined);
+    const reply = evaluateWhatsappServiceWindow({
+      activePhoneNumberId: result.clinic_config.phoneNumberId,
+      now: new Date('2026-11-26T10:00:00Z'),
+      messages: [{
+        direction: 'inbound',
+        sent_at: '2026-11-26T09:59:00Z',
+        metadata: { phoneNumberId: 'clinic-phone' },
+      }],
+    });
+    assert.equal(reply.open, true);
+    assert.equal(reply.matchedBy, 'message_phone_number_id');
+  }
+  assert.equal(policies.length, 0);
+  assert.equal(clinicRequests.length, 3);
+});
+
+test('a localized confirmation family takes precedence over an explicit sender override', async () => {
+  const { send, policies } = fixture({ directorActive: true });
+  const result = await send({}, { sender_mode: 'specific_origin', sender_origin_id: 2 }, {
+    contentConfig: { catalog_family_key: 'clinicaclick_confirmacion_datos_cita_reprogramada_24' },
+  });
+  assert.equal(result.sender_origin_id, 1);
+  assert.equal(result.clinic_config.wabaId, 'clinic-waba');
+  assert.equal(policies.length, 0);
+});
+
+test('a confirmation without an available primary fails without using the Director, secondary or WABA fallback', async () => {
+  const { send, policies } = fixture({ primaryAvailable: false, directorActive: true });
+  await assert.rejects(
+    send({ lead: { id: 200 } }, { template_name: 'clinicaclick_confirmacion_datos_cita_hoy_v7' }),
+    /whatsapp_appointment_primary_unavailable/
+  );
+  assert.equal(policies.length, 0);
+});
+
+test('the routing of other appointments can still use the assigned Director', async () => {
+  const { send } = fixture({ directorActive: true });
+  const result = await send({ appointment: { id: 100 }, lead: { id: 200 } }, {
+    template_name: 'clinicaclick_recordatorio_mismo_dia_primera_visita',
+  }, { execution: { trigger_type: 'appointment_reminder_window' } });
+  assert.equal(result.clinic_config.phoneNumberId, 'director-phone');
+  assert.equal(result.patient_direction.patient_direction_assignment_id, 17);
+});
 
 for (const [label, context] of Object.entries({
   appointment: { appointment: { id_cita: 100 }, lead: { id: 200 } },
@@ -70,8 +152,10 @@ for (const [label, context] of Object.entries({
 }
 
 test('an appointment originating from a lead can use its approved template before secondary provisioning', async () => {
-  const { send, selectTemplate } = fixture();
-  const { clinic_config: sender } = await send({ appointment: { id_cita: 100 }, lead: { id: 200 } }, { template_usage: 'cita_sin_confirmar_noche' });
+  const { send, selectTemplate } = fixture({ directorActive: true, secondaryAvailable: false });
+  const { clinic_config: sender } = await send({ appointment: { id_cita: 100 }, lead: { id: 200 } }, {
+    template_name: 'clinicaclick_confirmacion_datos_cita_hoy_v7',
+  });
   const template = { id: 50, clinic_id: null, waba_id: 'clinic-waba', catalog_template_id: 5,
     name: 'appointment_notice_v1', language: 'es', status: 'APPROVED', is_active: true,
     components: [{ type: 'BODY', text: 'Tu cita es mañana a las {{1}}.' }],
