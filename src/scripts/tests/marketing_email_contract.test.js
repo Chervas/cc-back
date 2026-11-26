@@ -132,6 +132,20 @@ test('email templates expose the canonical last attended appointment date', () =
   assert.equal(context.fecha_ultima_cita_asistida, '21/05/2026');
 });
 
+test('campaign email uses the imported name fields when the visible name is shortened', () => {
+  const context = dispatch.__testing.templateContext({
+    item: {
+      name: 'Ana',
+      email: 'ana@example.test',
+      custom_fields: { nombre: 'Ana María', apellido: 'García', nombre_completo: 'Ana María García' },
+    },
+  });
+  const preheader = 'Hola, {{nombre}} {{apellido}}.';
+  assert.deepEqual(templates.missingTemplateVariables(context, preheader), []);
+  assert.equal(templates.replaceVars(preheader, context), 'Hola, Ana María García.');
+  assert.equal(context.nombre_completo, 'Ana María García');
+});
+
 test('marketing outbox refuses a message without explicit consent or unsubscribe URL before touching storage', async () => {
   await assert.rejects(delivery.queueEmail({
     stream: 'marketing',

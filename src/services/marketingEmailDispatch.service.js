@@ -415,8 +415,12 @@ function clinicName(clinic) {
 
 function templateContext({ list, item, clinic }) {
   const value = plain(item);
-  const fullName = String(value.name || '').trim();
+  const fields = value.custom_fields && typeof value.custom_fields === 'object' ? value.custom_fields : {};
+  const fullName = (typeof fields.nombre_completo === 'string' && fields.nombre_completo.trim()) || String(value.name || '').trim();
   const nameParts = fullName.split(/\s+/).filter(Boolean);
+  const firstName = (typeof fields.nombre === 'string' && fields.nombre.trim()) || nameParts[0] || '';
+  const storedSurname = fields.apellido ?? fields.apellidos;
+  const surname = typeof storedSurname === 'string' ? storedSurname.trim() : nameParts.slice(1).join(' ');
   const resolvedClinicName = clinicName(clinic);
   const reviewSenderName = String(
     list?.criteria?.review_sender_name
@@ -424,11 +428,11 @@ function templateContext({ list, item, clinic }) {
     || ''
   ).trim();
   return {
-    ...(value.custom_fields && typeof value.custom_fields === 'object' ? value.custom_fields : {}),
-    nombre: nameParts[0] || 'Hola',
-    nombre_paciente: nameParts[0] || 'Hola',
-    apellido: nameParts.slice(1).join(' '),
-    nombre_completo: fullName,
+    ...fields,
+    nombre: firstName || 'Hola',
+    nombre_paciente: firstName || 'Hola',
+    apellido: surname,
+    nombre_completo: fullName === firstName && surname ? `${firstName} ${surname}`.trim() : fullName,
     email: value.email,
     telefono: value.phone || '',
     clinica: resolvedClinicName,
