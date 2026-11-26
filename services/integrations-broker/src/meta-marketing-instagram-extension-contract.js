@@ -5,6 +5,7 @@ const { fail } = require('./errors');
 const C = require('./meta-marketing-oauth-contract');
 const M = require('./meta-marketing-contract');
 const E = require('./meta-marketing-enrollment-contract');
+const { scopeKey: validScope } = require('./meta-marketing-admission-contract');
 
 const OPERATIONS = Object.freeze(Object.fromEntries(['begin', 'finish', 'status', 'confirm', 'abort']
   .map(name => [name, 'meta.marketing.instagram.extension.' + name + '.v1'])));
@@ -31,14 +32,27 @@ function clinicId(scopeKey) {
 function config(value, environment, account) {
   if (!C.exact(value, 'scopeKey,parentPageId,secretArn,slotVersionId,expiresAt')
       || !['dev', 'staging'].includes(environment) || !/^\d{12}$/.test(account)
-      || !M.graphId(value.parentPageId) || !/^[A-Za-z0-9-]{32,64}$/.test(value.slotVersionId)
+      || !validScope(value.scopeKey) || !M.graphId(value.parentPageId) || !/^[A-Za-z0-9-]{32,64}$/.test(value.slotVersionId)
       || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0) fail('invalid_request');
-  const path = 'arn:aws:secretsmanager:eu-west-3:' + account + ':secret:/clinicaclick/integrations/prod/meta-marketing/'
-    + environment + '/instagram-extension/clinic-' + clinicId(value.scopeKey) + '/candidate-';
-  if (typeof value.secretArn !== 'string' || !value.secretArn.startsWith(path) || !/^[A-Za-z0-9]{6}$/.test(value.secretArn.slice(path.length))) {
+  const owner = value.scopeKey.replace(':', '-');
+  const prefix = 'arn:aws:secretsmanager:eu-west-3:' + account + ':secret:/clinicaclick/integrations/prod/meta-marketing/'
+    + environment + '/instagram-extension/' + owner;
+  const paths = [prefix + '/page-' + value.parentPageId + '/candidate-'];
+  if (value.scopeKey.startsWith('clinic:')) paths.push(prefix + '/candidate-');
+  if (typeof value.secretArn !== 'string' || !paths.some(path => value.secretArn.startsWith(path)
+      && /^[A-Za-z0-9]{6}$/.test(value.secretArn.slice(path.length)))) {
     fail('invalid_request');
   }
   return Object.freeze({ ...value });
+}
+
+function targets(value, environment, account) {
+  const entries = Array.isArray(value) ? value : [value];
+  if (!entries.length || entries.length > 1000) fail('invalid_request');
+  const checked = entries.map(entry => config(entry, environment, account));
+  if (new Set(checked.map(entry => entry.secretArn)).size !== checked.length
+      || new Set(checked.map(entry => entry.parentPageId)).size !== checked.length) fail('invalid_request');
+  return checked;
 }
 
 function derive(base, settings) {
@@ -53,11 +67,12 @@ function derive(base, settings) {
 
 function authorize({ request, principal, binding }, environment, settings) {
   const roles = E.roles(environment);
-  if (C.bindingFor(binding).scopeKey !== settings.scopeKey || request.tenantRef !== settings.scopeKey
+  const active = C.bindingFor(binding);
+  if (active.scopeKey !== settings?.scopeKey || request.tenantRef !== 'clinic:' + active.clinicIds[0]
       || request.assetRef !== 'meta-enroll:' + settings.scopeKey || request.connectionRef !== binding.connectionRef
       || (principal.id !== roles.gateway && !(principal.id === roles.control && [OPERATIONS.abort, OPERATIONS.status].includes(request.operation)))) {
     fail('scope_denied');
   }
 }
 
-module.exports = { OPERATIONS, validators, clinicId, config, derive, authorize };
+module.exports = { OPERATIONS, validators, clinicId, config, targets, derive, authorize };
