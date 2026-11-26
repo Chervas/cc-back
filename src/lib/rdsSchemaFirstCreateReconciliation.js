@@ -6,6 +6,14 @@ const P = require('./rdsSchemaMigrationPolicy');
 const SUPPORTED = Object.freeze({ migration: '20261024190000-create-clinic-supplies.js', table: 'ClinicSuppliers',
   migrationSha256: '170da760689aa986f7b46ab3937fe06d776d9ac513c4fadcf478c37fec542e6a',
   sqlSha256: '37ef9ad22f006b17e49d8fdf0f84a00043da30448d9a9d33f744f8f7220c5877' });
+const DPD = Object.freeze({ migration:'20261126121500-create-dpd-contracts.js', table:'DpdContracts',
+  migrationSha256:'90d3842ebd87a4a5df39974197f0b3bc978a0da62bf131e3f36bb1c9024a8120',
+  sqlSha256:'e1454067a58408ebc81cf38d9ed32147a43183546a685691fee020062b0b3470',
+  sourceRevision:'62d718a179d5fd3840204612b6e3156b28473fb7',
+  originalPlanSha256:'fc9320481234996d07596ec24d4d8de9519de7ee75af277baab906aa67c2b017',
+  originalOperationNonce:'1e682be9-bd66-4256-9f28-5410e9d56480',
+  diagnosticMessageSha256:'a947e3875a510823331e22329aacd5cf0733eb3fe3b6116fca640a79d1e0b2fc',
+  contractDigest:'f0a829066b1facb690b8f35382144496195b9a13c7563aac9f19c42ddeb5a9a0' });
 const DELEGATED = Object.freeze({ migration: '20261028110000-create-delegated-sessions.js', table: 'DelegatedSessions',
   migrationSha256: 'd186aa13eee725796d0939b56d6c3fa9d1dfc2fc71eab30cde3012b7d66e0d10',
   sqlSha256: 'b760ee243c517c2d90c45c1d3ed85fdbec1b38af87e0e8b5d95bbd2c7faeb55e',
@@ -71,6 +79,15 @@ const isGbp = plan => plan.selected?.length === 1 && plan.selected[0].name === G
 const isBsAcknowledged = plan => Array.isArray(plan?.selected) && plan.selected.length === BS_ACKED.selected.length
   && plan.selected.every((row, i) => row.name === BS_ACKED.selected[i].name);
 function assertOriginalRequirements(plan, info, selected, originalPlanSha256) {
+  if (originalPlanSha256 === DPD.originalPlanSha256) {
+    P.need(plan.contractDigest===DPD.contractDigest && plan.sourceRevision===DPD.sourceRevision
+      && selected.length===1 && selected[0]===DPD.migration && !plan.continuation,'rds_schema_reconciliation_original_run_changed');
+    const operator='src/lib/rdsSchemaFirstCreateReconciliation.js';
+    const current=info.operatorFiles.find(f=>f.path===operator);
+    const old=plan.operatorFiles.find(f=>f.path===operator);
+    P.need(current && old?.sha256==='a70fda3ce26bc393d1a582af1217385277da6b0417490f904ab97a3cff07bd1b','rds_schema_operator_source_changed');
+    return P.assertRequirements({...plan,operatorFiles:plan.operatorFiles.map(f=>f.path===operator?current:f)},info,selected);
+  }
   if (isBsAcknowledged(plan)) {
     P.need(originalPlanSha256 === BS_ACKED.originalPlanSha256 && plan.sourceRevision === BS_ACKED.sourceRevision
       && plan.contractDigest === BS_ACKED.contractDigest && plan.effectiveContractDigest === BS_ACKED.effectiveContractDigest
@@ -252,7 +269,7 @@ async function validateGbp({ source, originalPlan: plan, observed, identity, res
     continuationWarningPolicy: { name: 'mysql-8.4.11-gbp-request-char-binary/1', sqlSha256: GBP.requestCreateSha256,
       warningCount: 7, code: 1287, messageSha256: GBP.diagnosticMessageSha256 } };
 }
-const supported = plan => plan.toApply?.[0] === DELEGATED.migration ? DELEGATED : SUPPORTED;
+const supported = plan => [DPD,DELEGATED].find(entry=>entry.migration===plan.toApply?.[0]) || SUPPORTED;
 const canonicalType = value => String(value).toLowerCase().replace(/\binteger\b/g, 'int').replace(/\b(int|bigint)\(\d+\)/g, '$1').replace(/,\s*/g, ',');
 async function definition(source, plan) {
   const selected = supported(plan), delegated = selected === DELEGATED;
@@ -277,6 +294,13 @@ async function definition(source, plan) {
   catch (error) { if (error !== stop) throw error; }
   P.need(captured && P.sha(sql) === selected.sqlSha256, 'rds_schema_reconciliation_sql_changed');
   const table = { TABLE_NAME: captured.table, ENGINE: 'InnoDB', TABLE_COLLATION: plan.before.defaults.DEFAULT_COLLATION_NAME };
+  if(selected===DPD){
+    const bytes=require('node:fs').readFileSync(require('node:path').join(source,'ops/security/schema-contract.json'));
+    P.need(P.sha(bytes)===DPD.contractDigest && plan.sourceRevision===DPD.sourceRevision && plan.selected.length===1 && plan.toApply.length===1,'rds_schema_reconciliation_source_changed');
+    const shape=JSON.parse(bytes).tables.DpdContracts;
+    return {table,columns:shape.columns.map(col=>({TABLE_NAME:table.TABLE_NAME,...col})),
+      indexes:shape.indexes.flatMap(idx=>idx.columns.map(col=>({TABLE_NAME:table.TABLE_NAME,...col}))),foreignKeys:[]};
+  }
   const columns = [], primary = [], foreignKeys = [], indexes = [];
   for (const [name, input] of Object.entries(captured.columns)) {
     const attr = sequelize.normalizeAttribute(input), rawType = canonicalType(attr.type.toSql());
@@ -327,18 +351,19 @@ async function validate({ source, originalPlan, observed, identity, result, jour
     && requests[0].kind === 'ddl' && !journal.some(row => row.event === 'statement_ack' || row.event === 'statement_reconciled')
     && journal.at(-1)?.event === 'terminal' && journal.at(-1)?.accepted === false, 'rds_schema_reconciliation_prefix_changed');
   let originalDiagnostics;
-  if (delegated) {
-    P.need(result.operationNonce === DELEGATED.originalOperationNonce && result.planRef?.sha256 === DELEGATED.originalPlanSha256
-      && originalPlan.sourceRevision === DELEGATED.sourceRevision && identity.engineVersion === '8.4.11', 'rds_schema_reconciliation_original_run_changed');
+  if (delegated || selected===DPD) {
+    const count=selected===DPD?1:2;
+    P.need(result.operationNonce === selected.originalOperationNonce && result.planRef?.sha256 === selected.originalPlanSha256
+      && originalPlan.sourceRevision === selected.sourceRevision && identity.engineVersion === '8.4.11', 'rds_schema_reconciliation_original_run_changed');
     const diagnostics = journal.filter(row => row.event === 'statement_diagnostics');
-    const expected = Array.from({ length: 2 }, () => ({ level: 'Warning', code: 1287, messageSha256: DELEGATED.diagnosticMessageSha256 }));
+    const expected = Array.from({ length: count }, () => ({ level: 'Warning', code: 1287, messageSha256: selected.diagnosticMessageSha256 }));
     P.need(diagnostics.length === 1 && diagnostics[0].migration === selected.migration && diagnostics[0].sqlSha256 === selected.sqlSha256
-      && diagnostics[0].kind === 'ddl' && diagnostics[0].warningReadFailed === false && diagnostics[0].warningStatus === 2
+      && diagnostics[0].kind === 'ddl' && diagnostics[0].warningReadFailed === false && diagnostics[0].warningStatus === count
       && diagnostics[0].policy === 'mysql-8.4.11-tinyint1-display-width/1' && digest(diagnostics[0].diagnostics) === digest(expected)
       && journal.indexOf(diagnostics[0]) > journal.indexOf(requests[0]) && journal.indexOf(diagnostics[0]) < journal.length - 1,
     'rds_schema_reconciliation_original_diagnostics_changed');
     originalDiagnostics = { journalIndex: journal.indexOf(diagnostics[0]), journalRowDigest: digest(diagnostics[0]),
-      warningReadFailed: false, warningStatus: 2, diagnostics: expected, policy: diagnostics[0].policy };
+      warningReadFailed: false, warningStatus: count, diagnostics: expected, policy: diagnostics[0].policy };
   }
   const shape = await definition(source, originalPlan), before = originalPlan.before, tableName = selected.table;
   P.need(!before.tables.some(row => row.TABLE_NAME === tableName), 'rds_schema_reconciliation_original_table_existed');
@@ -354,7 +379,7 @@ async function validate({ source, originalPlan, observed, identity, result, jour
   for (const group of ['checks', 'triggers', 'migrations']) P.need(digest(observed[group]) === digest(before[group]), 'rds_schema_reconciliation_metadata_drift');
   return { migration: selected.migration, table: tableName, sqlSha256: selected.sqlSha256,
     definitionDigest: digest(shape), originalBeforeDigest: originalPlan.beforeDigest, observedDigest: digest(observed),
-    originalWarning: delegated ? 'retained_by_original_operator_hashed_diagnostics' : 'not_retained_by_original_operator_unknown',
+    originalWarning: originalDiagnostics ? 'retained_by_original_operator_hashed_diagnostics' : 'not_retained_by_original_operator_unknown',
     ...(delegated ? { originalDiagnostics } : {}) };
 }
 module.exports = { SUPPORTED, DELEGATED, GBP, ZERO, GBP_OPERATOR_UPGRADE, ZERO_OPERATOR_UPGRADE,
