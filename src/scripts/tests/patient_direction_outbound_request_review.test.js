@@ -139,6 +139,15 @@ test('accepted review can materialize a new exact assignment when the phone has 
   assert.equal(f.calls.writes.filter(([kind]) => kind === 'assignment.create').length, 1);
 });
 
+test('reading the conversation can preview its sender without starting a Director assignment', async () => {
+  const f = fixture({ decision: 'director', assignments: 'none' });
+  const result = await f.service.resolveOutboundPolicy({ ...f.input, previewOnly: true });
+  assert.equal(result.mode, 'clinic_default');
+  assert.equal(result.assignment, null);
+  assert.deepEqual(f.calls.writes, []);
+  assert.equal(f.calls.transactions, 0);
+});
+
 test('an exact lead assignment in a different clinic is never used', async () => {
   const f = fixture({ decision: 'director', assignments: 'other_clinic' });
   await assert.rejects(f.service.resolveOutboundPolicy(f.input), { code: 'patient_direction_phone_already_assigned' });

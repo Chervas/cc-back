@@ -30,7 +30,7 @@ const {
   resolveAutomationAttentionForConversation,
 } = require('../services/conversationPendingReply.service');
 const {
-  resolveWhatsappServiceWindow,
+  resolveWhatsappReplySender,
 } = require('../services/whatsappServiceWindow.service');
 const {
   startPatientWhatsappConversation,
@@ -808,6 +808,33 @@ function applyAutomationProcessingState(target, pendingState) {
   return target;
 }
 
+async function resolveConversationWhatsappRoute(conversation, {
+  userId, to = conversation.contact_id, previewOnly = false,
+  isTemplate = false, allowTake = false, transaction = null,
+} = {}) {
+  const senderPolicy = await patientDirectionService.resolveOutboundPolicy({
+    clinicId: conversation.clinic_id,
+    phone: require('../lib/whatsapp-contact-identity').parseContact(to) ? null : to,
+    conversationId: conversation.id,
+    leadId: conversation.lead_id,
+    patientId: conversation.patient_id,
+    purpose: conversation.lead_id ? 'lead_capture' : 'general',
+    actorUserId: userId,
+    allowTake,
+    previewOnly,
+  });
+  if (isTemplate || (senderPolicy.requiresTakeConfirmation && !previewOnly)) return senderPolicy;
+  const reply = await resolveWhatsappReplySender({
+    conversation,
+    clinicConfig: senderPolicy.clinicConfig,
+    getSecondaryConfig: senderPolicy.mode === 'clinic_default' && !senderPolicy.assignment
+      ? () => whatsappService.getClinicConfig(conversation.clinic_id, { secondaryOnly: true })
+      : null,
+    transaction,
+  });
+  return { ...senderPolicy, ...reply };
+}
+
 async function enrichConversationUnreadForUser(userId, conversationLike) {
   if (!conversationLike) {
     return conversationLike;
@@ -837,10 +864,9 @@ async function enrichConversationUnreadForUser(userId, conversationLike) {
   if (plain.channel === 'whatsapp') {
     plain.last_inbound_at_any_sender = plain.last_inbound_at || null;
     try {
-      const clinicConfig = await whatsappService.getClinicConfig(plain.clinic_id);
-      const serviceWindow = await resolveWhatsappServiceWindow({
-        conversation: plain,
-        activePhoneNumberId: clinicConfig?.phoneNumberId || null,
+      const { serviceWindow } = await resolveConversationWhatsappRoute(plain, {
+        userId,
+        previewOnly: true,
       });
       plain.whatsapp_service_window_open = serviceWindow.open;
       plain.whatsapp_service_window_last_inbound_at = serviceWindow.lastInboundAt;
@@ -2345,16 +2371,12 @@ exports.postMessage = async (req, res) => {
         conversation.contact_id = to;
         await conversation.save({ transaction });
       }
-      senderPolicy = await patientDirectionService.resolveOutboundPolicy({
-        clinicId: conversation.clinic_id,
-        phone: require('../lib/whatsapp-contact-identity').parseContact(to) ? null : to,
-        conversationId: conversation.id,
-        leadId: conversation.lead_id,
-        patientId: conversation.patient_id,
-        purpose: conversation.lead_id ? 'lead_capture' : 'general',
-        actorUserId: userId,
+      senderPolicy = await resolveConversationWhatsappRoute(conversation, {
+        userId,
+        to,
+        isTemplate,
         allowTake: patientDirectionTakeConfirmed === true,
-        automation: false,
+        transaction,
       });
       if (senderPolicy.requiresTakeConfirmation) {
         await transaction.rollback();
@@ -2380,11 +2402,7 @@ exports.postMessage = async (req, res) => {
         await transaction.rollback(); return res.status(409).json({ error: 'whatsapp_image_transport_unavailable' });
       }
       if (!isTemplate) {
-        const serviceWindow = await resolveWhatsappServiceWindow({
-          conversation,
-          activePhoneNumberId: clinicConfig.phoneNumberId,
-          transaction,
-        });
+        const { serviceWindow } = senderPolicy;
         if (!serviceWindow.open) {
           await transaction.rollback();
           return res.status(400).json({

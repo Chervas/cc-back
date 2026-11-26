@@ -2,6 +2,7 @@
 
 const { Op } = require('sequelize');
 const db = require('../../models');
+const { isWhatsappRoutingConfigAvailable } = require('../lib/whatsapp-channel-role');
 
 const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MESSAGE_LIMIT = 200;
@@ -56,18 +57,9 @@ function isInsideWindow(value, { nowMs, windowMs }) {
   return ageMs >= 0 && ageMs <= windowMs;
 }
 
-function evaluateWhatsappServiceWindow({
-  messages = [],
-  activePhoneNumberId,
-  conversationLastInboundAt = null,
-  now = new Date(),
-  windowMs = DEFAULT_WINDOW_MS,
-} = {}) {
-  const nowMs = timestampMs(now) || Date.now();
-  const senderPhoneNumberId = cleanId(activePhoneNumberId);
-  const recentInbound = (Array.isArray(messages) ? messages : [])
-    .map((message) => ({
-      message,
+function recentWhatsappInbound(messages, { nowMs, windowMs }) {
+  return (Array.isArray(messages) ? messages : [])
+    .map(message => ({
       timestamp: messageTimestampMs(message),
       phoneNumberId: extractWhatsappPhoneNumberId(message?.metadata),
     }))
@@ -77,7 +69,17 @@ function evaluateWhatsappServiceWindow({
       && nowMs - entry.timestamp <= windowMs
     ))
     .sort((left, right) => right.timestamp - left.timestamp);
+}
 
+function evaluateWhatsappServiceWindow({
+  messages = [],
+  activePhoneNumberId,
+  conversationLastInboundAt = null,
+  now = new Date(),
+  windowMs = DEFAULT_WINDOW_MS,
+} = {}) {
+  const nowMs = timestampMs(now) || Date.now();
+  const senderPhoneNumberId = cleanId(activePhoneNumberId);
   if (!senderPhoneNumberId) {
     return {
       open: false,
@@ -88,7 +90,8 @@ function evaluateWhatsappServiceWindow({
     };
   }
 
-  const taggedInbound = recentInbound.filter((entry) => entry.phoneNumberId);
+  const taggedInbound = recentWhatsappInbound(messages, { nowMs, windowMs })
+    .filter(entry => entry.phoneNumberId);
   const senderInbound = taggedInbound.find(
     (entry) => entry.phoneNumberId === senderPhoneNumberId
   );
@@ -131,9 +134,8 @@ function evaluateWhatsappServiceWindow({
   };
 }
 
-async function resolveWhatsappServiceWindow({
+async function loadWhatsappServiceWindowEvidence({
   conversation,
-  activePhoneNumberId,
   now = new Date(),
   windowMs = DEFAULT_WINDOW_MS,
   transaction = null,
@@ -142,12 +144,11 @@ async function resolveWhatsappServiceWindow({
 } = {}) {
   const conversationId = Number(conversation?.id);
   if (!Number.isFinite(conversationId) || conversationId <= 0) {
-    return evaluateWhatsappServiceWindow({
-      activePhoneNumberId,
+    return {
       conversationLastInboundAt: conversation?.last_inbound_at || null,
       now,
       windowMs,
-    });
+    };
   }
 
   const nowMs = timestampMs(now) || Date.now();
@@ -173,18 +174,43 @@ async function resolveWhatsappServiceWindow({
     transaction,
   });
 
-  return evaluateWhatsappServiceWindow({
+  return {
     messages,
-    activePhoneNumberId,
     conversationLastInboundAt: identityWindow.allowLegacy ? conversation?.last_inbound_at || null : null,
     now,
     windowMs,
+  };
+}
+
+async function resolveWhatsappServiceWindow({ activePhoneNumberId, ...options } = {}) {
+  const evidence = await loadWhatsappServiceWindowEvidence(options);
+  return evaluateWhatsappServiceWindow({ ...evidence, activePhoneNumberId });
+}
+
+async function resolveWhatsappReplySender({ clinicConfig, getSecondaryConfig, ...options }) {
+  const evidence = await loadWhatsappServiceWindowEvidence(options);
+  const window = { nowMs: timestampMs(evidence.now) || Date.now(), windowMs: evidence.windowMs };
+  const receivedBy = getSecondaryConfig
+    && recentWhatsappInbound(evidence.messages, window).find(entry => entry.phoneNumberId)?.phoneNumberId;
+
+  // Switch only to the effective secondary of this clinic, based on verified
+  // inbound metadata. A foreign or previously disconnected number is ineligible.
+  if (receivedBy && receivedBy !== cleanId(clinicConfig?.phoneNumberId)) {
+    const secondary = await getSecondaryConfig();
+    if (cleanId(secondary?.phoneNumberId) === receivedBy) clinicConfig = secondary;
+  }
+  const serviceWindow = evaluateWhatsappServiceWindow({
+    ...evidence,
+    activePhoneNumberId: clinicConfig?.phoneNumberId,
   });
+  if (!isWhatsappRoutingConfigAvailable(clinicConfig)) serviceWindow.open = false;
+  return { clinicConfig, serviceWindow };
 }
 
 module.exports = {
   DEFAULT_WINDOW_MS,
   evaluateWhatsappServiceWindow,
   extractWhatsappPhoneNumberId,
+  resolveWhatsappReplySender,
   resolveWhatsappServiceWindow,
 };

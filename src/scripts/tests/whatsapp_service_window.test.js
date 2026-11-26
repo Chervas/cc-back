@@ -6,6 +6,7 @@ const test = require('node:test');
 const {
   evaluateWhatsappServiceWindow,
   extractWhatsappPhoneNumberId,
+  resolveWhatsappReplySender,
 } = require('../../services/whatsappServiceWindow.service');
 
 const NOW = '2026-07-27T16:30:00.000Z';
@@ -92,4 +93,46 @@ test('reconoce las claves de remitente usadas por webhook y transportes', () => 
     extractWhatsappPhoneNumberId(JSON.stringify({ phone_id: CURRENT_PHONE })),
     CURRENT_PHONE
   );
+});
+
+test('la respuesta manual utiliza el secundario que recibió el último mensaje', async t => {
+  const identity = require('../../services/whatsappContactIdentity.service');
+  t.mock.method(identity, 'windowContext', async () => ({ ids: [32], allowLegacy: false }));
+  const primary = { phoneNumberId: CURRENT_PHONE, accessToken: 'test' };
+  const secondary = { phoneNumberId: PREVIOUS_PHONE, accessToken: 'test' };
+  const last = inbound({ at: '2026-07-27T16:04:00.000Z', phoneNumberId: PREVIOUS_PHONE });
+  const earlier = inbound({ at: '2026-07-27T16:00:00.000Z', phoneNumberId: CURRENT_PHONE });
+  const options = {
+    conversation: { id: 32 },
+    now: NOW,
+    clinicConfig: primary,
+    getSecondaryConfig: async () => secondary,
+    messageModel: { findAll: async () => [last, earlier] },
+  };
+  const resolved = await resolveWhatsappReplySender(options);
+  assert.equal(resolved.clinicConfig, secondary);
+  assert.equal(resolved.serviceWindow.open, true);
+
+  const blocked = await resolveWhatsappReplySender({
+    ...options,
+    getSecondaryConfig: async () => ({ ...secondary, routingUnavailable: true }),
+  });
+  assert.equal(blocked.clinicConfig.phoneNumberId, PREVIOUS_PHONE);
+  assert.equal(blocked.serviceWindow.open, false);
+
+  const unrelated = await resolveWhatsappReplySender({
+    ...options,
+    getSecondaryConfig: async () => ({ ...secondary, phoneNumberId: 'other' }),
+    messageModel: { findAll: async () => [last] },
+  });
+  assert.equal(unrelated.clinicConfig, primary);
+  assert.equal(unrelated.serviceWindow.open, false);
+
+  const principalReply = await resolveWhatsappReplySender({
+    ...options,
+    getSecondaryConfig: async () => assert.fail('se debe mantener el principal'),
+    messageModel: { findAll: async () => [inbound({ at: NOW, phoneNumberId: CURRENT_PHONE }), last] },
+  });
+  assert.equal(principalReply.clinicConfig, primary);
+  assert.equal(principalReply.serviceWindow.open, true);
 });

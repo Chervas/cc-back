@@ -1119,6 +1119,7 @@ async function resolveOutboundPolicy({
   actorUserId = null,
   allowTake = false,
   automation = false,
+  previewOnly = false,
 } = {}) {
   const cid = positiveInt(clinicId);
   if (!cid || isConsentPurpose(purpose)) {
@@ -1151,7 +1152,7 @@ async function resolveOutboundPolicy({
   let assignment = mayAssign ? await findAssignment(reviewRequired
     ? { clinicId: cid, leadId }
     : { clinicId: cid, phone, conversationId, leadId, patientId }) : null;
-  if (mayAssign && !assignment && positiveInt(leadId) && !(reviewRequired && clinicOnlyPurpose)) {
+  if (!previewOnly && mayAssign && !assignment && positiveInt(leadId) && !(reviewRequired && clinicOnlyPurpose)) {
     assignment = await ensureAssignment({
       clinicId: cid,
       phone,

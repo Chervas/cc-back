@@ -40,7 +40,7 @@ class WhatsAppService {
                 : false;
     }
 
-    async resolvePhoneAssetByClinic(clinicId, { purpose = null } = {}) {
+    async resolvePhoneAssetByClinic(clinicId, { purpose = null, secondaryOnly = false } = {}) {
         if (!clinicId) {
             return null;
         }
@@ -92,6 +92,7 @@ class WhatsAppService {
             clinicAssets: authorizedClinicAssets,
             groupAssets: authorizedGroupAssets,
             purpose,
+            secondaryOnly,
             summarizeHealth: (asset) => whatsappAccountHealthService.summarizeAssetHealth(asset),
         });
     }
@@ -168,7 +169,7 @@ class WhatsAppService {
         }
 
         // A WABA record cannot establish which phone is the clinic's primary.
-        if (options.primaryOnly) return null;
+        if (options.primaryOnly || options.secondaryOnly) return null;
 
         const waba = await this.resolveWabaAssetByClinic(clinicId);
 

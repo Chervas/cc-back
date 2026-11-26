@@ -74,4 +74,22 @@ assert.equal(selectWhatsappPhoneAsset({
   purpose: null,
 }).id, 374, 'care traffic keeps using the clinic primary');
 
+assert.equal(selectWhatsappPhoneAsset({
+  groupAssets: [scopedSecondary],
+  secondaryOnly: true,
+}).id, 358, 'manual replies can resolve the secondary without choosing a campaign purpose');
+assert.equal(selectWhatsappPhoneAsset({
+  groupAssets: [groupPrimary],
+  secondaryOnly: true,
+}), null, 'resolving the secondary never substitutes a primary asset');
+const blockedSecondary = selectWhatsappPhoneAsset({
+  groupAssets: [applyBindingToAsset(groupPrimary, {
+    id: 9, clinic_id: 56, role: 'secondary', unavailable_action: 'fallback_primary',
+  })],
+  secondaryOnly: true,
+  summarizeHealth: () => ({ can_send: false }),
+});
+assert.equal(blockedSecondary.id, 358);
+assert.equal(blockedSecondary.routing_unavailable, true);
+
 console.log('whatsapp group sender routing: ok');

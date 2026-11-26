@@ -106,6 +106,7 @@ function selectWhatsappPhoneAsset({
   clinicAssets = [],
   groupAssets = [],
   purpose = null,
+  secondaryOnly = false,
   summarizeHealth = () => ({ can_send: true }),
 } = {}) {
   const all=[...clinicAssets,...groupAssets];
@@ -120,10 +121,10 @@ function selectWhatsappPhoneAsset({
   const secondary = explicit('secondary') || (!boundPrimary && (findRole(clinicAssets, 'secondary') || findRole(groupAssets, 'secondary')));
   const normalizedPurpose = String(purpose || '').trim().toLowerCase();
 
-  if (!secondary || !normalizedPurpose) return primary;
+  if (!secondary || (!secondaryOnly && !normalizedPurpose)) return secondaryOnly ? null : primary;
 
   const routing = resolveWhatsappRouting(secondary);
-  if (!routing.purposes.includes(normalizedPurpose)) return primary;
+  if (!secondaryOnly && !routing.purposes.includes(normalizedPurpose)) return primary;
 
   const health = summarizeHealth(secondary) || {};
   const broker = secondary.whatsappAuthorizedBinding;
@@ -131,7 +132,7 @@ function selectWhatsappPhoneAsset({
     ? broker.sendEnabled === true && broker.assetId === secondary.id && broker.phoneId === secondary.phoneNumberId
     : secondary.waAccessToken))
     && health.can_send !== false;
-  if (!secondaryCanSend && routing.unavailableAction === 'fallback_primary') {
+  if (!secondaryOnly && !secondaryCanSend && routing.unavailableAction === 'fallback_primary') {
     return primary;
   }
   return {
