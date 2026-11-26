@@ -57,11 +57,15 @@ test('older templates do not treat administrative corrections as ordinary clinic
  assert.equal(s.isRescheduleTemplateEligible(buildAdministrativeRescheduleFlow(sourceGraph()),{reschedule_reason:'administrative_error'}),true);
 });
 function httpFixture({booking=true,deny=false,currentStatus='info_enviada',confirmBeforeLock=false}={}){
+ class ClinicClock extends Date {
+  constructor(...args) { super(...(args.length ? args : ['2026-10-12T08:00:00Z'])); }
+ }
  const stored={id_cita:101,clinica_id:10,paciente_id:20,estado:currentStatus,inicio:new Date('2026-10-13T09:00Z'),fin:new Date('2026-10-13T09:30Z'),doctor_id:30,instalacion_id:40,import_metadata:{notification_suppression:{day_before:true}}};
  const calls=[],row=()=>({...stored,toJSON(){return {...stored}},async update(values){Object.assign(stored,values);return row()}});
  const runtime=Object.fromEntries(['cancelActiveExecutionsForCita','enqueueExecutionForCita','syncScheduledTriggersForCita'].map(name=>[name,async(cita,opts)=>calls.push({name,state:cita.estado,opts})]));
- const s={exports:{},console,Date,Number,String,asyncHandler:f=>f,CitaPaciente:{findByPk:async(_,opts)=>{if(confirmBeforeLock&&opts?.lock)stored.estado='recordatorio_confirmado';return row()}},denyAppointmentManageAccessIfNeeded:async(req,res)=>deny?(res.status(403).json({}),true):false,
+ const s={exports:{},console,Date:ClinicClock,Number,String,asyncHandler:f=>f,CitaPaciente:{findByPk:async(_,opts)=>{if(confirmBeforeLock&&opts?.lock)stored.estado='recordatorio_confirmado';return row()}},denyAppointmentManageAccessIfNeeded:async(req,res)=>deny?(res.status(403).json({}),true):false,
   require:name=>{
+   if(name==='../lib/availability-calendar')return require('../../lib/availability-calendar');
    if(name==='../lib/appointment-reschedule-reason')return policy;
    if(name==='../lib/booking-profile-duration')return require('../../lib/booking-profile-duration');
    if(name==='../lib/appointment-care')return require('../../lib/appointment-care');
@@ -74,10 +78,19 @@ function httpFixture({booking=true,deny=false,currentStatus='info_enviada',confi
   mutateAppointmentBooking:async opts=>{calls.push({name:'booking',values:opts.appointmentValues});return opts.persist({values:opts.appointmentValues,existing:row(),transaction:{}})},
   db:{sequelize:{transaction:async(_,f)=>f({LOCK:{UPDATE:'UPDATE'}})}},recordAppointmentStatusChange:async x=>calls.push({name:'activity',value:x}),processAppointmentLeadMilestones:async()=>{},patientDirectionService:{handleAppointmentChange:async()=>{}},
   appointmentAutomationV2Runtime:runtime,appointmentNotificationCleanup:{markAutomationNotificationsReadForAppointment:async()=>calls.push({name:'notification_cleanup'})},completeAppointmentAutomationReviews:async()=>calls.push({name:'review_closed'}),ensureConsentPackageAndAutomation:async()=>calls.push({name:'consent_communication'}),
-  Paciente:{},LeadIntake:{},Clinica:{},Instalacion:{},Tratamiento:{},attachFlowSummaryToCitas:async()=>{},attachUnreadCountsToCitas:async()=>{},consentimientosService:{attachConsentSummaryToCitas:async()=>{}},emitAppointmentSocketEvent:()=>{},protectAppointmentsForRequest:async(_,v)=>v};
+  Paciente:{},LeadIntake:{},Clinica:{findByPk:async()=>({configuracion:{timezone:'Europe/Madrid'}})},Instalacion:{},Tratamiento:{},attachFlowSummaryToCitas:async()=>{},attachUnreadCountsToCitas:async()=>{},consentimientosService:{attachConsentSummaryToCitas:async()=>{}},emitAppointmentSocketEvent:()=>{},protectAppointmentsForRequest:async(_,v)=>v};
  vm.createContext(s);vm.runInContext(visitCompatibilityWriter,s);vm.runInContext(controller.slice(controller.indexOf('exports.reagendarCita ='),controller.indexOf('exports.resolveImportedTreatment =')),s);
  return {stored,calls,async run(body){const res={code:200,status(c){this.code=c;return this},json(v){this.body=v;return this}};await s.exports.reagendarCita({params:{id:'101'},body,userData:{userId:7}},res);return res}};
 }
+
+test('reschedule rejects a date before today even when forced', async () => {
+ const f = httpFixture();
+ const result = await f.run({ inicio: '2026-10-11T09:00Z', fin: '2026-10-11T09:30Z', force: true });
+ assert.equal(result.code, 422);
+ assert.equal(result.body.code, 'booking_date_in_past');
+ assert.equal(f.stored.inicio.toISOString(), '2026-10-13T09:00:00.000Z');
+ assert.deepEqual(f.calls, []);
+});
 for(const booking of [true,false])test(`real reschedule controller persists the confirmed state, reason and future scheduling (booking=${booking})`,async()=>{
  const f=httpFixture({booking}),result=await f.run({inicio:'2026-10-14T10:00Z',fin:'2026-10-14T10:30Z',reschedule_reason:'administrative_error',estado:'recordatorio_confirmado'});
  assert.equal(result.code,200);assert.equal(f.stored.estado,'info_confirmada');assert.equal(f.stored.reschedule_reason,'administrative_error');assert.equal(f.stored.inicio.toISOString(),'2026-10-14T10:00:00.000Z');

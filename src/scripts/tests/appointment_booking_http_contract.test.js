@@ -6,6 +6,44 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const controller = fs.readFileSync(require.resolve('../../controllers/citas.controller.js'), 'utf8');
+
+test('appointment creation rejects a previous clinic day before proceeding with booking', async () => {
+  const nativeRequire = createRequire(require.resolve('../../controllers/citas.controller.js'));
+  class ClinicClock extends Date {
+    constructor(...args) { super(...(args.length ? args : ['2026-11-25T23:15:00Z'])); }
+  }
+  const exports = {};
+  const clinic = { configuracion: { timezone: 'Europe/Madrid' } };
+  vm.runInNewContext(controller.slice(controller.indexOf('exports.createCita ='), controller.indexOf('\n/**\n * Listar citas')), {
+    exports, Date: ClinicClock, require: nativeRequire, asyncHandler: fn => fn,
+    Clinica: { findOne: async () => clinic }, CITA_ESTADOS_VALIDOS: new Set(['pendiente']),
+    normalizeAppointmentClinicId: Number, normalizePatientLanguage: () => {}, assertAppointmentManageAccess: async () => {},
+    resolveClinicTimezone: nativeRequire('../lib/availability-calendar').resolveClinicTimezone,
+    parsePositiveInt: value => Number(value) || null, parseBool: Boolean, cleanOptionalString: value => value,
+    bookingCapabilities: () => ({ simple: false }),
+    normalizeAdditionalStaff: () => { throw Object.assign(Error('reached_booking'), { code: 'booking_test_checkpoint' }); },
+    bookingErrorPayload: error => ({ code: error.code }),
+  });
+  const book = async body => {
+    const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(value) { this.body = value; return this; } };
+    await exports.createCita({ body: { clinica_id: 1, paciente: {}, duracion_min: 10, ...body } }, res);
+    return res;
+  };
+  const rejected = await book({ inicio: '2026-11-25T22:00:00Z', force: true });
+  assert.equal(rejected.statusCode, 422);
+  assert.equal(rejected.body.code, 'booking_date_in_past');
+  assert.equal(rejected.body.message, 'La cita es anterior a la fecha de hoy y no se puede citar.');
+  assert.equal((await book({ inicio: '2026-11-25T23:00:00Z' })).body.code, 'booking_test_checkpoint');
+  assert.equal((await book({ inicio: '2026-11-25T22:00:00Z', historical_registration: true })).body.code, 'booking_test_checkpoint');
+});
+
+test('replay-only mode rejects a past booking before any persistence', async () => {
+  const { mutateAppointmentBooking } = require('../../services/appointmentBookingCommand.service');
+  await assert.rejects(mutateAppointmentBooking({ db: {}, appointmentValues: {}, replayOnly: true,
+    transaction: { options: { isolationLevel: 'READ COMMITTED' } }, capabilities: { simple: true },
+    persist: async () => assert.fail('A past booking cannot be written'),
+  }), { code: 'booking_date_in_past', statusCode: 422 });
+});
 test('HTTP reschedule preserves resources absent from the request', () => {
   assert.match(controller, /nextDoctorIdRaw !== undefined \? \{ doctor_id: nextDoctorId \} : \{\}/);
   assert.match(controller, /nextInstalacionIdRaw !== undefined \? \{ instalacion_id: nextInstalacionId \} : \{\}/);

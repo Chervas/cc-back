@@ -223,7 +223,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
   additionalStaffIds = undefined, supportOnly = false, expectedRange = null, importEquipmentAssignment = null,
   trustedProgramSeries = null, reschedulePatientOverlap = null, durationSelection, expectedPlanSha256,
   visitBirth = null, restrictionConfirmation = null, administrativeRestore = false, rescheduleNotice = null,
-  trustedDentalReservation = null }) {
+  trustedDentalReservation = null, replayOnly = false }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
   durationSelection = normalizeDurationSelection(durationSelection);
   // Internal documentary reconciliation only, never forwarded from an HTTP
@@ -284,6 +284,9 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
     const replay = async () => visitBirth && require('./appointmentVisitManaged.service').current().replayBirth(visitBirth, {
       values, selections, durationSelection, additionalStaffIds: requestedStaff, expectedPlanSha256, transaction: tx });
     const earlyReplay = await replay(); if (earlyReplay) return earlyReplay;
+    if (replayOnly) {
+      throw bookingError('booking_date_in_past', 'La cita es anterior a la fecha de hoy y no se puede citar.', null, 422);
+    }
     if (supportOnly) {
       if (!existing || !expectedRange
         || !Number.isFinite(new Date(expectedRange.start).getTime()) || !Number.isFinite(new Date(expectedRange.end).getTime())

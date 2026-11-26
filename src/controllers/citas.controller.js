@@ -2106,6 +2106,9 @@ exports.createCita = asyncHandler(async (req, res) => {
         // Calcular fin si falta: elección física o comportamiento legacy original.
         const inicioDate = new Date(inicio);
         let finDate = fin ? new Date(fin) : null;
+        if (!Number.isFinite(+inicioDate) || (finDate && !Number.isFinite(+finDate))) {
+            return res.status(400).json({ message: 'inicio/fin inválidos' });
+        }
         let duracionEfectiva = selectedDurationProfile ? require('../lib/booking-profile').bookingProfileDurationMinutes(selectedDurationProfile)
             : duracion_min ? parseInt(duracion_min, 10) : null;
 
@@ -2124,7 +2127,15 @@ exports.createCita = asyncHandler(async (req, res) => {
             || cleanOptionalString(source_system, 40)?.toLowerCase() === 'lead_resolution_historical';
         const bookingEnabled = bookingCapabilities().simple;
         // A historical label alone cannot bypass the booking gate for future work.
-        const pastHistoryOnly = isHistoricalRegistration && finDate <= new Date();
+        const now = new Date();
+        const pastHistoryOnly = isHistoricalRegistration && finDate <= now;
+        const calendar = require('../lib/availability-calendar');
+        const pastBookingDay = !pastHistoryOnly && inicioDate < now
+            && calendar.formatDateLocal(inicioDate, clinicTimezone) < calendar.formatDateLocal(now, clinicTimezone);
+        const hasBookingRequestKey = bookingEnabled && !pastHistoryOnly && req.body?.booking_request_key !== undefined;
+        if (pastBookingDay && !hasBookingRequestKey) {
+            return res.status(422).json({ code: 'booking_date_in_past', message: 'La cita es anterior a la fecha de hoy y no se puede citar.' });
+        }
         if (hasExplicitDurationChoice && (!tratamiento_id || pastHistoryOnly)) {
             throw Object.assign(new Error('La duración por pasos requiere un tratamiento con perfil físico y una reserva activa.'),
                 { code: 'booking_duration_unsupported', statusCode: 422 });
@@ -2295,7 +2306,7 @@ exports.createCita = asyncHandler(async (req, res) => {
                         await enqueueCreatedAppointmentCrmSignals({ lead, appointment, transaction });
                     },
                 };
-                const visitBirth = bookingEnabled && !pastHistoryOnly && req.body?.booking_request_key !== undefined
+                const visitBirth = hasBookingRequestKey
                     ? await require('../services/appointmentVisitManaged.service').current().prepareBirth({
                         requestKey: req.body.booking_request_key, values: createOptions.appointmentValues, clinic: clinica,
                         actorId: req.userData?.userId,
@@ -2318,6 +2329,7 @@ exports.createCita = asyncHandler(async (req, res) => {
                         priorityAcknowledged: req.body?.booking_priority_acknowledged === true,
                         expectedPlanSha256: req.body?.booking_plan_sha256,
                         visitBirth,
+                        replayOnly: pastBookingDay,
                         persist: async ({ values, existing, transaction, sealedBirth }) => {
                             requireIncidentConfirmation();
                             // Recheck while holding the canonical patient/resource locks:
@@ -3504,6 +3516,14 @@ exports.reagendarCita = asyncHandler(async (req, res) => {
     const fin = req.body?.fin ? new Date(req.body.fin) : null;
     if (!inicio || !fin || !Number.isFinite(inicio.getTime()) || !Number.isFinite(fin.getTime()) || fin <= inicio) {
         return res.status(400).json({ message: 'inicio/fin inválidos' });
+    }
+    const now = new Date();
+    if (inicio < now && +inicio !== +new Date(previousSchedule.inicio)) {
+        const calendar = require('../lib/availability-calendar');
+        const clinicTimezone = calendar.resolveClinicTimezone(await Clinica.findByPk(cita.clinica_id));
+        if (calendar.formatDateLocal(inicio, clinicTimezone) < calendar.formatDateLocal(now, clinicTimezone)) {
+            return res.status(422).json({ code: 'booking_date_in_past', message: 'La cita es anterior a la fecha de hoy y no se puede citar.' });
+        }
     }
 
     const nextDoctorIdRaw = req.body?.doctor_id;
