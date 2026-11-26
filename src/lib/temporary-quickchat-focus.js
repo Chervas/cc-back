@@ -12,45 +12,49 @@ const TEMPORARY_DIRECTOR_CLINICS = Object.freeze([66, 72, 77]);
 
 function temporaryQuickChatEligibilitySql() {
   const clinicIds = TEMPORARY_DIRECTOR_CLINICS.join(',');
-  const attention = `(SELECT JSON_EXTRACT(qc_decision.attribution_steps, '$.lead_patient_attention_v1')
+  const decisionAllows = `COALESCE((SELECT
+      JSON_UNQUOTE(JSON_EXTRACT(qc_decision.attribution_steps, '$.lead_patient_attention_v1.decision')) = 'director'
+      AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(qc_decision.attribution_steps, '$.lead_patient_attention_v1.director_user_id')), '') = '${TEMPORARY_FOCUSED_ACCOUNT.userId}'
     FROM LeadAttributionAudits AS qc_decision
     WHERE qc_decision.lead_intake_id = \`Conversation\`.\`lead_id\`
       AND JSON_UNQUOTE(JSON_EXTRACT(qc_decision.attribution_steps, '$.type')) = 'lead_patient_attention_v1'
       AND JSON_EXTRACT(qc_decision.attribution_steps, '$.lead_patient_attention_v1.version') = 1
       AND JSON_UNQUOTE(JSON_EXTRACT(qc_decision.attribution_steps, '$.lead_patient_attention_v1.decision')) IN ('director','clinic')
       AND JSON_UNQUOTE(JSON_EXTRACT(qc_decision.attribution_steps, '$.lead_patient_attention_v1.request_kind')) IN ('commercial','patient_care')
-    ORDER BY qc_decision.id DESC LIMIT 1)`;
-  const decision = `COALESCE(JSON_UNQUOTE(JSON_EXTRACT(${attention}, '$.decision')), '')`;
-  const director = `COALESCE(JSON_UNQUOTE(JSON_EXTRACT(${attention}, '$.director_user_id')), '')`;
-  const event = kind => `EXISTS (
-    SELECT 1 FROM \`Messages\` AS \`qc_attention\`
-    WHERE \`qc_attention\`.\`message_type\` = 'event'
-      AND \`qc_attention\`.\`automation_delivery_key\` LIKE 'temporary-patient-direction:%'
-      AND JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.source')) = 'temporary_patient_direction'
-      AND JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.clinic_id')) = \`Conversation\`.\`clinic_id\`
-      AND JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.director_user_id')) = ${TEMPORARY_FOCUSED_ACCOUNT.userId}
-      AND JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.kind')) = '${kind}'
-      AND (JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.lead_intake_id')) = \`Conversation\`.\`lead_id\`
-        OR (COALESCE(JSON_UNQUOTE(JSON_EXTRACT(\`qc_attention\`.\`metadata\`, '$.lead_intake_id')), 'null') = 'null'
-          AND \`qc_attention\`.\`conversation_id\` = \`Conversation\`.\`id\`
-          AND (\`Conversation\`.\`lead_id\` IS NULL OR \`qc_attention\`.\`sent_at\` IS NULL
-            OR \`qc_attention\`.\`sent_at\` >= (SELECT qc_request.created_at FROM LeadIntakes AS qc_request
-              WHERE qc_request.id = \`Conversation\`.\`lead_id\`))))
+    ORDER BY qc_decision.id DESC LIMIT 1), 1)`;
+  // DISTINCT materializes the matching handoffs once per statement. Events
+  // without a lead belong only to that conversation and request generation.
+  const handedOff = `EXISTS (
+    SELECT 1 FROM (
+      SELECT DISTINCT qc_attention.conversation_id, qc_attention.sent_at,
+        JSON_UNQUOTE(JSON_EXTRACT(qc_attention.metadata, '$.clinic_id')) AS marker_clinic,
+        JSON_UNQUOTE(JSON_EXTRACT(qc_attention.metadata, '$.lead_intake_id')) AS marker_lead
+      FROM Messages AS qc_attention
+      WHERE qc_attention.message_type = 'event'
+        AND qc_attention.automation_delivery_key LIKE 'temporary-patient-direction:%'
+        AND JSON_UNQUOTE(JSON_EXTRACT(qc_attention.metadata, '$.source')) = 'temporary_patient_direction'
+        AND JSON_UNQUOTE(JSON_EXTRACT(qc_attention.metadata, '$.director_user_id')) = ${TEMPORARY_FOCUSED_ACCOUNT.userId}
+        AND JSON_UNQUOTE(JSON_EXTRACT(qc_attention.metadata, '$.kind')) = 'temporary_patient_direction_handoff'
+    ) AS markers
+    WHERE markers.marker_clinic = Conversation.clinic_id
+      AND (markers.marker_lead = Conversation.lead_id
+        OR (COALESCE(markers.marker_lead, 'null') = 'null'
+          AND markers.conversation_id = Conversation.id
+          AND (markers.sent_at IS NULL OR markers.sent_at >= qc_lead.created_at)))
   )`;
   // Navae WhatsApp visibility only; responsibility and clinic/category ACLs remain separate.
   return `(\`Conversation\`.\`clinic_id\` NOT IN (${clinicIds})
     OR \`Conversation\`.\`channel\` = 'internal'
     OR (\`Conversation\`.\`clinic_id\` = 77 AND \`Conversation\`.\`channel\` = 'whatsapp')
-    OR (NOT ${event('temporary_patient_direction_handoff')}
-      AND ${decision} <> 'clinic'
-      AND (${decision} <> 'director' OR ${director} = '${TEMPORARY_FOCUSED_ACCOUNT.userId}')
-      AND ((\`Conversation\`.\`lead_id\` IS NOT NULL AND EXISTS (
+    OR (Conversation.lead_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM LeadIntakes AS qc_lead WHERE qc_lead.id = \`Conversation\`.\`lead_id\`
           AND qc_lead.clinica_id = \`Conversation\`.\`clinic_id\`
           AND (qc_lead.asignado_a IS NULL OR qc_lead.asignado_a = ${TEMPORARY_FOCUSED_ACCOUNT.userId})
           AND qc_lead.archived_at IS NULL AND qc_lead.status_lead NOT IN ('descartado','acudio_cita','convertido')
+          AND ${decisionAllows}
+          AND NOT ${handedOff}
           AND ${directionEligibilitySql('qc_lead')}
-      )))))`;
+      )))`;
 }
 
 function isTemporaryQuickChatFocusUser(actor) {

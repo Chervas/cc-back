@@ -19,7 +19,7 @@ const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-owne
 const { isReviewWorkflowWhatsappTemplate } = require('../lib/whatsapp-template-workflow');
 const { findCurrentConversation } = require('../services/patientWhatsappContactChange.service');
 const { normalizePhoneE164 } = require('../lib/phone');
-const { bulkOutboundSql, quickChatActivitySql } = require('../lib/quickchat-bulk-visibility');
+const { bulkOutboundSql, quickChatActivitySql, parseChangedConversationIds } = require('../lib/quickchat-bulk-visibility');
 const {
   extractWhatsappTemplateDisplayButtons,
 } = require('../lib/whatsapp-template-display');
@@ -1373,6 +1373,13 @@ exports.listConversations = async (req, res) => {
     const limit = Math.min(100, Math.max(20, Number.parseInt(req.query.limit || '50', 10) || 50));
     const offset = Math.max(0, Number.parseInt(req.query.offset || '0', 10) || 0);
 
+    const changedIds = parseChangedConversationIds(req.query.changed_ids);
+    if (changedIds === null || (changedIds && (offset || patientId || leadId))) {
+      return res.status(400).json({ error: 'Selección de conversaciones no válida' });
+    }
+    res.append('Access-Control-Expose-Headers', 'X-QuickChat-Partial, X-Next-Offset, X-Has-More, X-Total-Unread');
+    if (changedIds) res.set('X-QuickChat-Partial', '1');
+
     const { clinicIds, isAggregateAllowed } = await getUserClinics(userId);
     if (!clinicIds.length) {
       return res.status(403).json({ error: 'Sin clínicas asignadas' });
@@ -1513,6 +1520,10 @@ exports.listConversations = async (req, res) => {
 
     const linkedHistory = await contactIdentity.enabled();
     if(linkedHistory)where[Op.and]=[...(where[Op.and]||[]),db.Sequelize.literal('NOT EXISTS (SELECT 1 FROM WhatsappConversationLinks wi WHERE wi.conversation_id=`Conversation`.`id` AND wi.clinic_id=`Conversation`.`clinic_id` AND wi.canonical_id<>wi.conversation_id)')];
+    if (changedIds) {
+      const ids = linkedHistory ? await contactIdentity.canonicalListIds(changedIds, scope.clinicIds) : changedIds;
+      where[Op.and].push({ id: { [Op.in]: ids } });
+    }
     const conversationsPlusOne = await Conversation.findAll({
       where,
       ...(hideUnansweredBulk ? {
@@ -1522,7 +1533,7 @@ exports.listConversations = async (req, res) => {
       } : {}),
       order: [hideUnansweredBulk ? [db.Sequelize.literal('`quickchat_activity_at`'), 'DESC'] : ['last_message_at', 'DESC'],
         ['createdAt', 'DESC'], ['id', 'DESC']],
-      limit: limit + 1,
+      limit: changedIds ? changedIds.length : limit + 1,
       offset,
       include: [
         { model: Paciente, as: 'paciente', attributes: ['id_paciente', 'public_id', 'nombre', 'apellidos', 'foto', 'telefono_movil', 'email'] },
@@ -1538,7 +1549,7 @@ exports.listConversations = async (req, res) => {
         },
       ],
     });
-    const hasMore = conversationsPlusOne.length > limit;
+    const hasMore = !changedIds && conversationsPlusOne.length > limit;
     const conversations = hasMore ? conversationsPlusOne.slice(0, limit) : conversationsPlusOne;
 
     const conversationIds = conversations.map((c) => c.id);
@@ -1573,7 +1584,9 @@ exports.listConversations = async (req, res) => {
     const withLeadAppointments = await enrichQuickChatLeadAppointments(withRestrictions);
     const withPatientDirection = await enrichPatientDirectionAssignments(withLeadAppointments, userId);
     const withRouting = await attachRoutingReviews(await hydrateMarketingContactFallbacks(withPatientDirection, { searchQuery }), userId);
-    const payload = await contactIdentity.enrich(await attachTemporaryQuickChatEligibility(withRouting, req.userData, CitaPaciente),{searchQuery});
+    const payload = await contactIdentity.enrich(temporaryFocusSql
+      ? withRouting.map(row => ({ ...row, quickchat_list_eligible: true }))
+      : await attachTemporaryQuickChatEligibility(withRouting, req.userData, CitaPaciente), {searchQuery});
     const totalUnread = payload.reduce((total, item) => {
       if (item.quickchat_list_eligible === false) return total;
       const unread = Number(item?.unread_count || 0);

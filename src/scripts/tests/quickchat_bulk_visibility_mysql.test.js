@@ -4,13 +4,21 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { DataTypes: D, Sequelize } = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
-const { bulkOutboundSql, quickChatActivitySql, isBulkOutbound } = require('../../lib/quickchat-bulk-visibility');
+const { bulkOutboundSql, quickChatActivitySql, isBulkOutbound, parseChangedConversationIds } = require('../../lib/quickchat-bulk-visibility');
 
 test('classifies outgoing mass messages and review requests without suppressing their incoming replies', () => {
   assert.equal(isBulkOutbound({ direction: 'outbound', metadata: { source: 'marketing_bulk_sends' } }), true);
   assert.equal(isBulkOutbound({ direction: 'outbound', metadata: { communication_purpose: 'review_request' } }), true);
   assert.equal(isBulkOutbound({ direction: 'inbound', metadata: { communication_purpose: 'review_request' } }), false);
   assert.equal(isBulkOutbound({ direction: 'outbound' }), false);
+});
+
+test('socket batches accept at most 50 distinct positive integer inputs and never widen malformed reads', () => {
+  assert.equal(parseChangedConversationIds(undefined), undefined);
+  for (const value of ['', null, [], '0', 'a', '1,,2', '1e5', '9007199254740992', Array(51).fill('1').join(',')]) {
+    assert.equal(parseChangedConversationIds(value), null);
+  }
+  assert.deepEqual(parseChangedConversationIds('1,67,1'), [1,67]);
 });
 
 test('QuickChat filters and sorts before pagination while preserving direct searches and clinic-scoped replies', {
@@ -67,6 +75,15 @@ test('QuickChat filters and sorts before pagination while preserving direct sear
   assert.ok(await Conversation.findOne({ where: { id: 99, clinic_id: 56 } }), 'a direct search can reach an unanswered campaign');
   const [canonical] = await Conversation.findAll({ ...makeQuery(true), where: { id: 1002, clinic_id: 56 } });
   assert.equal(new Date(canonical.quickchat_activity_at).toISOString(), replyAt.toISOString());
+  const identity = require('../../services/whatsappContactIdentity.service');
+  const resolve = (ids, clinics) => identity.canonicalListIds(ids, clinics,
+    async (query, values) => (await sql.query(query, { replacements: values }))[0]);
+  assert.deepEqual(await resolve([1003, 1002], [56]), [1002]);
+  assert.deepEqual(await resolve([1003], [57]), []);
+  const changed = () => Conversation.findAll({ ...makeQuery(true), where: { clinic_id: 56, id: [99, 100] } });
+  assert.deepEqual(await changed(), [], 'no bulk-only rows are transmitted');
+  await Message.create({ ...incoming, conversation_id: 99 });
+  assert.deepEqual((await changed()).map(row => row.id), [99], 'a reply admits only its conversation');
   await Link.update({ clinic_id: 57 }, { where: { canonical_id: 1002 } });
   assert.equal((await Conversation.findAll({ ...makeQuery(true), where: { id: 1002, clinic_id: 56 } })).length, 0);
 }));

@@ -24,7 +24,7 @@ test('temporary attention: actual models, SQL locks, commit/rollback and list pr
     default_successor_user_id: { type: D.INTEGER, allowNull: true },
   }, { tableName: 'PatientDirectionSettings', timestamps: false });
   for (const file of ['usuario', 'leadintake', 'leadattributionaudit', 'leadcontactattempt', 'citapaciente', 'conversation', 'message', 'patientoperationalevent',
-    'clinicgoogleadsaccount', 'externalcampaigninventory', 'externalcampaignassignment', 'googleadsadinventory']) {
+    'clinicgoogleadsaccount', 'externalcampaigninventory', 'externalcampaignassignment', 'googleadsadinventory', 'marketingpatientlist']) {
     const model = require('../../../models/' + file)(sql, D); db[model.name] = model;
   }
   db.PatientOperationalEvent.options.indexes.forEach((index, i) => { index.name = 'temporary_attention_poe_' + i; });

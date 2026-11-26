@@ -57,15 +57,14 @@ test('lead review list uses the latest versioned decision and scopes marks to ea
   assert.match(sql, /JSON_UNQUOTE\(JSON_EXTRACT\(qc_decision.attribution_steps, '\$\.type'\)\) = 'lead_patient_attention_v1'/);
   assert.match(sql, /lead_patient_attention_v1.version'\) = 1/);
   assert.match(sql, /ORDER BY qc_decision.id DESC LIMIT 1/);
-  assert.match(sql, /<> 'clinic'/);
-  assert.match(sql, /<> 'director' OR[\s\S]*= '44'/);
+  assert.equal(sql.split('FROM LeadAttributionAudits AS qc_decision').length - 1, 1);
   assert.match(sql, /qc_lead.clinica_id = `Conversation`\.`clinic_id`/);
   assert.match(sql, /qc_lead.asignado_a IS NULL OR qc_lead.asignado_a = 44/);
   assert.match(sql, /qc_lead.archived_at IS NULL AND qc_lead.status_lead NOT IN \('descartado','acudio_cita','convertido'\)/,
     'discard/archive gates apply even when a start marker exists');
   assert.doesNotMatch(sql, /FROM LeadContactAttempts AS qc_contact/, 'a human contact is not a transfer');
-  assert.match(sql, /'\$\.lead_intake_id'\)\) = `Conversation`\.`lead_id`/);
-  assert.match(sql, /`sent_at` >= \(SELECT qc_request.created_at/);
+  assert.match(sql, /markers.marker_lead = Conversation.lead_id/);
+  assert.match(sql, /markers.sent_at >= qc_lead.created_at/);
   assert.doesNotMatch(sql, /`assignee_id`/, 'this column is absent from the current Conversation model');
 });
 

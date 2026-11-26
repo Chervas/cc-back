@@ -82,6 +82,16 @@ async function searchClause(term, clinicIds) {
     const rows = await q(`SELECT DISTINCT COALESCE(l.canonical_id,i.conversation_id) id FROM WhatsappContactIdentities i LEFT JOIN WhatsappConversationLinks l ON l.conversation_id=i.conversation_id AND l.clinic_id=i.clinic_id WHERE (${predicate})${scope} LIMIT 1000`, [...values, ...(clinicIds || [])]);
     return rows.map(r => Number(r.id));
 }
+// Resolve only notified IDs before applying the normal list query and all of
+// its authorization filters. Its primary-key lookup then stays bounded.
+async function canonicalListIds(ids, clinicIds, query = queryFor()) {
+    const rows = await query(
+        `SELECT DISTINCT COALESCE(root.id, c.id) id FROM Conversations c
+         LEFT JOIN WhatsappConversationLinks link ON link.conversation_id=c.id AND link.clinic_id=c.clinic_id
+         LEFT JOIN Conversations root ON root.id=link.canonical_id AND root.clinic_id=c.clinic_id
+         WHERE c.id IN (?) AND c.clinic_id IN (?)`, [ids, clinicIds]);
+    return rows.map(row => Number(row.id));
+}
 async function recentMessages(conversations, { hideUnansweredBulk = false } = {}) {
     if (!conversations.length || !await enabled())
         return new Map();
@@ -264,4 +274,4 @@ async function reviewSupersededInbound({ message, conversation, transaction }) {
         appointmentId: null, appointmentStatus: null, intent: 'otra', failureCode: 'previous_contact_identity_review', deadlineAt: null }, { transaction });
     return true;
 }
-module.exports = { queryFor, enabled, cluster, canonical, hasProviderPhoneProof, memberIds, enrich, searchClause, recentMessages, reconcilePatientChange, aggregatePending, assertDestination, restrict, windowMemberIds, windowContext, assertPhoneEndpointCurrent, reviewSupersededInbound };
+module.exports = { queryFor, enabled, cluster, canonical, hasProviderPhoneProof, memberIds, enrich, searchClause, canonicalListIds, recentMessages, reconcilePatientChange, aggregatePending, assertDestination, restrict, windowMemberIds, windowContext, assertPhoneEndpointCurrent, reviewSupersededInbound };

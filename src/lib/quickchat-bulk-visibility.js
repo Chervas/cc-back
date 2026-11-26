@@ -16,14 +16,28 @@ function quickChatActivitySql({ linkedHistory = false } = {}) {
     AND NOT ${bulkOutboundSql('qm')} AND qm.message_type <> 'event'
     AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(qm.metadata, '$.qa_cleanup')), '') <> 'true'
     AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(qm.metadata, '$.hide_from_quickchat')), '') <> 'true'`;
-  const activeAt = linkedHistory
-    ? `SELECT MAX(activity_at) FROM LATERAL (${lastActivity(direct)} UNION ALL ${lastActivity(linked)}) qa`
-    : lastActivity(direct);
   const ordinaryActivity = 'COALESCE(Conversation.last_message_at, Conversation.createdAt)';
+  const directActivity = `WHEN EXISTS (SELECT 1 ${direct} ${bulk}) THEN (${lastActivity(direct)})`;
+  // Most WhatsApp conversations have no aliases. Only canonical chats with
+  // another physical history need the union across both sets of messages.
+  const mergedActivity = linkedHistory ? `
+    WHEN (Conversation.id, Conversation.clinic_id) IN (
+      SELECT canonical_id, clinic_id FROM WhatsappConversationLinks WHERE canonical_id <> conversation_id
+    ) THEN CASE WHEN EXISTS (SELECT 1 ${direct} ${bulk}) OR EXISTS (SELECT 1 ${linked} ${bulk})
+      THEN (SELECT MAX(activity_at) FROM LATERAL (${lastActivity(direct)} UNION ALL ${lastActivity(linked)}) qa)
+      ELSE ${ordinaryActivity} END` : '';
   return `CASE WHEN Conversation.channel <> 'whatsapp' THEN ${ordinaryActivity}
-    WHEN NOT EXISTS (SELECT 1 ${direct} ${bulk})
-      ${linkedHistory ? `AND NOT EXISTS (SELECT 1 ${linked} ${bulk})` : ''} THEN ${ordinaryActivity}
-    ELSE (${activeAt}) END`;
+    ${mergedActivity}
+    ${directActivity} ELSE ${ordinaryActivity} END`;
+}
+
+// A partial read can only narrow the already authorized list.
+function parseChangedConversationIds(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.length > 850) return null;
+  const parts = value.split(',');
+  if (parts.length > 50 || !parts.every(id => /^[1-9][0-9]*$/.test(id) && Number.isSafeInteger(Number(id)))) return null;
+  return [...new Set(parts.map(Number))];
 }
 
 function isBulkOutbound(message) {
@@ -31,4 +45,4 @@ function isBulkOutbound(message) {
     || message.metadata?.communication_purpose === 'review_request');
 }
 
-module.exports = { bulkOutboundSql, quickChatActivitySql, isBulkOutbound };
+module.exports = { bulkOutboundSql, quickChatActivitySql, isBulkOutbound, parseChangedConversationIds };
