@@ -169,7 +169,8 @@ function createService({models,sessions,oauth,client,now=()=>new Date(),enabled=
           }catch(error){if(overviewDeadlock(error)||[401,403].includes(error.httpStatus))throw error;}
         }
         catch(error){if(overviewDeadlock(error)||[401,403].includes(error.httpStatus))throw error;selection={...selection,connected:false,attentionRequired:true,lastError:safe(error)};}
-        return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',discovery,...capability,...(instagramExtensionAvailable?{instagramExtensionAvailable:true}:{}),...(instagramDestinations.length?{instagramDestinations}:{}),selection:{...selection,
+        return {enabled:enabled(),canSelect:enabled()&&row.state==='revoked',discovery,...capability,...(instagramExtensionAvailable?{instagramExtensionAvailable:true}:{}),
+          ...(instagramExtensionAvailable && require('./metaMarketingInstagramAssignmentAccess').hasClinicDelegation(input) ? {instagramAssignmentDelegated:true} : {}),...(instagramDestinations.length?{instagramDestinations}:{}),selection:{...selection,
           canConfirm:enabled()&&row.state==='prepared'&&Number(row.actor_user_id)===input.actorId&&row.session_ref===input.sessionRef
             &&+row.session_expires_at===+input.sessionExpiresAt&&+row.session_expires_at>+now(),canCancel:!['revoke_pending','revoked'].includes(row.state)},
           ...(displayAssets&&selection.connected?{displayAssets}:{})};

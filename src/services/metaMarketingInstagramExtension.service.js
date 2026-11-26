@@ -173,7 +173,8 @@ function receipt(data, row, now) {
 
 function createService({ models, sessions, client, now = () => new Date(), returnOrigin = C.frontendOrigin(), settings = configuration, selfService = selfServiceEnabled } = {}) {
   const scope = require('./metaMarketingOAuthScope.service').createScope({ models, sessions, now });
-  const order = createOrder({ models, authorize: scope.authorize, unavailable: fail });
+  const authorize = require('./metaMarketingInstagramAssignmentAccess').assignmentAuthorization(scope, models.UsuarioClinica);
+  const order = createOrder({ models, authorize, unavailable: fail });
   const credentials = F.createEffectiveCredentials({ models, now });
   const bindings = require('./metaMarketingEnrollmentBinding.service').createBindings({ models, sessions, now });
   const Rows = models.MetaMarketingInstagramExtension;
