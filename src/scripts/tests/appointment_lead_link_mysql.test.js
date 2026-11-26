@@ -19,7 +19,7 @@ test('appointment/lead linkage uses isolated SQL, including rollback and simulta
     models.CitaPaciente = sql.define('CitaPaciente', { id_cita: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
       clinica_id: DataTypes.INTEGER, paciente_id: DataTypes.INTEGER, lead_intake_id: DataTypes.INTEGER, estado: DataTypes.STRING });
     models.Conversation = sql.define('Conversation', { id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-      clinic_id: DataTypes.INTEGER, patient_id: DataTypes.INTEGER, lead_id: DataTypes.INTEGER });
+      clinic_id: DataTypes.INTEGER, patient_id: DataTypes.INTEGER, lead_id: DataTypes.INTEGER, channel: DataTypes.STRING });
     models.LeadAttributionAudit = sql.define('LeadAttributionAudit', { lead_intake_id: DataTypes.INTEGER,
       raw_payload: DataTypes.JSON, attribution_steps: DataTypes.JSON });
     models.LeadContactAttempt = sql.define('LeadContactAttempt', { lead_intake_id: DataTypes.INTEGER,
@@ -171,6 +171,23 @@ test('appointment/lead linkage uses isolated SQL, including rollback and simulta
       finally { models.LeadContactAttempt.create = original; }
       const after = await models.LeadIntake.findByPk(1); assert.equal(after.status_lead, 'citado');
       assert.equal(after.num_contactos, 0); assert.deepEqual(after.historial_contactos, []);
+    });
+    await t.test('explicit booking links the social thread to the same patient and clinic, preserving its original lead', async () => {
+      await reset();
+      const linked = await lead({});
+      const thread = await models.Conversation.create({ channel: 'instagram', clinic_id: 3, lead_id: linked.id });
+      const foreign = await models.Conversation.create({ channel: 'messenger', clinic_id: 4, lead_id: linked.id });
+      const unrelated = await models.Conversation.create({ channel: 'instagram', clinic_id: 3 });
+      await create(linked);
+      assert.equal((await thread.reload()).patient_id, null, 'a phone-only match cannot assign a social identity');
+      await sql.transaction(async transaction => {
+        const appointment = await models.CitaPaciente.create({ clinica_id: 3, paciente_id: 9, lead_intake_id: linked.id, estado: 'pendiente' }, { transaction });
+        await recordCreatedAppointmentLead({ models, lead: linked, appointment, transaction, explicitLeadIntakeId: linked.id });
+      });
+      assert.equal((await thread.reload()).patient_id, 9);
+      assert.equal(thread.lead_id, linked.id);
+      assert.equal((await foreign.reload()).patient_id, null);
+      assert.equal((await unrelated.reload()).patient_id, null);
     });
     report.checks.push('Unique same-clinic identity; no-call first visit; duplicate/foreign/patient conflict denial; atomic rollback; concurrent manual contact protection');
   });

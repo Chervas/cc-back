@@ -25,6 +25,7 @@ function fixture() {
       const endpoint = url.pathname.split('/').slice(2).join('/');
       commands.push({
         endpoint,
+        fields: url.searchParams.get('fields'),
         method: options.method,
         body: options.body && JSON.parse(options.body),
       });
@@ -65,7 +66,7 @@ function fixture() {
           from: { id: '771' },
           timestamp: new Date().toISOString(),
         },
-        881: { id: '881', owner: { id: '501' }, permalink: 'https://www.instagram.com/p/FICTICIO/' },
+        881: { id: '881', owner: { id: '501' }, caption: 'Sesión informativa de la clínica', media_type: 'IMAGE', media_url: 'https://example.cdninstagram.com/post.jpg', permalink: 'https://www.instagram.com/p/FICTICIO/' },
         771: { id: '771', username: 'persona', first_name: 'Persona', last_name: 'Demo' },
         '401/messages': { recipient_id: '771', message_id: 'mid-test' },
       };
@@ -156,6 +157,10 @@ test('Instagram separates comment intake from private sending and verifies post 
     postId: '881',
     commentId: '991',
   });
+  assert.deepEqual(comment.post, { mediaType: 'IMAGE', caption: 'Sesión informativa de la clínica', previewUrl: 'https://example.cdninstagram.com/post.jpg' });
+  const mediaReads = f.commands.filter(command => command.endpoint === '881');
+  assert.equal(mediaReads.length, 1);
+  assert(mediaReads[0].fields.includes('thumbnail_url'));
   assert.equal(comment.permalink, 'https://www.instagram.com/p/FICTICIO/');
   assert.equal(
     (await f.call(social.status, 'instagram', 'comment')).reason,

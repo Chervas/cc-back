@@ -96,7 +96,8 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     },
     reconcile: async () => proof || { available: false, reason: 'reconciliation_required' },
   };
-  provider.receive = (r, e) => provider.availability(r, e.type);
+  const post = { mediaType: 'IMAGE', caption: 'Sesión informativa de prueba', previewUrl: 'https://example.cdninstagram.com/post.jpg' };
+  provider.receive = async (r, e) => ({ ...await provider.availability(r, e.type), ...(e.type === 'comment' ? { post } : {}) });
   let redisUnavailable = false;
   const svc = social.create({
     db,
@@ -198,6 +199,8 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(thread.patient_id, null);
   assert.equal(thread.last_inbound_at, null);
   const m = await db.Message.findOne();
+  assert.deepEqual(m.metadata.social.post, post);
+  assert.deepEqual((await svc.readEntry(eventKey(events(comment('991'))[0]), 41)).post, post);
   assert.equal(await db.Message.count(), 1);
   const reply = (args = {}) =>
     svc.reply(thread, { actorId: 1, text: 'Respuesta ficticia', attemptId: randomUUID(), ...args });

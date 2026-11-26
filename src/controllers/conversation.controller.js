@@ -1505,11 +1505,13 @@ exports.listConversations = async (req, res) => {
       where.channel = channel;
     }
 
-    if (filter === 'leads') {
+    if (filter === 'leads' || filter === 'clinica') {
       // La pestaña "Otros" agrupa leads y conversaciones externas de campañas.
       // Si ya existe paciente, debe vivir solo en la pestaña de pacientes.
-      where.patient_id = null;
+      if (filter === 'leads') where.patient_id = null;
+      else where[Op.and].push({ channel: { [Op.ne]: 'internal' } });
       where[Op.or] = [
+        ...(filter === 'clinica' ? [{ patient_id: { [Op.not]: null } }] : []),
         { lead_id: { [Op.not]: null } },
         {
           id: {
@@ -1955,7 +1957,7 @@ exports.getConversationByLead = async (req, res) => {
     }
 
     const contactPhone = await resolveLeadWhatsappPhone(lead);
-    const conversation = await findCanonicalWhatsappConversation({
+    const whatsapp = await findCanonicalWhatsappConversation({
       clinicId: clinicToResolve,
       contactId: contactPhone,
       leadId: Number(leadId),
@@ -1963,6 +1965,23 @@ exports.getConversationByLead = async (req, res) => {
       createIfMissing: shouldCreate,
     });
 
+    const threads = [];
+    if (!shouldCreate && leadClinicId === clinicToResolve) {
+      const categories = buildQuickChatCategoryWhere(await getAllowedQuickChatClinicIdsByCategory(userId, [clinicToResolve]));
+      if (categories) {
+        const social = await Conversation.findAll({
+          where: { clinic_id: clinicToResolve, lead_id: Number(leadId),
+            channel: { [Op.in]: ['instagram', 'messenger'] }, [Op.and]: [categories] },
+          attributes: ['id', 'channel', 'social_account_name', 'social_alias'],
+          order: [['last_message_at', 'DESC'], ['id', 'DESC']], raw: true,
+        });
+        threads.push(...social);
+      }
+    }
+    const readableWhatsapp = whatsapp && await canReadQuickChatConversation(userId, whatsapp);
+    if (readableWhatsapp) threads.unshift({ id: whatsapp.id, channel: 'whatsapp' });
+    const conversation = readableWhatsapp ? whatsapp : threads.length
+      ? await Conversation.findByPk(threads[0].id) : whatsapp;
     if (!conversation) {
       return res.status(404).json({ error: 'Conversación no encontrada' });
     }
@@ -1982,7 +2001,7 @@ exports.getConversationByLead = async (req, res) => {
     const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([conversationPayload], req.userData, CitaPaciente);
     const [identified]=await contactIdentity.enrich([focusedPayload]);
-    return res.json({ conversation: identified, messages, messages_page: messagesPage });
+    return res.json({ conversation: { ...identified, lead_threads: threads }, messages, messages_page: messagesPage });
   } catch (err) {
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
     console.error('Error getConversationByLead', err);

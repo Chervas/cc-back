@@ -118,6 +118,17 @@ async function recordCreatedAppointmentLead({ models, lead, appointment, transac
         userId: positive(actorId), clinic_id: positive(appointment.clinica_id) },
     }, { transaction });
   }
+  if (explicitLeadIntakeId && ACTIVE_APPOINTMENTS.has(String(appointment.estado || '').toLowerCase())
+    && positive(fresh.clinica_id) === positive(appointment.clinica_id)
+    && positive(appointment.paciente_id)) {
+    const otherPatient = await models.CitaPaciente.findOne({ where: { clinica_id: appointment.clinica_id,
+      lead_intake_id: fresh.id, paciente_id: { [Op.ne]: appointment.paciente_id } }, attributes: ['id_cita'], transaction });
+    if (!otherPatient) {
+      await models.Conversation.update({ patient_id: appointment.paciente_id }, { where: {
+        clinic_id: appointment.clinica_id, lead_id: fresh.id, patient_id: null, channel: { [Op.in]: ['instagram', 'messenger'] },
+      }, transaction });
+    }
+  }
   return fresh;
 }
 

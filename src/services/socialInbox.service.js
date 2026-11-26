@@ -112,6 +112,7 @@ function create({
     if (e.type === 'comment') {
       e.permalink = postLink(access.permalink) || e.permalink;
       if (access.commentAt) e.at = access.commentAt;
+      if (access.post) e.post = access.post;
     }
     await db.sequelize.transaction(async (t) => {
       const route = await resolve(db, e, t);

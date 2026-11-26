@@ -37,6 +37,16 @@ const checks = {
   }),
 };
 checks[outcome] = checks[send];
+function postPreviewUrl(value) {
+  if (typeof value !== 'string' || value.length > 4096) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:' && !url.username && !url.password && !url.port
+      && !url.searchParams.has('access_token') && /\.(?:cdninstagram\.com|fbcdn\.net)$/.test(url.hostname)) return url.href;
+  } catch {}
+  return null;
+}
+
 function config(rows) {
   if (!Array.isArray(rows) || !rows.length || rows.length > 1000) fail('invalid_request');
   const accounts = new Set();
@@ -229,10 +239,11 @@ async function execute({
   if (operation === receive) {
     let alias = null,
       permalink = null,
-      commentAt = null;
+      commentAt = null,
+      post = null;
     if (p.kind === 'comment') {
       if (!p.postId || !p.commentId || p.channel !== 'instagram') fail('scope_denied');
-      const media = await graph(p.postId, page.access_token, { fields: 'id,owner,permalink' });
+      const media = await graph(p.postId, page.access_token, { fields: 'id,owner,permalink,caption,media_type,media_url,thumbnail_url' });
       if (media.id !== p.postId || media.owner?.id !== p.accountId)
         return blocked('post_owner_unverified');
       const comment = await graph(p.commentId, page.access_token, { fields: 'id,media,from,timestamp' });
@@ -247,6 +258,12 @@ async function execute({
         return blocked('comment_unavailable');
       commentAt = new Date(at).toISOString();
       permalink = media.permalink || null;
+      const mediaType = ['IMAGE', 'VIDEO', 'CAROUSEL_ALBUM'].includes(media.media_type) ? media.media_type : null;
+      post = {
+        mediaType,
+        caption: typeof media.caption === 'string' ? media.caption.slice(0, 4400) : null,
+        previewUrl: postPreviewUrl(mediaType === 'VIDEO' ? media.thumbnail_url : mediaType && media.media_url),
+      };
     } else {
       try {
         const person = await graph(p.senderId, page.access_token, {
@@ -267,6 +284,7 @@ async function execute({
       alias: typeof alias === 'string' ? alias.slice(0, 100) : null,
       permalink,
       commentAt,
+      ...(post ? { post } : {}),
     };
   }
   if (operation === status) return { available: true, accountName };
