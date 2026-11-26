@@ -155,8 +155,13 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const handler = createMetaLeadWebhookHandlers({
     env,
     socialVerify: async (raw, signature) => {
-      broker.verifyBody({ rawBase64: raw.toString('base64'), signature }, secret);
-      return '123';
+      const routes = [
+        { channel: 'instagram', accountId: '501', clinicId: 41 },
+        { channel: 'instagram', accountId: '502', clinicId: 42 },
+        { channel: 'messenger', accountId: '401', clinicId: 41 },
+        { channel: 'instagram', accountId: '999', clinicId: 41 },
+      ];
+      return { appId: '123', ...broker.verifyBody({ rawBase64: raw.toString('base64'), signature }, secret, routes) };
     },
     socialAccept: svc.accept,
   });
@@ -192,7 +197,12 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   }
   await webhook(comment('991'), true);
   assert.equal(await db.SocialInboxReceipt.count(), 0);
-  await webhook(comment('991'));
+  const outside = dm('777', 'unconnected-in-same-app');
+  await webhook(outside);
+  assert.equal(await db.SocialInboxReceipt.count(), 0);
+  const selected = comment('991');
+  await webhook({ ...selected, entry: [...outside.entry, ...selected.entry] });
+  assert.equal(await db.SocialInboxReceipt.count(), 1);
   await webhook(comment('991'));
   let thread = await db.Conversation.findOne({ where: { social_account_id: '501' } });
   assert.equal(thread.lead_id, null);

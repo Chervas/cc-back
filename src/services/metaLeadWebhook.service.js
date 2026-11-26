@@ -53,10 +53,14 @@ function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqu
         }
         if (hasSocial) {
           if (env.META_SOCIAL_INBOX_RECEIVER_ENABLED!=='true') fail('meta_lead_unsupported_notification');
-          const appId=await (socialVerify||require('./socialInboxWebhookVerifier.service').verify)(req.rawBody,signature,env);
-          const namespace=require('../lib/gatewayJobOwnership').resolveEnqueueRuntimeNamespace('gateway',env.META_LEAD_JOB_RUNTIME_NAMESPACE,env);
-          const inbox=socialAccept||require('./socialInboxIntake.service').accept;
-          await inbox(body,{appId,namespace});
+          const {appId,destinations}=await (socialVerify||require('./socialInboxWebhookVerifier.service').verify)(req.rawBody,signature,env);
+          const accounts=new Map(destinations.map(d=>[d.accountId,d.clinicId]));
+          const entry=body.entry.filter(e=>accounts.has(e?.id));
+          if(entry.length){
+            const namespace=require('../lib/gatewayJobOwnership').resolveEnqueueRuntimeNamespace('gateway',env.META_LEAD_JOB_RUNTIME_NAMESPACE,env);
+            const inbox=socialAccept||require('./socialInboxIntake.service').accept;
+            await inbox({...body,entry},{appId,namespace,accounts});
+          }
         }
         if (!hasSocial) {
           if (body?.object!=='page'||!Array.isArray(body.entry)||!body.entry.length

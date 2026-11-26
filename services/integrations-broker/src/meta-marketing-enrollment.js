@@ -371,7 +371,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
         if(previous && previous.digest!==digest)fail('idempotency_conflict');
         data=previous?.state==='completed'&&previous.result?JSON.parse(previous.result).data:{available:false,reason:'reconciliation_required'};
       }else if(request.operation===Social.verify){
-        data=await secrets.withApplication(binding,secret=>({...Social.verifyBody(request.payload,secret),appId:K.bindingFor(binding).appId}),signal);
+        data=await secrets.withApplication(binding,secret=>({...Social.verifyBody(request.payload,secret,socialInbox),appId:K.bindingFor(binding).appId}),signal);
       }else if(leadOperation(request.operation)&&[L.OPERATIONS.receiptAccept,L.OPERATIONS.challenge].includes(request.operation)){
         if(request.operation===L.OPERATIONS.receiptAccept){
           const raw=Buffer.from(request.payload.rawBase64,'base64');try{data=await secrets.withApplication(binding,appSecret=>{context=check();return leadReceipts.accept({raw,signature:request.payload.signature,appSecret,

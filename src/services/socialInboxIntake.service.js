@@ -5,7 +5,7 @@ const { resolveRoute, sameRoute } = require('./socialInboxRoute.service');
 const JOB = 'quickchat_social_receive';
 
 function createReceiptIntake({ db, resolve = resolveRoute, enqueue }) {
-  return async function accept(body, { appId, namespace, history = false, expectedRoute }) {
+  return async function accept(body, { appId, namespace, history = false, expectedRoute, accounts }) {
     const counts = { queued: 0, duplicate: 0, review: 0 };
     for (const e of events(body, { history })) {
       const result = await db.sequelize.transaction(async (t) => {
@@ -36,7 +36,7 @@ function createReceiptIntake({ db, resolve = resolveRoute, enqueue }) {
         const route = historyRoute || (await resolve(db, e, t));
         if (!fresh && (!sameRoute(route, receipt.route) || route.appId !== appId))
           return 'duplicate';
-        if (!route || route.appId !== appId) {
+        if (!route || route.appId !== appId || (accounts && accounts.get(e.accountId) !== route.clinicId)) {
           await receipt.update(
             { state: 'review', reason: 'account_unassigned' },
             { transaction: t },

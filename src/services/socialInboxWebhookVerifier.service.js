@@ -32,9 +32,13 @@ async function verify(raw, signature, env = process.env) {
   if (
     response?.requestId !== requestId ||
     response.data?.appId !== c.appId ||
-    response.data?.digest !== createHash('sha256').update(raw).digest('hex')
+    response.data?.digest !== createHash('sha256').update(raw).digest('hex') ||
+    !Array.isArray(response.data.destinations) || response.data.destinations.length > 1000 ||
+    response.data.destinations.some(d => !d || typeof d.accountId !== 'string' || !/^[1-9][0-9]{0,29}$/.test(d.accountId) ||
+      !Number.isSafeInteger(d.clinicId) || d.clinicId < 1) ||
+    new Set(response.data.destinations.map(d => d.accountId)).size !== response.data.destinations.length
   )
     throw Error('social_verification_unavailable');
-  return c.appId;
+  return { appId: c.appId, destinations: response.data.destinations };
 }
 module.exports = { verify };
