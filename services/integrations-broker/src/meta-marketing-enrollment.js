@@ -8,6 +8,7 @@ const P=require('./meta-marketing-admission-contract');
 const L=require('./meta-marketing-leads-contract'),{timingSafeEqual}=require('node:crypto');
 const V=require('./meta-marketing-enrollment-assets-contract'),R=require('./meta-marketing-credential-renewal-contract');
 function createMetaMarketingEnrollment({store,secrets,http,environment,socialInbox,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,leadRecovery,credentialEpochs,businessConfig,enrolledAssetAccess,resolvePolicy,admissionAdsReadScopeKeys}){
+  const socialConsent=socialInbox && credentialEpochs && require('./meta-marketing-social-consent').journal(store);
   if(resolvePolicy!==undefined&&typeof resolvePolicy!=='function')fail('invalid_request');
   if(admissionAdsReadScopeKeys!==undefined&&(!Array.isArray(admissionAdsReadScopeKeys)||admissionAdsReadScopeKeys.length>64
     ||admissionAdsReadScopeKeys.some((key,i)=>!P.scopeKey(key)||i>0&&key<=admissionAdsReadScopeKeys[i-1])
@@ -384,8 +385,15 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
         data=await secrets.withCandidate(binding,context.flow,context.flow.secret_digest,async borrowed=>{
           context=check();if(JSON.stringify(borrowed.metadata)!==context.flow.credential_metadata)fail('secret_unavailable');
           if(isRead){
-            if(Social.ops.includes(request.operation))return Social.execute({...borrowed,asset:context.asset,operation:request.operation,payload:request.payload,signal,authorize:check,
-              context:{principalId:principal.id,tenantRef:request.tenantRef,binding:{connectionRef:request.connectionRef},policyVersion:policy.version,generation:[row.id,context.flow.id,context.credential?.versionId??context.flow.id]}});
+            if(Social.ops.includes(request.operation)){
+              const proof=socialConsent && socialConsent.active(row.id,context.credential);
+              const p=request.payload;
+              const hasConsent=proof && JSON.parse(proof.accounts).some(a=>a.channel===p.channel&&a.accountId===p.accountId&&a.clinicId===p.clinicId&&a.pageId===context.asset.id);
+              const metadata=hasConsent?JSON.parse(proof.metadata):borrowed.metadata;
+              if(metadata.appId!==borrowed.metadata.appId || metadata.subjectId!==borrowed.metadata.subjectId)fail('oauth_identity_mismatch');
+              return Social.execute({...borrowed,metadata,asset:context.asset,operation:request.operation,payload:p,signal,authorize:check,
+                context:{principalId:principal.id,tenantRef:request.tenantRef,binding:{connectionRef:request.connectionRef},policyVersion:policy.version,generation:[row.id,context.flow.id,context.credential?.versionId??context.flow.id]}});
+            }
             if(leadOperation(request.operation))return leadsHttp.read({binding,...borrowed,asset:context.asset,account:context.account,operation:request.operation,payload:request.payload,signal,authorize:check,
               context:{principalId:principal.id,tenantRef:request.tenantRef,policyVersion:policy.version,
                 credentialEpoch:context.credential?.epoch??0,credentialVersionId:context.credential?.versionId??context.flow.id,

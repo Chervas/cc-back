@@ -26,7 +26,11 @@ const retentionStage = (enrollmentId, versionId) => {
 function validate(operation, payload) {
   const name = Object.keys(OPERATIONS).find(key => OPERATIONS[key] === operation);
   if (!name) fail('operation_denied');
-  validators[name](payload);
+  if (name === 'begin' && Object.hasOwn(payload || {}, 'quickChat')) {
+    const {quickChat, quickChatTargetsDigest, ...rest} = payload;
+    if (quickChat !== true || typeof quickChatTargetsDigest !== 'string' || !/^[a-f0-9]{64}$/.test(quickChatTargetsDigest)) fail('invalid_request');
+    validators.begin(rest);
+  } else validators[name](payload);
   if (['begin', 'finish'].includes(name) && payload.flowId !== payload.renewalId
     || name === 'activate' && payload.candidateVersionId !== payload.renewalId) fail('invalid_request');
   return name;
@@ -45,7 +49,8 @@ function effective(value, binding) {
 function validateResponse(operation, value, payload, binding) {
   const name = validate(operation, payload);
   if (name === 'begin') {
-    if (!C.exact(value, 'renewalId,flowId,enrollmentId,authUrl,expiresAt') || value.renewalId !== payload.renewalId
+    const continued = !payload.quickChat && value?.continuedQuickChat === true;
+    if (!C.exact(value, 'renewalId,flowId,enrollmentId,authUrl,expiresAt'+(continued?',continuedQuickChat':'')) || value.renewalId !== payload.renewalId
       || value.flowId !== payload.renewalId || value.enrollmentId !== payload.enrollmentId || value.expiresAt !== payload.expiresAt) fail('invalid_request');
     let url; try { url = new URL(value.authUrl); } catch { fail('invalid_request'); }
     if (url.origin !== 'https://www.facebook.com' || url.pathname !== '/v24.0/dialog/oauth'

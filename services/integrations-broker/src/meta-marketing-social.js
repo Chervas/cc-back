@@ -50,26 +50,7 @@ function postPreviewUrl(value) {
   return null;
 }
 
-function config(rows) {
-  if (!Array.isArray(rows) || !rows.length || rows.length > 1000) fail('invalid_request');
-  const accounts = new Set();
-  for (const row of rows) {
-    if (
-      !row ||
-      Object.keys(row).sort().join(',') !== 'accountId,channel,clinicId,pageId' ||
-      !graphId(row.accountId) ||
-      !graphId(row.pageId) ||
-      !Number.isSafeInteger(row.clinicId) ||
-      row.clinicId <= 0 ||
-      !['instagram', 'messenger'].includes(row.channel) ||
-      (row.channel === 'messenger' && row.pageId !== row.accountId) ||
-      accounts.has(row.channel + row.accountId)
-    )
-      fail('invalid_request');
-    accounts.add(row.channel + row.accountId);
-  }
-  return rows;
-}
+const { config } = require('./meta-marketing-social-consent');
 function authorize(rows, asset, request, clinicIds) {
   const p = request.payload;
   if (

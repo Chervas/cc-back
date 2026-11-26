@@ -9,14 +9,17 @@ const C = require('../../services/metaMarketingCredentialRenewal.contract');
 const ORDER = require('../../services/metaMarketingTransactionOrder.service');
 const barrier = () => { let release; const promise = new Promise(done => { release = done; }); return { promise, release }; };
 
-function fixture() {
+function fixture({ quickChat = false } = {}) {
   let clock = +new Date('2030-01-01T12:00:00Z'), enabled = true;
   const now = () => new Date(clock), HASH = 'a'.repeat(64), initialVersion = randomUUID(), enrollmentId = randomUUID();
   const scopes = ['ads_read', 'public_profile'];
   const metadata = { appId: '101', subjectId: '201', tokenType: 'USER', scopes,
     expiresAt: clock + 86400000, dataAccessExpiresAt: null, granularScopes: [] };
   const initial = { versionId: initialVersion, digest: HASH, ...metadata };
-  const selected = C.assets([{ assetRef: 'meta-ad_account:301', kind: 'ad_account', id: '301', parentPageId: null }]);
+  const assets = [{ assetRef: 'meta-ad_account:301', kind: 'ad_account', id: '301', parentPageId: null }];
+  const targets = quickChat ? [{channel:'instagram',clinicId:72,pageId:'401',accountId:'501'}] : [];
+  if (quickChat) assets.push({assetRef:'meta-facebook_page:401',kind:'facebook_page',id:'401',parentPageId:null});
+  const selected = C.assets(assets);
   const flow = { flow_id: initialVersion, scope_key: 'group:29', app_id: '101', scopes: JSON.stringify(scopes),
     redirect_uri: 'https://auth.example.invalid/oauth/meta/marketing/callback', candidate_metadata: JSON.stringify(initial) };
   const slot = { scope_key: 'group:29', connection_ref: 'fictitious-connection', asset_ref: 'meta-enroll:group:29',
@@ -26,7 +29,7 @@ function fixture() {
     prepare_request_id: randomUUID(), activate_request_id: randomUUID(), revoke_request_id: randomUUID(),
     scope_digest: HASH, flow_digest: HASH, candidate_digest: HASH, assignment_digest: HASH,
     scope_key: slot.scope_key, actor_user_id: 99, meta_connection_id: 172, connection_ref: slot.connection_ref,
-    meta_user_id: '201', app_id: '101', clinic_ids: slot.clinic_ids, assets: JSON.stringify(selected), mapping_ids: '[31]',
+    meta_user_id: '201', app_id: '101', clinic_ids: slot.clinic_ids, assets: JSON.stringify(selected), mapping_ids: quickChat ? '[31,32]' : '[31]',
     session_expires_at: new Date(clock + 10800000), requested_at: now(), updated_at: now(), next_attempt_at: now(),
     prepared_at: now(), activated_at: now(), revoked_at: null, attempts: 0, selection_digest: HASH,
     last_error: null, lease_token: null, lease_until: null, state: 'active' };
@@ -81,7 +84,7 @@ function fixture() {
     if (name === 'begin') {
       state.owner = { status: 'awaiting' }; entered.release(); await resume.promise;
       const query = new URLSearchParams({ client_id: slot.app_id, redirect_uri: slot.redirect_uri,
-        response_type: 'code', scope: scopes.join(','), state: command.payload.state });
+        response_type: 'code', scope: (command.payload.quickChat ? require('../../../services/integrations-broker/src/meta-marketing-social-consent').scopesFor(scopes, targets) : scopes).join(','), state: command.payload.state });
       return { requestId: command.requestId, replayed: false, data: { renewalId: command.payload.renewalId,
         flowId: command.payload.renewalId, enrollmentId, authUrl: 'https://www.facebook.com/v24.0/dialog/oauth?' + query,
         expiresAt: command.payload.expiresAt } };
@@ -89,7 +92,7 @@ function fixture() {
     if (name === 'abort' && state.owner) state.owner.status = 'aborted';
     return { requestId: command.requestId, replayed: false, data: receipt(command.payload.renewalId) };
   } };
-  const service = loaded.exports.createService({ models, sessions: {}, client, now, enabled: () => enabled,
+  const service = loaded.exports.createService({ models, sessions: {}, client, now, enabled: () => enabled, quickChatTargets: () => targets,
     returnOrigin: 'https://app.example.invalid', audit: {
       health: async () => ({ pending: 0, oldestAgeSeconds: 0 }), append: async event => { state.audits.push(event); },
     } });
@@ -97,6 +100,20 @@ function fixture() {
   return { state, input, service, entered, resume, now, advance: ms => { clock += ms; }, disable: () => { enabled = false; },
     assertOriginal: () => { assert.equal(JSON.stringify({ enrollment, flow, effective }), original); assert.equal(state.pointerWrites, 0); } };
 }
+
+test('QuickChat obtains explicit consent on an eligible enrollment and preserves its original scopes', async () => {
+  const unavailable = fixture();
+  await assert.rejects(unavailable.service.begin(unavailable.input,{quickChat:true}),{code:'meta_renewal_scope_forbidden'});
+  const f = fixture({quickChat:true});
+  const pending = f.service.begin(f.input,{quickChat:true});
+  await f.entered.promise;
+  f.resume.release();
+  const value = await pending;
+  const scopes = new URL(value.authUrl).searchParams.get('scope').split(',');
+  assert(scopes.includes('instagram_manage_messages') && scopes.includes('instagram_manage_comments'));
+  assert.equal(f.state.row.scopes,'["ads_read","public_profile"]');
+  f.assertOriginal();
+});
 
 test('a deferred begin survives scheduled and manual reconciliation until its Owner response', async () => {
   const f = fixture(), pending = f.service.begin(f.input); await f.entered.promise;

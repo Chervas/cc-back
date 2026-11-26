@@ -168,7 +168,7 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,socialInbox:config.socialInbox,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessRegistry(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead}:{}),...(adsHttp?{adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{}),...(config.leadRecovery?{leadRecovery:config.leadRecovery}:{}),...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{}),
       ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base),
         ...(config.admission.adsReadScopeKeys?{admissionAdsReadScopeKeys:config.admission.adsReadScopeKeys}:{})}:{})});
-    if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment});
+    if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,socialInbox:config.socialInbox});
     const resolveInstagramBinding=ref=>config.policy.connections.find(value=>value.connectionRef===ref)||admission?.resolveBinding(ref);
     const instagramTargets=config.instagramExtension?Instagram.targets(config.instagramExtension,config.environment,ACCOUNT):[];
     const resolveInstagramPolicy=(request,principal,base)=>{

@@ -2,8 +2,11 @@
 const { BrokerError, fail } = require('./errors'), { eventFor } = require('./audit'), { canonical } = require('./canonical');
 const C = require('./meta-marketing-oauth-contract'), E = require('./meta-marketing-enrollment-contract');
 const D = require('./meta-marketing-discovery-contract'), R = require('./meta-marketing-credential-renewal-contract');
-function createMetaMarketingCredentialRenewal({ store, epochs, enrollment, oauth, secrets, http, environment, now = Date.now }) {
+const SocialConsent = require('./meta-marketing-social-consent');
+function createMetaMarketingCredentialRenewal({ store, epochs, enrollment, oauth, secrets, http, environment, socialInbox, now = Date.now }) {
   const roles = E.roles(environment), running = new Map(); let closed = false;
+  const hasSocialJournal = store.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='meta_marketing_social_consents'").get();
+  const social = (socialInbox || hasSocialJournal) ? SocialConsent.journal(store) : null;
   const rowFor = id => store.db.prepare('SELECT * FROM meta_marketing_credential_renewals WHERE id=?').get(id);
   function owned(request, principal, binding, row) {
     if (row && (row.tenant !== request.tenantRef || row.connection !== request.connectionRef || row.scope !== request.assetRef
@@ -68,8 +71,26 @@ function createMetaMarketingCredentialRenewal({ store, epochs, enrollment, oauth
       const grant = check({ allowTerminal: true }).row;
       return [grant.flow, ...store.db.prepare("SELECT id FROM meta_marketing_credential_renewals WHERE enrollment=? AND state='active'").all(grant.id).map(value => value.id)];
     };
-    const callOAuth = async (family, payload) => oauth.executeRenewal({ request: { ...request, requestId: family === 'begin' ? id : request.requestId,
-      operation: C.OPERATIONS[family], payload }, principal, binding, policy }, { guard: () => check({ allowTerminal: family === 'abort' }), retainedFlowIds, signal });
+    const callOAuth = async (family, payload) => {
+      const record = family !== 'abort' && social?.find(id);
+      let quickChat;
+      if (record) {
+        const grant = check(), accounts = JSON.parse(record.accounts), base = C.bindingFor(binding);
+        const allowed = SocialConsent.targetsFor(socialInbox, grant.assets, base.clinicIds);
+        if (record.enrollment !== grant.row.id || accounts.some(a => !allowed.some(b => SocialConsent.sameTarget(a, b)))) fail('scope_denied');
+        quickChat = {
+          scopes: SocialConsent.scopesFor(base.scopes, accounts),
+          inspect: raw => SocialConsent.inspect(raw, binding, check().credential.metadata, accounts, now()),
+          capture(digest, proof) {
+            if (!proof || proof.subjectId !== check().credential.metadata.subjectId) fail('oauth_credentials_incomplete');
+            social.capture(id, digest, proof);
+          },
+        };
+      }
+      return oauth.executeRenewal({ request: { ...request, requestId: family === 'begin' ? id : request.requestId,
+        operation: C.OPERATIONS[family], payload }, principal, binding, policy },
+      { guard: () => check({ allowTerminal: family === 'abort' }), retainedFlowIds, signal, quickChat });
+    };
     const stage = metadata => store.transaction(() => {
       const original = check(); epochs.expected(original.credential, expected(row));
       const flow = epochs.flowFor(id);
@@ -88,6 +109,12 @@ function createMetaMarketingCredentialRenewal({ store, epochs, enrollment, oauth
       const original = check(); epochs.expected(original.credential, expected(row));
       const flow = epochs.flowFor(id);
       if (flow?.state !== 'staged' || flow.secret_digest !== row.candidate_digest) fail('secret_unavailable');
+      const consent = social?.find(id);
+      if (consent) {
+        const allowed = SocialConsent.targetsFor(socialInbox, original.assets, C.bindingFor(binding).clinicIds);
+        if (consent.enrollment !== original.row.id || consent.candidate_digest !== flow.secret_digest || !consent.metadata ||
+          JSON.parse(consent.accounts).some(a => !allowed.some(b => SocialConsent.sameTarget(a, b)))) fail('scope_denied');
+      }
       await secrets.withCandidate(binding, flow, flow.secret_digest, async borrowed => {
         const current = check(); epochs.expected(current.credential, expected(row));
         candidateMetadata(row, binding, borrowed.metadata, current.credential);
@@ -113,11 +140,17 @@ function createMetaMarketingCredentialRenewal({ store, epochs, enrollment, oauth
           || p.assetSetDigest !== R.assetSetDigest(grant.assets) || p.scopeDigest !== original.scope_digest
           || p.clinicSetDigest !== C.clinicDigest(b) || p.expiresAt <= now() || p.expiresAt > now() + 600000 || p.expiresAt > binding.expiresAt) fail('scope_denied');
         epochs.expected(grant.credential, p);
+        const allowed = SocialConsent.targetsFor(socialInbox, grant.assets, b.clinicIds);
+        if (p.quickChat && (!allowed.length || p.quickChatTargetsDigest !== SocialConsent.targetDigest(allowed))) fail('scope_denied');
+        const previousConsent = social?.active(original.id, grant.credential);
+        const prior = previousConsent ? JSON.parse(previousConsent.accounts) : [];
+        const accounts = p.quickChat ? allowed : allowed.filter(a => prior.some(b => SocialConsent.sameTarget(a, b)));
         const pin = { enrollment: original.id, principal: roles.gateway, tenant: request.tenantRef, connection: request.connectionRef, scope: request.assetRef,
           expected_epoch: p.expectedEpoch, expected_version: p.expectedVersionId, expected_digest: p.expectedCandidateDigest, state_hash: C.hash(p.state),
           scope_digest: p.scopeDigest, clinic_digest: p.clinicSetDigest, asset_digest: p.assetSetDigest, grant_digest: epochs.grantDigest(original), expires_at: p.expiresAt };
         store.transaction(() => {
           const old = owned(request, principal, binding, rowFor(id));
+          social?.begin(id, original.id, accounts, !!old);
           if (old) {
             if (Object.entries(pin).some(([key, value]) => old[key] !== value) || old.state !== 'awaiting') fail('idempotency_conflict');
           } else {
@@ -133,7 +166,8 @@ function createMetaMarketingCredentialRenewal({ store, epochs, enrollment, oauth
         await epochs.protect(original, binding, grant.credential, secrets, signal); check();
         const response = await callOAuth('begin', { state: p.state, scopeDigest: p.scopeDigest, clinicSetDigest: p.clinicSetDigest, expiresAt: p.expiresAt });
         return { requestId: request.requestId, data: { renewalId: id, flowId: id, enrollmentId: original.id,
-          authUrl: response.data.authUrl, expiresAt: response.data.expiresAt }, replayed: response.replayed };
+          authUrl: response.data.authUrl, expiresAt: response.data.expiresAt,
+          ...(!p.quickChat && accounts.length ? {continuedQuickChat:true} : {}) }, replayed: response.replayed };
       }
       check({ allowTerminal: true });
       if (name === 'abort') {

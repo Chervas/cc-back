@@ -5,7 +5,7 @@ const { BrokerStore } = require('../src/store'); const { Broker } = require('../
 const { createMetaMarketingOAuth, createMetaMarketingOAuthOperations } = require('../src/meta-marketing-oauth'); const { createMetaMarketingOAuthSecrets } = require('../src/meta-marketing-oauth-secrets');
 const { createMetaMarketingOAuthHttp } = require('../src/meta-marketing-oauth-http'); const C = require('../src/meta-marketing-oauth-contract'); const { ACCOUNT, SECRET_KEY } = require('../src/google-main');
 const TOKEN = 'FICTITIOUS_META_OAUTH_TOKEN'; const APP = '0123456789abcdef'.repeat(2);
-function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, socialInbox, adsManagement = false, business = false, agency = false, migrationDays = 366, businessPermissionProfile = 'legacy-v1', businessRegistry } = {}) {
+function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, socialInbox, socialConsentOnly = false, adsManagement = false, business = false, agency = false, migrationDays = 366, businessPermissionProfile = 'legacy-v1', businessRegistry } = {}) {
   business=business||agency;
   renewal=renewal||business;leads=leads||business;
   enrollment=enrollment||renewal;
@@ -26,7 +26,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
   const targetBusinessConfig=()=>require('../src/meta-marketing-business-issuer').selected(binding,businessConfig);
   if(discovery)binding.metaMarketingOAuth.scopes.push('pages_show_list');
   if(leads)binding.metaMarketingOAuth.scopes.push('leads_retrieval','pages_manage_ads','pages_manage_metadata');
-  if(socialInbox)binding.metaMarketingOAuth.scopes.push('instagram_manage_messages','instagram_manage_comments','pages_messaging');
+  if(socialInbox&&!socialConsentOnly)binding.metaMarketingOAuth.scopes.push('instagram_manage_messages','instagram_manage_comments','pages_messaging');
   if(adsManagement)binding.metaMarketingOAuth.scopes.push('ads_management');
   const leadAds=leads?{enabled:true,cohort:'meta-marketing-lead-ads-v1',verifyTokenRef:{secretArn:prefix+'qa-lead-verify-abcdef',versionId:'v'.repeat(32)},
     pairs:[{pageAssetRef:'meta-facebook_page:401',adAccountAssetRef:'meta-ad_account:301',recipientClinicId:71}]}:undefined;
@@ -152,7 +152,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
     const engine = createMetaMarketingOAuth({ store: target, policy: chosenPolicy, secrets, http:activeHttp, now, assetDiscovery:discovery,onAbort:id=>enroll?.abortFlow(id) }); engines.push(engine);
     const epochs=renewal?require('../src/meta-marketing-credential-epochs').createMetaMarketingCredentialEpochs({store:target,now}):null;
     if(enrollment){enroll=require('../src/meta-marketing-enrollment').createMetaMarketingEnrollment({store:target,secrets,http:activeHttp,environment:'staging',now,socialInbox,...(businessConfig?{businessConfig}:{}),...(epochs?{credentialEpochs:epochs}:{}),...(leadAds?{leadAds,leadsHttp:{read:()=>assert.fail('FICTITIOUS_LEAD_RPC_NOT_EXPECTED')}}:{})});engines.push(enroll);}
-    if(renewal){renewer=require('../src/meta-marketing-credential-renewal').createMetaMarketingCredentialRenewal({store:target,epochs,enrollment:enroll,oauth:engine,secrets,http:activeHttp,environment:'staging',now});engines.push(renewer);}
+    if(renewal){renewer=require('../src/meta-marketing-credential-renewal').createMetaMarketingCredentialRenewal({store:target,epochs,enrollment:enroll,oauth:engine,secrets,http:activeHttp,socialInbox,environment:'staging',now});engines.push(renewer);}
     if(business){businessOwner=require('../src/meta-marketing-business').createMetaMarketingBusiness({store:target,epochs,enrollment:enroll,oauth:engine,secrets,http:activeHttp,environment:'staging',config:businessConfig,now});maintenance=require('../src/meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({store:target,epochs,enrollment:enroll,secrets,http:activeHttp,businessHttp:require('../src/meta-marketing-business-issuer-http').createIssuerHttp({request:chosenRequest,now}),environment:'staging',config:businessConfig,now});engines.push(businessOwner,maintenance);}
     if(business)target.setConnectionAuthorityResolver(ref=>enroll.connectionAuthority(ref,chosenPolicy));
     return { store: target, engine,enrollment:enroll,renewal:renewer,businessOwner,maintenance,epochs, broker: new Broker({ store: target, policy: chosenPolicy, secrets,policyResolver:enroll,

@@ -50,6 +50,53 @@ test('fresh OAuth renews only the effective credential; immutable grant/assets/c
   for (const secret of [TOKEN, APP, n.payload.state, 'FICTITIOUS_RENEWAL_CODE_']) assert(!stored.includes(secret));
 });
 
+test('QuickChat consent is bound to the active USER candidate, the enrolled Page and the chosen clinic', async t => {
+  const social = require('../src/meta-marketing-social-consent');
+  const accounts = [{ channel: 'instagram', accountId: '501', pageId: '401', clinicId: 71 }];
+  const r = await ready(t, { leads: true, socialInbox: accounts, socialConsentOnly: true });
+  const { f } = r;
+  const base = f.binding.metaMarketingOAuth.scopes;
+  const wanted = social.scopesFor(base, accounts);
+  const j = social.journal(f.current.store);
+  const active = () => f.current.epochs.current(f.current.store.db.prepare('SELECT * FROM meta_marketing_enrollments WHERE id=?').get(r.id), f.binding);
+  const chosen = social.targetsFor(accounts,r.grant.assets,[71]);
+  const explicit = {quickChat:true,quickChatTargetsDigest:social.targetDigest(chosen)};
+  await assert.rejects(r.next({...explicit,quickChatTargetsDigest:'0'.repeat(64)}).begin(),{code:'scope_denied'});
+  const provider = require('../src/meta-marketing-social');
+  const payload = {clinicId:71,channel:'instagram',accountId:'501',kind:'dm'};
+  const query = () => f.execute(provider.status,payload,{assetRef:'meta-facebook_page:401'},'reader');
+  const reads = [];
+  t.mock.method(provider,'execute',async ({metadata}) => {
+    reads.push(metadata);
+    return {available:metadata.scopes.includes('instagram_manage_messages'),reason:metadata.scopes.includes('instagram_manage_messages')?null:'permission:instagram_manage_messages'};
+  });
+  assert.equal((await query()).data.available,false);
+  const first = r.next(explicit);
+  assert.deepEqual(new URL((await first.begin()).data.authUrl).searchParams.get('scope').split(','), wanted);
+  await assert.rejects(first.finish(), { code: 'oauth_credentials_incomplete' });
+  assert.equal(j.active(r.id, active()), null);
+  await first.abort();
+  const valid = r.next(explicit);
+  await valid.begin();
+  f.state.afterGraph = (kind, value) => kind === 'inspect' ? {data:{...value.data,scopes:wanted}} : value;
+  const candidate = (await valid.finish()).data.candidate;
+  assert.equal(j.active(r.id, active()), null);
+  await valid.activate(candidate);
+  assert.equal((await query()).data.available,true);
+  await assert.rejects(f.execute(provider.status,{...payload,clinicId:72},{assetRef:'meta-facebook_page:401'},'reader'),{code:'scope_denied'});
+  assert.equal(reads.length,2);
+  const current = active(), proof=j.active(r.id,current);
+  assert.deepEqual(JSON.parse(proof.accounts), social.targetsFor(accounts,[{kind:'facebook_page',id:'401'}],[71]));
+  assert.deepEqual(JSON.parse(proof.metadata).scopes, wanted);
+  assert.deepEqual(current.metadata.scopes, [...base].sort());
+  assert.equal(j.active(r.id,{...current,digest:'0'.repeat(64)}),null);
+  assert.equal(j.active(randomUUID(),current),null);
+  const next=r.next();
+  assert.deepEqual(new URL((await next.begin()).data.authUrl).searchParams.get('scope').split(','),wanted);
+  await next.abort();
+  assert.equal(j.active(r.id,active()).candidate_digest,current.digest);
+});
+
 test('abort/rejected fresh grant preserves the prior current credential and never revokes its authorization', async t => {
   for (const rejected of [false, true]) {
     const r = await ready(t), before = r.immutable(), n = r.next(); await n.begin();

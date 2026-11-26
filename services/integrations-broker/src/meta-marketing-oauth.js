@@ -165,7 +165,8 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
             });
           }
           if (signal.aborted) fail('provider_timeout');
-          const params = new URLSearchParams({ client_id:b.appId,redirect_uri:b.redirectUri,response_type:'code',...(K.business(binding)?{config_id:b.businessLogin.configId,override_default_response_type:'true'}:{scope:b.scopes.join(',')}),state:p.state });
+          const requestedScopes = renewalContexts.get(id)?.quickChat?.scopes || b.scopes;
+          const params = new URLSearchParams({ client_id:b.appId,redirect_uri:b.redirectUri,response_type:'code',...(K.business(binding)?{config_id:b.businessLogin.configId,override_default_response_type:'true'}:{scope:requestedScopes.join(',')}),state:p.state });
           return { requestId:request.requestId,data:{flowId:id,authUrl:`https://www.facebook.com/${K.graphVersion(binding)}/dialog/oauth?${params}`,expiresAt:p.expiresAt},replayed:!!old };
         }
         let row = checked(request,binding,principal);
@@ -185,7 +186,8 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
         });
         const code=Buffer.from(request.payload.code);
         try {
-          await secrets.withApplication(binding, appSecret => http.withExchangedToken({binding,flowId:id,code,appSecret,signal,authorize:()=>{checked(request,binding,principal);active(request,binding);}}, async (token, raw, exchangeSignal) => {
+          const consent = renewalContexts.get(id)?.quickChat;
+          await secrets.withApplication(binding, appSecret => http.withExchangedToken({binding,flowId:id,code,appSecret,signal,inspectQuickChat:consent?.inspect,authorize:()=>{checked(request,binding,principal);active(request,binding);}}, async (token, raw, exchangeSignal, quickChatProof) => {
             const value=K.metadata(raw,binding); let encoded;
             try {
               row=checked(request,binding,principal); active(request,binding);
@@ -196,6 +198,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
               store.transaction(() => {
                 row=checked(request,binding,principal); active(request,binding);
                 if (row.state !== 'exchanging' || row.expires_at <= now()) fail('oauth_flow_interrupted');
+                if (consent) consent.capture(encoded.digest, quickChatProof);
                 store.db.prepare("UPDATE meta_marketing_oauth_flows SET state='staging',secret_digest=?,credential_metadata=?,updated_at=? WHERE id=?")
                   .run(encoded.digest,JSON.stringify(value),now(),id);
               });

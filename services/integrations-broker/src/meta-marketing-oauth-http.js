@@ -54,7 +54,7 @@ function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 800
     verifyBusiness:input=>require('./meta-marketing-agency-contract').isBinding(input.binding)?require('./meta-marketing-agency-http').createMetaMarketingAgencyHttp({request,timeoutMs,now,pacer,bootstrap:agencyBootstrap}).verifyPages(input):Promise.resolve(true),
     discover: require('./meta-marketing-discovery-http').createMetaMarketingDiscoveryHttp({ request, timeoutMs, now,pacer }),
     readCandidate: require('./meta-marketing-candidate-read-http').createMetaMarketingCandidateReadHttp({ request, timeoutMs, now,pacer }),
-    async withExchangedToken({ binding, flowId, code, appSecret, signal: callerSignal,authorize=()=>{} }, work) {
+    async withExchangedToken({ binding, flowId, code, appSecret, signal: callerSignal,authorize=()=>{},inspectQuickChat }, work) {
       if(require('./meta-marketing-agency-contract').isBinding(binding))return require('./meta-marketing-agency-http').createMetaMarketingAgencyHttp({request,timeoutMs,now,pacer,bootstrap:agencyBootstrap}).withExchangedToken({binding,flowId,code,appSecret,signal:callerSignal||AbortSignal.timeout(25000),authorize},work);
       if(K.business(binding))return require('./meta-marketing-business-http').createMetaMarketingBusinessHttp({request,timeoutMs,now,pacer}).withExchangedToken({binding,code,appSecret,signal:callerSignal||AbortSignal.timeout(25000),authorize},work);
       const b = C.bindingFor(binding);
@@ -78,11 +78,12 @@ function createMetaMarketingOAuthHttp({ request = https.request, timeoutMs = 800
         catch (error) { if (error?.code === 'credential_revoked') fail('secret_unavailable'); throw error; }
         if (signal.aborted) fail('provider_timeout');
         const metadata = C.inspected(inspected, binding, now());
+        const quickChatProof = inspectQuickChat?.(inspected);
         if (long.expiresAt !== null) metadata.expiresAt = Math.min(metadata.expiresAt ?? long.expiresAt, long.expiresAt);
         const assertFresh = () => { if (signal.aborted) fail('provider_timeout');
           if ([metadata.expiresAt, metadata.dataAccessExpiresAt].some(v => v !== null && v <= now())) fail('credential_revoked'); };
         assertFresh(); borrowed = Buffer.from(long.token);
-        const result = await Promise.race([Promise.resolve().then(() => { assertFresh(); return work(borrowed, metadata, signal); }),
+        const result = await Promise.race([Promise.resolve().then(() => { assertFresh(); return work(borrowed, metadata, signal, quickChatProof); }),
           new Promise((resolve, reject) => { abortWork = () => reject(new BrokerError('provider_timeout')); signal.addEventListener('abort', abortWork, { once: true }); if (signal.aborted) abortWork(); })]);
         assertFresh(); const encoded = JSON.stringify(result);
         if (typeof encoded !== 'string' || [ownCode, ownApp, short.token, long.token].some(v => encoded.includes(v.toString('utf8')))) fail('provider_failed');
