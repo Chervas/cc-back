@@ -3,7 +3,7 @@
 const { enqueueMetaLeadNotifications } = require('./metaLeadReception.service');
 const fail = code => { throw Object.assign(Error(code), { code }); };
 function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqueue,
-  receive = enqueueMetaLeadNotifications } = {}) {
+  socialVerify, socialAccept, receive = enqueueMetaLeadNotifications } = {}) {
   const dependencies = () => {
     const factory = require('./metaMarketingLeadWebhookReader.service');
     // Disabled/missing ingress configuration closes public aliases before any
@@ -14,7 +14,7 @@ function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqu
   };
   const errorResponse = (res, error) => {
     const status = error?.code === 'invalid_signature' ? 401
-      : ['invalid_request', 'meta_lead_invalid_notification'].includes(error?.code) ? 400 : 503;
+      : ['invalid_request', 'social_invalid_event', 'meta_lead_invalid_notification'].includes(error?.code) ? 400 : 503;
     res.set('Cache-Control', 'no-store');
     if (status === 503) res.set('Retry-After', '60');
     return res.status(status).json({ success: false, code: status === 401 ? 'meta_lead_signature_invalid'
@@ -44,13 +44,31 @@ function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqu
         }
         let body;
         try { body = JSON.parse(req.rawBody.toString('utf8')); } catch { fail('meta_lead_invalid_notification'); }
-        // This endpoint is not a replacement for a Page/Messenger multiplexer.
-        // Unhandled fields must not be acknowledged and silently discarded.
-        if (body?.object !== 'page' || !Array.isArray(body.entry) || !body.entry.length
-          || body.entry.some(entry => !Array.isArray(entry.changes) || !entry.changes.length
-            || entry.changes.some(change => change.field !== 'leadgen'))) fail('meta_lead_unsupported_notification');
-        const data = dependencies();
-        await receive(body, { ...data, env, enqueue, raw: req.rawBody, signature });
+        const hasSocial=body?.object==='instagram'||(body?.object==='page'&&Array.isArray(body.entry)&&body.entry.some(e=>e.messaging!==undefined));
+        const hasForms=body?.object==='page'&&Array.isArray(body.entry)&&body.entry.some(e=>e.changes?.length);
+        let formFailure;
+        if (hasSocial && hasForms) {
+          try {const data=dependencies();await receive(body,{...data,env,enqueue,raw:req.rawBody,signature});}
+          catch (error) {formFailure=error;}
+        }
+        if (hasSocial) {
+          if (env.META_SOCIAL_INBOX_RECEIVER_ENABLED!=='true') fail('meta_lead_unsupported_notification');
+          const {appId,destinations}=await (socialVerify||require('./socialInboxWebhookVerifier.service').verify)(req.rawBody,signature,env);
+          const accounts=new Map(destinations.map(d=>[d.accountId,d.clinicId]));
+          const entry=body.entry.filter(e=>accounts.has(e?.id));
+          if(entry.length){
+            const namespace=require('../lib/gatewayJobOwnership').resolveEnqueueRuntimeNamespace('gateway',env.META_LEAD_JOB_RUNTIME_NAMESPACE,env);
+            const inbox=socialAccept||require('./socialInboxIntake.service').accept;
+            await inbox({...body,entry},{appId,namespace,accounts});
+          }
+        }
+        if (!hasSocial) {
+          if (body?.object!=='page'||!Array.isArray(body.entry)||!body.entry.length
+            ||body.entry.some(e=>!Array.isArray(e.changes)||!e.changes.length||e.changes.some(c=>c.field!=='leadgen'))) fail('meta_lead_unsupported_notification');
+          const data=dependencies();
+          await receive(body,{...data,env,enqueue,raw:req.rawBody,signature});
+        }
+        if (formFailure) throw formFailure;
         res.set('Cache-Control', 'no-store');
         return res.status(200).json({ success: true });
       } catch (error) { return errorResponse(res, error); }
