@@ -27,6 +27,14 @@ function packetFor(event, payload) {
   const resourceType = { message: 'conversation', conversation: 'conversation', lead: 'lead', appointment: 'appointment', availability: 'calendar', flow_execution: 'execution', notification: 'notification' }[family];
   const resourceId = payload[{ message: 'conversation_id', conversation: 'id', lead: 'lead_id', appointment: 'appointment_id', availability: 'clinic_id', flow_execution: 'execution_id', notification: 'id' }[family]];
   if (!positive(resourceId)) return null;
+  if (event === 'lead:created' && payload.director_alert === true) {
+    if (!positive(payload.clinic_id)) return null;
+    return {
+      event,
+      body: { type: 'created', lead_id: Number(resourceId), clinic_id: Number(payload.clinic_id), director_alert: true },
+      resource: { type: resourceType, id: String(resourceId) },
+    };
+  }
   const body = project(payload, fields[family]);
   if (family === 'message') {
     body.realtime_refresh = true;

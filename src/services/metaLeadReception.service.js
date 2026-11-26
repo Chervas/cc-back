@@ -250,6 +250,7 @@ function contactFields(lead) {
 
 async function persistMetaLead({ models, event, retrieved, now = new Date(), recoveryProof = null, publishCreated = require('./leadCreatedRealtime.service').publishLeadCreated }) {
   const contact = contactFields(retrieved.lead);
+  let alertDirector = true;
   const result = await models.sequelize.transaction(async transaction => {
     const clinic = await resolveMetaLeadClinic({ models, event, ...retrieved, transaction });
     if (Number(clinic.id_clinica) !== Number(retrieved.clinic.id_clinica)) fail('meta_lead_clinic_scope_mismatch');
@@ -270,6 +271,7 @@ async function persistMetaLead({ models, event, retrieved, now = new Date(), rec
       const late = await recovery.forLateProviderReceipt({ event, clinic, retrieved, transaction, recoveredAt: now });
       if (late) historicalRecovery = recovery.forPersistence(late, event, Number(clinic.id_clinica), retrieved.lead.created_time);
     }
+    alertDirector = !historicalRecovery;
     const identity = retrieved.identity && { version: 1, verified_by: 'meta_graph', provider: 'meta_ads',
       clinic_id: Number(clinic.id_clinica), ...retrieved.identity, page_id: event.page_id, form_id: event.form_id };
     const lead = await models.LeadIntake.create({ clinica_id: clinic.id_clinica, grupo_clinica_id: clinic.grupoClinicaId || null,
@@ -294,7 +296,7 @@ async function persistMetaLead({ models, event, retrieved, now = new Date(), rec
     });
     return { lead, duplicate: false };
   });
-  publishCreated(result);
+  publishCreated(result, { alertDirector });
   return result;
 }
 

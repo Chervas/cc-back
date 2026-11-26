@@ -3730,6 +3730,10 @@ exports.ingestLead = asyncHandler(async (req, res) => {
     }
   }
 
+  if (lead && shouldEmitLeadCreated && !dedupeConflict) {
+    void require('../services/leadCreatedRealtime.service').publishLeadDirectorAlert(lead);
+  }
+
   // Ambos contratos del widget dejan audit + JobRequest en el mismo commit,
   // también cuando el lead se deduplica. El fast path consume ese mismo job;
   // nunca materializa por una segunda vía lateral.

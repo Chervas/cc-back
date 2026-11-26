@@ -35,16 +35,23 @@ function createPolicy({ models, canAccess, isAdmin }) {
     return null;
   }
   async function resolve(packet) {
-    const id = Number(packet.resource.id); const type = packet.resource.type; let row, location, features;
+    const id = Number(packet.resource.id); const type = packet.resource.type; let row, location, features, ownerId = null;
     if (type === 'conversation') {
       row = await db().Conversation.findByPk(id, { attributes: ['id', 'clinic_id', 'channel', 'patient_id'], raw: true });
       if (!row) return null;
       features = row.channel === 'internal' ? ['quickchat.read_team'] : row.patient_id ? PATIENT : LEAD;
       location = await scopeFor(row.clinic_id);
     } else if (type === 'lead') {
-      row = await db().LeadIntake.findByPk(id, { attributes: ['id', 'clinica_id', 'grupo_clinica_id'], raw: true });
+      row = await db().LeadIntake.findByPk(id, { attributes: ['id', 'clinica_id', 'grupo_clinica_id', 'archived_at'], raw: true });
       if (!row) return null;
       features = LEAD; location = await scopeFor(row.clinica_id, row.grupo_clinica_id);
+      if (packet.event === 'lead:created' && packet.body?.director_alert === true) {
+        if (row.archived_at || !positive(row.clinica_id) || Number(row.clinica_id) !== Number(packet.body.clinic_id)) return null;
+        const attention = require('./leadPatientAttention.service').createLeadPatientAttentionService(db());
+        const director = await attention.directorFor(row);
+        if (!positive(director?.id)) return null;
+        ownerId = Number(director.id);
+      }
     } else if (type === 'execution') {
       row = await db().FlowExecutionV2.findByPk(id, { attributes: ['id', 'clinic_id', 'group_id'], raw: true });
       if (!row) return null;
@@ -96,7 +103,7 @@ function createPolicy({ models, canAccess, isAdmin }) {
     if (!location) return null;
     // Reject producer scope mismatches. Rooms and payload hints never expand a DB scope.
     if (positive(packet.body?.clinic_id) && !location.clinicIds.includes(Number(packet.body.clinic_id))) return null;
-    return { ...location, features, ownerId: type === 'notification' ? Number(row.userId) : null };
+    return { ...location, features, ownerId: type === 'notification' ? Number(row.userId) : ownerId };
   }
   async function authorize(actorId, descriptor) {
     if (!descriptor || descriptor.ownerId && descriptor.ownerId !== actorId) return false;
