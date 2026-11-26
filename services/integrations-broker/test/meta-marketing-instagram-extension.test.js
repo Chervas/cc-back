@@ -131,9 +131,13 @@ function fixture(t, group = false, automatic = false) {
     },
   });
   t.after(() => { extension.close(); oauth.close(); });
-  const exec = (name, payload, principal = gateway, requestId = randomUUID()) => {
+  const exec = async (name, payload, principal = gateway, requestId = randomUUID()) => {
     const operation = I.OPERATIONS[name];
-    return extension.operations[operation].execute({ request: { ...requestFields, requestId, operation, payload }, principal, binding, policy })
+    const context = { request: { ...requestFields, requestId, operation, payload }, principal, binding, policy };
+    const handler = extension.operations[operation];
+    handler.validate(payload);
+    handler.authorize(context);
+    return handler.execute(context)
       .then(result => result.data);
   };
   function attempt() {

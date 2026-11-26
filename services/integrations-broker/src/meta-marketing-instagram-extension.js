@@ -7,7 +7,7 @@ const I = require('./meta-marketing-instagram-extension-contract');
 const { assetSetDigest, retentionStage } = require('./meta-marketing-credential-renewal-contract');
 
 function createInstagramExtension({ store, settings: configured, autoSlot, environment, oauth, secrets, enrollment, readCandidate, resolveBinding, resolvePolicy, now = Date.now }) {
-  const targets = Array.isArray(configured) ? configured : [configured];
+  const targets = Array.isArray(configured) ? configured : configured ? [configured] : [];
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_instagram_extensions (
     id TEXT PRIMARY KEY, enrollment TEXT NOT NULL, tenant TEXT NOT NULL, connection TEXT NOT NULL, page TEXT NOT NULL,
     base_digest TEXT NOT NULL, candidate_binding_digest TEXT NOT NULL, scope_digest TEXT NOT NULL,
@@ -30,6 +30,13 @@ function createInstagramExtension({ store, settings: configured, autoSlot, envir
   const flow = id => store.db.prepare('SELECT * FROM meta_marketing_oauth_flows WHERE id=?').get(id);
   const tombstone = id => store.db.prepare('SELECT * FROM meta_marketing_instagram_extension_cancellations WHERE id=?').get(id);
 
+  function authorize(context) {
+    const scopeKey = C.bindingFor(context.binding).scopeKey;
+    const enabled = autoSlot || targets.some(target => target.scopeKey === scopeKey);
+    if (!enabled) fail('scope_denied');
+    I.authorize(context, environment, { scopeKey });
+  }
+
   async function execute({ request, binding, principal, policy }) {
     const operation = Object.keys(I.OPERATIONS).find(name => I.OPERATIONS[name] === request.operation);
     if (!operation) fail('operation_denied');
@@ -40,7 +47,7 @@ function createInstagramExtension({ store, settings: configured, autoSlot, envir
     const scopeKey = C.bindingFor(binding).scopeKey;
     const page = operation === 'begin' ? p.parentPageId : row?.page;
     let settings = targets.find(target => target.scopeKey === scopeKey && (!page || target.parentPageId === page));
-    I.authorize({ request, binding, principal }, environment, settings || (autoSlot && {scopeKey}));
+    authorize({ request, binding, principal });
     if (row && (row.tenant !== request.tenantRef || row.connection !== request.connectionRef)) fail('scope_denied');
     if (!row && operation === 'status') {
       const cancelled = tombstone(id);
@@ -278,7 +285,7 @@ function createInstagramExtension({ store, settings: configured, autoSlot, envir
   }
   const operations = Object.fromEntries(Object.entries(I.OPERATIONS).map(([name, operation]) => [operation, {
     provider: C.PROVIDER, control: 'meta_marketing_oauth', validate: I.validators[name],
-    authorize: context => I.authorize(context, environment, settings), execute,
+    authorize, execute,
   }]));
   return { operations, close() { closed = true; for (const controller of running.values()) controller.abort(); } };
 }
