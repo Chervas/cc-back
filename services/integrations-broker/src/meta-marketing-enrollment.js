@@ -1,4 +1,5 @@
 'use strict';
+const Social=require('./meta-marketing-social');
 const K=require('./meta-marketing-credential-shape'),B=require('./meta-marketing-business-issuer');
 const {BrokerError,fail}=require('./errors'),{eventFor}=require('./audit'),{canonical}=require('./canonical');
 const C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),M=require('./meta-marketing-contract'),E=require('./meta-marketing-enrollment-contract');
@@ -6,7 +7,7 @@ const A=require('./meta-marketing-ads-contract'),X=require('./meta-marketing-enr
 const P=require('./meta-marketing-admission-contract');
 const L=require('./meta-marketing-leads-contract'),{timingSafeEqual}=require('node:crypto');
 const V=require('./meta-marketing-enrollment-assets-contract'),R=require('./meta-marketing-credential-renewal-contract');
-function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,leadRecovery,credentialEpochs,businessConfig,enrolledAssetAccess,resolvePolicy,admissionAdsReadScopeKeys}){
+function createMetaMarketingEnrollment({store,secrets,http,environment,socialInbox,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,leadRecovery,credentialEpochs,businessConfig,enrolledAssetAccess,resolvePolicy,admissionAdsReadScopeKeys}){
   if(resolvePolicy!==undefined&&typeof resolvePolicy!=='function')fail('invalid_request');
   if(admissionAdsReadScopeKeys!==undefined&&(!Array.isArray(admissionAdsReadScopeKeys)||admissionAdsReadScopeKeys.length>64
     ||admissionAdsReadScopeKeys.some((key,i)=>!P.scopeKey(key)||i>0&&key<=admissionAdsReadScopeKeys[i-1])
@@ -24,7 +25,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   const leadReceipts=leadAds?require('./meta-marketing-leads-receipts').createMetaMarketingLeadReceipts({store,now}):null;
   const adsOperation=operation=>Object.values(A.OPERATIONS).includes(operation);
   const leadOperation=operation=>Object.values(L.OPERATIONS).includes(operation);
-  const validateRead=(operation,payload)=>leadOperation(operation)?L.validate(operation,payload):adsOperation(operation)?A.validate(operation,payload):M.validate(operation,payload);
+  const validateRead=(operation,payload)=>Social.ops.includes(operation)?Social.checks[operation](payload):leadOperation(operation)?L.validate(operation,payload):adsOperation(operation)?A.validate(operation,payload):M.validate(operation,payload);
   const roles=E.roles(environment),running=new Map();let closed=false,checkingProviderAuthority=false;
   // One owner and one journal with OAuth. Claims/history survive cancellation.
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_enrollments (
@@ -156,7 +157,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     if(!active.assets.some(a=>a.assetRef===page.assetRef&&a.kind==='facebook_page')||accounts.length!==1||accounts[0].assetRef!==account.assetRef)fail('scope_denied');
     return {pageAssetRef:page.assetRef,adAccountAssetRef:account.assetRef,recipientClinicId:null};
   }
-  const receiptIngress=(request,principal)=>Boolean(leadAds&&principal.id===L.ingressPrincipal(environment)&&L.RECEPTION_OPERATIONS.includes(request.operation));
+  const receiptIngress=(request,principal)=>Boolean(leadAds&&principal.id===L.ingressPrincipal(environment)&&(L.RECEPTION_OPERATIONS.includes(request.operation)||request.operation===Social.verify));
   function assetOwner(request,principal,policy){
     const lookup=get('SELECT enrollment FROM meta_marketing_enrollment_assets WHERE asset=?',request.assetRef);
     if(!lookup)fail('scope_denied');const row=rowFor(lookup.enrollment),binding=grantBinding(row,source(policy,request.connectionRef));
@@ -167,11 +168,16 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     const control=request.operation===M.REVOKE&&principal.id===roles.assetControl;
     if(!control){
       const ingress=receiptIngress(request,principal);
-      if(!ingress&&(principal.id!==roles.reader||![...M.OPERATIONS,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS)].includes(request.operation)))fail('scope_denied');
+      if(!ingress&&(principal.id!==roles.reader||![...M.OPERATIONS,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS),...Social.ops].includes(request.operation)))fail('scope_denied');
       if([L.OPERATIONS.recoveryList,L.OPERATIONS.recoveryRead].includes(request.operation)
         &&(!leadRecovery||principal.id!==roles.reader||!leadRecovery.scopeKeys.includes(b.scopeKey)))fail('scope_denied');
       // Metrics are a distinct, explicitly reviewed cohort. Merely adding an
       // operation to source or enrolling an account does not grant these reads.
+      if (Social.ops.includes(request.operation)) {
+        if (request.operation===Social.send && request.payload.attemptId!==request.requestId) fail('invalid_request');
+        if ((request.operation===Social.verify)!==ingress) fail('scope_denied');
+        Social.authorize(socialInbox,asset,request,b.clinicIds);
+      }
       if(adsOperation(request.operation)){
         if(asset.kind!=='ad_account'||!b.scopes.includes('ads_read'))fail('scope_denied');
         if(!admittedAdsRead(binding)){
@@ -192,7 +198,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     return {row,binding,asset,control};
   }
   function resolve(request,principal,policy){
-    if(![...M.OPERATIONS,M.REVOKE,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS)].includes(request.operation))return policy;
+    if(![...M.OPERATIONS,M.REVOKE,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS),...Social.ops].includes(request.operation))return policy;
     assetOwner(request,principal,policy);
     return {...policy,grants:[...policy.grants,{principalId:principal.id,tenantRef:request.tenantRef,
       connectionRef:request.connectionRef,assetRef:request.assetRef,operations:[request.operation]}]};
@@ -271,9 +277,9 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
   }
   async function execute({request,principal,binding,policy}){
     if(closed)fail('connection_blocked');
-    const initialRow=E.OPERATIONS.status===request.operation||E.OPERATIONS.revoke===request.operation?rowFor(request.payload.enrollmentId):[...M.OPERATIONS,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS)].includes(request.operation)?rowFor(get('SELECT enrollment FROM meta_marketing_enrollment_assets WHERE asset=?',request.assetRef)?.enrollment):null;
+    const initialRow=E.OPERATIONS.status===request.operation||E.OPERATIONS.revoke===request.operation?rowFor(request.payload.enrollmentId):[...M.OPERATIONS,...Object.values(A.OPERATIONS),...Object.values(L.OPERATIONS),...Social.ops].includes(request.operation)?rowFor(get('SELECT enrollment FROM meta_marketing_enrollment_assets WHERE asset=?',request.assetRef)?.enrollment):null;
     if(initialRow)binding=grantBinding(initialRow,binding);
-    const name=Object.keys(E.OPERATIONS).find(k=>E.OPERATIONS[k]===request.operation),isRead=M.OPERATIONS.includes(request.operation)||adsOperation(request.operation)||leadOperation(request.operation);
+    const name=Object.keys(E.OPERATIONS).find(k=>E.OPERATIONS[k]===request.operation),isRead=M.OPERATIONS.includes(request.operation)||adsOperation(request.operation)||leadOperation(request.operation)||Social.ops.includes(request.operation);
     if(!name&&!isRead)fail('operation_denied');
     if(name){E.validators[name](request.payload);E.authorize({request,principal,binding},environment);}else validateRead(request.operation,request.payload);
     const authority=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey])),configDigest=K.fingerprint(binding);
@@ -282,10 +288,10 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     // Admitted Ads reads must refresh the binding as often as the control
     // plane. Admission adds no reader grant; resolve below derives it again
     // only from the already-confirmed, live per-account authority.
-    const enrollmentPolicy=()=>resolvePolicy&&(name||adsOperation(request.operation)&&admittedAdsRead(binding)
+    const enrollmentPolicy=()=>resolvePolicy&&(name||Social.ops.includes(request.operation)||adsOperation(request.operation)&&admittedAdsRead(binding)
       ||leadOperation(request.operation)&&admittedLeadRead(binding))
       ?resolvePolicy(request,principal,policy):policy;
-    const auditPolicy=leadOperation(request.operation)&&principal.id===L.ingressPrincipal(environment)
+    const auditPolicy=Social.ops.includes(request.operation)||leadOperation(request.operation)&&principal.id===L.ingressPrincipal(environment)
       ||adsOperation(request.operation)&&admittedAdsRead(binding)||leadOperation(request.operation)&&admittedLeadRead(binding)
       ?resolve(request,principal,enrollmentPolicy()):enrollmentPolicy();
     const event=(action,result,reason)=>eventFor(request,principal,auditPolicy,action,result,reason,now());
@@ -331,7 +337,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
         const v=assetOwner(request,principal,enrollmentPolicy());row=v.row;const active=enrollmentActive(row,binding,{requireActive:true,allowExpired:receiptIngress(request,principal)});task.assets=active.assets;
         // HMAC acceptance/challenge do not borrow a user credential. Their
         // stable grant/receipt generation survives a concurrent token renewal.
-        if(credentialEpochs&&![L.OPERATIONS.receiptAccept,L.OPERATIONS.challenge].includes(request.operation)){
+        if(credentialEpochs&&![Social.verify,L.OPERATIONS.receiptAccept,L.OPERATIONS.challenge].includes(request.operation)){
           if(credentialEpoch!==undefined&&credentialEpoch!==active.credential.epoch)fail('secret_version_changed');credentialEpoch=active.credential.epoch;
         }
         return {...active,assets:task.assets,asset:v.asset,account:v.account};
@@ -354,12 +360,19 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       let context=check();
       if(store.backlog().pending+2>policy.maxBacklog)fail('audit_unavailable');
       const cached=store.reserve(principal.id,request.requestId,commandDigest,event('integration.requested','accepted','meta_enrollment_'+(name||'read')+'_requested'),policy.maxBacklog,now());
-      if(cached){check();if(isRead)fail('outcome_unknown');return {requestId:request.requestId,data:receipt(row,binding),replayed:true};}
+      if(cached){check();if(request.operation===Social.send)return {...cached,replayed:true};if(isRead)fail('outcome_unknown');return {requestId:request.requestId,data:receipt(row,binding),replayed:true};}
       reserved=true;
       // Successful prepare replay uses its immutable selection; activate and every
       // read verify the provider again. No code exchange or Secrets mutation here.
       let assets=context.assets,data;
-      if(leadOperation(request.operation)&&[L.OPERATIONS.receiptAccept,L.OPERATIONS.challenge].includes(request.operation)){
+      if(request.operation===Social.outcome){
+        const digest=C.hash(canonical({operation:Social.send,tenantRef:request.tenantRef,connectionRef:request.connectionRef,assetRef:request.assetRef,payload:request.payload}));
+        const previous=get('SELECT digest,state,result FROM commands WHERE principal=? AND id=?',principal.id,request.payload.attemptId);
+        if(previous && previous.digest!==digest)fail('idempotency_conflict');
+        data=previous?.state==='completed'&&previous.result?JSON.parse(previous.result).data:{available:false,reason:'reconciliation_required'};
+      }else if(request.operation===Social.verify){
+        data=await secrets.withApplication(binding,secret=>({...Social.verifyBody(request.payload,secret),appId:K.bindingFor(binding).appId}),signal);
+      }else if(leadOperation(request.operation)&&[L.OPERATIONS.receiptAccept,L.OPERATIONS.challenge].includes(request.operation)){
         if(request.operation===L.OPERATIONS.receiptAccept){
           const raw=Buffer.from(request.payload.rawBase64,'base64');try{data=await secrets.withApplication(binding,appSecret=>{context=check();return leadReceipts.accept({raw,signature:request.payload.signature,appSecret,
             context:leadContext(row,binding,context.asset,context.account,{allowExpired:receiptIngress(request,principal)}),authorize:check,allowNew:()=>!barrier(row),settledDuplicate});},signal);}finally{raw.fill(0);}
@@ -371,6 +384,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
         data=await secrets.withCandidate(binding,context.flow,context.flow.secret_digest,async borrowed=>{
           context=check();if(JSON.stringify(borrowed.metadata)!==context.flow.credential_metadata)fail('secret_unavailable');
           if(isRead){
+            if(Social.ops.includes(request.operation))return Social.execute({...borrowed,asset:context.asset,operation:request.operation,payload:request.payload,signal,authorize:check});
             if(leadOperation(request.operation))return leadsHttp.read({binding,...borrowed,asset:context.asset,account:context.account,operation:request.operation,payload:request.payload,signal,authorize:check,
               context:{principalId:principal.id,tenantRef:request.tenantRef,policyVersion:policy.version,
                 credentialEpoch:context.credential?.epoch??0,credentialVersionId:context.credential?.versionId??context.flow.id,
@@ -393,7 +407,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
       context=check();if(!isRead)exclusions(assets,enrollmentId);task.assets=assets;
       const response={requestId:request.requestId,data:isRead?data:null,replayed:false};
       store.complete(principal.id,request.requestId,response,event('integration.completed','success','meta_enrollment_'+(name||'read')+'_completed'),{
-        persistResult:!isRead,mutate:()=>{
+        persistResult:!isRead||request.operation===Social.send,mutate:()=>{
           context=check();if(store.backlog().pending>=policy.maxBacklog)fail('audit_unavailable');
           if(isRead)return;
           exclusions(assets,enrollmentId);
@@ -419,6 +433,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,now=()=>D
     authorize:context=>E.authorize(context,environment),...(name==='assets'?{persistResult:false}:{}),execute:name==='assets'?inventory:execute}]));
   for(const op of M.OPERATIONS)operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>M.validate(op,payload),execute};
   if(adsRead||admittedAdsScopes.length)for(const op of Object.values(A.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>A.validate(op,payload),execute};
+  if(socialInbox)for(const op of Social.ops)operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:Social.checks[op],persistResult:false,execute};
   if(leadAds)for(const op of Object.values(L.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>L.validate(op,payload),persistResult:false,execute};
   operations[M.REVOKE]={provider:C.PROVIDER,control:'revoke_asset',validate:payload=>M.validate(M.REVOKE,payload),onRevoked:request=>abortAsset(request.assetRef)};
   return {operations,resolve,abortFlow,

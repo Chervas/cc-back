@@ -2,6 +2,7 @@
   "version": 1,
   "description": "Required security schema for this code release; additive unrelated fields are allowed. Update with reviewed migrations and isolated SQL tests. No business data.",
   "featureGroups": {
+    "quickchat_social": {"required":true,"tables":["Conversations","SocialInboxReceipts"],"migrations":["20261126180000-quickchat-social.js"]},
     "google_first_admission_recovery": {"required":true,"tables":["GoogleOAuthAdmissionRecoveries"],"migrations":["20261123050000-create-google-oauth-admission-recoveries.js"]},
     "google_first_admission": {"enabledWhenAll":{"GOOGLE_OAUTH_FIRST_ADMISSION_INSTALLED":"true"},"tables":["GoogleOAuthAdmissionAttempts","GoogleOAuthAdmissionReturns","GoogleOAuthAdmissionPublications"],"migrations":["20261122223000-create-google-oauth-admission-attempts.js","20261122224500-create-google-oauth-admission-returns.js","20261122225000-create-google-oauth-admission-publications.js"]},
     "meta_marketing_group_destinations": {"enabledWhenAll":{"META_MARKETING_GROUP_DESTINATION_PLAN_ENABLED":"true"},"tables":["MetaMarketingEnrollmentDestinationPlans"],"migrations":["20261122213000-create-meta-marketing-enrollment-destination-plans.js"]},
@@ -92,6 +93,8 @@
   },
   "defaults": {"DEFAULT_CHARACTER_SET_NAME": "utf8mb4", "DEFAULT_COLLATION_NAME": "utf8mb4_0900_ai_ci"},
   "tables": {
+    "Conversations": {"columns": [{"COLUMN_NAME": "channel", "COLUMN_TYPE": "enum('whatsapp','instagram','internal','messenger')", "IS_NULLABLE": "NO"}, {"COLUMN_NAME": "social_account_id", "COLUMN_TYPE": "varchar(30)", "IS_NULLABLE": "YES"}, {"COLUMN_NAME": "social_alias", "COLUMN_TYPE": "varchar(255)", "IS_NULLABLE": "YES"}, {"COLUMN_NAME": "social_account_name", "COLUMN_TYPE": "varchar(255)", "IS_NULLABLE": "YES"}], "indexes": [{"name": "cc_social_thread", "columns": [{"INDEX_NAME": "cc_social_thread", "NON_UNIQUE": 0, "SEQ_IN_INDEX": 1, "COLUMN_NAME": "clinic_id", "SUB_PART": null, "INDEX_TYPE": "BTREE"}, {"INDEX_NAME": "cc_social_thread", "NON_UNIQUE": 0, "SEQ_IN_INDEX": 2, "COLUMN_NAME": "channel", "SUB_PART": null, "INDEX_TYPE": "BTREE"}, {"INDEX_NAME": "cc_social_thread", "NON_UNIQUE": 0, "SEQ_IN_INDEX": 3, "COLUMN_NAME": "social_account_id", "SUB_PART": null, "INDEX_TYPE": "BTREE"}, {"INDEX_NAME": "cc_social_thread", "NON_UNIQUE": 0, "SEQ_IN_INDEX": 4, "COLUMN_NAME": "contact_id", "SUB_PART": null, "INDEX_TYPE": "BTREE"}]}]},
+    "SocialInboxReceipts": {"columns": [{"COLUMN_NAME": "key", "COLUMN_TYPE": "char(64)", "IS_NULLABLE": "NO"}, {"COLUMN_NAME": "state", "COLUMN_TYPE": "varchar(16)", "IS_NULLABLE": "NO"}, {"COLUMN_NAME": "event", "COLUMN_TYPE": "json", "IS_NULLABLE": "NO"}, {"COLUMN_NAME": "route", "COLUMN_TYPE": "json", "IS_NULLABLE": "YES"}, {"COLUMN_NAME": "message_id", "COLUMN_TYPE": "int", "IS_NULLABLE": "YES"}, {"COLUMN_NAME": "reason", "COLUMN_TYPE": "varchar(100)", "IS_NULLABLE": "YES"}, {"COLUMN_NAME": "createdAt", "COLUMN_TYPE": "datetime", "IS_NULLABLE": "NO"}, {"COLUMN_NAME": "updatedAt", "COLUMN_TYPE": "datetime", "IS_NULLABLE": "NO"}], "indexes": [{"name": "PRIMARY", "columns": [{"INDEX_NAME": "PRIMARY", "NON_UNIQUE": 0, "SEQ_IN_INDEX": 1, "COLUMN_NAME": "key", "SUB_PART": null, "INDEX_TYPE": "BTREE"}]}, {"name": "cc_social_state", "columns": [{"INDEX_NAME": "cc_social_state", "NON_UNIQUE": 1, "SEQ_IN_INDEX": 1, "COLUMN_NAME": "state", "SUB_PART": null, "INDEX_TYPE": "BTREE"}, {"INDEX_NAME": "cc_social_state", "NON_UNIQUE": 1, "SEQ_IN_INDEX": 2, "COLUMN_NAME": "updatedAt", "SUB_PART": null, "INDEX_TYPE": "BTREE"}, {"INDEX_NAME": "cc_social_state", "NON_UNIQUE": 1, "SEQ_IN_INDEX": 3, "COLUMN_NAME": "key", "SUB_PART": null, "INDEX_TYPE": "BTREE"}]}]},
     "GoogleOAuthAdmissionRecoveries": {
       "ENGINE": "InnoDB",
       "TABLE_COLLATION": "utf8mb4_bin",
@@ -7134,6 +7137,7 @@
     }
   },
   "migrations": [
+    {"name": "20261126180000-quickchat-social.js", "sha256": "865336339d6d79f85f563507c364f979a4231ea64bd7d8188955e8bfeb4b8a88"},
     {"name":"20261122223000-create-google-oauth-admission-attempts.js","sha256":"46cb281bb26de3f5506ac128f6da6d221ec6dfac8749a260f9d22d12afdad139"},
     {"name":"20261122224500-create-google-oauth-admission-returns.js","sha256":"02e624cc5f79861a37e2cc2bdf570b664cfe49993803dd6a309a7453af48b926"},
     {"name":"20261123050000-create-google-oauth-admission-recoveries.js","sha256":"da9a84fd176daa7203ccddf39dac4236e5ac887a6d27a5f236e04627de752b3b"},

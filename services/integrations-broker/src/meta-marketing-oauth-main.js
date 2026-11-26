@@ -55,6 +55,11 @@ function validateConfig(config) {
   if(businessConfigs(config||{}).length)I.config(businessRegistry(config));
   if (config && Object.hasOwn(config,'adsRead')) {fields.push('adsRead');A.config(config.adsRead);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
   if (config && Object.hasOwn(config,'leadAds')) {fields.push('leadAds');L.config(config.leadAds);if(config.assetEnrollment!==true||config.standby===true)fail('invalid_request');}
+  if (config && Object.hasOwn(config,'socialInbox')) {
+    fields.push('socialInbox');
+    require('./meta-marketing-social').config(config.socialInbox);
+    if (!config.leadAds || !config.assetEnrollment || config.standby) fail('invalid_request');
+  }
   if(config&&Object.hasOwn(config,'leadRecovery')){fields.push('leadRecovery');require('./meta-marketing-lead-recovery-config').config(config.leadRecovery);
     if(config.assetEnrollment!==true||!config.leadAds||config.standby===true)fail('invalid_request');}
   if(config&&Object.hasOwn(config,'enrolledAssetAccess')){fields.push('enrolledAssetAccess');X.config(config.enrolledAssetAccess);if(config.assetEnrollment!==true||config.assetDiscovery!==true||!config.leadAds||config.standby===true)fail('invalid_request');}
@@ -160,7 +165,7 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
       if(config.leadAds)leadsHttp=require('./meta-marketing-leads-http').createMetaMarketingLeadsHttp({pacer,cursor,now:adsNow,...(leadsRequest?{request:leadsRequest}:{})});
     }
     const credentialEpochs=config.credentialRenewal?createMetaMarketingCredentialEpochs({store}):null;
-    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessRegistry(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead}:{}),...(adsHttp?{adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{}),...(config.leadRecovery?{leadRecovery:config.leadRecovery}:{}),...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{}),
+    if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,socialInbox:config.socialInbox,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessRegistry(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead}:{}),...(adsHttp?{adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{}),...(config.leadRecovery?{leadRecovery:config.leadRecovery}:{}),...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{}),
       ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base),
         ...(config.admission.adsReadScopeKeys?{admissionAdsReadScopeKeys:config.admission.adsReadScopeKeys}:{})}:{})});
     if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment});

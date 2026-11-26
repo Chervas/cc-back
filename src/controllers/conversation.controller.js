@@ -951,10 +951,10 @@ function buildPhoneOnlyConversationSearchClause(searchQuery) {
   const phoneValuesSql = phoneCandidates.map((value) => db.sequelize.escape(value)).join(', ');
   const digitValuesSql = digitCandidates.map((value) => db.sequelize.escape(value)).join(', ');
   const localDigitsSql = localDigits ? db.sequelize.escape(localDigits) : null;
-  const conversationPhoneDigits = "(CASE WHEN `Conversation`.`contact_id` LIKE 'bsuid:%' THEN '' ELSE "+sqlPhoneDigitsExpression('`Conversation`.`contact_id`')+" END)";
+  const conversationPhoneDigits = "(CASE WHEN `Conversation`.`channel` <> 'whatsapp' OR `Conversation`.`contact_id` LIKE 'bsuid:%' THEN '' ELSE "+sqlPhoneDigitsExpression('`Conversation`.`contact_id`')+" END)";
   const patientPhoneDigits = sqlPhoneDigitsExpression('`paciente`.`telefono_movil`');
   const leadPhoneDigits = sqlPhoneDigitsExpression('`lead`.`telefono`');
-  const externalConversationSql = '(`Conversation`.`patient_id` IS NULL AND `Conversation`.`lead_id` IS NULL)';
+  const externalConversationSql = "(`Conversation`.`channel`='whatsapp' AND `Conversation`.`patient_id` IS NULL AND `Conversation`.`lead_id` IS NULL)";
 
   const digitMatchSql = (expression) => {
     const clauses = [];
@@ -969,7 +969,7 @@ function buildPhoneOnlyConversationSearchClause(searchQuery) {
 
   const clauses = [
     ...(phoneCandidates.length ? [
-      { contact_id: { [Op.in]: phoneCandidates } },
+      { channel:'whatsapp', contact_id: { [Op.in]: phoneCandidates } },
       { '$paciente.telefono_movil$': { [Op.in]: phoneCandidates } },
       { '$lead.telefono$': { [Op.in]: phoneCandidates } },
     ] : []),
@@ -1097,7 +1097,7 @@ async function buildConversationSearchClause(searchQuery, { clinicIds = [] } = {
     clauses.push({ id: { [Op.in]: externalMatches.conversationIds } });
   }
   if (externalMatches.phones.length) {
-    clauses.push({ contact_id: { [Op.in]: externalMatches.phones } });
+    clauses.push({ channel:'whatsapp', contact_id: { [Op.in]: externalMatches.phones } });
   }
 
   return { [Op.or]: clauses };
@@ -1522,6 +1522,8 @@ exports.listConversations = async (req, res) => {
       if(await contactIdentity.enabled())where[Op.or].push({id:{[Op.in]:db.sequelize.literal(
         "(SELECT COALESCE(wl.canonical_id,wi.conversation_id) FROM WhatsappContactIdentities wi LEFT JOIN WhatsappConversationLinks wl ON wl.conversation_id=wi.conversation_id AND wl.clinic_id=wi.clinic_id WHERE wi.identity_type='bsuid')"
       )}});
+    } else if (filter === 'redes') {
+      where[Op.and].push({channel:{[Op.in]:['instagram','messenger']}});
     } else if (filter === 'pacientes') {
       where.patient_id = { [Op.not]: null };
     } else if (filter === 'equipo') {
@@ -1540,8 +1542,9 @@ exports.listConversations = async (req, res) => {
       const searchClause = await buildConversationSearchClause(searchQuery, {
         clinicIds: scope.clinicIds,
       });
+      const aliasMatch={social_alias:{[Op.like]:'%'+escapeLikePattern(searchQuery)+'%'}};
       const identityMatches=await contactIdentity.searchClause(searchQuery,scope.clinicIds);
-      where[Op.and] = [...(where[Op.and] || []), identityMatches?.length ? {[Op.or]:[searchClause,{id:{[Op.in]:identityMatches}}]} : searchClause];
+      where[Op.and] = [...(where[Op.and] || []), {[Op.or]:[searchClause,aliasMatch,...(identityMatches?.length?[{id:{[Op.in]:identityMatches}}]:[])]}];
     }
 
     const linkedHistory = await contactIdentity.enabled();
@@ -1743,6 +1746,9 @@ exports.getMessages = async (req, res) => {
     const [withRouting] = await attachRoutingReviews([conversationPayload], userId);
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([withRouting], req.userData, CitaPaciente);
     const [identified]=await contactIdentity.enrich([focusedPayload]);
+    if (['instagram','messenger'].includes(conversation.channel)) {
+      identified.social_replies=await require('../services/socialInbox.service').service().availability(conversation,messages);
+    }
     return res.json({ conversation: identified, messages, messages_page: messagesPage });
   } catch (err) {
     if (err.code === 'whatsapp_contact_identity_conflict') return res.status(409).json({ code: err.code, error: err.message });
@@ -2296,7 +2302,7 @@ exports.postMessage = async (req, res) => {
 
     const incidentRestricted = conversation.channel !== 'internal'
       && await require('../services/patientIncidents.service').unwantedRecipient({
-        db, clinicId: conversation.clinic_id, patientId: conversation.patient_id, phone: conversation.contact_id, transaction,
+        db, clinicId: conversation.clinic_id, patientId: conversation.patient_id, phone: conversation.channel === 'whatsapp' ? conversation.contact_id : null, transaction,
       });
     if (incidentRestricted && req.body?.patientIncidentAcknowledged !== true && !useTemplate && message_type !== 'template') {
       await transaction.rollback();
@@ -2304,6 +2310,16 @@ exports.postMessage = async (req, res) => {
         message: 'Este paciente está marcado como No deseado. Confirma que el mensaje es de atención.' });
     }
 
+    if (['instagram','messenger'].includes(conversation.channel)) {
+      const social=require('../services/socialInbox.service');
+      await transaction.rollback();
+      if (message_type!=='text'||useTemplate||req.body.attachment) return res.status(400).json({reason:'invalid_reply'});
+      try {
+        const result=await social.service().reply(conversation,{attemptId:req.body.attemptId,text:message,
+          commentMessageId:req.body.commentMessageId??null,actorId:userId});
+        return res.status(result.available===false?409:200).json(result);
+      } catch { return res.status(503).json({reason:'provider_unavailable'}); }
+    }
     if (message_type === 'image' || req.body.attachment !== undefined) {
       if (req.quickChatImageUpload !== true) {
         await transaction.rollback(); return res.status(400).json({ error: 'quickchat_image_endpoint_required' });

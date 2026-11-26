@@ -29,10 +29,13 @@ module.exports = (sequelize, DataTypes) => {
         onDelete: 'CASCADE',
       },
       channel: {
-        type: DataTypes.ENUM('whatsapp', 'instagram', 'internal'),
+        type: DataTypes.ENUM('whatsapp', 'instagram', 'internal', 'messenger'),
         allowNull: false,
         defaultValue: 'internal',
       },
+      social_account_id: DataTypes.STRING(30),
+      social_account_name: DataTypes.STRING,
+      social_alias: DataTypes.STRING,
       contact_id: {
         type: DataTypes.STRING,
         allowNull: true,

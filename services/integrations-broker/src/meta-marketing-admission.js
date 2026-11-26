@@ -65,6 +65,14 @@ function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date
     // Never rewrite or shadow a static binding, grant, history or fingerprint.
     if(liveBase.connections.some(binding=>binding.connectionRef===request.connectionRef))return liveBase;
     const binding=resolveBinding(request.connectionRef);if(!binding)return liveBase;
+    const social=require('./meta-marketing-social');
+    if(social.ops.includes(request.operation)){
+      const b=C.bindingFor(binding);
+      if(principal.id!==(request.operation===social.verify?leadIngress:leadReader)||!config.enrollmentScopeKeys?.includes(b.scopeKey)
+        ||request.tenantRef!=='clinic:'+b.clinicIds[0])fail('scope_denied');
+      checkBlocks(b.scopeKey,b.clinicIds);checkFootprint(b.scopeKey,b.clinicIds);
+      return {...liveBase,connections:[...liveBase.connections,binding]};
+    }
     if(Object.values(L.OPERATIONS).includes(request.operation)){
       const b=C.bindingFor(binding);
       const readerOperations=[L.OPERATIONS.destinations,L.OPERATIONS.form,L.OPERATIONS.pageStatus,L.OPERATIONS.pageEnable,L.OPERATIONS.receiptRead];

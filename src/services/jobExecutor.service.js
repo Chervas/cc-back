@@ -616,6 +616,12 @@ const JOB_HANDLERS = {
   intake_quickchat_summary_materialize: async (payload = {}) => (
     intakeQuickChatOutboxService.runIntakeQuickChatSummaryMaterializeJob(payload)
   ),
+  quickchat_social_receive: async payload => {
+    const namespace=process.env.JOB_RUNTIME_NAMESPACE||process.env.RUNTIME_NAMESPACE;
+    if (!namespace||namespace==='gateway'||payload?.__runtime_namespace!==namespace||!/^[a-f0-9]{64}$/.test(payload.receiptKey)) throw Error('social_job_scope');
+    await require('./socialInbox.service').service().importReceipt(payload.receiptKey);
+    return { processed:true };
+  },
   campaign_meta_lead_receive: async (payload = {}, jobRequest = null) => (
     require('./metaLeadReception.service').runMetaLeadReceptionJob(payload, jobRequest)
   ),

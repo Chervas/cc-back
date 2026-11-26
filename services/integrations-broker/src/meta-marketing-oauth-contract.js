@@ -4,7 +4,7 @@ const { schema } = require('./contracts'), { fail } = require('./errors');
 const M = require('./meta-marketing-contract');
 // USER consent can require ads_management for paid Lead Ads identifiers. This
 // does not add campaign-write operations or broaden the direct-read contract.
-const SCOPES = Object.freeze([...M.SCOPES, 'ads_management']);
+const SCOPES = Object.freeze([...M.SCOPES, 'ads_management', 'instagram_manage_messages', 'instagram_manage_comments', 'pages_messaging']);
 const PROVIDER = 'meta_marketing_onboarding', COHORT = 'meta-marketing-oauth-v1';
 const OPERATIONS = Object.freeze(Object.fromEntries(['begin', 'finish', 'status', 'abort'].map(k => [k, `meta.marketing.oauth.${k}.v1`])));
 const id = { type: 'string', pattern: '^[1-9][0-9]{0,29}$' };

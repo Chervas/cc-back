@@ -9,13 +9,13 @@ function fixture({access=true,open=true,existing=null,unknown=false}={}){
   const transaction={LOCK:{UPDATE:'UPDATE'},commit:async()=>{calls.commit++;transaction.finished='commit';},rollback:async()=>{calls.rollback++;transaction.finished='rollback';}};
   const metadata=[];
   const context={exports:{},console,Buffer,Op:{and:Symbol('and')},
-    require:name=>{if(name==='../lib/quickchat-image')return image;if(name==='../lib/whatsapp-contact-identity')return require('../../lib/whatsapp-contact-identity');if(name==='../services/temporaryPatientDirection.service')return{observeConversation:async()=>{}};throw Error('Forbidden module '+name);},
+    require:name=>{if(name==='../services/patientIncidents.service')return{unwantedRecipient:async()=>false};if(name==='../lib/quickchat-image')return image;if(name==='../lib/whatsapp-contact-identity')return require('../../lib/whatsapp-contact-identity');if(name==='../services/temporaryPatientDirection.service')return{observeConversation:async()=>{}};throw Error('Forbidden module '+name);},
     db:{sequelize:{transaction:async()=>transaction,where:()=>({}),json:()=>({})}},
     Conversation:{findByPk:async()=>conversation}, Message:{findOne:async()=>existing,create:async values=>{calls.rows.push(structuredClone(values));return{...values,id:77,save:async()=>{}};}},
     getUserClinics:async()=>({clinicIds:[123]}),ensureAccess:()=>access,ensureQuickChatConversationReadAccess:async()=>{},sendQuickChatCategoryForbidden:()=>{},
     findCanonicalWhatsappConversation:async()=>null,getIO:()=>null,
     patientDirectionService:{resolveOutboundPolicy:async()=>({clinicConfig:{authorizedBroker:{},phoneNumberId:'401'}})},isWhatsappRoutingConfigAvailable:()=>true,
-    resolveWhatsappServiceWindow:async()=>({open}),
+    resolveConversationWhatsappRoute:async()=>({clinicConfig:{authorizedBroker:{},phoneNumberId:'401'},serviceWindow:{open}}),
     whatsappService:{normalizePhoneNumber:v=>v,assertRecipientCanReceive:async()=>{},checkOutboundLimit:async()=>({}),sendMessage:async input=>{calls.send++;metadata.push(input);if(unknown)throw Object.assign(Error('unknown'),{code:'whatsapp_delivery_unknown',delivery_unknown:true});return{messages:[{id:'wamid.SYNTHETIC'}],media:{id:'501',mime_type:'image/png',sha256:input.image.sha256}};}},
     queues:{outboundWhatsApp:{add:async()=>{calls.queue++;}}},markBufferedResponseExecutionsForHumanReply:async()=>{},
     completeAutomationStateAfterHumanReplyForConversation:async()=>({}),resolveAutomationAttentionForConversation:async()=>({}),process:{env:{}}};

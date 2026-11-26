@@ -8,7 +8,11 @@ test('API USER slot admits explicit paid Lead scope and preserves USER-only rest
   const make=scopes=>({scope_key:'group:9',connection_ref:'qa:meta-scope',asset_ref:'meta-enroll:group:9',app_id:'101',clinic_ids:'[71,72]',scopes:JSON.stringify([...scopes].sort()),redirect_uri:'https://example.invalid/oauth/meta/marketing/callback',state:'active',expires_at:new Date(Date.now()+600000)});
   const old=['public_profile','ads_read','pages_show_list','pages_read_engagement','leads_retrieval','pages_manage_ads','pages_manage_metadata'];
   assert.deepEqual(API.slot(make(old)).scopeValues,[...old].sort());assert(API.slot(make([...old,'ads_management'])).scopeValues.includes('ads_management'));
-  for(const scope of ['business_management','whatsapp_business_messaging','pages_messaging','instagram_manage_messages']){
+  for(const scope of ['pages_messaging','instagram_manage_messages','instagram_manage_comments']) {
+    assert(API.slot(make([...old,scope])).scopeValues.includes(scope));
+    const f=fixture(t);f.binding.metaMarketingOAuth.scopes.push(scope);assert(C.bindingFor(f.binding).scopes.includes(scope));
+  }
+  for(const scope of ['business_management','whatsapp_business_messaging']){
     assert.throws(()=>API.slot(make([...old,scope])),{code:'meta_oauth_unavailable'});
     const f=fixture(t);f.binding.metaMarketingOAuth.scopes.push(scope);assert.throws(()=>C.bindingFor(f.binding),{code:'invalid_request'});
   }

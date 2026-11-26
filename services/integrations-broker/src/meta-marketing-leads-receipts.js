@@ -20,7 +20,7 @@ function createMetaMarketingLeadReceipts({store,now=Date.now}){
     let value;try{value=JSON.parse(raw.toString('utf8'));}catch{fail('invalid_request');}
     if(!value||value.object!=='page'||!Array.isArray(value.entry)||value.entry.length>1000)fail('invalid_request');
     const events=new Map();let changes=0;
-    for(const entry of value.entry){if(!entry||!M.graphId(entry.id)||!Array.isArray(entry.changes))fail('invalid_request');for(const change of entry.changes){if(++changes>1000)fail('invalid_request');if(change?.field!=='leadgen')fail('scope_denied');if(entry.id!==context.page)continue;
+    for(const entry of value.entry){if(M.graphId(entry?.id)&&Array.isArray(entry.messaging)&&entry.changes===undefined)continue;if(!entry||!M.graphId(entry.id)||!Array.isArray(entry.changes))fail('invalid_request');for(const change of entry.changes){if(++changes>1000)fail('invalid_request');if(change?.field!=='leadgen')fail('scope_denied');if(entry.id!==context.page)continue;
       const v=change.value;if(!v||!M.graphId(v.leadgen_id)||!M.graphId(v.form_id)||v.page_id!=null&&v.page_id!==entry.id||v.ad_id!=null&&!M.graphId(v.ad_id))fail('invalid_request');
       const e=L.event({lead_id:v.leadgen_id,page_id:entry.id,form_id:v.form_id,ad_id:v.ad_id??null}),old=events.get(e.lead_id);if(old&&JSON.stringify(old)!==JSON.stringify(e))fail('idempotency_conflict');events.set(e.lead_id,e);
     }}
