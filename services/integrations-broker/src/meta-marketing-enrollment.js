@@ -384,7 +384,8 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
         data=await secrets.withCandidate(binding,context.flow,context.flow.secret_digest,async borrowed=>{
           context=check();if(JSON.stringify(borrowed.metadata)!==context.flow.credential_metadata)fail('secret_unavailable');
           if(isRead){
-            if(Social.ops.includes(request.operation))return Social.execute({...borrowed,asset:context.asset,operation:request.operation,payload:request.payload,signal,authorize:check});
+            if(Social.ops.includes(request.operation))return Social.execute({...borrowed,asset:context.asset,operation:request.operation,payload:request.payload,signal,authorize:check,
+              context:{principalId:principal.id,tenantRef:request.tenantRef,binding:{connectionRef:request.connectionRef},policyVersion:policy.version,generation:[row.id,context.flow.id,context.credential?.versionId??context.flow.id]}});
             if(leadOperation(request.operation))return leadsHttp.read({binding,...borrowed,asset:context.asset,account:context.account,operation:request.operation,payload:request.payload,signal,authorize:check,
               context:{principalId:principal.id,tenantRef:request.tenantRef,policyVersion:policy.version,
                 credentialEpoch:context.credential?.epoch??0,credentialVersionId:context.credential?.versionId??context.flow.id,

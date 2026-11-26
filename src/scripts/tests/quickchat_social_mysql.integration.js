@@ -273,6 +273,19 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     (await db.SocialInboxReceipt.findByPk(eventKey(events(history)[0]))).event.source,
     'history',
   );
+  const liveAfterImport = dm('501', 'same-event-history-and-live');
+  const pinnedRoute = await resolve(db, { channel: 'instagram', accountId: '501' });
+  await assert.rejects(svc.accept(liveAfterImport, { appId: '123', namespace: 'dev', history: true,
+    expectedRoute: { ...pinnedRoute, clinicId: 999 } }), /route_changed/);
+  const imported = await svc.accept(liveAfterImport, { appId: '123', namespace: 'dev', history: true, expectedRoute: pinnedRoute });
+  assert.equal(imported.queued, 1);
+  await svc.importReceipt(jobs.pop().payload.receiptKey);
+  assert.equal((await svc.accept(liveAfterImport, { appId: '123', namespace: 'dev', history: true })).duplicate, 1);
+  await svc.accept(liveAfterImport, { appId: '123', namespace: 'dev' });
+  await svc.importReceipt(jobs.pop().payload.receiptKey);
+  const merged = await db.Message.findAll({ where: { 'metadata.providerId': 'same-event-history-and-live' } });
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].metadata.social.source, 'new');
   const delayed = dm('501', 'mid-delayed-notification');
   await svc.accept(delayed, { appId: '123', namespace: 'dev' });
   const delayedKey = jobs.pop().payload.receiptKey;

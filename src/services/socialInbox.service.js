@@ -91,7 +91,7 @@ function create({
     await db.sequelize.transaction(async (t) => {
       const route = await resolve(db, e, t);
       const row = await R.findByPk(key, lock(t));
-      if (row.state !== 'pending') return;
+      if (row.state !== 'pending' || row.event.source !== e.source) return;
       if (!sameRoute(route, r) || !access.available)
         return row.update(
           { state: 'review', reason: !sameRoute(route, r) ? 'account_changed' : access.reason },
@@ -110,6 +110,12 @@ function create({
       });
       const c = await C.findByPk(thread.id, lock(t));
       let m;
+      if (row.message_id) {
+        m = await M.findByPk(row.message_id, lock(t));
+        if (!m || m.conversation_id !== c.id || m.metadata?.providerId !== e.eventId)
+          throw Error('social_history_message_changed');
+        await m.update({ metadata: { ...m.metadata, social: { ...e, clinicId: c.clinic_id, conversationId: c.id } } }, { transaction: t });
+      }
       if (e.echo) {
         const attempt = e.attemptId && (await R.findByPk(attemptKey(e.attemptId), lock(t)));
         if (

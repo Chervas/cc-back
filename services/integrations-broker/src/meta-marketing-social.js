@@ -1,15 +1,17 @@
 'use strict';
 
-const { createHmac, timingSafeEqual, createHash } = require('node:crypto');
+const { createHmac } = require('node:crypto');
 const { fail } = require('./errors');
 const { graphId, GRAPH_VERSION } = require('./meta-marketing-contract');
 const { schema } = require('./contracts');
+const { operation: verify, verifyBody } = require('./meta-marketing-social-signature');
 const status = 'meta.marketing.social.status.v1',
-  send = 'meta.marketing.social.send.v1',
-  verify = 'meta.marketing.social.verify.v1';
+  send = 'meta.marketing.social.send.v1';
 const outcome = 'meta.marketing.social.outcome.v1';
 const receive = 'meta.marketing.social.receive.v1';
-const ops = [status, receive, send, verify, outcome];
+const History = require('./meta-marketing-social-history');
+const history = History.operation;
+const ops = [status, receive, send, verify, outcome, history];
 const id = { type: 'string', pattern: '^[1-9][0-9]{0,29}$' };
 const scope = {
   accountId: id,
@@ -23,12 +25,8 @@ const checks = {
     signature: { type: 'string', pattern: '^sha256=[a-f0-9]{64}$' },
   }),
   [status]: schema(scope),
-  [receive]: schema({
-    ...scope,
-    senderId: id,
-    postId: { anyOf: [id, { type: 'null' }] },
-    commentId: { anyOf: [id, { type: 'null' }] },
-  }),
+  [history]: schema({ ...scope, start: { type: 'integer', minimum: 1 }, end: { type: 'integer', minimum: 1 },
+    cursor: { anyOf: [{ type: 'null' }, { type: 'string', pattern: '^[A-Za-z0-9_-]{40,4096}$' }] } }),
   [send]: schema({
     ...scope,
     recipient: id,
@@ -36,6 +34,11 @@ const checks = {
     attemptId: { type: 'string', pattern: '^[a-f0-9-]{36}$' },
   }),
 };
+const receiptFields = { ...scope, senderId: id,
+  postId: { anyOf: [id, { type: 'null' }] }, commentId: { anyOf: [id, { type: 'null' }] } };
+const checkLiveReceipt = schema(receiptFields);
+const checkHistoryReceipt = schema({ ...receiptFields, history: { const: true } });
+checks[receive] = p => p?.history === true ? checkHistoryReceipt(p) : checkLiveReceipt(p);
 checks[outcome] = checks[send];
 function postPreviewUrl(value) {
   if (typeof value !== 'string' || value.length > 4096) return null;
@@ -83,32 +86,21 @@ function authorize(rows, asset, request, clinicIds) {
     fail('scope_denied');
   if (request.operation === send && p.channel !== 'instagram') fail('operation_denied');
 }
-function verifyBody(p, secret) {
-  const raw = Buffer.from(p.rawBase64, 'base64');
-  if (!raw.length || raw.length > 65536 || raw.toString('base64') !== p.rawBase64)
-    fail('invalid_request');
-  if (
-    !timingSafeEqual(
-      createHmac('sha256', secret).update(raw).digest(),
-      Buffer.from(p.signature.slice(7), 'hex'),
-    )
-  )
-    fail('invalid_signature');
-  return { digest: createHash('sha256').update(raw).digest('hex') };
-}
 const permissions = (channel, kind, operation) =>
   channel === 'messenger'
     ? ['pages_manage_metadata', 'pages_read_engagement', 'pages_messaging']
     : [
         'pages_manage_metadata',
         'instagram_basic',
-        ...(kind === 'dm' || operation !== receive ? ['instagram_manage_messages'] : []),
+        ...(kind === 'dm' || ![receive, history].includes(operation) ? ['instagram_manage_messages'] : []),
+        ...(kind === 'dm' && operation === history ? ['pages_messaging'] : []),
         ...(kind === 'comment' ? ['instagram_manage_comments', 'pages_read_engagement'] : []),
       ];
 
 async function execute({
   operation,
   payload: p,
+  context,
   token,
   appSecret,
   metadata,
@@ -214,28 +206,31 @@ async function execute({
   const blocked = (reason) => ({ available: false, reason, accountName });
   if (missing.length) return blocked('permission:' + missing[0]);
   const allowedTasks =
-    operation === receive && p.kind === 'comment'
+    [receive, history].includes(operation) && p.kind === 'comment'
       ? ['MODERATE', 'MANAGE', 'MESSAGING']
       : ['MESSAGING', 'MANAGE'];
   if (!allowedTasks.some((task) => page.tasks?.includes(task))) return blocked('page_messaging_task');
-  const subs = await graph(asset.id + '/subscribed_apps', page.access_token, {
-    fields: 'id,subscribed_fields',
-    limit: '100',
-  });
-  const installed = subs.data?.find((a) => a.id === metadata.appId);
-  if (!installed || (p.channel === 'messenger' && !installed.subscribed_fields?.includes('messages')))
-    return blocked('subscription:messages');
-  const object = p.channel === 'messenger' ? 'page' : 'instagram',
-    field = p.kind === 'comment' ? 'comments' : 'messages';
-  const appSubs = await graph(metadata.appId + '/subscriptions', appToken, {
-    fields: 'object,active,fields',
-  });
-  if (
-    !appSubs.data?.some(
-      (s) => s.object === object && s.active !== false && s.fields?.some((f) => f.name === field),
+  if (operation === history) return History.read({ payload: p, asset, context, appSecret, graph, pageToken: page.access_token });
+  if (!(operation === receive && p.history === true)) {
+    const subs = await graph(asset.id + '/subscribed_apps', page.access_token, {
+      fields: 'id,subscribed_fields',
+      limit: '100',
+    });
+    const installed = subs.data?.find((a) => a.id === metadata.appId);
+    if (!installed || (p.channel === 'messenger' && !installed.subscribed_fields?.includes('messages')))
+      return blocked('subscription:messages');
+    const object = p.channel === 'messenger' ? 'page' : 'instagram',
+      field = p.kind === 'comment' ? 'comments' : 'messages';
+    const appSubs = await graph(metadata.appId + '/subscriptions', appToken, {
+      fields: 'object,active,fields',
+    });
+    if (
+      !appSubs.data?.some(
+        (s) => s.object === object && s.active !== false && s.fields?.some((f) => f.name === field),
+      )
     )
-  )
-    return blocked('subscription:' + field);
+      return blocked('subscription:' + field);
+  }
   if (operation === receive) {
     let alias = null,
       permalink = null,
@@ -314,6 +309,7 @@ async function execute({
 }
 module.exports = {
   status,
+  history,
   receive,
   send,
   verify,
