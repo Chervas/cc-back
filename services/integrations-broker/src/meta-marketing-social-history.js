@@ -58,6 +58,8 @@ async function read({ payload, asset, context, appSecret, graph, pageToken }) {
       ...(edge === 'conversations' ? { platform: channel } : {}),
       ...(node.after ? { after: node.after } : {}),
     });
+    if (result.rejected === 'instagram_inbox_access_disabled')
+      return { available: false, reason: result.rejected };
     if (!Array.isArray(result.data)) fail('provider_failed');
     const entries = [],
       children = [];

@@ -180,6 +180,25 @@ test('Instagram directs DM to IGSID and a single private reply to the comment ID
     assert.deepEqual(f.commands.at(-1).body.recipient, expected);
   }
 });
+test('the Instagram Inbox setting has a distinct reason for history and rejected sends', async () => {
+  const f = fixture();
+  const original = f.ctx.transport;
+  let message = '(#200) The account owner has disabled access to instagram direct messages.';
+  f.ctx.transport = (url, options) => /\/401\/(messages|conversations)$/.test(url.pathname)
+    ? { ok: false, status: 403, json: () => ({ error: { code: 200, message } }) }
+    : original(url, options);
+  f.ctx.context = { generation: 'demo', policyVersion: '1' };
+  const end = Date.now() - 5000;
+  const interval = { cursor: null, start: end - 72 * 3600000, end };
+  const send = () => f.call(social.send, 'instagram', 'dm', {
+    recipient: '771', text: 'Prueba', attemptId: '00000000-0000-4000-8000-000000000111',
+  });
+  assert.equal((await f.call(social.history, 'instagram', 'dm', interval)).reason, 'instagram_inbox_access_disabled');
+  assert.equal((await send()).reason, 'instagram_inbox_access_disabled');
+  message = '(#200) Missing permission.';
+  assert.equal((await send()).reason, 'provider_unauthorized');
+});
+
 test('Messenger requires its own grants and subscription, accepts DM and denies sending', async () => {
   const f = fixture();
   const received = await f.call(social.receive, 'messenger', 'dm', {

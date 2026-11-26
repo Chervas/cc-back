@@ -15,7 +15,7 @@ function postLink(url) {
       ['instagram.com', 'www.instagram.com'].includes(u.host) &&
       !u.username &&
       !u.password &&
-      /^\/(?:p|reel|tv)\/[\w-]+\/?$/.test(u.pathname)
+      /^\/(?:[a-zA-Z0-9._]{1,30}\/)?(?:p|reel|tv)\/[\w-]+\/?$/.test(u.pathname)
     )
       return u.origin + u.pathname;
   } catch {}

@@ -139,7 +139,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
               id,
               from: { id: '771', username: 'persona_ficticia' },
               text: 'INFO',
-              media: { id: '881', permalink: 'https://www.instagram.com/p/FICTICIO/' },
+              media: { id: '881', permalink: 'https://www.instagram.com/clinica.demo/p/FICTICIO/?igsh=test' },
             },
           },
         ],
@@ -199,6 +199,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(thread.patient_id, null);
   assert.equal(thread.last_inbound_at, null);
   const m = await db.Message.findOne();
+  assert.equal(m.metadata.social.permalink, 'https://www.instagram.com/clinica.demo/p/FICTICIO/');
   assert.deepEqual(m.metadata.social.post, post);
   assert.deepEqual((await svc.readEntry(eventKey(events(comment('991'))[0]), 41)).post, post);
   assert.equal(await db.Message.count(), 1);

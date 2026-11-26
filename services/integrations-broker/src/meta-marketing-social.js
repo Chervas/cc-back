@@ -132,6 +132,14 @@ async function execute({
     const raw = await response.json();
     if (raw.error || !response.ok) {
       if (
+        p.channel === 'instagram' && response.status >= 400 && response.status < 500 && raw.error?.code === 200 &&
+        /^(?:\(#200\)\s*)?the account owner has disabled access to instagram direct messages\.?$/i.test(raw.error.message) &&
+        ((operation === history && p.kind === 'dm' && /\/(?:conversations|messages)$/.test(path)) ||
+          (operation === send && body && path === asset.id + '/messages'))
+      ) {
+        return { rejected: 'instagram_inbox_access_disabled' };
+      }
+      if (
         body &&
         response.status >= 400 &&
         response.status < 500 &&
