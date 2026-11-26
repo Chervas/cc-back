@@ -169,8 +169,13 @@ async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
   // The broker path must not turn a disabled local allowlist into unrestricted
   // recipients. Only the existing persisted-account policy can authorize MFA.
   const recipientConfig = config.brokerEnabled ? { ...config, requireRecipientAllowlist: true } : config;
+  const contractMail=['dpd.signature_code','dpd.signed_copy'].includes(message.templateKey);
+  if(contractMail){
+    if(!config.brokerEnabled || !await require('./dpdMailGuard').allowed(message)) throw Object.assign(Error('dpd_recipient_unverified'),{code:'dpd_recipient_unverified',retryable:false});
+    recipientPolicy='contract-signer';
+  }
   try {
-    if (!isMarketing) assertRecipientAllowed(message.to, recipientConfig);
+    if (!isMarketing && !contractMail) assertRecipientAllowed(message.to, recipientConfig);
   } catch (error) {
     if (error.code !== 'email_recipient_not_allowlisted') throw error;
     let authorized;
@@ -210,6 +215,7 @@ async function sendEmail(message, { env = process.env, beforeDispatch } = {}) {
           throw Object.assign(Error('email_delivery_guard_unavailable'), { code: 'email_delivery_guard_unavailable', retryable: true });
         }
       }
+      if(contractMail && !await require('./dpdMailGuard').allowed(snapshot)) throw Object.assign(Error('dpd_recipient_unverified'),{code:'dpd_recipient_unverified',retryable:false});
       if (recipientPolicy === 'registered-account') {
         let authorized;
         try { authorized = await require('./authEmailRecipientPolicy.service').maySend(snapshot, { env }); }

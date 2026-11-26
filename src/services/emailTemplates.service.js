@@ -311,6 +311,18 @@ function renderTemplate(templateKey, context = {}) {
       return renderPasswordReset(context);
     case 'auth.email_verification':
       return renderEmailVerification(context);
+    case 'dpd.signed_copy': {
+      const subject='Clínica Click · Tu copia del contrato firmado';
+      const url=new URL(context.reset_url);
+      if(!['https:','http:'].includes(url.protocol)) throw Error('URL no válida');
+      return {subject,text:'Descarga tu PDF firmado durante las próximas 48 horas: '+url.href,html:'<p>Tu contrato ya está firmado por ambas partes.</p><p><a href="'+escapeHtml(url.href)+'">Descargar el PDF firmado</a></p><p>Enlace privado válido durante 48 horas.</p>'};
+    }
+    case 'dpd.signature_code': {
+      if (!/^\d{6}$/.test(context.verification_code)) throw Error('Código no válido');
+      const subject = 'Clínica Click · Firma de tu contrato';
+      const text = 'Código para firmar el contrato que acabas de revisar: ' + context.verification_code + '. Caduca en diez minutos. Introdúcelo únicamente si deseas firmar.';
+      return {subject,text,html:'<p>'+text+'</p>'};
+    }
     case 'ops.email_test':
       return renderOpsTest(context);
     case 'ops.system_alert':

@@ -85,7 +85,7 @@ function normalizeTemplateContext(context) {
 
 function sealSensitiveTemplateContext(context, { publicId, recipientHash, templateKey }) {
   const sealed = normalizeTemplateContext(context);
-  if (templateKey === 'auth.email_verification') {
+  if (['auth.email_verification','dpd.signature_code'].includes(templateKey)) {
     if (typeof sealed.verification_code !== 'string' || !/^[0-9]{6}$/.test(sealed.verification_code)) {
       throw Object.assign(Error('email_verification_code_invalid'), { code: 'email_verification_code_invalid' });
     }
@@ -93,7 +93,7 @@ function sealSensitiveTemplateContext(context, { publicId, recipientHash, templa
       templateContextEnvelopeContext({ publicId, recipientHash, field: 'verification_code' }));
     delete sealed.verification_code;
   }
-  if (String(templateKey || '').trim() === 'auth.password_reset' && cleanString(sealed.reset_url)) {
+  if (['auth.password_reset','dpd.signed_copy'].includes(templateKey) && cleanString(sealed.reset_url)) {
     sealed.reset_url_envelope = encryptEmailValue(
       sealed.reset_url,
       templateContextEnvelopeContext({ publicId, recipientHash, field: 'reset_url' })
@@ -105,7 +105,7 @@ function sealSensitiveTemplateContext(context, { publicId, recipientHash, templa
 
 function unsealSensitiveTemplateContext(context, message) {
   const unsealed = normalizeTemplateContext(context);
-  if (message.template_key === 'auth.email_verification') {
+  if (['auth.email_verification','dpd.signature_code'].includes(message.template_key)) {
     // A plaintext fallback would expose short codes through outbox inspection.
     if (Object.hasOwn(unsealed, 'verification_code') || !cleanString(unsealed.verification_code_envelope)) {
       throw Object.assign(Error('email_verification_envelope_invalid'), { code: 'email_verification_envelope_invalid' });
@@ -585,7 +585,7 @@ async function runEmailSendJob(payload = {}, jobRequest = null) {
       };
     }
     const providerError = emailProvider.classifyProviderError(error);
-    if (message.template_key === 'auth.email_verification') providerError.message = 'Email verification delivery failed.';
+    if (['auth.email_verification','dpd.signature_code'].includes(message.template_key)) providerError.message = 'Email verification delivery failed.';
     const safeProviderMessage = sanitizeErrorMessage(providerError.message || providerError.code)
       || providerError.code
       || 'email_provider_error';

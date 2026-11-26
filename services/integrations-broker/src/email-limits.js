@@ -18,6 +18,6 @@ module.exports = Object.freeze({
   MAX_PENDING_REQUEST_BYTES: 512 * 1024,
   MAX_TIMEOUT_MS: 30000,
   MAX_PROVIDER_TIMEOUT_MS: 20000,
-  TEMPLATES: Object.freeze(['auth.email_verification', 'auth.password_reset', 'ops.email_test', 'ops.system_alert', 'automation.generic', 'marketing.campaign']),
+  TEMPLATES: Object.freeze(['auth.email_verification', 'auth.password_reset', 'dpd.signature_code','dpd.signed_copy','ops.email_test', 'ops.system_alert', 'automation.generic', 'marketing.campaign']),
   AUTH_TEMPLATES: Object.freeze(['auth.email_verification', 'auth.password_reset']),
 });

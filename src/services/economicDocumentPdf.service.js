@@ -467,6 +467,7 @@ async function fiscalPdf({ publicId, actorId }) {
 
 module.exports = {
   domainError,
+  renderDocumentHtml: render,
   budgetPdf,
   fiscalPdf,
   __testing: { budgetHtml, fiscalHtml, assetUrl, isAllowedAssetUrl },

@@ -16,7 +16,7 @@ const check = new Ajv({ strict: true }).compile({
   outboxId: outbox, attempt: { type: 'integer', minimum: 1, maximum: 100 },
   timeoutMs: { type: 'integer', minimum: 1000, maximum: L.MAX_PROVIDER_TIMEOUT_MS },
   templateKey: { enum: L.TEMPLATES }, stream: { enum: ['transactional', 'automation', 'marketing'] },
-  recipientPolicy: { enum: ['allowlist', 'registered-account', 'marketing-consent'] },
+  recipientPolicy: { enum: ['allowlist', 'registered-account', 'marketing-consent','contract-signer'] },
   to: address, from: header, replyTo: { anyOf: [header, { type: 'null' }] },
   configurationSet: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$' },
   subject: { ...header, maxLength: 160 }, text: content, html: content,
@@ -55,6 +55,8 @@ function authorize({ request, binding }) {
     || p.stream !== 'marketing' && !b.fromAddresses.includes(p.from)
     || p.stream !== 'marketing' && p.replyTo !== null && !b.replyToAddresses.includes(p.replyTo)
     || !b.configurationSets.includes(p.configurationSet)) fail('scope_denied');
+  const dpd=['dpd.signature_code','dpd.signed_copy'].includes(p.templateKey);
+  if(dpd !== (p.recipientPolicy==='contract-signer') || dpd && (p.stream!=='transactional'))fail('scope_denied');
   if (p.recipientPolicy === 'allowlist' && !b.recipientAllowlist.includes(p.to)) fail('scope_denied');
   if (p.recipientPolicy === 'registered-account'
     && (!L.AUTH_TEMPLATES.includes(p.templateKey) || !b.registeredAccountTemplates.includes(p.templateKey))) fail('scope_denied');

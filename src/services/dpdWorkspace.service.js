@@ -58,7 +58,12 @@ function createWorkspace(Entry, now = () => new Date()) {
     async read(admin) {
       const { Op } = require('sequelize');
       const rows = await Entry.findAll({ where: { key: { [Op.ne]: guestKey } }, raw: true, logging: false });
-      return { ...seed, statuses, changes: Object.fromEntries(rows.map(r => [r.key, r])),
+      const changes = Object.fromEntries(rows.filter(r => !r.key.startsWith('field-proveedor_10_')).map(r => [r.key, r]));
+      if (changes.contract) changes.contract.value = changes.contract.value.map(b => ({
+        title: b.title.replace(/Clínica Clic\b/g,'Clínica Click'),
+        text: b.text.replace(/Clínica Clic\b/g,'Clínica Click').replace(/^\| \{\{proveedor_10_1\}\} \| Correo de soporte [^\n]*\n?/gm,''),
+      }));
+      return { ...seed, statuses, changes,
         ...(admin ? { guest: guestInfo(await getGuest()) } : {}) };
     },
     save(key, body, actor) { return write(key, body.revision, cleanValue(key, body.value), actor); },
