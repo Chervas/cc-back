@@ -105,13 +105,13 @@ async function operate(id,action,b,actor){
   const html=sheet(documentHtml(d.snapshot.blocks)+'<section class="proof"><h1>Justificante de firmas</h1><p>Referencia '+id+'<br>SHA-256 del texto aceptado: '+d.snapshot.hash+'</p>'+evidence+'<img class="signature" src="data:image/png;base64,'+bytes.toString('base64')+'"></section>');
   const pdf=await require('./economicDocumentPdf.service').renderDocumentHtml(html);d.pdfHash=hash(pdf);
   const receipt=token();d.receipt={hash:receipt.secret_hash,until:receipt.expires.toISOString()};delete d.image;
-  await update({status:'firmado',pdf});
+
   const base=d.origin;
   if(!base)fail(503,'Falta configurar la dirección pública para la copia por correo.');
   const url=new URL('/dpd/firmar',base);url.hash=new URLSearchParams({id,recibo:receipt.key}).toString();
   const mail=await require('./emailDelivery.service').queueEmail({stream:'transactional',relatedType:'dpd_contract',relatedId:id,templateKey:'dpd.signed_copy',recipientEmail:row.email,dedupeKey:'dpd:copy:'+id,templateContext:{reset_url:url.href},origin:'dpd.signature'},{transaction});
   if(!mail?.emailMessage?.id||['failed','suppressed','cancelled','rejected'].includes(mail.emailMessage.status))fail(503,'No se pudo preparar el envío de la copia. Vuelve a intentarlo.');
-  d.receipt.message=mail.emailMessage.id;await update({});return {...state(row),receiptKey:receipt.key};
+  d.receipt.message=mail.emailMessage.id;await update({status:'firmado',pdf});return {...state(row),receiptKey:receipt.key};
  }
  fail(400,'Operación desconocida.');
  });

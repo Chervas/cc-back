@@ -29,7 +29,7 @@ withIsolatedCampaignMysql(async({sql,models})=>{
  const digest=review.digest;await svc.operate(id,'code',{key,digest});
  await assert.rejects(svc.operate(id,'sign',{key,digest,code:'invalid',accept:true}),e=>e.status===400);
  const signed=await svc.operate(id,'sign',{key,digest,code:otp,accept:true});assert.equal(signed.status,'firmado');
- const row=await models.DpdContract.findByPk(id);assert.equal(row.dossier.pdfHash,svc.hash(row.pdf));assert.match(row.pdf.toString('ascii',0,5),/%PDF/);assert.ok(copy.includes('recibo='));
+ const row=await models.DpdContract.findByPk(id);assert.equal(row.dossier.receipt.message,1);assert.equal(row.dossier.pdfHash,svc.hash(row.pdf));assert.match(row.pdf.toString('ascii',0,5),/%PDF/);assert.ok(copy.includes('recibo='));
  await assert.rejects(svc.operate(id,'sign',{key,digest,code:otp,accept:true}),e=>e.status===409);
  await row.update({expires:new Date(0)});await assert.rejects(svc.operate(id,'view',{key}),e=>e.status===410);
  console.log('OK: contrato de grupo, sustitución, revisión, OTP, PDF, copia, repetición y caducidad');
