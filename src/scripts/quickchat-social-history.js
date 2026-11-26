@@ -141,17 +141,21 @@ async function main(argv) {
       provider: require('../services/socialInboxProvider.service').provider(),
       accept: require('../services/socialInboxIntake.service').accept,
     });
-    console.log(JSON.stringify(report));
-    if (Object.values(report.kinds).some((r) => !r.complete)) process.exitCode = 2;
+    return report;
   } finally {
     await db.sequelize.close();
   }
 }
-if (require.main === module)
-  main(process.argv.slice(2)).catch((e) => {
-    console.error(
-      /^social_history_[a-z_]+$/.test(e.message) ? e.message : 'social_history_unavailable',
-    );
-    process.exitCode = 1;
-  });
+if (require.main === module) {
+  main(process.argv.slice(2)).then(
+    (report) => {
+      const code = Object.values(report.kinds).some((r) => !r.complete) ? 2 : 0;
+      process.stdout.write(JSON.stringify(report) + '\n', () => process.exit(code));
+    },
+    (error) => {
+      const reason = /^social_history_[a-z_]+$/.test(error.message) ? error.message : 'social_history_unavailable';
+      process.stderr.write(reason + '\n', () => process.exit(1));
+    },
+  );
+}
 module.exports = { options, run };
