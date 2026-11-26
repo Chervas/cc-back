@@ -1,9 +1,16 @@
 'use strict';
 const {randomUUID,randomBytes}=require('node:crypto'),{Op}=require('sequelize');
 const C=require('./metaMarketingCredentialRenewal.contract'),{fromRenewal}=require('../../services/platform-audit/src/meta-credential-renewal-event');
+const SocialConsent=require('../../services/integrations-broker/src/meta-marketing-social-consent');
+function configuredQuickChat(){
+  const raw=process.env.META_SOCIAL_INBOX_CONSENT_TARGETS;
+  if(!raw)return [];
+  try{return SocialConsent.config(JSON.parse(raw));}
+  catch{return [];}
+}
 const plain=value=>value?.get?value.get({plain:true}):value;
 const actor=row=>({scopeKey:row.scope_key,actorId:Number(row.actor_user_id),sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at});
-function createService({models,sessions,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_CREDENTIAL_RENEWAL_ENABLED==='true',returnOrigin=C.frontendOrigin(),audit:providedAudit}={}){
+function createService({models,sessions,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_CREDENTIAL_RENEWAL_ENABLED==='true',returnOrigin=C.frontendOrigin(),audit:providedAudit,quickChatTargets=configuredQuickChat}={}){
   const R=models.MetaMarketingCredentialRenewal,P=models.MetaMarketingEffectiveCredential;
   const credentials=C.F.createEffectiveCredentials({models,now}),scope=require('./metaMarketingOAuthScope.service').createScope({models,sessions,now});
   const bindings=require('./metaMarketingEnrollmentBinding.service').createBindings({models,sessions,now});
@@ -12,6 +19,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
   const order=require('./metaMarketingTransactionOrder.service').createOrder({models,authorize:scope.authorize,unavailable:()=>C.fail('meta_renewal_unavailable',503)});
   const lock=transaction=>({transaction,lock:transaction.LOCK.UPDATE,raw:true,logging:false});
   const gate=()=>{if(!enabled())C.fail('meta_renewal_disabled',503);if(!R||!P)C.fail('meta_renewal_unavailable',503);};
+  const socialTargets=row=>SocialConsent.targetsFor(quickChatTargets(),row.selected,row.clinicIds);
   async function record(row,reason,transaction,input){
     const health=await audit.health(now(),{includeUnresolved:false,transaction});
     if(!Number.isSafeInteger(health.pending)||health.pending>=10000||!Number.isFinite(health.oldestAgeSeconds)||health.oldestAgeSeconds>=3600)C.fail('audit_unavailable');
@@ -81,10 +89,18 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     if(!C.exact(response,'requestId,data,replayed')||response.requestId!==requestId||typeof response.replayed!=='boolean'||name==='status'&&response.replayed)C.fail('broker_response_invalid');
     if(name!=='begin')return C.receipt(response.data,row,{allowAbortedVersionDrift:name==='abort'});
     const value=response.data;
-    if(!C.exact(value,'renewalId,flowId,enrollmentId,authUrl,expiresAt')||value.renewalId!==row.renewal_id||value.flowId!==row.renewal_id
+    const continued=!payload.quickChat&&value?.continuedQuickChat===true;
+    if(!C.exact(value,'renewalId,flowId,enrollmentId,authUrl,expiresAt'+(continued?',continuedQuickChat':''))||value.renewalId!==row.renewal_id||value.flowId!==row.renewal_id
       ||value.enrollmentId!==row.enrollment_id||value.expiresAt!==+row.expires_at)C.fail('broker_response_invalid');
     let url;try{url=new URL(value.authUrl);}catch{C.fail('broker_response_invalid');}
-    const expected={client_id:row.app_id,redirect_uri:row.redirect_uri,response_type:'code',scope:row.scopeValues.join(','),state:payload.state};
+    const accounts=socialTargets(row);
+    let permitted=[row.scopeValues];
+    if(payload.quickChat)permitted=[SocialConsent.scopesFor(row.scopeValues,accounts)];
+    if(continued)permitted=['instagram','messenger','both'].map(channel=>accounts.filter(a=>channel==='both'||a.channel===channel))
+      .filter(targets=>targets.length).map(targets=>SocialConsent.scopesFor(row.scopeValues,targets));
+    const returnedScopes=url.searchParams.get('scope');
+    if(!permitted.some(scopes=>scopes.join(',')===returnedScopes)||payload.quickChat&&(!accounts.length||payload.quickChatTargetsDigest!==SocialConsent.targetDigest(accounts)))C.fail('broker_response_invalid');
+    const expected={client_id:row.app_id,redirect_uri:row.redirect_uri,response_type:'code',scope:returnedScopes,state:payload.state};
     if(url.origin!=='https://www.facebook.com'||url.pathname!=='/v24.0/dialog/oauth'||url.username||url.password||url.hash
       ||[...url.searchParams.keys()].sort().join(',')!==Object.keys(expected).sort().join(',')||Object.entries(expected).some(([key,value])=>url.searchParams.get(key)!==value))C.fail('broker_response_invalid');
     return value;
@@ -133,6 +149,9 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     // Closing admission also stops a queued exchange/activation. Abort still
     // returns a previously applied CAS so its receipt can be acknowledged.
     if(!enabled()&&row.state!=='cancel_pending')row=await queueCancel(id,'meta_renewal_disabled');
+    // A live begin owns its bounded OAuth window. A worker or UI poll must not
+    // abort it while the Owner is still preparing the authorization response.
+    if(row.state==='begin_pending'&&+row.expires_at>+now())return row;
     // Status/abort never need an old login to resolve an already-authorized CAS.
     let remote=await call(row,row.state==='cancel_pending'?'abort':'status',{renewalId:id});
     if(remote.activationApplied)return requestTx(id,(row,transaction)=>apply(row,remote,transaction));
@@ -174,15 +193,22 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
         const pending=await R.findOne({...lock(transaction),where:{pending_enrollment_id:context.enrollment.enrollment_id}});
         const latest=plain(pending||await R.findOne({...lock(transaction),where:{enrollment_id:context.enrollment.enrollment_id},order:[['requested_at','DESC'],['renewal_id','DESC']]}));
         const row=latest?C.request(latest):null,value=context.effective;
-        return {enabled:true,canRenew:!row||C.TERMINAL.includes(row.state),credential:{epoch:value.epoch,versionId:value.versionId,expiresAt:value.metadata.expiresAt,
+        const channels=[...new Set(socialTargets(context.enrollment).map(a=>a.channel))].sort();
+        return {enabled:true,canRenew:!row||C.TERMINAL.includes(row.state),...(channels.length?{quickChatChannels:channels}:{}),credential:{epoch:value.epoch,versionId:value.versionId,expiresAt:value.metadata.expiresAt,
           dataAccessExpiresAt:value.metadata.dataAccessExpiresAt,expired:value.expired,requiresRenewal:value.requiresRenewal,healthKind:value.healthKind,lastError:value.lastError},pending:row?pendingDto(row,input):null};
       });
     },
-    async begin(input){
+    async begin(input,options){
+      const requestedQuickChat=options?.quickChat===true;
+      let requestedTargets;
       gate();input=require('./metaMarketingTransactionOrder.service').pinInput(input);const state=randomBytes(32).toString('base64url');
       const row=await order.scope(input,{active:true},async({transaction,enrollment:stored})=>{
         const context=stored?await admission(input,transaction,stored.enrollment_id):null;if(!context)C.fail('meta_renewal_scope_forbidden',403);
         const {enrollment,slot,effective}=context;
+        if(requestedQuickChat){
+          requestedTargets=socialTargets(enrollment);
+          if(!requestedTargets.length)C.fail('meta_renewal_scope_forbidden',403);
+        }
         if(await R.findOne({...lock(transaction),where:{pending_enrollment_id:enrollment.enrollment_id}}))C.fail('meta_renewal_busy',409);
         const date=now(),id=randomUUID(),expires=new Date(Math.min(+date+600000,+input.sessionExpiresAt,+slot.expires_at));
         if(+expires<=+date)C.fail('meta_renewal_session_required',401);
@@ -191,14 +217,15 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
           scopes:slot.scopes,redirect_uri:slot.redirect_uri,return_origin:returnOrigin,scope_digest:enrollment.scope_digest,slot_digest:C.slotDigest(slot),assets:enrollment.assets,
           asset_set_digest:C.F.assetSetDigest(enrollment.selected),expected_epoch:effective.epoch,expected_version_id:effective.versionId,expected_candidate_digest:effective.digest,
           state_hash:C.hash(state),actor_user_id:input.actorId,session_ref:input.sessionRef,session_expires_at:input.sessionExpiresAt,
-          begin_request_id:randomUUID(),finish_request_id:randomUUID(),activate_request_id:randomUUID(),abort_request_id:randomUUID(),requested_at:date,expires_at:expires,updated_at:date,next_attempt_at:date,
+          begin_request_id:randomUUID(),finish_request_id:randomUUID(),activate_request_id:randomUUID(),abort_request_id:randomUUID(),requested_at:date,expires_at:expires,updated_at:date,next_attempt_at:expires,
           state:'begin_pending',candidate_metadata:null,owner_receipt:null,grant_digest:null,code_digest:null,last_error:null,lease_token:null,lease_until:null,completed_at:null,activate_sent_at:null,attempts:0});
         await R.create(value,{transaction,logging:false});await record(value,'meta_credential_renewal_requested',transaction,input);return value;
       });
       try{
         const remote=await call(row,'begin',{renewalId:row.renewal_id,flowId:row.renewal_id,enrollmentId:row.enrollment_id,expectedEpoch:Number(row.expected_epoch),expectedVersionId:row.expected_version_id,
-          expectedCandidateDigest:row.expected_candidate_digest,assetSetDigest:row.asset_set_digest,scopeDigest:row.scope_digest,clinicSetDigest:C.hash(row.clinic_ids),state,expiresAt:+row.expires_at});
-        await requestTx(row.renewal_id,async(currentRow,transaction)=>{await assertRequest(currentRow,transaction,{input,requireOrigin:true});await update(currentRow,{state:'awaiting',next_attempt_at:new Date(+now()+30000)},transaction);},input);
+          expectedCandidateDigest:row.expected_candidate_digest,assetSetDigest:row.asset_set_digest,scopeDigest:row.scope_digest,clinicSetDigest:C.hash(row.clinic_ids),state,expiresAt:+row.expires_at,
+          ...(requestedQuickChat?{quickChat:true,quickChatTargetsDigest:SocialConsent.targetDigest(requestedTargets)}:{})});
+        await requestTx(row.renewal_id,async(currentRow,transaction)=>{await assertRequest(currentRow,transaction,{input,requireOrigin:true});if(currentRow.state!=='begin_pending')C.fail('meta_renewal_scope_changed',409);await update(currentRow,{state:'awaiting',next_attempt_at:new Date(+now()+30000)},transaction);},input);
         return {enabled:true,requestId:row.renewal_id,status:'awaiting',authUrl:remote.authUrl,expiresAt:remote.expiresAt};
       }catch(error){await queueCancel(row.renewal_id,C.safe(error));throw error;}
     },
