@@ -21,15 +21,29 @@ withIsolatedCampaignMysql(async({sql,models})=>{
  const image='data:image/png;base64,'+fs.readFileSync(require.resolve('../../contracts/dpd/logo.png')).toString('base64');
  const issued=await svc.issue({type:'grupo',targetId:10,email:'representante@example.invalid',image,accept:true},1);
  const {id}=issued;
+ const saved=await models.DpdContract.findByPk(id);
+ assert.ok(saved.dossier.signingKeyEnvelope && !saved.dossier.signingKeyEnvelope.includes(issued.key));
+ const before=JSON.stringify(saved.dossier);
+ for(let i=0;i<2;i++) {
+  const copied=await svc.copyLink(id);assert.equal(copied.key,issued.key);assert.equal(+copied.expires,+saved.expires);
+ }
+ assert.equal(JSON.stringify((await saved.reload()).dossier),before);
+ const legacy={...saved.dossier};delete legacy.signingKeyEnvelope;await saved.update({dossier:legacy});
+ await assert.rejects(svc.copyLink(id),e=>e.status===409);
+ assert.equal((await svc.operate(id,'view',{key:issued.key})).status,'pendiente');
  const renewed=await svc.operate(id,'regenerate',{},1);
  await assert.rejects(svc.operate(id,'view',{key:issued.key}),e=>e.status===410);
  const key=renewed.key;
+ assert.equal((await svc.copyLink(id)).key,key);
+ await saved.update({expires:new Date(0)});await assert.rejects(svc.copyLink(id),e=>e.status===410);
+ await saved.update({expires:renewed.expires});
  const view=await svc.operate(id,'view',{key});assert.deepEqual(view.centres,['Uno','Dos']);
  const review=await svc.operate(id,'review',{key,clinica:'Sociedad de prueba',nif:'NIF de prueba',domicilio:'Dirección ficticia',nombre:'Persona de prueba',cargo:'Representante'});
  const digest=review.digest;await svc.operate(id,'code',{key,digest});
  await assert.rejects(svc.operate(id,'sign',{key,digest,code:'invalid',accept:true}),e=>e.status===400);
  const signed=await svc.operate(id,'sign',{key,digest,code:otp,accept:true});assert.equal(signed.status,'firmado');
- const row=await models.DpdContract.findByPk(id);assert.equal(row.dossier.receipt.message,1);assert.equal(row.dossier.pdfHash,svc.hash(row.pdf));assert.match(row.pdf.toString('ascii',0,5),/%PDF/);assert.ok(copy.includes('recibo='));
+ await assert.rejects(svc.copyLink(id),e=>e.status===409);
+ const row=await models.DpdContract.findByPk(id);assert.equal(row.dossier.signingKeyEnvelope,undefined);assert.equal(row.dossier.receipt.message,1);assert.equal(row.dossier.pdfHash,svc.hash(row.pdf));assert.match(row.pdf.toString('ascii',0,5),/%PDF/);assert.ok(copy.includes('recibo='));
  await assert.rejects(svc.operate(id,'sign',{key,digest,code:otp,accept:true}),e=>e.status===409);
  await row.update({expires:new Date(0)});await assert.rejects(svc.operate(id,'view',{key}),e=>e.status===410);
  console.log('OK: contrato de grupo, sustitución, revisión, OTP, PDF, copia, repetición y caducidad');

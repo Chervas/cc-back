@@ -5,6 +5,7 @@ const path = require('node:path');
 const {Op} = require('sequelize');
 const db = require('../../models');
 const {createWorkspace} = require('./dpdWorkspace.service');
+const {encryptEmailValue, decryptEmailValue} = require('../lib/emailSensitiveEnvelope');
 const logo = fs.readFileSync(path.join(__dirname,'../contracts/dpd/logo.png')).toString('base64');
 const hash = x => crypto.createHash('sha256').update(x).digest('hex');
 const hours48 = 48*3600000;
@@ -63,9 +64,23 @@ async function issue(b,actor){
  const supplier={actor,name:w.changes['field-firmante']?.value,at:issued.toISOString(),method:'Aceptación expresa de la oferta desde cuenta administrativa autenticada',declaration:'Autorizo este modelo para el centro o grupo indicado y su cumplimentación por el representante designado.',digest:hash(JSON.stringify({model,target:name,centres,email})),imageHash:hash(signature)};
  const fiscal=target.datos_fiscales_clinica||{};
  const initial={clinica:b.legalName?field(b.legalName,'razón social'):fiscal.denominacion_social||fiscal.razon_social||'',nif:fiscal.cif_nif||fiscal.nif||'',domicilio:fiscal.direccion_facturacion||''};
- const row=await db.DpdContract.create({id,target:name,email,status:'pendiente',issued,expires:t.expires,secret_hash:t.secret_hash,dossier:{clientEmail:b.clientEmail===true,origin:['https://crm.clinicaclick.com','http://localhost:4203'].includes(b.origin)?b.origin:'https://crm.clinicaclick.com',model,target:name,centres,initial,actor,supplier,image:signature.toString('base64'),issuer:w.changes['field-firmante']?.value,history:[{action:'emitido',actor,at:issued.toISOString()}]}},{logging:false});
+ const row=await db.DpdContract.create({id,target:name,email,status:'pendiente',issued,expires:t.expires,secret_hash:t.secret_hash,dossier:{signingKeyEnvelope:encryptEmailValue(t.key, signingKeyContext(id)),clientEmail:b.clientEmail===true,origin:['https://crm.clinicaclick.com','http://localhost:4203'].includes(b.origin)?b.origin:'https://crm.clinicaclick.com',model,target:name,centres,initial,actor,supplier,image:signature.toString('base64'),issuer:w.changes['field-firmante']?.value,history:[{action:'emitido',actor,at:issued.toISOString()}]}},{logging:false});
  return {...state(row),key:t.key};
 }
+function signingKeyContext(id) { return 'dpd:contract-signature-link:'+id; }
+
+async function copyLink(id) {
+ if (!/^[0-9a-f-]{36}$/.test(id)) fail(404,'Contrato no encontrado.');
+ const row = await db.DpdContract.findByPk(id, {attributes:['id','status','secret_hash','expires','dossier'],logging:false});
+ if (!row) fail(404,'Contrato no encontrado.');
+ if (!['pendiente','revisado'].includes(row.status)) fail(409,'Este contrato ya está firmado.');
+ if (+new Date(row.expires) <= Date.now()) fail(410,'El enlace ha caducado. Puedes sustituirlo por uno nuevo.');
+ if (!row.dossier.signingKeyEnvelope) fail(409,'Este enlace se emitió antes de habilitar la copia. El enlace original sigue siendo válido hasta su caducidad.');
+ const key = decryptEmailValue(row.dossier.signingKeyEnvelope, signingKeyContext(row.id));
+ check(row,key);
+ return {id:row.id,key,expires:row.expires};
+}
+
 async function operate(id,action,b,actor){
  if(!/^[0-9a-f-]{36}$/.test(id))fail(404,'Contrato no encontrado.');
  const result=await db.sequelize.transaction(async transaction=>{
@@ -77,7 +92,7 @@ async function operate(id,action,b,actor){
  if(action==='view')return {...state(row),canSetEmail:d.clientEmail&&!d.lastSend,initial:d.snapshot?.inputs||d.initial,centres:d.centres,blocks:d.snapshot?.blocks||[],digest:d.snapshot?.hash,acceptance};
  if(action==='regenerate'){
   if(!['pendiente','revisado'].includes(row.status))fail(409,'El representante ya ha firmado.');
-  const t=token();delete d.code;d.sends=0;d.history.push({action:'renovado',actor,at:new Date().toISOString()});
+  const t=token();d.signingKeyEnvelope=encryptEmailValue(t.key, signingKeyContext(row.id));delete d.code;d.sends=0;d.history.push({action:'renovado',actor,at:new Date().toISOString()});
   await update({secret_hash:t.secret_hash,expires:t.expires});return {...state(row),key:t.key};
  }
  if(action==='review'){
@@ -104,7 +119,7 @@ async function operate(id,action,b,actor){
   const evidence=[['Por la clínica',d.client],['Por La Voz Medios Digitales, S.L.',d.supplier]].map(([label,s])=>'<h2>'+label+'</h2><p>'+[s.name,s.role,s.email,s.at,s.method,s.declaration,'SHA-256: '+s.digest].filter(Boolean).map(esc).join('<br>')+'</p>').join('');
   const html=sheet(documentHtml(d.snapshot.blocks)+'<section class="proof"><h1>Justificante de firmas</h1><p>Referencia '+id+'<br>SHA-256 del texto aceptado: '+d.snapshot.hash+'</p>'+evidence+'<img class="signature" src="data:image/png;base64,'+bytes.toString('base64')+'"></section>');
   const pdf=await require('./economicDocumentPdf.service').renderDocumentHtml(html);d.pdfHash=hash(pdf);
-  const receipt=token();d.receipt={hash:receipt.secret_hash,until:receipt.expires.toISOString()};delete d.image;
+  const receipt=token();d.receipt={hash:receipt.secret_hash,until:receipt.expires.toISOString()};delete d.image;delete d.signingKeyEnvelope;
 
   const base=d.origin;
   if(!base)fail(503,'Falta configurar la dirección pública para la copia por correo.');
@@ -117,4 +132,4 @@ async function operate(id,action,b,actor){
  });
  if(result.invalid)fail(400,'Código incorrecto.');return result;
 }
-module.exports={issue,operate,targets,state,check,hash,documentHtml,sheet,acceptance};
+module.exports={issue,operate,copyLink,targets,state,check,hash,documentHtml,sheet,acceptance};

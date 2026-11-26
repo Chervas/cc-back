@@ -52,6 +52,7 @@ function createRouter(service, auth = require('./auth.middleware')) {
   router.get('/targets',run(async(req,res)=>res.json(await contracts.targets(req.query.q))));
   router.get('/contracts',run(async(req,res)=>res.json((await Contract().findAll({attributes:['id','target','email','status','expires','issued'],order:[['issued','DESC']],logging:false})).map(contracts.state))));
   router.post('/contracts',run(async(req,res)=>res.status(201).json(await contracts.issue(req.body||{},req.userData.userId))));
+  router.post('/contracts/:id/copy-link',run(async(req,res)=>res.json(await contracts.copyLink(req.params.id))));
   for(const action of ['view','regenerate']){
     router.post('/contracts/:id/'+action,run(async(req,res)=>res.json(await contracts.operate(req.params.id,action,req.body||{},req.userData.userId))));
   }
