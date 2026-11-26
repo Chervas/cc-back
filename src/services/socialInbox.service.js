@@ -1,10 +1,10 @@
 'use strict';
 
-const { events, eventKey, digest, mid, postLink } = require('./socialInboxEvents');
+const { eventKey, digest, mid, postLink } = require('./socialInboxEvents');
 const { sameRoute, resolveRoute } = require('./socialInboxRoute.service');
 const { invalidation } = require('../lib/socket-view-invalidation');
 const { graphId } = require('../../services/integrations-broker/src/meta-marketing-contract');
-const JOB = 'quickchat_social_receive';
+const { JOB, createReceiptIntake } = require('./socialInboxIntake.service');
 const isSocial = (c) => ['instagram', 'messenger'].includes(c?.channel);
 const attemptKey = (id) => digest('attempt', id);
 const blocked = (reason) => ({ available: false, reason });
@@ -59,33 +59,7 @@ function create({
     await R.update({ state: 'persisted' }, { where: { key: row.key, state: 'notify' } });
   }
   const threadIdentity = (c) => ({ channel: c.channel, accountId: c.social_account_id });
-  async function accept(body, { appId, namespace, history = false }) {
-    for (const e of events(body, { history }))
-      await db.sequelize.transaction(async (t) => {
-        const key = eventKey(e);
-        const [receipt, fresh] = await R.findOrCreate({
-          where: { key },
-          defaults: { event: e, state: 'pending' },
-          transaction: t,
-        });
-        if (!fresh) return;
-        const route = await resolve(db, e, t);
-        if (!route || route.appId !== appId)
-          return receipt.update({ state: 'review', reason: 'account_unassigned' }, { transaction: t });
-        await receipt.update({ route }, { transaction: t });
-        await enqueue(
-          {
-            type: JOB,
-            priority: 'high',
-            origin: 'meta_social_webhook',
-            maxAttempts: 8,
-            dedupeScope: key,
-            payload: { receiptKey: key, __runtime_namespace: namespace },
-          },
-          { transaction: t, JobRequestModel: db.JobRequest, sequelizeInstance: db.sequelize },
-        );
-      });
-  }
+  const accept = createReceiptIntake({ db, resolve, enqueue });
   async function importReceipt(key) {
     const pending = await R.findByPk(key);
     if (pending?.state === 'notify') return notifyReceipt(pending);

@@ -55,7 +55,7 @@ function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqu
           if (env.META_SOCIAL_INBOX_RECEIVER_ENABLED!=='true') fail('meta_lead_unsupported_notification');
           const appId=await (socialVerify||require('./socialInboxProvider.service').verify)(req.rawBody,signature,env);
           const namespace=require('../lib/gatewayJobOwnership').resolveEnqueueRuntimeNamespace('gateway',env.META_LEAD_JOB_RUNTIME_NAMESPACE,env);
-          const inbox=socialAccept||require('./socialInbox.service').service().accept;
+          const inbox=socialAccept||require('./socialInboxIntake.service').accept;
           await inbox(body,{appId,namespace});
         }
         if (!hasSocial) {
