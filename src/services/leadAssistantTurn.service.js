@@ -2,7 +2,7 @@
 
 const { randomUUID } = require('node:crypto');
 const dialogue = require('./leadAssistantDialogue.service');
-const { catalog, offerSections, isOfferActive } = require('./leadAssistantPromotionImages.service');
+const { catalog, offerSections, isOfferActive, clinicDate } = require('./leadAssistantPromotionImages.service');
 const { assistantCommercialText, genericInfoRequest } = require('./socialLeadInterestClassification.service');
 const { handoff, refreshAfterCommit } = require('./leadAssistantHandoff.service');
 
@@ -16,6 +16,7 @@ function postReference(entry) {
 }
 
 function commercialOffer(fields, entry, priorKey, options) {
+  options = { ...options, today: clinicDate(options) };
   const sections = offerSections(fields.promotions);
   const images = catalog(fields.promotions, options, sections);
   const explicit = String(entry.text || '').toUpperCase();
@@ -78,7 +79,12 @@ function commercialOffer(fields, entry, priorKey, options) {
       .map(([code]) => code);
   }
   const key = matches.length === 1 ? matches[0] : !matches.length && (!postReference(entry) || options?.samePublication) && sections.has(priorKey) ? priorKey : null;
-  if (!key || !isOfferActive(sections.get(key), options)) return null;
+  if (!key) return null;
+  if (!isOfferActive(sections.get(key), options)) {
+    const restriction = require('../lib/lead-assistant-promotion-validity').salesRestriction(sections.get(key).saleTerms,options.today);
+    return options.includeUnavailable && restriction && isOfferActive({ ...sections.get(key), saleTerms:null }, options)
+      ? { key, restriction, images:[] } : null;
+  }
   const stripLinks = (line) =>
     line.replace(/!?\[([^\]\n]*)\]\(https?:\/\/[^\s()]+\)/gi, '$1').replace(/https?:\/\/\S+/gi, '');
   const section = sections.get(key);
@@ -224,7 +230,7 @@ async function attend({
     const priorPost = priorTurn?.postReference || postReference(previous?.metadata?.social);
     const currentPost = postReference(entry);
     const samePublication = !!currentPost && currentPost === priorPost;
-    const offer = commercialOffer(publication.fields, entry, priorTurn?.promotionKey, { timezone, samePublication });
+    const offer = commercialOffer(publication.fields, entry, priorTurn?.promotionKey, { timezone, samePublication, includeUnavailable:true });
     // A new post starts a fresh commercial exchange. A clear switch of offer
     // in a DM likewise invalidates pending selections for the earlier service.
     const changed = (currentPost && !samePublication) ||
@@ -254,7 +260,7 @@ async function attend({
   const human = raw.length <= 1000 && raw ? dialogue.requestedHumanHandoff(raw) : null;
   const userText = assistantCommercialText(raw);
   let appointment;
-  if (entry.type === 'dm' && !human) {
+  if (entry.type === 'dm' && !human && !offer?.restriction) {
     const previousResult = initial.metadata?.assistantBooking;
     if (previousResult?.executionId === execution.id) appointment = { reply: previousResult.reply };
     else {
@@ -349,6 +355,18 @@ async function attend({
     const availability = await social.availability(thread, commentId ? [initial] : []);
     const window = commentId ? availability.comments[commentId] : availability.dm;
     if (!window?.available) return stopped(window?.reason || 'reply_unavailable');
+  }
+  if (offer?.restriction) {
+    const response = require('../lib/lead-assistant-promotion-validity').restrictionReply(offer.restriction,raw);
+    const destination = response.handoff ? await recordHandoff(scope) : null;
+    const receipt = destination?.recorded ? dialogue.formatHandoffReceipt({
+      firstTurn:false, recorded:true, destination:destination.destination,
+    }) : '';
+    const text = dialogue.formatCommercialReply({firstTurn:turn.firstTurn, tone:publication.fields.tone,
+      clinicName:clinic.nombre_clinica, draft:[response.text,receipt].filter(Boolean).join(' ')});
+    const sent = await social.reply(thread,{actorId:execution.created_by,attemptId:saved.attemptId,text,commentMessageId:commentId},
+      {executionId:execution.id,blockReason:destination ? blockReason : stillOwnsTurn});
+    return {outcome:sent.outcome,reason:offer.restriction.reason,attention:response.handoff && !destination?.recorded};
   }
   let answer = turn.answer;
   if (!answer) {

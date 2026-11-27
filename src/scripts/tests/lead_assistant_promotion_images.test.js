@@ -161,3 +161,39 @@ test('published Markdown table keeps each offer, price and image separate from t
   assert.doesNotMatch(offer.description,/30 €|otro.jpg|Glosario/);
   assert.equal(commercialOffer({promotions:text},{text:'INFO'}),null);
 });
+
+test('purchase cutoff, later redemption and scoped month or valuation checks use clinic dates', () => {
+  const {commercialOffer}=require('../../services/leadAssistantTurn.service');
+  const {restrictionReply}=require('../../lib/lead-assistant-promotion-validity');
+  const promotions=[
+    '## Vigencia de las ofertas', 'Ficha revisada el **27/11/2026**.',
+    '- **Semana especial corporal.** La compra promocional termina el **30/11/2026 inclusive**. Los bonos comprados durante la promoción se pueden canjear hasta el **31/12/2026** con valoración previa.',
+    '- **Facial y corporal.** Si la consulta llega otro mes, confirma la tarifa con la clínica.',
+    '- **Cirugía plástica.** La valoración sin coste es para solicitudes anteriores al 30 de noviembre.',
+    '### Facial y corporal', '| Tratamiento | Precio | Imagen |','|---|---|---|',
+    '| Bono Semana especial | 100 € | [Foto](https://media.example.com/bono.png) |',
+    '| Otro facial | 35 € | [Foto](https://media.example.com/otra.png) |',
+    '### Cirugía y diagnóstico','| Tratamiento | Precio | Imagen |','|---|---|---|',
+    '| Visita inicial | Presupuesto tras valoración. Primera visita según vigencia de la promoción. | [Foto](https://media.example.com/visita.png) |',
+    '| Consulta capilar | Diagnóstico gratuito | [Foto](https://media.example.com/capilar.png) |',
+  ].join('\n');
+  const offer = (name,ts,timezone='Europe/Madrid') => commercialOffer({promotions},{text:name},null,
+    {now:new Date(ts),timezone,includeUnavailable:true});
+  const before = '2026-11-30T22:59:59Z', after = '2026-11-30T23:00:00Z';
+  assert.equal(offer('Bono Semana especial',before).images.length,1);
+  assert.equal(offer('Bono Semana especial',after,'Atlantic/Canary').images.length,1);
+  const expired = offer('Bono Semana especial',after);
+  assert.equal(expired.restriction.reason,'sale_ended');
+  assert.equal(expired.images.length,0);
+  assert.equal(expired.description,undefined);
+  const redeem = restrictionReply(expired.restriction,'Ya lo compré. ¿Cómo lo canjeo?');
+  assert.equal(redeem.handoff,false);
+  assert.match(redeem.text,/31\/12\/2026.*valoración previa/);
+  assert.equal(restrictionReply(expired.restriction,'Quiero comprarlo').handoff,true);
+  assert.match(restrictionReply(expired.restriction,'¿Puedo comprarlo para canjearlo el mes próximo?').text,/plazo de compra/);
+  assert.equal(restrictionReply(offer('Bono Semana especial','2027-01-01T12:00:00Z').restriction,'¿Puedo canjearlo?').handoff,true);
+  assert.equal(offer('Otro facial',after).restriction.reason,'verify_price');
+  assert.equal(offer('Visita inicial',before).restriction.reason,'verify_valuation');
+  assert.equal(offer('Consulta capilar',after).images.length,1);
+  assert.deepEqual([...catalog(promotions,{now:new Date(after)}).keys()],['consulta-capilar']);
+});
