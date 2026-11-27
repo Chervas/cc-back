@@ -142,6 +142,9 @@ async function processTurn({
   const affirmative = /^(?:si|ok(?:ay|ey)?|vale|de acuerdo|me viene bien|que si(?: cone)?)$/.test(replyWords);
   const unclear = affirmative || /^(?:so|la que hemos dicho)$/.test(replyWords) ||
     (replyWords.split(' ').length === 1 && offer && require('./leadAssistantConversationPolicy.service').areaIn(raw)?.words.test(cal.normalize(offer.title)));
+  if (pending?.stage === 'contact' && pending.waitingForDetails && unclear) {
+    return { stop:'assistant_waiting_for_contact' };
+  }
   const contactTurn = !postponed && pending?.stage === 'contact' && !wantsHumanInput(raw) &&
     (unclear || readContact(raw));
   const choice =
@@ -430,11 +433,20 @@ async function processTurn({
           : 'Para enviarte el recordatorio de la cita, ¿me indicas ' + need + '?')
       : '¿A qué nombre dejo la cita del ' + cal.display(selected, timezone) + '? ' +
         (needsSurname ? 'Con tu nombre y un apellido es suficiente.' : '');
+    const clarification = contactTurn && unclear;
+    const waitingForDetails = clarification && !!pending.askedForOneDetail;
+    let reply = question.trim();
+    if (waitingForDetails)
+      reply = 'La cita sigue sin confirmar. Cuando quieras retomarla, puedes escribirme ' + missing[0] + '.';
+    else if (clarification)
+      reply = 'La hora que elegiste es el ' + cal.display(selected, timezone) + '. Vamos paso a paso. ¿Me indicas ' + missing[0] + '?';
     return materialize(async () => ({
       ...common,
       stage: 'contact',
+      askedForOneDetail: !!clarification,
+      waitingForDetails: !!waitingForDetails,
       contact,
-      reply: question.trim(),
+      reply,
     }));
   }
   if (!choice?.confirmed)
