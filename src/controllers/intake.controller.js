@@ -6729,10 +6729,20 @@ exports.leadAssistantDraft = asyncHandler(async (req, res) => {
   if (!(await requireLeadAutomationClinicAccess(req, res, clinicId))) return;
   res.set('Cache-Control', 'private, no-store');
   try {
+    if (req.method === 'POST') {
+      if (!req.body || Object.keys(req.body).length !== 1 || !Object.hasOwn(req.body, 'version')) {
+        return res.status(400).json({ error: 'assistant_version_invalid' });
+      }
+      return res.json(await leadAssistantDrafts.approve(clinicId, Number(req.userData.userId), req.body.version));
+    }
     const draft = req.method === 'PUT'
       ? await leadAssistantDrafts.save(clinicId, Number(req.userData.userId), req.body)
       : await leadAssistantDrafts.read(clinicId);
-    return res.json(draft);
+    if (req.method === 'GET') {
+      const { destination } = await require('../services/leadAssistantHandoff.service').recipients(db, clinicId);
+      draft.handoffDestination = destination;
+    }
+    return res.json({ ...draft, approvedVersion: await leadAssistantDrafts.approvedVersion(clinicId) });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.code });
     throw error;

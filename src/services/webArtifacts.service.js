@@ -137,7 +137,7 @@ function clinicProjection(row, businessLocation = null) {
   });
 }
 
-async function resolveBusinessLocationForClinic(clinicRow, { models, transaction } = {}) {
+async function resolveBusinessLocationForClinic(clinicRow, { models, transaction, attributes } = {}) {
   if (!models?.ClinicBusinessLocation?.findAll) return null;
   const clinic = plain(clinicRow) || {};
   const clinicId = positiveInteger(clinic.id_clinica ?? clinic.id);
@@ -188,6 +188,7 @@ async function resolveBusinessLocationForClinic(clinicRow, { models, transaction
   };
   const rows = await models.ClinicBusinessLocation.findAll({
     where,
+    ...(attributes ? { attributes } : {}),
     order: [['id', 'ASC']],
     limit: 2,
     transaction,

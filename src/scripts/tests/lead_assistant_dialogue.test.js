@@ -24,16 +24,17 @@ test('only explicitly projected commercial fields are included in a model reques
 
 test('the channel introduces the assistant once and handoff needs a recorded result', () => {
   const params = { clinicName:'Clínica Nube', draft:'La visita incluye 25 minutos.' };
-  assert.match(formatCommercialReply({ ...params, firstTurn:true }), /asistente de IA de Clínica Nube.*25 minutos.*recepción/);
+  assert.match(formatCommercialReply({ ...params, firstTurn:true }), /asistente de IA de Clínica Nube.*25 minutos.*persona del equipo/);
   assert.equal(formatCommercialReply({ ...params, firstTurn:false }), params.draft);
   assert.throws(() => formatHandoffReceipt({recorded:false}), /not_recorded/);
-  assert.match(formatHandoffReceipt({recorded:true,requestedCallback:true}), /plazo confirmado/);
-  assert(!formatHandoffReceipt({recorded:true,requestedCallback:false}).includes('llamada'));
+  assert.match(formatHandoffReceipt({recorded:true,requestedCallback:true,destination:'reception'}), /plazo confirmado/);
+  assert(!formatHandoffReceipt({recorded:true,requestedCallback:false,destination:'patient_director'}).includes('llamada'));
 });
 
 test('a request for reception or a call hands over before generation, while an explicit refusal does not', () => {
   assert.deepEqual(requestedHumanHandoff('Prefiero hablar con recepción. ¿Me llaman en diez minutos?'), { requestedCallback:true });
   assert.deepEqual(requestedHumanHandoff('¿Me pasas con una persona?'), { requestedCallback:false });
   assert.equal(requestedHumanHandoff('No quiero hablar con recepción.'), null);
+  assert.deepEqual(requestedHumanHandoff('¿Puedo hablar con la directora de pacientes?'), { requestedCallback:false });
   assert.equal(requestedHumanHandoff('¿Hay algo el viernes por la tarde?'), null);
 });

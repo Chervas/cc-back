@@ -15,7 +15,7 @@ function validate(input) {
 
 function create(db) {
   async function clinicFor(clinicId, transaction) {
-    const options = { attributes: ['id_clinica', 'nombre_clinica'], raw: true };
+    const options = { attributes: ['id_clinica', 'nombre_clinica', 'grupoClinicaId'], raw: true };
     if (transaction) Object.assign(options, { transaction, lock: transaction.LOCK.UPDATE });
     const clinic = await db.Clinica.findByPk(clinicId, options);
     if (!clinic) throw fail(404, 'clinic_not_found');
@@ -27,7 +27,10 @@ function create(db) {
   }
   async function read(clinicId) {
     const clinic = await clinicFor(clinicId);
-    return present(clinic, await db.LeadAssistantDraft.findByPk(clinicId));
+    const [draft, openingHours] = await Promise.all([
+      db.LeadAssistantDraft.findByPk(clinicId), require('./leadAssistantHours.service').readOpeningHours(db, clinic),
+    ]);
+    return { ...present(clinic, draft), openingHours };
   }
   async function save(clinicId, actorId, input) {
     validate(input);
@@ -41,6 +44,31 @@ function create(db) {
       return present(clinic, row);
     });
   }
-  return { read, save };
+  async function approve(clinicId, actorId, version) {
+    if (!Number.isSafeInteger(version) || version < 1) throw fail(400, 'assistant_version_invalid');
+    return db.sequelize.transaction(async transaction => {
+      await clinicFor(clinicId, transaction);
+      const draft = await db.LeadAssistantDraft.findByPk(clinicId, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!draft || draft.version !== version) throw fail(409, 'assistant_draft_changed');
+      if (!['tone', 'context', 'guardrails', 'booking'].every(key => draft.fields[key]?.trim())) {
+        throw fail(409, 'assistant_draft_incomplete');
+      }
+      const where = { clinic_id: clinicId, version };
+      const previous = await db.LeadAssistantPublication.findOne({ where, transaction });
+      if (!previous) {
+        await db.LeadAssistantPublication.create({
+          ...where, fields: draft.fields, approved_by: actorId, approved_at: new Date(),
+        }, { transaction });
+      }
+      return { clinicId, version };
+    });
+  }
+  async function approvedVersion(clinicId) {
+    const row = await db.LeadAssistantPublication.findOne({
+      where: { clinic_id: clinicId }, attributes: ['version'], order: [['version', 'DESC']], raw: true,
+    });
+    return row?.version ?? null;
+  }
+  return { read, save, approve, approvedVersion };
 }
 module.exports = { create };
