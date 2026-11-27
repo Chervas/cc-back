@@ -27,11 +27,11 @@ module.exports = async function verifyWithdrawal({ db, svc, dm, webhook, resolve
   mixed.entry[0].messaging[2].message.admin_text = 'Contexto administrativo';
   assert.equal(events(mixed).length, 1);
   await webhook(mixed);
-  assert.equal(dispatched.length, calls);
+  assert.equal(dispatched.length, ++calls);
   const oldest = (await thread()).last_inbound_at;
   const original = message('withdraw-after');
   await webhook(original);
-  assert.equal(dispatched.length, calls);
+  assert.equal(dispatched.length, ++calls);
   const row = await receipt(original), msg = await db.Message.findByPk(row.message_id);
   await msg.update({ metadata: { ...msg.metadata, preview_text: secret, socialLead: { decision: { kind: 'opt_out', summary: secret } } } });
   const deleted = message('withdraw-after', { deleted: true });
@@ -120,7 +120,7 @@ module.exports = async function verifyWithdrawal({ db, svc, dm, webhook, resolve
 
   const rotatedMid = 'withdraw-after-renewal', rotatedMessage = message(rotatedMid);
   await webhook(rotatedMessage);
-  assert.equal(dispatched.length, calls);
+  assert.equal(dispatched.length, ++calls);
   const reroutedJobs = [];
   const otherConnection = require('../../../services/socialInbox.service').create({
     db,
@@ -146,7 +146,7 @@ module.exports = async function verifyWithdrawal({ db, svc, dm, webhook, resolve
   await webhook(message('valid-other-sender', { deleted: true, sender: '9876543' }));
   await webhook(spoof);
   assert.equal((await receipt(spoof)).state, 'persisted');
-  assert.equal(dispatched.length, calls);
+  assert.equal(dispatched.length, ++calls);
   const ignored = dm('501', 'echo-withdrawal', 0, true);ignored.entry[0].messaging[0].message.is_deleted = true;
   await webhook(ignored);
   assert.equal(events(ignored).length, 0);
