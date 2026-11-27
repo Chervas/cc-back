@@ -389,10 +389,10 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       'La comprobación de identidad debe leer únicamente los identificadores administrativos permitidos.'
     );
   await db.LeadAssistantPublication.create({clinic_id:100,version:6,approved_by:1,approved_at:new Date(),
-    fields:{...originalPub.fields,booking:'Servicio de agenda: VAL. Pide correo electrónico para el recordatorio.'}});
+    fields:{...originalPub.fields,booking:'Servicio de agenda: VAL\nPide correo electrónico para el recordatorio.'}});
   const known = await thread('instagram','contacto-qa-con-datos');
   await db.LeadIntake.update({email:'anterior@example.org',telefono:'+34600223995'},{where:{id:known.lead_id}});
-  const oneOption = await enter(known,'Quiero reservar el 2030-01-08 a las 10:00',{version:6});
+  const oneOption = await enter(known,'Quiero reservar el 2030-01-18 a las 09:00',{version:6});
   assert.equal((await oneOption.booking()).slots.length,1);
   assert.match(questions.at(-1),/¿Te viene bien/);
   const acceptedTime = await enter(known,'Sí',{version:6});
