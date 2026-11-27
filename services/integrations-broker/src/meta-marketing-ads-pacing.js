@@ -29,6 +29,10 @@ function createPacing({state,now=Date.now,wait=(ms,signal)=>new Promise((resolve
       try{return await request();}catch(error){if(error?.code==='rate_limited'){const latest=snapshot(scope);state.save(scope,{next_allowed_at:latest.next_allowed_at,pause_until:now()+cooldownMs});error.retryAfterMs=Math.max(1,snapshot(scope).pause_until-now());}throw error;}
     }finally{release();}
   },observe(scope,usagePct){if(!Number.isFinite(usagePct)||usagePct<0||usagePct>100)fail('provider_failed');const v=snapshot(scope);if(usagePct>=90)state.save(scope,{next_allowed_at:v.next_allowed_at,pause_until:now()+cooldownMs});},
+    checkPause(scope) {
+      const remaining = snapshot(scope).pause_until - now();
+      if (remaining > 0) denied(remaining);
+    },
     usage(scope,usagePct){const v=snapshot(scope);return {usagePct,nextAllowedAt:v.next_allowed_at,pauseUntil:v.pause_until};}};
 }
 module.exports={createPacing,sqliteState};

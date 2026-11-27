@@ -5,7 +5,7 @@ const { BrokerStore } = require('../src/store'); const { Broker } = require('../
 const { createMetaMarketingOAuth, createMetaMarketingOAuthOperations } = require('../src/meta-marketing-oauth'); const { createMetaMarketingOAuthSecrets } = require('../src/meta-marketing-oauth-secrets');
 const { createMetaMarketingOAuthHttp } = require('../src/meta-marketing-oauth-http'); const C = require('../src/meta-marketing-oauth-contract'); const { ACCOUNT, SECRET_KEY } = require('../src/google-main');
 const TOKEN = 'FICTITIOUS_META_OAUTH_TOKEN'; const APP = '0123456789abcdef'.repeat(2);
-function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, socialInbox, socialConsentOnly = false, adsManagement = false, business = false, agency = false, migrationDays = 366, businessPermissionProfile = 'legacy-v1', businessRegistry } = {}) {
+function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, socialInbox, assertConsentAvailable, socialConsentOnly = false, adsManagement = false, business = false, agency = false, migrationDays = 366, businessPermissionProfile = 'legacy-v1', businessRegistry } = {}) {
   business=business||agency;
   renewal=renewal||business;leads=leads||business;
   enrollment=enrollment||renewal;
@@ -149,7 +149,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
   function make(target = new BrokerStore(filename), chosenPolicy = policy) {
     stores.push(target);let enroll,renewer,businessOwner,maintenance;
     const activeHttp=agency?createMetaMarketingOAuthHttp({request:chosenRequest,now,agencyBootstrap:require('../src/meta-marketing-agency-bootstrap').createAgencyBootstrap({store:target,policy:chosenPolicy,now})}):http;
-    const engine = createMetaMarketingOAuth({ store: target, policy: chosenPolicy, secrets, http:activeHttp, now, assetDiscovery:discovery,onAbort:id=>enroll?.abortFlow(id) }); engines.push(engine);
+    const engine = createMetaMarketingOAuth({ store: target, policy: chosenPolicy, secrets, http:activeHttp, socialInbox, assertConsentAvailable, now, assetDiscovery:discovery,onAbort:id=>enroll?.abortFlow(id) }); engines.push(engine);
     const epochs=renewal?require('../src/meta-marketing-credential-epochs').createMetaMarketingCredentialEpochs({store:target,now}):null;
     if(enrollment){enroll=require('../src/meta-marketing-enrollment').createMetaMarketingEnrollment({store:target,secrets,http:activeHttp,environment:'staging',now,socialInbox,...(businessConfig?{businessConfig}:{}),...(epochs?{credentialEpochs:epochs}:{}),...(leadAds?{leadAds,leadsHttp:{read:()=>assert.fail('FICTITIOUS_LEAD_RPC_NOT_EXPECTED')}}:{})});engines.push(enroll);}
     if(renewal){renewer=require('../src/meta-marketing-credential-renewal').createMetaMarketingCredentialRenewal({store:target,epochs,enrollment:enroll,oauth:engine,secrets,http:activeHttp,socialInbox,environment:'staging',now});engines.push(renewer);}

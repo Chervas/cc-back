@@ -156,7 +156,8 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     http??=createMetaMarketingOAuthHttp({pacer,agencyBootstrap,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
     const admission=createMetaMarketingAdmission({store,policy:config.policy,settings:config.admission,client:aws.secrets,
       ...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{})});
-    oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id),
+    oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,socialInbox:config.socialInbox,
+      assertConsentAvailable: pacer && (appId => pacer.checkPause('meta-ads-app:' + appId)),assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id),
       ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base)}:{})});
     if(config.adsRead||config.admission?.adsReadScopeKeys?.length||config.leadAds){
       cursorKey=require('node:crypto').randomBytes(32);

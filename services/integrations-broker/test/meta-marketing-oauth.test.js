@@ -117,3 +117,38 @@ test('legacy USER binding projects extra observed ads_management without silentl
   const result=await f.finish(flow);assert(!result.data.candidate.scopes.includes('ads_management'));
   assert.deepEqual(result.data.candidate.scopes,[...f.binding.metaMarketingOAuth.scopes].sort());
 });
+
+test('normal Meta login requests messaging once and preserves marketing when optional permissions are declined', async t => {
+  const account = {clinicId:72, channel:'instagram', accountId:'501', pageId:'401'};
+  for (const granted of [true, false]) {
+    const f = fixture(t, {socialInbox:[account], socialConsentOnly:true});
+    const flow = await f.begin();
+    const requested = new URL(flow.result.data.authUrl).searchParams.get('scope').split(',');
+    assert.ok(requested.includes('instagram_manage_messages'));
+    f.state.afterGraph = (kind, value) => {
+      if (kind === 'inspect' && granted) {
+        value.data.scopes = requested;
+        value.data.granular_scopes.push({scope:'instagram_manage_messages',target_ids:['501','999']});
+      }
+      return value;
+    };
+    const done = await f.finish(flow);
+    assert.equal(done.data.status,'staged');
+    assert.deepEqual(done.data.candidate.scopes,[...f.binding.metaMarketingOAuth.scopes].sort());
+    const journal = require('../src/meta-marketing-social-consent').journal(f.current.store);
+    const credential = {versionId:flow.flowId,digest:done.data.candidate.digest};
+    assert.equal(journal.active('other-enrollment',credential,'different-initial-flow'),null);
+    const receipt = journal.active('enrollment',credential,flow.flowId);
+    assert.deepEqual(JSON.parse(receipt.accounts),[account]);
+    const proof = JSON.parse(receipt.metadata);
+    assert.equal(proof.scopes.includes('instagram_manage_messages'),granted);
+    if (granted) assert.deepEqual(proof.granularScopes.find(x=>x.scope==='instagram_manage_messages').targetIds,['501']);
+  }
+});
+
+test('a known provider cooldown stops before presenting a Meta authorization URL', async t => {
+  const f = fixture(t, {assertConsentAvailable() { throw new (require('../src/errors').BrokerError)('rate_limited'); }});
+  await assert.rejects(f.begin(), {code:'rate_limited'});
+  assert.equal(f.current.store.db.prepare('SELECT count(*) n FROM meta_marketing_oauth_flows').get().n,0);
+  assert.equal(f.state.codes,0);
+});

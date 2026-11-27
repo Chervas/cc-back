@@ -26,6 +26,7 @@ test('Mounted OAuth router preserves authentication and uses the same configured
   const router=loadDiscoverySource('routes/oauth.routes.js',{...unusedMetaSurfaceDependencies(),express,sequelize:require('sequelize'),'../../models':{},'./auth.middleware':auth,
     './metaLeadReceptionSetup.routes':unrequested('/lead-reception'),'./metaMarketingBusiness.routes':unrequested('/business-connection'),
     './metaMarketingCredentialRenewal.routes':unrequested('/credential-renewal'),
+    './metaMarketingInstagramExtension.routes':unrequested('/instagram-extension'),
     '../services/accessSession.service':sessions,'./metaMarketingOAuth.routes':{createRouter:options=>{
       assert.equal(options.returnOrigin,undefined,'Legacy hardcoded frontend origin must not override the configured OAuth origin');
       return require('../../routes/metaMarketingOAuth.routes').createRouter({...options,service});

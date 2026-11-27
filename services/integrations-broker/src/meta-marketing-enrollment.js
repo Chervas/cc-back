@@ -386,7 +386,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
           context=check();if(JSON.stringify(borrowed.metadata)!==context.flow.credential_metadata)fail('secret_unavailable');
           if(isRead){
             if(Social.ops.includes(request.operation)){
-              const proof=socialConsent && socialConsent.active(row.id,context.credential);
+              const proof=socialConsent && socialConsent.active(row.id,context.credential,row.flow);
               const p=request.payload;
               const hasConsent=proof && JSON.parse(proof.accounts).some(a=>a.channel===p.channel&&a.accountId===p.accountId&&a.clinicId===p.clinicId&&a.pageId===context.asset.id);
               const metadata=hasConsent?JSON.parse(proof.metadata):borrowed.metadata;

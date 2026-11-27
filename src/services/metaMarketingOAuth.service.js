@@ -80,7 +80,11 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     if(name==='begin'){
       if(!C.exact(v,'flowId,authUrl,expiresAt')||v.flowId!==row.flow_id||v.expiresAt!==+row.expires_at||typeof v.authUrl!=='string'||v.authUrl.length>8192)C.fail('broker_response_invalid');
       let url;try{url=new URL(v.authUrl);}catch{C.fail('broker_response_invalid');}
-      const expected={client_id:row.app_id,redirect_uri:row.redirect_uri,response_type:'code',scope:JSON.parse(row.scopes).join(','),state:payload.state};
+      const baseScopes=JSON.parse(row.scopes);
+      const requested=url.searchParams.get('scope');
+      const permitted=require('./metaMarketingMessagingScopes').normalConsentScopes(baseScopes,JSON.parse(row.clinic_ids));
+      if(requested!==baseScopes.join(',') && requested!==permitted.join(','))C.fail('broker_response_invalid');
+      const expected={client_id:row.app_id,redirect_uri:row.redirect_uri,response_type:'code',scope:requested,state:payload.state};
       if(url.origin!=='https://www.facebook.com'||url.pathname!=='/v24.0/dialog/oauth'||url.username||url.password||url.hash
         ||[...url.searchParams.keys()].sort().join(',')!==Object.keys(expected).sort().join(',')||Object.entries(expected).some(([k,x])=>url.searchParams.get(k)!==x))C.fail('broker_response_invalid');
     }else{

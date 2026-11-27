@@ -2,7 +2,8 @@
 const K=require('./meta-marketing-credential-shape');
 const { BrokerError, fail } = require('./errors'), { eventFor } = require('./audit');
 const C = require('./meta-marketing-oauth-contract'), D = require('./meta-marketing-discovery-contract'), { GRAPH_VERSION } = require('./meta-marketing-contract');
-function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Date.now(), assetDiscovery = false, onAbort = () => {}, resolvePolicy }) {
+const SocialConsent = require('./meta-marketing-social-consent');
+function createMetaMarketingOAuth({ store, policy, secrets, http, socialInbox, assertConsentAvailable, now = () => Date.now(), assetDiscovery = false, onAbort = () => {}, resolvePolicy }) {
   if(resolvePolicy!==undefined&&typeof resolvePolicy!=='function')fail('invalid_request');
   // This table is installed only by the explicit onboarding runtime, not the generic broker.
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_oauth_flows (
@@ -17,6 +18,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
   }
   // A process may die after Meta consumed the one-use code. Keep its uncertain
   // state until an explicit abort; never replay it or mutate another owner's work at startup.
+  const social = socialInbox?.length ? SocialConsent.journal(store) : null;
   const running = new Map(), renewalContexts = new Map(); let closed = false;
   const rowFor = id => store.db.prepare('SELECT * FROM meta_marketing_oauth_flows WHERE id=?').get(id);
   function checked(request, binding, principal) {
@@ -72,6 +74,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
       const id = request.payload.flowId || request.requestId;
       const lane = renewalContexts.get(id)?.lane || 'standard';
       if (closed) fail('connection_blocked');
+      const ordinaryLogin = social && !renewalContexts.has(id) && !K.business(binding);
       if (name === 'abort') {
         // Abort is allowed while an exchange is in flight and before a delayed begin arrives.
         const result = store.transaction(() => {
@@ -140,6 +143,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
         }
         if (name === 'begin') {
           active(request,binding);
+          if (assertConsentAvailable && !K.business(binding)) assertConsentAvailable(b.appId);
           if(unrelatedActiveEnrollment(binding,id))fail('oauth_flow_busy');
           const old = rowFor(id), p = request.payload;
           if (old) {
@@ -162,10 +166,16 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
               store.db.prepare(`INSERT INTO meta_marketing_oauth_flows(id,principal,tenant,connection,asset,state_hash,config_digest,
                 scope_digest,clinic_digest,created_at,expires_at,updated_at,state,lane) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'awaiting',?)`)
                 .run(id,principal.id,request.tenantRef,request.connectionRef,request.assetRef,C.hash(p.state),K.fingerprint(binding),p.scopeDigest,p.clinicSetDigest,now(),p.expiresAt,now(),lane);
+              if (ordinaryLogin) {
+                const targets = socialInbox.filter(account => b.clinicIds.includes(account.clinicId));
+                social.begin(id, 'initial:' + id, targets, false);
+              }
             });
           }
           if (signal.aborted) fail('provider_timeout');
-          const requestedScopes = renewalContexts.get(id)?.quickChat?.scopes || b.scopes;
+          const initial = ordinaryLogin && social.find(id);
+          const requestedScopes = initial ? SocialConsent.scopesFor(b.scopes, JSON.parse(initial.accounts))
+            : renewalContexts.get(id)?.quickChat?.scopes || b.scopes;
           const params = new URLSearchParams({ client_id:b.appId,redirect_uri:b.redirectUri,response_type:'code',...(K.business(binding)?{config_id:b.businessLogin.configId,override_default_response_type:'true'}:{scope:requestedScopes.join(',')}),state:p.state });
           return { requestId:request.requestId,data:{flowId:id,authUrl:`https://www.facebook.com/${K.graphVersion(binding)}/dialog/oauth?${params}`,expiresAt:p.expiresAt},replayed:!!old };
         }
@@ -186,11 +196,19 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, now = () => Da
         });
         const code=Buffer.from(request.payload.code);
         try {
-          const consent = renewalContexts.get(id)?.quickChat;
+          const initial = ordinaryLogin && social.find(id);
+          const consent = initial ? {
+            inspect: raw => SocialConsent.inspectInitial(raw, binding, JSON.parse(initial.accounts), now()),
+            capture(digest, proof) {
+              if (!proof || proof.appId !== b.appId || proof.tokenType !== 'USER') fail('oauth_identity_mismatch');
+              social.capture(id, digest, proof);
+            },
+          } : renewalContexts.get(id)?.quickChat;
           await secrets.withApplication(binding, appSecret => http.withExchangedToken({binding,flowId:id,code,appSecret,signal,inspectQuickChat:consent?.inspect,authorize:()=>{checked(request,binding,principal);active(request,binding);}}, async (token, raw, exchangeSignal, quickChatProof) => {
             const value=K.metadata(raw,binding); let encoded;
             try {
               row=checked(request,binding,principal); active(request,binding);
+              if (initial && quickChatProof?.subjectId !== value.subjectId) fail('oauth_identity_mismatch');
               if (exchangeSignal.aborted || signal.aborted) fail('provider_timeout');
               if (row.state !== 'exchanging' || row.expires_at <= now()) fail('oauth_flow_interrupted');
               if ([value.expiresAt,value.dataAccessExpiresAt].some(v=>v!==null && v<=now())) fail('credential_revoked');

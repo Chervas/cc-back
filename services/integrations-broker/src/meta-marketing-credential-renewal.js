@@ -142,7 +142,7 @@ function createMetaMarketingCredentialRenewal({ store, epochs, enrollment, oauth
         epochs.expected(grant.credential, p);
         const allowed = SocialConsent.targetsFor(socialInbox, grant.assets, b.clinicIds);
         if (p.quickChat && (!allowed.length || p.quickChatTargetsDigest !== SocialConsent.targetDigest(allowed))) fail('scope_denied');
-        const previousConsent = social?.active(original.id, grant.credential);
+        const previousConsent = social?.active(original.id, grant.credential, original.flow);
         const prior = previousConsent ? JSON.parse(previousConsent.accounts) : [];
         const accounts = p.quickChat ? allowed : allowed.filter(a => prior.some(b => SocialConsent.sameTarget(a, b)));
         const pin = { enrollment: original.id, principal: roles.gateway, tenant: request.tenantRef, connection: request.connectionRef, scope: request.assetRef,

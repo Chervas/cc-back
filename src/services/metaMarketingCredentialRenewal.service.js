@@ -2,12 +2,7 @@
 const {randomUUID,randomBytes}=require('node:crypto'),{Op}=require('sequelize');
 const C=require('./metaMarketingCredentialRenewal.contract'),{fromRenewal}=require('../../services/platform-audit/src/meta-credential-renewal-event');
 const SocialConsent=require('../../services/integrations-broker/src/meta-marketing-social-consent');
-function configuredQuickChat(){
-  const raw=process.env.META_SOCIAL_INBOX_CONSENT_TARGETS;
-  if(!raw)return [];
-  try{return SocialConsent.config(JSON.parse(raw));}
-  catch{return [];}
-}
+const {configuredQuickChat}=require('./metaMarketingMessagingScopes');
 const plain=value=>value?.get?value.get({plain:true}):value;
 const actor=row=>({scopeKey:row.scope_key,actorId:Number(row.actor_user_id),sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at});
 function createService({models,sessions,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_CREDENTIAL_RENEWAL_ENABLED==='true',returnOrigin=C.frontendOrigin(),audit:providedAudit,quickChatTargets=configuredQuickChat}={}){
