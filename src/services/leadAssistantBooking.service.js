@@ -2,6 +2,7 @@
 
 const { randomUUID, createHash } = require('node:crypto');
 const cal = require('./leadAssistantCalendar.service');
+const { addDays } = require('../lib/personal-schedule-recurring');
 const { normalizePhoneE164 } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
 const { assistantCommercialText, explicitOptOut } = require('./socialLeadInterestClassification.service');
@@ -270,17 +271,26 @@ async function processTurn({
       treatment,
       reply: '¿Qué día futuro te vendría bien para la cita?',
     }));
-  async function propose(prefix = '', range = calendar) {
-    const available = await findSlots({
+  async function propose({ range = calendar, prefix = '', afterConflict = false } = {}) {
+    const search = requestedRange => findSlots({
       db,
       clinic,
       treatment,
-      calendar: range,
+      calendar: requestedRange,
       patientId: thread.patient_id,
       professionalId,
       now,
       capabilities,
     });
+    let available = await search(range);
+    if (afterConflict && !available.length) {
+      const next = { ...range, date: addDays(range.date, range.days), days: 7 };
+      available = await search(next);
+      if (available.length) {
+        range = next;
+        prefix += 'Si te encaja otro día, tengo estas alternativas. ';
+      }
+    }
     const slots = /\b(?:dos|2) (?:alternativas|opciones|huecos)\b/i.test(fields.booking) ? available.slice(0, 2) : available;
     return materialize(async () =>
       slots.length
@@ -290,6 +300,7 @@ async function processTurn({
             treatment,
             professionalId,
             calendar: range,
+            ...(afterConflict && pending.contact ? { contact: pending.contact } : {}),
             slots,
             requestKey: randomUUID(),
             reply:
@@ -333,7 +344,7 @@ async function processTurn({
   if (!(await hasDelivered(db, thread, pending))) return { review: true };
   const index = choice ? choice.index : pending.selected;
   const selected = pending.slots[index];
-  if (!selected || +new Date(selected.start) <= +now) return propose('Ese hueco ya ha pasado. ');
+  if (!selected || +new Date(selected.start) <= +now) return propose({ prefix: 'Ese hueco ya ha pasado. ' });
   const common = {
     offerMessageId: pending.offerMessageId,
     slots: pending.slots,
@@ -504,7 +515,7 @@ async function processTurn({
         'booking_priority_confirmation_required',
       ].includes(error.code)
     ) {
-      return propose('Ese hueco se acaba de ocupar. ', pending.calendar);
+      return propose({ range: pending.calendar, prefix: 'Ese hueco se acaba de ocupar. ', afterConflict: true });
     }
     if (error.code === 'assistant_booking_review' || error.status === 409 || error.statusCode === 409)
       return { review: true };
