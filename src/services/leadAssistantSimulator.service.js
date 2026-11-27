@@ -41,7 +41,7 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
     const id = randomUUID();
     sessions.set(id, { clinicId, actorId, version:draft.version, clinicName:clinic.nombre_clinica,
       groupId:clinic.grupoClinicaId, timezone:resolveClinicTimezone(clinic), until:now()+ttl,
-      count:0, receipts:new Map(), history:[], booking:null, promotionKey:null, origin:null, closed:false, busy:false });
+      calendar:null, count:0, receipts:new Map(), history:[], booking:null, promotionKey:null, origin:null, closed:false, busy:false });
     const promotions = [...offerSections(draft.fields.promotions)].map(([key,p])=>({key,title:p.title.split('\n')[0].slice(0,180)}));
     return { id, clinicName:clinic.nombre_clinica, version:draft.version, approved:published?.version === draft.version, promotions };
   }
@@ -68,14 +68,20 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
       let appointment;
       try {
         appointment = await booking({db, thread:{clinic_id:s.clinicId,channel:'instagram',patient_id:null},
-          entry, scope:{originMessageId:1,messageId:index,version:s.version}, execution:{created_by:s.actorId},
+          entry:!s.booking && dialogue.acceptsOfferedTimes(message,s.history.at(-1)?.text) ? {...entry,text:'Quiero consultar horarios'} : entry, scope:{originMessageId:1,messageId:index,version:s.version}, execution:{created_by:s.actorId},
           fields,offer, preview:s, blockReason:async()=>null, availability:async()=>true});
       } catch (error) {
         if (![400,404,409,422].includes(error.status || error.statusCode) ||
             !/^(?:booking_|treatment_|appointment_)/.test(error.code || '')) throw error;
         appointment = {review:true};
       }
-      if (appointment?.reply) return {reply:format(appointment.reply), event:s.booking?.stage==='booked' ? 'booked' : 'reply'};
+      if (appointment?.reply) {
+        const options = s.booking?.stage === 'offered' ? s.booking.slots.map((slot,i)=>({
+          label:require('./leadAssistantCalendar.service').display(slot,s.timezone),
+          message:['La primera','La segunda','La tercera'][i],
+        })) : [];
+        return {reply:format(appointment.reply),event:s.booking?.stage==='booked' ? 'booked' : 'reply', ...(options.length ? {slots:options} : {})};
+      }
       if (appointment?.review || appointment?.stop) return passToTeam();
     }
     if (!userText) return passToTeam();
@@ -95,13 +101,13 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
   }
 
   async function turn(clinicId, actorId, sessionId, input) {
-    const { id, message, promotion } = input || {};
+    const { id, message, promotion, calendar = 'clinic' } = input || {};
     if (typeof id !== 'string' || !uuid.test(id) || typeof message !== 'string' || !message.trim() || message.length > 1000 ||
-        typeof promotion !== 'string' || promotion.length > 96)
+        typeof promotion !== 'string' || promotion.length > 96 || !['demo','clinic'].includes(calendar))
       throw fail(400,'assistant_simulator_invalid');
     const s = sessions.get(sessionId);
     if (!s || s.clinicId !== clinicId || s.actorId !== actorId || s.until <= now()) throw fail(410,'assistant_simulator_expired');
-    const fingerprint = createHash('sha256').update(JSON.stringify([message,promotion])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify([message,promotion,calendar])).digest('hex');
     const previous = s.receipts.get(id);
     if (previous) {
       if (previous.fingerprint !== fingerprint) throw fail(409,'assistant_simulator_invalid');
@@ -113,12 +119,12 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
     try {
       const draft = await db.LeadAssistantDraft.findByPk(clinicId,{attributes:['version','fields'],raw:true});
       if (draft?.version !== s.version) throw fail(409,'assistant_simulator_changed');
-      if ((s.count && promotion !== s.origin) || (!s.count && promotion && !offerSections(draft.fields.promotions).has(promotion)))
+      if ((s.count && (promotion !== s.origin || calendar !== s.calendar)) || (!s.count && promotion && !offerSections(draft.fields.promotions).has(promotion)))
         throw fail(400,'assistant_simulator_invalid');
       // Commit only completed turns, so a failed model/availability call leaves the conversation retryable.
-      const next = {...s};
+      const next = {...s,calendar};
       const result = await respond(next, draft.fields, message.trim(), promotion, s.count+1);
-      Object.assign(s, {history:next.history,booking:next.booking,promotionKey:next.promotionKey,origin:promotion,
+      Object.assign(s, {history:next.history,booking:next.booking,promotionKey:next.promotionKey,origin:promotion,calendar,
         count:s.count+1,closed:result.event!=='reply',until:now()+ttl});
       s.receipts.set(id,{fingerprint,result});
       return result;

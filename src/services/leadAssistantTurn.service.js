@@ -94,6 +94,7 @@ function commercialOffer(fields, entry, priorKey, options) {
     key,
     title: sections.get(key).title.split(/[.\n]/)[0].slice(0, 180),
     description: body,
+    ...(section.guide ? { guide: stripLinks(section.guide) } : {}),
     images: (images.get(key) || []).slice(0, 24),
   };
 }
@@ -253,7 +254,7 @@ async function attend({
       await message.update({ metadata: { ...message.metadata, leadAssistantTurn: turn } }, { transaction });
     }
     if (turn.executionId !== execution.id || turn.promotionKey !== (offer?.key || null)) return null;
-    return { turn, offer, originMessageId: turn.contextStartId || contextStartId };
+    return { turn, offer, previousAnswer: changed ? null : priorTurn?.answer?.reply, originMessageId: turn.contextStartId || contextStartId };
   });
   if (!lockTurn) return stopped('assistant_turn_unavailable');
   if (lockTurn.receipt) return deliverReceipt(lockTurn.receipt);
@@ -293,7 +294,7 @@ async function attend({
         appointment = await require('./leadAssistantBooking.service').processTurn({
           db,
           thread,
-          entry,
+          entry: dialogue.acceptsOfferedTimes(raw, lockTurn.previousAnswer) ? {...entry,text:'Quiero consultar horarios'} : entry,
           scope: {
             ...scope,
             audience: rule.audience,

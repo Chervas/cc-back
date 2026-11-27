@@ -57,3 +57,45 @@ test('conserva el último tratamiento de un contexto aprobado de 120.000 caracte
     commercialHistory:[],userText:'¿Cuánto dura esa consulta?',availableSlots:[]});
   assert.equal(JSON.parse(request.inputText).approvedContext,approvedContext);
 });
+
+test('a follow-up on a treatment goal uses its own guide, answers the unresolved question and omits the earlier image',async()=>{
+  const {generateAnswer}=require('../../services/leadAssistantDialogue.service');
+  const {commercialOffer}=require('../../services/leadAssistantTurn.service');
+  const fields={tone:'Breve',context:'Información comercial',guardrails:'Solo hechos documentados',booking:'Consultar agenda',
+    promotions:['| Tratamiento | Precio | Imagen |','|---|---|---|','| Facial Claro | 35 € | |','| Facial Luz | 45 € | |',
+      '### Facial Claro · Objetivo','Cuidado de la textura e hidratación.','### Facial Luz · Otra oferta','Solo para la segunda oferta.'].join('\n')};
+  const offer=commercialOffer(fields,{text:'Facial Claro'},null,{});
+  assert.match(offer.guide,/hidratación/);assert(!offer.guide.includes('segunda oferta'));
+  offer.images=[{id:'a'.repeat(24),label:'Foto'}];
+  const history=[{role:'user',text:'INFO'},{role:'assistant',text:'La promoción cuesta 35 €.'},
+    {role:'user',text:'¿Me sirve para reducir volumen?'},{role:'assistant',text:'La promoción cuesta 35 €.'}];
+  let calls=0;
+  const answer=await generateAnswer({fields,offer,clinicName:'Clínica de prueba',readHistory:async()=>history,userText:'No me estás contestando',analyze:async req=>{
+    const data=JSON.parse(req.inputText);
+    assert.match(req.prompt,/reducir volumen/);assert.match(data.promotion.description,/textura/);
+    assert.equal(data.promotion.images,undefined);assert.equal(data.userText,'No me estás contestando');
+    return ++calls===1 ? {reply:'La promoción cuesta 35 €.',imageId:'a'.repeat(24)} :
+      {reply:'La ficha habla de hidratación y textura. No indica una reducción de volumen.',imageId:'a'.repeat(24)};
+  }});
+  assert.equal(calls,2);assert.match(answer.reply,/volumen/);assert.equal(answer.imageId,null);
+});
+test('an affirmative accepts a specific offer to check times',()=>{
+  const {acceptsOfferedTimes}=require('../../services/leadAssistantDialogue.service');
+  assert(acceptsOfferedTimes('Sí, por favor','¿Quieres que miremos horarios para una valoración?'));
+  assert(!acceptsOfferedTimes('Sí','¿Te preocupa la textura?'));
+  assert(!acceptsOfferedTimes('No','¿Quieres que miremos horarios?'));
+});
+
+test('the approved benefits answer a volume question and its repair without inventing an alternative treatment', async()=>{
+  const {generateAnswer,acceptsOfferedTimes}=require('../../services/leadAssistantDialogue.service');
+  const h=[{role:'user',text:'INFO'},{role:'assistant',text:'Una sesión por 260 €.'}];
+  const ask=userText=>generateAnswer({fields:{context:'Centro',guardrails:'No diagnosticar',booking:'Agenda'},clinicName:'Centro',
+    offer:{title:'Cuidado del cuello',description:'Una sesión por 260 €.',guide:'- **En qué lo puedes notar.** Se busca una piel más hidratada. La valoración se hace antes.'},
+    readHistory:async()=>h,userText,analyze:()=>assert.fail('published benefit answers the question')});
+  const response=await ask('me va bien para reducir cuello?');
+  assert.match(response.reply,/volumen del cuello/);assert.match(response.reply,/hidratada/);assert(!response.imageId);
+  h.push({role:'user',text:'me va bien para reducir cuello?'},{role:'assistant',text:response.reply});
+  const repair=await ask('no me estás contestando');
+  assert.notEqual(response.reply,repair.reply);assert(acceptsOfferedTimes('sí',repair.reply));
+  assert.doesNotMatch(repair.reply,/260|cirug|hialur/i);
+});

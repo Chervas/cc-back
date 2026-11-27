@@ -41,3 +41,19 @@ test('handoff, clinical follow-up and opt-out finish the test locally',async()=>
   }
   assert.equal(calls.length,0);
 });
+
+test('the sample calendar completes a booking without staff, patient, appointments, or transport models', async()=>{
+  const fields={tone:'Breve',context:'Valoraciones',guardrails:'Solo información comercial',booking:'Pide el correo electrónico.',promotions:''};
+  const db={LeadAssistantDraft:{findByPk:async()=>({version:1,fields})},Clinica:{findByPk:async()=>({nombre_clinica:'Prueba'})},
+    LeadAssistantPublication:{findOne:async()=>null}};
+  const sim=create({db,analyze:()=>assert.fail('booking is local'),recipients:()=>assert.fail('unexpected handoff')});
+  const s=await sim.start(1,42);
+  const ask=message=>sim.turn(1,42,s.id,{id:randomUUID(),message,promotion:'',calendar:'demo'});
+  const offered=await ask('¿Qué horarios hay para una valoración el 2030-01-07 por la tarde?');
+  assert.deepEqual(offered.slots.map(slot=>slot.message),['La primera','La segunda']);
+  assert.match(offered.slots[0].label,/16:00/);assert.match(offered.slots[1].label,/17:30/);
+  await assert.rejects(sim.turn(1,42,s.id,{id:randomUUID(),message:'La primera',promotion:'',calendar:'clinic'}),{code:'assistant_simulator_invalid'});
+  assert.match((await ask(offered.slots[1].message)).reply,/recordatorio/);
+  assert.match((await ask('Ana Prueba, +34600000001, ana@example.invalid')).reply,/17:30/);
+  assert.equal((await ask('Confirmo')).event,'booked');
+});
