@@ -274,16 +274,12 @@ async function processTurn({
   if (mapping && choices.length !== 1) return { review: true };
   if (!choices.length) return { review: true };
   const treatment = cal.pickTreatment(choices, raw, offer, pending?.treatment?.id);
+  if (!treatment && pending?.stage === 'service' && !requestBooking && !subject.area) return null;
   if (!treatment)
     return materialize(async () => ({
       stage: 'service',
       reply:
-        '¿Para qué tratamiento quieres la cita? ' +
-        choices
-          .slice(0, 6)
-          .map((c) => c.name)
-          .join(', ') +
-        '.',
+        '¿Qué zona o tratamiento te gustaría valorar? Así puedo buscar la agenda adecuada.',
     }));
   const lead = preview ? { es_paciente:false } :
     thread.lead_id &&

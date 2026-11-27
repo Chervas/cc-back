@@ -1,6 +1,7 @@
 'use strict';
 
 const { normalize } = require('./leadAssistantCalendar.service');
+const { offerSections, isOfferActive } = require('./leadAssistantPromotionImages.service');
 
 // These labels retain the subject of an administrative or commercial enquiry.
 // They are never diagnoses or authorisation to recommend a treatment.
@@ -53,7 +54,7 @@ function sameVisit(text) {
     /\b(?:hacerme|empezar|hacer el|hacerme el|realizarme)\b.{0,36}\b(?:tratamiento|tratmiento|sesion)\b/.test(words);
 }
 
-function groundedFollowup({userText,history,offer,fields}) {
+function groundedFollowup({userText,history,offer,fields,timezone}) {
   const words = normalize(userText);
   if (/^(?:no (?:quiero|necesito) (?:reservar|una cita)(?: (?:ahora|aun|todavia))?(?: solo (?:estoy mirando|queria informacion))?|solo (?:estoy mirando|queria informacion))$/.test(words))
     return 'De acuerdo, seguimos por aquí si quieres información.';
@@ -74,6 +75,12 @@ function groundedFollowup({userText,history,offer,fields}) {
   if (!offer && /\b(?:a (?:cual|que) te referias|lo dijiste tu|lo has dicho tu|a que te refieres tu)\b/.test(words) &&
       history.some(m=>m.role==='user' && /anuncio|publicaci[oó]n/i.test(m.text)))
     return 'Aún no he identificado el anuncio que viste. Si me dices una palabra del texto o qué aparecía en la imagen, puedo intentar localizarlo.';
+  if (/\b(?:consulta|valoracion|visita)\b/.test(words) && /\b(?:por telefono|telefonica|online|videollamada|presencial)\b/.test(words)) {
+    const modalities = [fields.context,fields.booking,offer?.guide].filter(Boolean).flatMap(v=>v.split(/\n|(?<=[.!?])\s+/))
+      .filter(line=>/\b(?:consulta|valoracion|visita)\b/.test(normalize(line)) &&
+        /\b(?:presencial|telefonica|telefonico|videollamada|online|por telefono)\b/.test(normalize(line)));
+    if (!modalities.length) return 'No tengo confirmado si esa valoración puede hacerse por teléfono o a distancia. ¿Quieres que pida al equipo que te llame para aclararlo?';
+  }
   const closing = /^(?:(?:vale|gracias|de acuerdo) )?(?:nos vemos|hasta luego|hasta pronto|adios)(?: gracias)?$/.test(words);
   if (closing) return 'Gracias por escribirnos. Hasta pronto.';
   if (!offer && /^(?:(?:hola|buenas) )?(?:info|informacion|quiero (?:mas )?info(?:rmacion)?|me interesa (?:mas )?info(?:rmacion)?)$/.test(words))
@@ -92,6 +99,34 @@ function groundedFollowup({userText,history,offer,fields}) {
     ? 'la papada' : 'el volumen '+area.label.replace(/^el /,'del ').replace(/^los /,'de los ');
   const alreadyOffered = history.slice(-4).some(m=>m.role==='assistant' && /horarios|primera valoraci[oó]n|confirmado la cita/i.test(m.text));
   const propose = alreadyOffered ? '' : ' ¿Quieres que mire horarios para una valoración?';
+  if (alternative.test(words) || promoPrice.test(words)) {
+    // Consider other active promotions by their own stated indication. Neither a
+    // general price table nor another area's price is evidence for this request.
+    const matches = [];
+    for (const [key,section] of offerSections(fields.promotions)) {
+      if (!isOfferActive(section,{timezone})) continue;
+      const lines = [section.title,...section.lines,section.guide].filter(Boolean);
+      const indicated = lines.flatMap(line=>line.split(/\n|(?<=[.!?])\s+/)).some(line=>{
+        const text = normalize(line);
+        return area.words.test(text) && volume.test(text) &&
+          /\b(?:reduc\w*|disminu\w*|tratamiento (?:de|para)|indicado para|mejorar)\b/.test(text) &&
+          !/\b(?:no|sin evidencia|excepto|contraindica\w*|no apto)\b/.test(text);
+      });
+      if (indicated && (key !== offer?.key || promoPrice.test(words))) matches.push(section);
+    }
+    if (matches.length) {
+      const names = matches.slice(0,3).map(m=>m.title.split('\n')[0].slice(0,130));
+      if (promoPrice.test(words) && matches.length === 1) {
+        const priceLine = matches[0].lines.find(l=>/[€$£]/.test(l) && !/https?:|antes|desde|hasta|ahorro|descuento/i.test(l) &&
+          (l.match(/[€$£]/g)||[]).length === 1);
+        const price=priceLine?.match(/(?:\d[\d.,]*\s*[€$£]|[€$£]\s*\d[\d.,]*)/u)?.[0];
+        if (price) return 'La promoción «'+names[0]+'» tiene un precio publicado de '+price+'.';
+      }
+      return matches.length === 1
+        ? 'La clínica sí describe «'+names[0]+'» para ese objetivo. La valoración permite comprobar si encaja contigo.'
+        : 'Las opciones que la clínica indica para esa zona son '+new Intl.ListFormat('es').format(names)+'. ¿Sobre cuál te gustaría saber más?';
+    }
+  }
   if (promoPrice.test(words) && !evidence.some(line=>/[€$£]|\b(?:euros?|precio)\b/i.test(line)))
     return 'No tengo un precio promocional confirmado para '+target+'.'+propose;
   if (offer && !alternative.test(words) && !promoPrice.test(words)) return null;

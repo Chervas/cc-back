@@ -115,7 +115,7 @@ async function respondToLead({
 }) {
   const raw = String(entry.text || '').trim();
   if (explicitOptOut(raw)) return { kind:'silent', reason:'opt_out' };
-  const human = raw.length <= 1000 && raw ? dialogue.requestedHumanHandoff(raw) : null;
+  const human = raw.length <= 1000 && raw ? dialogue.requestedHumanHandoff(raw,previousAnswer) : null;
   const userText = assistantCommercialText(raw);
   const identity = { firstTurn, clinicName, tone:fields.tone };
   const format = draft => dialogue.formatCommercialReply({ ...identity, draft });
