@@ -1,15 +1,15 @@
 'use strict';
 
 const keys = ['tone', 'context', 'promotions', 'guardrails', 'booking'];
-const promotionCharacterLimit = 120000;
+const longTextLimit = 120000;
 const fail = (status, code) => Object.assign(new Error(code), { status, code });
 
 function validate(input) {
   const { version, fields } = input || {};
   if (!Number.isSafeInteger(version) || version < 0 || !fields || typeof fields !== 'object' ||
       Array.isArray(fields) || Object.keys(fields).length !== keys.length ||
-      !keys.every(key => typeof fields[key] === 'string' && (key === 'promotions'
-        ? Array.from(fields[key]).length <= promotionCharacterLimit : fields[key].length <= 12000)) ||
+      !keys.every(key => typeof fields[key] === 'string' && (['context', 'promotions'].includes(key)
+        ? Array.from(fields[key]).length <= longTextLimit : fields[key].length <= 12000)) ||
       Object.keys(input).some(key => !['version', 'fields'].includes(key))) {
     throw fail(400, 'assistant_draft_invalid');
   }
@@ -24,7 +24,7 @@ function create(db) {
     return clinic;
   }
   function present(clinic, row) {
-    return { promotionCharacterLimit, clinicId: clinic.id_clinica, clinicName: clinic.nombre_clinica, version: row?.version || 0,
+    return { promotionCharacterLimit: longTextLimit, contextCharacterLimit: longTextLimit, clinicId: clinic.id_clinica, clinicName: clinic.nombre_clinica, version: row?.version || 0,
       fields: row ? row.fields : Object.fromEntries(keys.map(key => [key, ''])) };
   }
   async function read(clinicId) {

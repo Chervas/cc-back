@@ -34,5 +34,15 @@ withIsolatedCampaignMysql(async ({ sql, report }) => {
   await assert.rejects(service.save(1, 81, {version:large.version, fields:{...large.fields, promotions:promotions+'X'}}), {status:400});
   assert.equal((await service.read(1)).version, large.version);
   report.checks.push('120.000 caracteres Unicode y enlace final guardados íntegros. Un carácter de más conserva la versión anterior.');
+  assert.equal(draft.contextCharacterLimit, 120000);
+  const context = 'C'.repeat(119996) + '📘fin';
+  assert.equal(Array.from(context).length,120000);
+  const combined = await service.save(1, 81, {version:large.version, fields:{...large.fields, context}});
+  const recovered = await service.read(1);
+  assert.equal(recovered.fields.context, context);
+  assert.equal(recovered.fields.promotions, promotions);
+  await assert.rejects(service.save(1, 81, {version:combined.version, fields:{...combined.fields, context:context+'X'}}), {status:400});
+  assert.equal((await service.read(1)).version, combined.version);
+  report.checks.push('Contexto y promociones de 120.000 caracteres Unicode cada uno coexisten y se recuperan completos.');
   report.checks.push('Borrador UTF-8, aislamiento por clínica, conflicto concurrente, validación y persistencia.');
 });
