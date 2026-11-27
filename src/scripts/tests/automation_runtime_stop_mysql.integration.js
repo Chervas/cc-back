@@ -12,7 +12,16 @@ const gate = () => {
 };
 
 withIsolatedCampaignMysql(async ({ sql, models, report }) => {
+  // Apply the offline environment while retaining the fixture's socket-only MySQL guard.
+  const net = require('node:net');
+  const createConnection = net.createConnection;
   require('./fixtures/security_offline_runtime.cjs');
+  const reject = net.createConnection;
+  net.createConnection = net.connect = function (options, ...args) {
+    const path = typeof options === 'string' ? options : options?.path;
+    if (path === report.root + '/mysql.sock') return createConnection.call(net, options, ...args);
+    return reject();
+  };
   models.Sequelize = D;
   models.Clinica = require('../../../models/clinica')(sql, D);
   models.Conversation = sql.define('Conversation', { id: { type: D.INTEGER, primaryKey: true }, clinic_id: D.INTEGER,
@@ -91,7 +100,9 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const start = controllerSource.indexOf('exports.updateTemplateDraft =');
   const end = controllerSource.indexOf('\nexports.', start + 10);
   const exports = {};
-  vm.runInNewContext(controllerSource.slice(start, end), { exports, console,
+  const captureGuard = controllerSource.slice(controllerSource.indexOf('function inboundCaptureTemplate('),
+    controllerSource.indexOf('function buildTemplatePermissions('));
+  vm.runInNewContext(captureGuard + controllerSource.slice(start, end), { exports, console,
     AutomationFlowTemplateV2: models.AutomationFlowTemplateV2,
     resolveAccess: async () => ({ is_admin: true }), resolveTemplateFamilyWhere: async ref => ({ public_id: ref }),
     parseIntOrNull: Number, parseBool: value => value, hasScopeAccess: () => true,
@@ -152,7 +163,10 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
   const dispatchStart = waSource.indexOf('    async dispatchMessage(');
   const dispatchEnd = waSource.indexOf('\n    /**', dispatchStart);
   let fakePosts = 0;
-  const sandbox = { db: models, require: name => { assert.equal(name, '../lib/automation-runtime-stop'); return stop; },
+  const sandbox = { db: models, require: name => {
+    if (name === '../lib/whatsapp-contact-identity') return require('../../lib/whatsapp-contact-identity');
+    assert.equal(name, '../lib/automation-runtime-stop'); return stop;
+  },
     whatsappAuthorizedBroker: { send: async () => { fakePosts++; return { messages: [{ id: 'fictitious-wamid' }] }; } },
   };
   vm.runInNewContext('this.service = new (class {\n' + waSource.slice(dispatchStart, dispatchEnd) + '\n})()', sandbox);

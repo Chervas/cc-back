@@ -8578,6 +8578,17 @@ async function resolveSingleNoticeRuntime(execution, template, latest) {
   return policy.runtimeSingleNoticeFlow(template, latest, context);
 }
 
+async function reconcileCommittedCapture(execution, template, jobClaim) {
+  if (template?.trigger_config?.managed_feature !== 'inbound_lead_capture') return null;
+  const captureRecovery = require('./inboundLeadCaptureRecovery.service');
+  const saved = await captureRecovery.reconcile(db, execution, template, jobClaim);
+  if (!saved) return null;
+  captureRecovery.refreshMessage(saved.execution);
+  emitExecutionLogEvent(saved.execution, saved.log, { kind: 'success' });
+  emitExecutionEvent(saved.execution, saved.execution.status === 'completed' ? 'flow_execution:completed' : 'flow_execution:cancelled');
+  return saved.execution;
+}
+
 async function runExecution(executionId, options = {}) {
   const maxSteps = Number.isInteger(options.maxSteps) ? options.maxSteps : 100;
   const resumeMode = cleanString(options.resumeMode) || null;
@@ -8636,6 +8647,13 @@ async function runExecution(executionId, options = {}) {
     );
     return execution;
   }
+
+  if (options.jobClaim?.attempt > 1 || !template.is_active) {
+    const saved = await reconcileCommittedCapture(execution, execution.templateVersion, options.jobClaim);
+    if (saved) return saved;
+  }
+  if (execution.status === 'waiting' && execution.waiting_meta?.kind === 'inbound_lead_capture_retry'
+    && resumeMode !== 'retry_current_node') return execution;
 
   await require('../lib/automation-runtime-stop').assertExecutionActive(execution, undefined, { allowSelfDeactivatedEnd: true });
 
@@ -8866,6 +8884,8 @@ async function runExecution(executionId, options = {}) {
         context = mergeContextPatch(context, result.context_patch);
       }
 
+      // This final receipt supersedes the temporary failure shown while waiting.
+      if (node.type === 'action/inbound_lead_capture') context = { ...context, outputs: { ...context.outputs, [currentNodeId]: {} } };
       context = mergeNodeOutput(context, currentNodeId, {
         ...(result.output || {}),
         status: 'success',
@@ -8909,6 +8929,8 @@ async function runExecution(executionId, options = {}) {
         waiting_meta: null,
         last_error: null,
       }, 'flow_execution:updated');
+      if (node.type === 'action/inbound_lead_capture' && nodeOutputBefore?.capture_retry)
+        require('./inboundLeadCaptureRecovery.service').refreshMessage(execution);
     } catch (error) {
       if (error.code === 'automation_silence_followup_retired' && singleNotice.scoped(template)) {
         // A publication committed while this worker was already running. Keep
@@ -8945,6 +8967,34 @@ async function runExecution(executionId, options = {}) {
           emitExecutionLogEvent(execution, log, { kind: 'error' });
         }
         throw error;
+      }
+      const captureRecovery = node.type === 'action/inbound_lead_capture' && require('./inboundLeadCaptureRecovery.service');
+      if (captureRecovery && captureRecovery.captureNode(execution)?.id === currentNodeId) {
+        // An exception after COMMIT (including a notification failure) must not
+        // turn an already confirmed capture into a retry or a failed execution.
+        const saved = await reconcileCommittedCapture(execution, execution.templateVersion, options.jobClaim);
+        if (saved) return saved;
+        const failure = captureRecovery.retry(error, context.outputs[currentNodeId]?.capture_retry);
+        const code = failure?.code || 'inbound_capture_failed';
+        const willRetry = failure?.will_retry === true;
+        const output = { status: 'error', error_code: code, at: finishedAt.toISOString() };
+        if (failure) output.capture_retry = { attempt: failure.attempt, max_attempts: failure.max_attempts, will_retry: willRetry };
+        context = { ...context, outputs: { ...context.outputs, [currentNodeId]: output } };
+        const waitUntil = willRetry ? new Date(Date.now() + 15000 * 2 ** (failure.attempt - 1)) : null;
+        localStatus = willRetry ? 'waiting' : 'failed';
+        await withExecutionJobClaim(execution, async transaction => {
+          await log.update({ status: 'error', finished_at: finishedAt, error_message: code, audit_snapshot: {
+            kind: 'error', node_output_before: nodeOutputBefore, node_output_after: output,
+          } }, { transaction });
+          await execution.update({ status: localStatus, context, last_error: code, wait_until: waitUntil,
+            current_node_id: willRetry ? currentNodeId : null,
+            waiting_meta: willRetry ? { kind: 'inbound_lead_capture_retry', type: 'delay',
+              resume_mode: 'retry_current_node', runtime_namespace: CURRENT_RUNTIME_NAMESPACE } : null }, { transaction });
+        });
+        captureRecovery.refreshMessage(execution);
+        emitExecutionLogEvent(execution, log, { kind: 'error' });
+        emitExecutionEvent(execution, willRetry ? 'flow_execution:updated' : 'flow_execution:failed');
+        break;
       }
       const onFailNode = readOutputTarget(node, 'on_fail');
       if (cleanString(node?.type) === 'action/send_whatsapp' && !require('../lib/patient-mobile-verification').isFlow(execution)
@@ -9034,6 +9084,10 @@ async function runExecution(executionId, options = {}) {
   return execution;
   } catch (error) {
     if (!require('../lib/automation-runtime-stop').isStop(error)) throw error;
+    if (error.code === 'automation_deactivated' || error.code === 'automation_execution_stopped') {
+      const saved = await reconcileCommittedCapture(execution, execution.templateVersion, options.jobClaim);
+      if (saved) return saved;
+    }
     const stoppedExecution = await require('../lib/automation-runtime-stop').stopExecution(execution);
     emitExecutionEvent(stoppedExecution, 'flow_execution:cancelled');
     return stoppedExecution;
@@ -9069,6 +9123,7 @@ function canRunNodeAfterHumanTakeover(node, context = {}) {
 module.exports = {
   computeQuietHoursDelayMs,
   runExecution,
+  reconcileCommittedCapture,
   buildAutomationWhatsappDeliveryKey,
   buildAutomationWhatsappRowDeliveryKey,
   findAutomationWhatsappMessageByDeliveryKey,

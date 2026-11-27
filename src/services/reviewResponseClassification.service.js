@@ -1,5 +1,7 @@
 'use strict';
 
+const { campaignCopy, withdrawalText } = require('../lib/inbound-commercial-language');
+const { explicitOptOut } = require('./socialLeadInterestClassification.service');
 const aiOrchestrator = require('./aiOrchestrator.service');
 
 const ALLOWED_INTENTS = new Set([
@@ -38,13 +40,10 @@ function parseRating(text) {
   return null;
 }
 
-// The campaign footer can be copied into an incoming WhatsApp image caption.
-const campaignFooter = /\bpara dejar de recibir (?:notificaciones|mensajes|comunicaciones)(?: promocionales| comerciales)?[,.:;\s]+(?:responde|responda|escribe|escriba)\s+[*_«“"']*(?:baja|stop)\b[*_»”"']*[.!]?/giu;
-
 function classifyDeterministically(text, explicitRating = null) {
-  const original = clean(text);
-  const raw = original.replace(campaignFooter, '').trim();
-  const containsFooter = raw !== original;
+  const copied = campaignCopy(clean(text));
+  const raw = copied.rest.trim();
+  const containsFooter = copied.quoted;
   const value = normalized(raw);
   const rating = Number(explicitRating || 0) || parseRating(raw);
   if (!value) return { intent: 'ambiguous', rating: null, confidence: 1, source: containsFooter ? 'campaign_footer' : 'rule_empty' };
@@ -65,9 +64,10 @@ function classifyDeterministically(text, explicitRating = null) {
     return { intent: 'wrong_recipient', rating: null, confidence: 0.99, source: 'rule' };
   }
 
+  const withdrawal = normalized(withdrawalText(text));
   const marketingOptOut = [
-    /\bbaja\b/,
-    /\bstop\b/,
+    /^(?:(?:por favor|please)[, ]+)?(?:baja|baixa|stop|unsubscribe)(?:[, ]+(?:por favor|please))?[.! ]*$/,
+    /\b(?:quiero|solicito|deseo|dame|darme|dadme|tramita|tramitad)\s+(?:(?:la|de)\s+)?baja\b/,
     /no (?:quiero|deseo) (?:recibir )?(?:mas )?(?:mensajes|whatsapp|comunicaciones|publicidad)/,
     /no me (?:escribais|escriban|mandeis|manden) (?:mas|publicidad|mensajes)/,
     /borr(?:a|ad|en) mi (?:telefono|numero)/,
@@ -78,8 +78,8 @@ function classifyDeterministically(text, explicitRating = null) {
     /^(?:ya )?no me interesa(?:\s*[,.-]?\s*(?:gracias|muchas gracias))?[.!]*$/,
     /^(?:ja )?no (?:estic interessat|estic interessada|m'interessa)(?:\s*[,.-]?\s*gracies)?[.!]*$/,
     /^(?:i am |i'm )?(?:no longer |not )interested(?:\s*[,.-]?\s*(?:thanks|thank you))?[.!]*$/,
-  ].some((pattern) => pattern.test(value));
-  if (marketingOptOut) {
+  ].some((pattern) => pattern.test(withdrawal));
+  if (marketingOptOut || explicitOptOut(text)) {
     return { intent: 'marketing_opt_out', rating: null, confidence: 0.99, source: 'rule' };
   }
 

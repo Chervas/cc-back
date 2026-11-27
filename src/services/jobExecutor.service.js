@@ -127,6 +127,13 @@ async function runAutomationFlowV2Job(payload = {}, _job, jobClaim) {
   }
 
   if (['completed', 'failed', 'dead_letter', 'cancelled'].includes(execution.status)) {
+    // A stop can win the race with the worker's acknowledgement of a SQL
+    // commit. Record that confirmed capture without reopening the terminal run.
+    if (execution.status === 'cancelled' && execution.last_error === 'automation_deactivated'
+      && execution.idempotency_key?.startsWith('inbound_capture:')) {
+      const template = await db.AutomationFlowTemplateV2.findByPk(execution.template_version_id);
+      await flowEngineV2Service.reconcileCommittedCapture(execution, template, jobClaim);
+    }
     return {
       status: 'completed',
       result: {
@@ -145,7 +152,9 @@ async function runAutomationFlowV2Job(payload = {}, _job, jobClaim) {
     ? waitingMeta.resume_mode.trim().toLowerCase()
     : '';
 
-  if (payload.resume_mode === 'response' || payload.resume_mode === 'timeout' || payload.resume_mode === 'form_submission') {
+  if (execution.status === 'waiting' && waitingMeta.kind === 'inbound_lead_capture_retry') {
+    options.resumeMode = 'retry_current_node';
+  } else if (payload.resume_mode === 'response' || payload.resume_mode === 'timeout' || payload.resume_mode === 'form_submission') {
     options.resumeMode = payload.resume_mode;
   } else if (execution.status === 'waiting') {
     if (
@@ -263,6 +272,8 @@ async function runAutomationFlowV2Job(payload = {}, _job, jobClaim) {
   if (updated.status === 'failed' || updated.status === 'dead_letter') {
     return {
       status: 'failed',
+      ...(updated.templateVersion?.trigger_config?.managed_feature === 'inbound_lead_capture'
+        && require('./inboundLeadCaptureRecovery.service').captureNode(updated) ? { retryable: false } : {}),
       nextRunAt: null,
       error: new Error(updated.last_error || `flow_execution_${updated.status}`),
       result: {

@@ -1,6 +1,7 @@
 'use strict';
 const { Op } = require('sequelize');
 const db = require('../../models');
+const capturePresentation = require('../services/inboundLeadCapturePresentation.service');
 const contactIdentity=require('../services/whatsappContactIdentity.service');
 const { queues } = require('../services/queue.service');
 const { getIO } = require('../services/socket.service');
@@ -343,11 +344,17 @@ function resolveMessagePageRequest(query = {}) {
   };
 }
 
-async function getConversationMessagePage(conversation, query = {}, transaction = null) {
-  const { limit, beforeMessageId } = resolveMessagePageRequest(query);
+async function getConversationMessagePage(conversation, query = {}, transaction = null, actorId = null) {
+  const exact = Object.hasOwn(query, 'message_id');
+  const requestedId = Number(query.message_id);
+  const { limit, beforeMessageId } = exact
+    ? { limit: 1, beforeMessageId: null }
+    : resolveMessagePageRequest(query);
   const isSocial = ['instagram', 'messenger'].includes(conversation.channel);
   const where = { conversation_id: { [Op.in]: await contactIdentity.memberIds(conversation, { transaction }) } };
-  if (beforeMessageId && isSocial) {
+  if (exact) {
+    where.id = Number.isSafeInteger(requestedId) && requestedId > 0 ? requestedId : 0;
+  } else if (beforeMessageId && isSocial) {
     // A late import can have a larger ID than an already displayed live message.
     // Read the cursor's stored time in this query so the boundary uses MySQL's exact precision.
     where[Op.and] = db.Sequelize.literal(`
@@ -363,7 +370,7 @@ async function getConversationMessagePage(conversation, query = {}, transaction 
     where,
     order: isSocial ? messageChronologicalOrder('DESC') : [['id', 'DESC']],
     ...(beforeMessageId && isSocial ? { replacements: { beforeMessageId, conversationId: conversation.id } } : {}),
-    limit: limit + 1,
+    limit: exact ? 1 : limit + 1,
     raw: true,
     transaction,
   });
@@ -376,7 +383,9 @@ async function getConversationMessagePage(conversation, query = {}, transaction 
   );
 
   return {
-    messages: visibleMessages,
+    messages: await capturePresentation.presentMessages(visibleMessages, {
+      db, actorId, clinicId: Number(conversation.clinic_id), transaction, canSeeLeads: canUserAccessFeature,
+    }),
     messagesPage: {
       limit,
       has_more_before: hasMoreBefore,
@@ -1603,9 +1612,8 @@ exports.listConversations = async (req, res) => {
         filterQuickChatVisibleMessages(sharedRecent.get(Number(data.id)) || data.messages),
         { clinicId: data.clinic_id }
       );
-      data.lastMessage = recentMessages.find((message) => !isTechnicalWhatsappFailureNotice(message))
-        || recentMessages[0]
-        || null;
+      data.lastMessage = capturePresentation.stripInternalCapture(recentMessages.find(message => !isTechnicalWhatsappFailureNotice(message))
+        || recentMessages[0] || null);
       if (hideUnansweredBulk) data.last_message_at = data.quickchat_activity_at;
       delete data.quickchat_activity_at;
       delete data.messages;
@@ -1754,7 +1762,7 @@ exports.getMessages = async (req, res) => {
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload], userId);
-    const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
+    const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {}, null, userId);
     const [withRouting] = await attachRoutingReviews([conversationPayload], userId);
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([withRouting], req.userData, CitaPaciente);
     const [identified]=await contactIdentity.enrich([focusedPayload]);
@@ -1891,7 +1899,7 @@ async function readConversationByPatient(req, res, wantsCurrentNumber) {
           senderForClinic: clinicId => whatsappService.getClinicConfig(clinicId), identityService: contactIdentity });
         if (!current) return null;
         await ensureQuickChatConversationReadAccess(userId, current);
-        currentMessagePage = await getConversationMessagePage(current, req.query, transaction);
+        currentMessagePage = await getConversationMessagePage(current, req.query, transaction, userId);
         if (!current.patient_id) return current;
         return { ...current.toJSON(), paciente: patient };
       });
@@ -1925,7 +1933,7 @@ async function readConversationByPatient(req, res, wantsCurrentNumber) {
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload], userId);
-    const { messages, messagesPage } = currentMessagePage || await getConversationMessagePage(conversation, req.query || {});
+    const { messages, messagesPage } = currentMessagePage || await getConversationMessagePage(conversation, req.query || {}, null, userId);
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([conversationPayload], req.userData, CitaPaciente);
     const [identified]=await contactIdentity.enrich([focusedPayload]);
     return res.json({ conversation: identified, messages, messages_page: messagesPage });
@@ -2014,7 +2022,7 @@ exports.getConversationByLead = async (req, res) => {
     const unreadConversationPayload = await enrichConversationUnreadForUser(userId, conversation);
     const [restrictedConversationPayload] = await attachContactRestrictions([unreadConversationPayload]);
     const [conversationPayload] = await enrichPatientDirectionAssignments([restrictedConversationPayload], userId);
-    const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {});
+    const { messages, messagesPage } = await getConversationMessagePage(conversation, req.query || {}, null, userId);
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([conversationPayload], req.userData, CitaPaciente);
     const [identified]=await contactIdentity.enrich([focusedPayload]);
     return res.json({ conversation: { ...identified, lead_threads: threads }, messages, messages_page: messagesPage });

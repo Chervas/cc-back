@@ -4,6 +4,8 @@ const crypto = require('crypto');
 const { DEFAULT_MESSAGE_TEXT: GOOGLE_REVIEW_REMINDER_MESSAGE, messageTemplate: reviewReminderMessageTemplate } = require('../lib/google-review-reminder-copy');
 const { Op, literal } = require('sequelize');
 const db = require('../../models');
+const capturePresentation = require('../services/inboundLeadCapturePresentation.service');
+const { canUserAccessFeature } = require('../lib/access-policy');
 
 const AutomationFlowTemplateV2 = db.AutomationFlowTemplateV2;
 const FlowExecutionV2 = db.FlowExecutionV2;
@@ -3236,7 +3238,8 @@ function mapExecution(row, { includeContext = true } = {}) {
   };
 
   if (includeContext) {
-    base.context = item.context ?? {};
+    base.context = item.idempotency_key === `inbound_capture:${item.clinic_id}:${item.trigger_entity_id}`
+      ? capturePresentation.withoutCaptureEntityIds(item.context || {}) : item.context ?? {};
   }
 
   if (item.templateVersion) {
@@ -3273,7 +3276,8 @@ function mapExecutionLog(row, { includeAudit = true } = {}) {
   };
 
   if (includeAudit) {
-    base.audit_snapshot = item.audit_snapshot ?? null;
+    base.audit_snapshot = item.node_type === 'action/inbound_lead_capture'
+      ? capturePresentation.withoutCaptureEntityIds(item.audit_snapshot ?? null) : item.audit_snapshot ?? null;
   }
 
   return base;
@@ -7387,7 +7391,20 @@ exports.getExecution = async (req, res) => {
       return res.status(404).json({ success: false, error: 'execution_not_found' });
     }
 
-    return res.json({ success: true, data: mapExecution(execution, { includeContext }) });
+    const data = mapExecution(execution, { includeContext });
+    if (execution.idempotency_key === `inbound_capture:${execution.clinic_id}:${execution.trigger_entity_id}`) {
+      const message = await Message.findByPk(execution.trigger_entity_id, {
+        attributes: ['id', 'conversation_id', 'direction', 'metadata'], raw: true,
+      });
+      if (message) {
+        const [presented] = await capturePresentation.presentMessages([message], {
+          db, actorId: access.user_id, clinicId: execution.clinic_id, execution,
+          canSeeLeads: canUserAccessFeature,
+        });
+        if (presented.capture_result) data.capture_result = presented.capture_result;
+      }
+    }
+    return res.json({ success: true, data });
   } catch (err) {
     console.error('Error getExecution v2', err);
     return res.status(500).json({ success: false, error: 'get_execution_failed', message: err.message });

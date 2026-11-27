@@ -42,8 +42,9 @@ async function resolveCampaignReply({ db, message, conversation, binding, transa
     attributes: ['id', 'status', 'metadata', 'createdAt'], order: [['id', 'DESC']], limit: quoted ? 2 : 25, raw: true, transaction,
   });
   if (!outbound.length) return null;
-  const excluded = { excluded: true };
-  if ((quoted && outbound.length !== 1) || (!quoted && outbound.length === 25)) return excluded;
+  const excluded = { excluded: true, reason: 'campaign_excluded' };
+  const ambiguous = { excluded: true, reason: 'attribution_ambiguous' };
+  if ((quoted && outbound.length !== 1) || (!quoted && outbound.length === 25)) return ambiguous;
   const delivered = outbound.filter(row => {
     const meta = row.metadata || {};
     return !!meta.wamid && normalizePhoneDigits(meta.recipient) === phone && id(meta.list_id) && id(meta.item_id)
@@ -51,9 +52,33 @@ async function resolveCampaignReply({ db, message, conversation, binding, transa
         || (row.status === 'pending' && meta.provider_acceptance_status === 'accepted'));
   });
   const valid = delivered.filter(({ metadata }) => metadata.kind === 'mass_campaign_send' && metadata.dispatch_context === 'campaign');
-  if (!valid.length || new Set(valid.map(row => id(row.metadata.list_id))).size !== 1) return excluded;
+  if (!valid.length) return excluded;
+  if (new Set(valid.map(row => id(row.metadata.list_id))).size !== 1) return ambiguous;
   const original = valid[0];
-  if (!quoted && delivered[0].id !== original.id) return excluded;
+  if (!quoted && delivered[0].id !== original.id) return ambiguous;
+  if (!quoted) {
+    // A reply without provider context cannot be assigned to an earlier offer when
+    // a certified booking/identity request on the same line intervened.
+    const careRequest = await db.Message.findOne({
+      where: {
+        conversation_id: conversation.id, direction: 'outbound',
+        status: { [Op.in]: ['sent','delivered','read'] },
+        createdAt: { [Op.lte]: new Date(receivedAt + 999) },
+        [Op.or]: [
+          {createdAt: {[Op.gt]: original.createdAt}},
+          {createdAt: original.createdAt, id: {[Op.gt]: original.id}},
+        ],
+        [Op.and]: [
+          metadataEquals('phoneNumberId', String(binding.phoneId)),
+          metadataEquals('wabaId', String(binding.wabaId)),
+          where(json('metadata.kind'), {[Op.in]: ['patient_program_booking_notice','patient_mobile_verification']}),
+          where(json('metadata.wamid'), {[Op.like]: 'wamid.%'}),
+        ],
+      },
+      attributes: ['id'], transaction, raw: true,
+    });
+    if (careRequest) return ambiguous;
+  }
   const campaignId = id(original.metadata.list_id);
   const [campaign, recipient] = await Promise.all([
     db.MarketingPatientList.findByPk(campaignId, { transaction, raw: true }),
@@ -74,7 +99,8 @@ async function resolveCampaignReply({ db, message, conversation, binding, transa
   const legacyEnabled = original.metadata.capture_whatsapp_info_leads === true && campaign.criteria?.capture_whatsapp_info_leads === true;
   const policy = original.metadata.whatsapp_lead_capture_policy || 'inherit';
   const commercial = original.metadata.template_commercial === true || legacyEnabled;
-  return { excluded: !commercial || policy === 'disabled', commercial, legacyEnabled, policy, sentAt: new Date(original.createdAt).getTime(),
+  const isExcluded = !commercial || policy === 'disabled';
+  return { excluded: isExcluded, ...(isExcluded ? {reason:'campaign_excluded'} : {}), commercial, legacyEnabled, policy, sentAt: new Date(original.createdAt).getTime(),
     campaign, recipient, phone, name, campaignId, originalId: original.id, clinicId };
 }
 
@@ -102,17 +128,18 @@ async function attributeCampaignInfoReply({ db, message, conversation, binding, 
     transaction,
   });
   if (Number(lead.clinica_id) !== clinicId || lead.archived_at) return null;
+  const captureOrigin = verifiedInterest ? 'inbound_lead_capture' : 'campaign_send_configuration';
   if (created) {
     await db.LeadAttributionAudit.create({
       lead_intake_id: lead.id, raw_payload: { message_id: message.id },
-      attribution_steps: { whatsapp_bulk_send: { campaign_id: campaignId, outbound_message_id: originalId } },
+      attribution_steps: { whatsapp_bulk_send: { campaign_id: campaignId, outbound_message_id: originalId, capture_origin: captureOrigin } },
     }, { transaction });
   }
   if (!conversation.lead_id) {
     await db.Conversation.update({ lead_id: lead.id },
       { where: { id: conversation.id, clinic_id: clinicId, lead_id: null }, transaction });
   }
-  return { lead, duplicate: !created, attribution: { lead_id: lead.id, campaign_id: campaignId } };
+  return { lead, duplicate: !created, attribution: { lead_id: lead.id, campaign_id: campaignId, capture_origin: captureOrigin, outcome: created ? 'created' : 'linked' } };
 }
 
 module.exports = { SOURCE, attributeCampaignInfoReply, resolveCampaignReply, isInfoReply };
