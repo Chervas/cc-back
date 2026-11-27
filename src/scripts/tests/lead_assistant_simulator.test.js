@@ -44,11 +44,20 @@ test('handoff, clinical follow-up and opt-out finish the test locally',async()=>
   assert.equal(calls.length,0);
 });
 
-test('the sample calendar completes a booking without staff, patient, appointments, or transport models', async()=>{
-  const fields={tone:'Breve',context:'Valoraciones',guardrails:'Solo información comercial',booking:'Pide el correo electrónico.',promotions:''};
-  const db={LeadAssistantDraft:{findByPk:async()=>({version:1,fields})},Clinica:{findByPk:async()=>({nombre_clinica:'Prueba'})},
-    LeadAssistantPublication:{findOne:async()=>null}};
-  const sim=create({db,analyze:()=>assert.fail('booking is local'),recipients:()=>assert.fail('unexpected handoff')});
+function bookingSimulator({services = [{id_tratamiento:1,nombre:'Valoración',codigo:'VAL'}],allowed = true}={}) {
+  const fields = {tone:'Breve',context:'Valoraciones',guardrails:'Solo información comercial',
+    booking:'Servicio de agenda: VAL\nPide el correo electrónico para el recordatorio.',promotions:''};
+  const db = {
+    Sequelize:require('sequelize').Sequelize, Tratamiento:{findAll:async()=>services},
+    LeadAssistantDraft:{findByPk:async()=>({version:1,fields})}, LeadAssistantPublication:{findOne:async()=>null},
+    Clinica:{findByPk:async()=>({id_clinica:1,nombre_clinica:'Prueba'})},
+  };
+  return create({db,analyze:()=>assert.fail('booking is local'),recipients:async()=>({destination:'unassigned'}),
+    booking:args=>require('../../services/leadAssistantBooking.service').processTurn({...args,mayBook:async()=>allowed})});
+}
+
+test('the sample calendar completes a booking with the authorised catalogue and no patient, appointment or transport models', async()=>{
+  const sim = bookingSimulator();
   const s=await sim.start(1,42);
   const ask=message=>sim.turn(1,42,s.id,{id:randomUUID(),message,promotion:'',calendar:'demo'});
   const offered=await ask('¿Qué horarios hay para una valoración el 2030-01-07 por la tarde?');
@@ -61,10 +70,7 @@ test('the sample calendar completes a booking without staff, patient, appointmen
 });
 
 test('the simulated WhatsApp sender already supplies the phone number and cannot change channel mid-thread', async () => {
-  const fields={tone:'Breve',context:'Valoración',guardrails:'Usa la ficha',booking:'Pide correo electrónico para el recordatorio.'};
-  const db={LeadAssistantDraft:{findByPk:async()=>({version:1,fields})},Clinica:{findByPk:async()=>({nombre_clinica:'Prueba'})},
-    LeadAssistantPublication:{findOne:async()=>null}};
-  const sim=create({db});
+  const sim = bookingSimulator();
   for (const channel of ['whatsapp','instagram','messenger']) {
     const {id}=await sim.start(1,42);
     const ask=(text,via=channel)=>sim.turn(1,42,id,{id:randomUUID(),message:text,promotion:'',calendar:'demo',channel:via});
@@ -73,5 +79,16 @@ test('the simulated WhatsApp sender already supplies the phone number and cannot
     const prompt=(await ask('La primera')).reply;
     if (channel==='whatsapp') assert.match(prompt,/ya tengo el móvil/);
     else assert.match(prompt,/tu número de móvil/);
+  }
+});
+
+test('fictitious slots still require a configured service and the same scheduling permission as live slots',async()=>{
+  for (const config of [{services:[]},{allowed:false}]) {
+    const sim=bookingSimulator(config);
+    for (const calendar of ['demo','clinic']) {
+      const {id}=await sim.start(1,42);
+      const result=await sim.turn(1,42,id,{id:randomUUID(),message:'Quiero una cita',calendar,promotion:''});
+      assert.equal(result.event,'handoff');assert.equal(result.slots,undefined);
+    }
   }
 });

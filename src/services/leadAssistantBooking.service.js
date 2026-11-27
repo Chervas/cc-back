@@ -119,8 +119,8 @@ async function processTurn({
   if (entry.type !== 'dm' || explicitOptOut(entry.text)) return null;
   const raw = String(entry.text || '').trim();
   if (scope.originMessageId === scope.messageId && !cal.bookingRequest(raw)) return null;
-  const demo = preview?.calendar === 'demo';
-  const searchSlots = demo ? params => require('./leadAssistantSampleCalendar.service').sampleSlots({...params,timezone:preview.timezone})
+  const searchSlots = preview?.calendar === 'demo'
+    ? params => require('./leadAssistantSampleCalendar.service').sampleSlots(params)
     : findSlots || cal.available;
   const pending = preview ? preview.booking : await previous(db, scope);
   const contactTurn = pending?.stage === 'contact' && readContact(raw) && !wantsHumanInput(raw);
@@ -159,8 +159,8 @@ async function processTurn({
         clinicId,
         featureKey: 'appointments.manage',
       }));
-  if (!demo && !(await allowed(execution.created_by, thread.clinic_id))) return { review: true };
-  const clinic = demo ? null : await db.Clinica.findByPk(thread.clinic_id, {
+  if (!(await allowed(execution.created_by, thread.clinic_id))) return { review: true };
+  const clinic = await db.Clinica.findByPk(thread.clinic_id, {
     attributes: [
       'id_clinica',
       'nombre_clinica',
@@ -170,16 +170,16 @@ async function processTurn({
     ],
     raw: true,
   });
-  const mapped = !demo && offer && require('../lib/lead-assistant-tables').tableRows(fields.booking, [
+  const mapped = offer && require('../lib/lead-assistant-tables').tableRows(fields.booking, [
     /promocion|oferta/, /tratamiento|servicio/, /persona|profesional/,
   ]).filter(([title]) => cal.normalize(title) === cal.normalize(offer.title));
   if (mapped?.length > 1) return { review: true };
   const mapping = mapped?.[0];
-  const catalog = demo ? [{id:1,name:offer?.title || 'Valoración',code:null}] : await cal.services(db, clinic, fields, offer);
+  const catalog = await cal.services(db, clinic, fields, offer);
   const choices = mapping ? catalog.filter(item => [item.name, item.code].some(name => cal.normalize(name) === cal.normalize(mapping[1]))) : catalog;
   if (mapping && choices.length !== 1) return { review: true };
   if (!choices.length) return { review: true };
-  const timezone = demo ? preview.timezone : cal.resolveClinicTimezone(clinic);
+  const timezone = cal.resolveClinicTimezone(clinic);
   const treatment = cal.pickTreatment(choices, raw, offer, pending?.treatment?.id);
   async function materialize(build) {
     if (preview) {
@@ -276,7 +276,7 @@ async function processTurn({
     && require('./leadAssistantOverlap.service').allowsLeadPair(fields.booking);
   const currentOffer =
     pending?.treatment?.id === treatment.id && pending.stage !== 'booked' && pending.slots?.length;
-  const professional = demo ? {id:null} : await localProfessional(db, thread.clinic_id, raw);
+  const professional = await localProfessional(db, thread.clinic_id, raw);
   if (professional.unclear) return { review: true };
   const assigned = mapping ? await localProfessional(db, thread.clinic_id, 'Profesional de agenda: ' + mapping[2]) : null;
   if (mapping && (!assigned?.id || (professional.id && professional.id !== assigned.id))) return { review: true };
