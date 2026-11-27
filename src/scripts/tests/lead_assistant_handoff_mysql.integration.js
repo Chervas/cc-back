@@ -15,7 +15,9 @@ withIsolatedCampaignMysql(async ({ sql, report }) => {
   db.UsuarioClinica.belongsTo(db.Usuario, { as: 'Usuario', foreignKey: 'id_usuario' });
   db.Conversation = sql.define('Conversation', { clinic_id: D.INTEGER, channel: D.STRING, patient_id: D.INTEGER }, { timestamps: false });
   db.Message = sql.define('Message', { conversation_id: D.INTEGER, direction: D.STRING, metadata: D.JSON }, { timestamps: false });
+  db.Clinica = sql.define('Clinica', { id_clinica: { type:D.INTEGER,primaryKey:true }, configuracion:D.JSON }, { timestamps:false });
   await sql.sync();
+  await db.Clinica.bulkCreate([7,8,9,10].map(id => ({id_clinica:id, configuracion:id===9 ? {} : {leadAssistantHandoffUserId:id===10 ? 5 : 6}})));
 
   const accounts = Array.from({length: 9}, (_, n) => ({ id_usuario: n + 1, nombre: 'Cuenta de prueba',
     estado_cuenta: n === 4 ? 'suspendido' : 'activo' }));
@@ -81,12 +83,37 @@ withIsolatedCampaignMysql(async ({ sql, report }) => {
   const manualTurn = await turn(7);
   const take = require('../../services/leadAssistantHandoff.service').takeConversation;
   const thread = await db.Conversation.findByPk(manualTurn.conversationId);
-  const claimed = await Promise.all([take(db, thread, 2), take(db, thread, 3)]);
+  const socket = require('../../services/socket.service');
+  const packets = [];
+  const original = socket.getIO;
+  socket.getIO = () => ({ to: room => ({ emit: (event,body) => packets.push({room,event,body}) }) });
+  let claimed;
+  try { claimed = await Promise.all([take(db,thread,2),take(db,thread,3)]); }
+  finally { socket.getIO = original; }
+  assert.deepEqual(packets, [{room:'clinic:7',event:'message:updated',
+    body:{id:manualTurn.messageId,conversation_id:thread.id}}]);
   assert.deepEqual(claimed, ['operator','operator']);
   assert([2,3].includes((await db.Message.findByPk(manualTurn.messageId)).metadata.assistantOperator.actorId));
   assert.equal((await db.LeadAssistantSession.findByPk(thread.id)).state, 'operator');
   assert.deepEqual(await record(manualTurn), { recorded:false, destination:null });
   assert.equal(await take(db,{id:thread.id,clinic_id:999},3),null);
+  await db.Clinica.update({configuracion:{leadAssistantHandoffUserId:8}}, {where:{id_clinica:9}});
+  assert.deepEqual(await recipients(db,9), {destination:'reception',ids:[7]});
+  await db.UsuarioClinica.destroy({where:{id_clinica:9}});
+  assert.deepEqual(await recipients(db,10), {destination:'unassigned',ids:[]});
+  const fallbackTurn = await turn(9);
+  const denied = await handoff(db, fallbackTurn, {...options, canAccess: async ({actorId,clinicId,featureKey}) => {
+    assert.deepEqual([actorId,clinicId,featureKey], [8,9,'quickchat.read_leads']); return false;
+  }});
+  assert.deepEqual(denied, unassigned);
+  const previousCount = await db.Notification.count();
+  const fallback = await Promise.all([record(fallbackTurn),record(fallbackTurn)]);
+  assert.deepEqual(fallback,Array(2).fill({recorded:true,destination:'designated_staff'}));
+  assert.equal(await db.Notification.count(),previousCount+1);
+  const note=await db.Notification.findOne({where:{userId:8,clinicaId:9}});
+  assert.equal(note.data.quickChatConversationId,fallbackTurn.conversationId);
+  assert.equal((await db.LeadAssistantSession.findByPk(fallbackTurn.conversationId)).state,'human');
+  report.checks.push('Responsable de respaldo de la clínica: cuenta activa, permiso del hilo, aviso único, prioridad de dirección y recepción.');
   report.checks.push('Intervención manual en el mismo hilo, idempotente y aislada por clínica.');
   report.checks.push('Dirección asignada y activa, recepción de la clínica, ausencia de destinatario y recuperación del pendiente.');
   report.checks.push('Turno aislado por clínica y versión, bloqueo concurrente, avisos únicos y conservación del mensaje.');

@@ -4,7 +4,7 @@ const { randomUUID } = require('node:crypto');
 const dialogue = require('./leadAssistantDialogue.service');
 const { catalog, offerSections, isOfferActive } = require('./leadAssistantPromotionImages.service');
 const { assistantCommercialText } = require('./socialLeadInterestClassification.service');
-const { handoff } = require('./leadAssistantHandoff.service');
+const { handoff, refreshAfterCommit } = require('./leadAssistantHandoff.service');
 
 function commercialOffer(fields, entry, priorKey, options) {
   const sections = offerSections(fields.promotions);
@@ -143,7 +143,7 @@ async function attend({
     )
       return null;
     let session = await db.LeadAssistantSession.findByPk(c.id, locked);
-    if (!session)
+    if (!session) {
       session = await db.LeadAssistantSession.create(
         {
           conversation_id: c.id,
@@ -157,6 +157,8 @@ async function attend({
         },
         { transaction }
       );
+      refreshAfterCommit(transaction, c.clinic_id, c.id, message.id);
+    }
     if (
       session.state !== 'active' ||
       session.template_id !== scope.templateId ||
@@ -192,6 +194,7 @@ async function attend({
     });
     if (humanMessage) {
       await session.update({ state: 'human', updated_at: new Date() }, { transaction });
+      refreshAfterCommit(transaction, c.clinic_id, c.id, message.id);
       return null;
     }
     const previous = await db.Message.findOne({
