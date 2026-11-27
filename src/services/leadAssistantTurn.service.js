@@ -1,103 +1,8 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
-const dialogue = require('./leadAssistantDialogue.service');
-const { catalog, offerSections, isOfferActive, clinicDate } = require('./leadAssistantPromotionImages.service');
-const { assistantCommercialText, genericInfoRequest } = require('./socialLeadInterestClassification.service');
+const { commercialOffer, exchangeContext, postReference, respondToLead } = require('./leadAssistantConversation.service');
 const { handoff, refreshAfterCommit } = require('./leadAssistantHandoff.service');
-
-// Meta may supply only a media ID for an advertisement. Two separate posts
-// from the same account still share a QuickChat thread and a virtual assistant.
-function postReference(entry) {
-  if (entry?.type !== 'comment' && !entry?.ad) return null;
-  const media = entry.postId || entry.ad?.originalMediaId;
-  if (!media && !entry.ad?.id) return 'message:' + (entry.messageId || entry.eventId);
-  return JSON.stringify([media || null, !!entry.ad, entry.ad?.id || null]);
-}
-
-function commercialOffer(fields, entry, priorKey, options) {
-  options = { ...options, today: clinicDate(options) };
-  const sections = offerSections(fields.promotions);
-  const images = catalog(fields.promotions, options, sections);
-  const explicit = String(entry.text || '').toUpperCase();
-  const origin = [entry.post?.caption, entry.ad?.title, entry.postId].filter(Boolean).join(' ').toUpperCase();
-  const matched = (text) =>
-    [...sections.keys()].filter((key) => new RegExp('\\b' + key + '\\b', 'i').test(text));
-  let matches = matched(explicit);
-  if (!matches.length) matches = matched(origin);
-  if (!matches.length) {
-    const normalize = require('../lib/lead-assistant-tables').normalize;
-    const titlesIn = (value) => [...sections].filter(([, item]) => {
-      const title = normalize(item.title.split(' · ')[0]);
-      return title && (' ' + normalize(value).replace(/[^a-z0-9]+/g, ' ') + ' ').includes(' ' + title.replace(/[^a-z0-9]+/g, ' ') + ' ');
-    }).map(([key]) => key);
-    matches = titlesIn(explicit);
-    if (!matches.length) matches = titlesIn(origin);
-  }
-  if (!matches.length) {
-    const words = (value) =>
-      value
-        .normalize('NFKD')
-        .replace(/\p{M}/gu, '')
-        .toLowerCase()
-        .match(/[a-z0-9]+/g) || [];
-    const meaningful = (value) =>
-      words(value).filter(
-        (word) =>
-          (word.length > 2 || /^\d+$/.test(word)) &&
-          ![
-            'una',
-            'del',
-            'para',
-            'con',
-            'por',
-            'promo',
-            'promocion',
-            'imagen',
-            'foto',
-            'cartel',
-            'creatividad',
-            'figma',
-          ].includes(word)
-      );
-    const requested = meaningful(explicit + ' ' + origin);
-    matches = [...sections]
-      .filter(([code, lines]) => {
-        const aliases = [lines.title.split('.')[0], ...(images.get(code) || []).map((image) => image.label)];
-        return aliases.some((alias) => {
-          const names = meaningful(alias);
-          return (
-            (names.length === 1 && requested.includes(names[0])) ||
-            names.some(
-              (word, i) =>
-                i > 0 &&
-                requested.some((part, j) => j > 0 && part === word && requested[j - 1] === names[i - 1])
-            )
-          );
-        });
-      })
-      .map(([code]) => code);
-  }
-  const key = matches.length === 1 ? matches[0] : !matches.length && (!postReference(entry) || options?.samePublication) && sections.has(priorKey) ? priorKey : null;
-  if (!key) return null;
-  if (!isOfferActive(sections.get(key), options)) {
-    const restriction = require('../lib/lead-assistant-promotion-validity').salesRestriction(sections.get(key).saleTerms,options.today);
-    return options.includeUnavailable && restriction && isOfferActive({ ...sections.get(key), saleTerms:null }, options)
-      ? { key, restriction, images:[] } : null;
-  }
-  const stripLinks = (line) =>
-    line.replace(/!?\[([^\]\n]*)\]\(https?:\/\/[^\s()]+\)/gi, '$1').replace(/https?:\/\/\S+/gi, '');
-  const section = sections.get(key);
-  const body = [section.preamble, ...section.lines].filter(Boolean).map(stripLinks).join('\n').trim();
-  if (!body) return null;
-  return {
-    key,
-    title: sections.get(key).title.split(/[.\n]/)[0].slice(0, 180),
-    description: body,
-    ...(section.guide ? { guide: stripLinks(section.guide) } : {}),
-    images: (images.get(key) || []).slice(0, 24),
-  };
-}
 
 async function attend({
   db,
@@ -229,14 +134,10 @@ async function attend({
     });
     const timezone = require('../lib/availability-calendar').resolveClinicTimezone(clinic);
     const priorTurn = previous?.metadata?.leadAssistantTurn;
-    const priorPost = priorTurn?.postReference || postReference(previous?.metadata?.social);
-    const currentPost = postReference(entry);
-    const samePublication = !!currentPost && currentPost === priorPost;
-    const offer = commercialOffer(publication.fields, entry, priorTurn?.promotionKey, { timezone, samePublication, includeUnavailable:true });
-    // A new post starts a fresh commercial exchange. A clear switch of offer
-    // in a DM likewise invalidates pending selections for the earlier service.
-    const changed = (currentPost && !samePublication) ||
-      (offer && priorTurn?.promotionKey && offer.key !== priorTurn.promotionKey);
+    const { offer, changed, post } = exchangeContext(publication.fields, entry, {
+      promotionKey:priorTurn?.promotionKey,
+      postReference:priorTurn?.postReference || postReference(previous?.metadata?.social),
+    }, timezone);
     const contextStartId = changed ? message.id : priorTurn?.contextStartId || session.origin_message_id;
     let turn = message.metadata.leadAssistantTurn;
     if (!turn) {
@@ -245,7 +146,7 @@ async function attend({
         publicationVersion: scope.version,
         executionId: execution.id,
         promotionKey: offer?.key || null,
-        postReference: currentPost || priorPost,
+        postReference: post,
         contextStartId,
         timezone,
         imageAttemptId: randomUUID(),
@@ -282,78 +183,6 @@ async function attend({
     }, { executionId: execution.id, blockReason: (transaction) => sessionBlockReason(receipt.state, transaction) });
     return { outcome: sent.outcome, reason: sent.reason || receipt.reason, attention: receipt.attention || sent.outcome !== 'sent' };
   }
-  const raw = String(entry.text || '').trim();
-  const human = raw.length <= 1000 && raw ? dialogue.requestedHumanHandoff(raw) : null;
-  const userText = assistantCommercialText(raw);
-  let appointment;
-  if (entry.type === 'dm' && !human && !offer?.restriction) {
-    const previousResult = initial.metadata?.assistantBooking;
-    if (previousResult?.executionId === execution.id) appointment = { reply: previousResult.reply };
-    else {
-      try {
-        appointment = await require('./leadAssistantBooking.service').processTurn({
-          db,
-          thread,
-          entry: dialogue.acceptsOfferedTimes(raw, lockTurn.previousAnswer) ? {...entry,text:'Quiero consultar horarios'} : entry,
-          scope: {
-            ...scope,
-            audience: rule.audience,
-            originMessageId: lockTurn.originMessageId,
-            promotionKey: offer?.key,
-          },
-          execution,
-          fields: publication.fields,
-          offer,
-          blockReason: stillOwnsTurn,
-          availability: async () => !!(await social.availability(thread, [])).dm?.available,
-          ...bookingOptions,
-        });
-      } catch (error) {
-        if (
-          !(
-            [400, 404, 409, 422].includes(error.status || error.statusCode) &&
-            /^(?:booking_|treatment_|appointment_)/.test(error.code || '')
-          )
-        )
-          throw error;
-        appointment = { review: true };
-      }
-    }
-    if (appointment?.stop) return stopped(appointment.stop);
-    if (appointment?.reply) {
-      const text = dialogue.formatCommercialReply({
-        firstTurn: turn.firstTurn, tone: publication.fields.tone,
-        clinicName: clinic.nombre_clinica,
-        draft: appointment.reply,
-      });
-      const result = await social.reply(
-        thread,
-        { actorId: execution.created_by, attemptId: saved.attemptId, text, commentMessageId: null },
-        { executionId: execution.id, blockReason: stillOwnsTurn }
-      );
-      return {
-        outcome: result.outcome,
-        reason: result.reason || 'assistant_booking',
-        attention: result.outcome !== 'sent',
-      };
-    }
-  }
-  function passToTeam(reason) {
-    return handoffAndReply((destination) => {
-      if (!destination.recorded) return {
-        reason: 'assistant_handoff_unassigned', attention: true,
-        text: dialogue.formatCommercialReply({ firstTurn: turn.firstTurn, tone: publication.fields.tone,
-          clinicName: clinic.nombre_clinica, draft: 'Esta consulta necesita atención del equipo. Puedes contactar con la recepción de la clínica.' }),
-      };
-      return { reason, attention: false, text: dialogue.formatHandoffReceipt({
-        firstTurn: turn.firstTurn, tone: publication.fields.tone, clinicName: clinic.nombre_clinica,
-        recorded: true, destination: destination.destination, requestedCallback: !!human?.requestedCallback,
-      }) };
-    });
-  }
-  if (appointment?.review || !userText || human || saved.decision.kind === 'review') {
-    return passToTeam('assistant_handoff_recorded');
-  }
   function stillOwnsTurn(transaction) { return sessionBlockReason('active', transaction); }
   async function sessionBlockReason(state, transaction) {
     const blocked = await blockReason(transaction);
@@ -372,62 +201,51 @@ async function attend({
     });
     return active ? null : 'assistant_turn_unavailable';
   }
-  if (!turn.answer) {
-    const availability = await social.availability(thread, commentId ? [initial] : []);
-    const window = commentId ? availability.comments[commentId] : availability.dm;
-    if (!window?.available) return stopped(window?.reason || 'reply_unavailable');
-  }
-  if (offer?.restriction) {
-    const response = require('../lib/lead-assistant-promotion-validity').restrictionReply(offer.restriction,raw);
-    const prepare = (destination) => {
-      const acknowledgement = destination?.recorded ? dialogue.formatHandoffReceipt({
-        firstTurn: false, recorded: true, destination: destination.destination,
-      }) : '';
-      return {
-        reason: offer.restriction.reason, attention: response.handoff && !destination?.recorded,
-        text: dialogue.formatCommercialReply({ firstTurn: turn.firstTurn, tone: publication.fields.tone,
-          clinicName: clinic.nombre_clinica, draft: [response.text, acknowledgement].filter(Boolean).join(' ') }),
-      };
-    };
-    if (response.handoff) return handoffAndReply(prepare);
-    const { text, reason } = prepare(null);
-    const sent = await social.reply(thread, { actorId: execution.created_by, attemptId: saved.attemptId, text, commentMessageId: commentId },
-      { executionId: execution.id, blockReason: stillOwnsTurn });
-    return { outcome: sent.outcome, reason: sent.reason || reason, attention: sent.outcome !== 'sent' };
-  }
-  let answer = turn.answer;
-  if (!answer) {
-    answer = await dialogue.generateAnswer({
-      fields: publication.fields, clinicName: clinic.nombre_clinica, timezone: turn.timezone,
-      offer, userText, askPromotion: !offer && turn.postReference && genericInfoRequest(raw),
-      analyze, clinicId: scope.clinicId, groupId: execution.group_id,
-      beforeDispatch: async () => { if (await stillOwnsTurn()) throw Error('assistant_turn_unavailable'); },
-      readHistory: async () => {
-        const historyRows = await db.Message.findAll({
-          where: {
-            conversation_id: thread.id,
-            direction: 'inbound',
-            id: { [db.Sequelize.Op.lt]: scope.messageId, [db.Sequelize.Op.gte]: lockTurn.originMessageId },
-            'metadata.leadAssistantTurn.templateId': scope.templateId,
-            'metadata.leadAssistantTurn.publicationVersion': scope.version,
-          },
-          attributes: ['metadata'],
-          order: [['id', 'DESC']],
-          limit: 6,
-        });
-        return historyRows.reverse().flatMap((row) => {
-          const item = row.metadata?.leadAssistantTurn;
-          return item?.answer?.reply && item?.commercialQuestion
-            ? [
-                { role: 'user', text: item.commercialQuestion },
-                { role: 'assistant', text: item.answer.reply },
-              ]
-            : [];
-        });
-      },
-    });
-    if (!answer) return passToTeam('assistant_reply_requires_review');
-    answer = await db.sequelize.transaction(async (transaction) => {
+  const plan = await respondToLead({
+    entry, fields:publication.fields, clinicName:clinic.nombre_clinica, timezone:turn.timezone,
+    offer, firstTurn:turn.firstTurn, previousAnswer:lockTurn.previousAnswer, post:turn.postReference,
+    decisionKind:saved.decision.kind, analyze, clinicId:scope.clinicId, groupId:execution.group_id,
+    cachedAnswer:turn.answer,
+    beforeDispatch:async () => { if (await stillOwnsTurn()) throw Error('assistant_turn_unavailable'); },
+    checkWindow:async () => {
+      const availability = await social.availability(thread, commentId ? [initial] : []);
+      const window = commentId ? availability.comments[commentId] : availability.dm;
+      return window?.available ? null : window?.reason || 'reply_unavailable';
+    },
+    book:bookingEntry => {
+      const previous = initial.metadata?.assistantBooking;
+      if (previous?.executionId === execution.id) return {reply:previous.reply};
+      return require('./leadAssistantBooking.service').processTurn({
+        db, thread, entry:bookingEntry, execution, fields:publication.fields, offer,
+        scope:{ ...scope, audience:rule.audience, originMessageId:lockTurn.originMessageId, promotionKey:offer?.key },
+        blockReason:stillOwnsTurn, availability:async () => !!(await social.availability(thread, [])).dm?.available,
+        ...bookingOptions,
+      });
+    },
+    readHistory:async () => {
+      const historyRows = await db.Message.findAll({
+        where: {
+          conversation_id: thread.id,
+          direction: 'inbound',
+          id: { [db.Sequelize.Op.lt]: scope.messageId, [db.Sequelize.Op.gte]: lockTurn.originMessageId },
+          'metadata.leadAssistantTurn.templateId': scope.templateId,
+          'metadata.leadAssistantTurn.publicationVersion': scope.version,
+        },
+        attributes: ['metadata'],
+        order: [['id', 'DESC']],
+        limit: 6,
+      });
+      return historyRows.reverse().flatMap((row) => {
+        const item = row.metadata?.leadAssistantTurn;
+        return item?.answer?.reply && item?.commercialQuestion
+          ? [
+              { role: 'user', text: item.commercialQuestion },
+              { role: 'assistant', text: item.answer.reply },
+            ]
+          : [];
+      });
+    },
+    saveAnswer:(answer, userText) => db.sequelize.transaction(async (transaction) => {
       const message = await db.Message.findByPk(scope.messageId, {
         transaction,
         lock: transaction.LOCK.UPDATE,
@@ -445,16 +263,11 @@ async function attend({
         { transaction }
       );
       return answer;
-    });
-  }
-  const image = offer?.images.find((item) => item.id === answer.imageId);
-  let text = dialogue.formatCommercialReply({
-    firstTurn: turn.firstTurn, tone: publication.fields.tone,
-    clinicName: clinic.nombre_clinica,
-    draft: answer.reply,
+    }),
   });
-  if (entry.type === 'comment' && image && text.length + image.url.length + 1 <= 1000)
-    text += '\n' + image.url;
+  if (plan.kind === 'silent') return stopped(plan.reason);
+  if (plan.kind === 'handoff') return handoffAndReply(plan.prepare);
+  const { text, image } = plan;
   const selection = image
     ? {
         templateId: scope.templateId,
@@ -485,7 +298,7 @@ async function attend({
   if (result.outcome !== 'sent' || !image || entry.type !== 'dm')
     return {
       outcome: result.outcome,
-      reason: result.reason || 'assistant_reply',
+      reason: result.reason || plan.reason,
       attention: result.outcome !== 'sent',
     };
   const attachment = await social.replyWithPromotionImage(

@@ -405,6 +405,7 @@ async function processTurn({
         (contact.name ? ' a nombre de ' + contact.name : '') +
         '?',
     }));
+  const confirmation = () => 'Tu cita ha quedado reservada para el ' + cal.display(selected, timezone) + '. Gracias.';
   // A test can confirm only a slot offered in its own in-memory conversation.
   // Re-read availability, then finish the preview before entering the real reservation transaction.
   if (preview) {
@@ -413,7 +414,7 @@ async function processTurn({
     if (!fresh.some(slot => slot.start === selected.start && slot.doctorId === selected.doctorId && slot.receipt === selected.receipt))
       return propose({range:pending.calendar, prefix:'Ese hueco se acaba de ocupar. ', afterConflict:true});
     return materialize(async () => ({ ...common, stage:'booked',
-      reply:'Tu cita de prueba ha quedado confirmada para el ' + cal.display(selected, timezone) + '.' }));
+      reply:confirmation() }));
   }
   try {
     return await materialize(async ({ current, transaction }) => {
@@ -516,10 +517,7 @@ async function processTurn({
         stage: 'booked',
         appointmentId: booked.id,
         patientId: booked.patientId,
-        reply:
-          'Tu cita ha quedado reservada para el ' +
-          cal.display(selected, timezone) +
-          '. Gracias.',
+        reply:confirmation(),
       };
     });
   } catch (error) {
