@@ -6710,6 +6710,19 @@ exports.listLeads = asyncHandler(async (req, res) => {
   res.status(200).json(payload);
 });
 
+exports.inboundLeadCaptureConfig = asyncHandler(async (req, res) => {
+  const cfg = require('../services/inboundLeadCaptureConfig.service');
+  const clinicId = Number(req.params.clinicId), channel = req.params.channel;
+  if (!/^[1-9]\d*$/.test(req.params.clinicId) || !Number.isSafeInteger(clinicId) || !cfg.CHANNELS.includes(channel))
+    return res.status(400).json({error:'lead_capture_scope_invalid'});
+  if (!(await requireLeadAutomationClinicAccess(req,res,clinicId))) return;
+  res.set('Cache-Control','private, no-store');
+  if (req.method === 'GET') return res.json(cfg.status(channel,await cfg.current(db,clinicId,channel)));
+  if (!req.body || Object.keys(req.body).length !== 1 || typeof req.body.active !== 'boolean')
+    return res.status(400).json({error:'lead_capture_config_invalid'});
+  return res.json(await cfg.save(db,clinicId,channel,Number(req.userData.userId),req.body.active));
+});
+
 exports.getLeadAutoReplyStatus = asyncHandler(async (req, res) => {
   const clinicId = parseInteger(req.query.clinic_id || req.query.clinicId);
   if (clinicId === null) {
@@ -6743,6 +6756,25 @@ exports.leadAssistantDraft = asyncHandler(async (req, res) => {
       draft.handoffDestination = destination;
     }
     return res.json({ ...draft, approvedVersion: await leadAssistantDrafts.approvedVersion(clinicId) });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.code });
+    throw error;
+  }
+});
+
+exports.afterHoursLeadSettings = asyncHandler(async (req, res) => {
+  const clinicId = Number(req.params.clinicId);
+  if (!/^[1-9]\d*$/.test(req.params.clinicId) || !Number.isSafeInteger(clinicId)) {
+    return res.status(400).json({ error: 'clinic_id_required' });
+  }
+  if (!(await requireLeadAutomationClinicAccess(req, res, clinicId))) return;
+  const settings = require('../services/afterHoursLeadSettings.service').create(db);
+  res.set('Cache-Control', 'private, no-store');
+  try {
+    const result = req.method === 'PUT'
+      ? await settings.save(clinicId, Number(req.userData.userId), req.body)
+      : await settings.read(clinicId);
+    return res.json(result);
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.code });
     throw error;

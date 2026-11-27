@@ -72,8 +72,9 @@ function socialEntries(raw, strict = false) {
   const entries = {};
   for (const [key, rule] of Object.entries(raw)) {
     if (!SOCIAL_ENTRIES.has(key) || !rule || Object.getPrototypeOf(rule) !== Object.prototype) return invalid();
-    const fields = Object.keys(rule).sort().join(',');
-    if (key === 'whatsapp_dm' && rule.action !== 'assistant') return invalid();
+    const fields = Object.keys(rule).filter(field => field !== 'inbound_capture_separate').sort().join(',');
+    if (Object.hasOwn(rule, 'inbound_capture_separate') && rule.inbound_capture_separate !== true) return invalid();
+    if (key === 'whatsapp_dm' && !['message', 'assistant'].includes(rule.action)) return invalid();
     if (fields === 'action' && rule.action === 'notify') entries[key] = { action: 'notify' };
     else if ((fields === 'action,audience,version' || (fields === 'action,audience,origins,version' && validOrigins(rule.origins))) &&
         rule.action === 'assistant' && key !== 'messenger_dm' &&
@@ -81,15 +82,24 @@ function socialEntries(raw, strict = false) {
       entries[key] = { action: 'assistant', audience: rule.audience, version: rule.version };
       if (rule.origins) entries[key].origins = [...rule.origins];
     }
-    else if (fields === 'action,text' && rule.action === 'message' && key !== 'messenger_dm' && typeof rule.text === 'string'
-      && rule.text.trim().length > 0 && rule.text.trim().length <= 1000) entries[key] = { action: 'message', text: rule.text.trim() };
+    else if (['action,text', 'action,audience,text', 'action,origins,text', 'action,audience,origins,text'].includes(fields)
+        && rule.action === 'message' && key !== 'messenger_dm' && typeof rule.text === 'string'
+        && rule.text.trim().length > 0 && rule.text.trim().length <= 1000
+        && (!Object.hasOwn(rule, 'audience') || ['all', 'leads'].includes(rule.audience))
+        && (!Object.hasOwn(rule, 'origins') || validOrigins(rule.origins))) {
+      entries[key] = { action: 'message', text: rule.text.trim() };
+      if (rule.audience) entries[key].audience = rule.audience;
+      if (rule.origins) entries[key].origins = [...rule.origins];
+    }
     else return invalid();
+    if (rule.inbound_capture_separate === true) entries[key].inbound_capture_separate = true;
   }
   return entries;
 }
 
 function normalizeConfig(raw = {}) {
   return {
+    ...(raw.inbound_capture_separate === true ? { inbound_capture_separate: true } : {}),
     managed_feature: FEATURE_KEY,
     configured: raw.configured === true,
     sources: normalizeSources(raw.sources || raw.contact_sources),
@@ -353,6 +363,8 @@ async function getStatus(clinicId) {
   const config = normalizeConfig(flow?.trigger_config || {});
   const readiness = await buildReadiness(config, clinicId);
   return {
+    whatsapp_prepared_supported: true,
+    separate_capture_supported: true,
     feature: FEATURE_KEY,
     clinic_id: clinicId,
     whatsapp_assistant_supported: true,
@@ -417,6 +429,15 @@ async function saveConfig({ clinicId, actorUserId, input }) {
     updated_at: new Date().toISOString(),
     updated_by: actorUserId,
   });
+  config.inbound_capture_separate = true;
+  const priorRules = socialEntries(previous?.trigger_config?.social_entries);
+  for (const [key, rule] of Object.entries(config.social_entries)) {
+    const prior = priorRules[key];
+    const comparable = value => value && JSON.stringify({action: value.action, audience: value.audience,
+      origins: value.origins?.slice().sort(), version: value.version, text: value.text});
+    if (prior?.inbound_capture_separate || comparable(prior) !== comparable(rule)) rule.inbound_capture_separate = true;
+    else delete rule.inbound_capture_separate;
+  }
   const empty = !config.sources.length && !Object.keys(config.social_entries).length;
   const clearing = empty && input.active !== true && Object.hasOwn(input, 'social_entries') &&
     Object.keys(socialEntries(previous?.trigger_config?.social_entries)).length > 0;

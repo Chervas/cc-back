@@ -1299,6 +1299,16 @@ const NODE_TYPES_V2 = [
     ],
   },
   {
+    type:'action/inbound_lead_capture', category:'action', label:'Captar un lead por interés comercial',
+    description:'Registra el contacto de una entrada verificada de esta clínica.',
+    output_keys:['on_success'], runtime_status:'real', default_config:{}, config_schema:[],
+  },
+  {
+    type: 'action/reply_with_prepared_whatsapp', category:'action', label:'Enviar un mensaje preparado',
+    description:'Responde en el mismo WhatsApp con el texto aprobado por la clínica dentro de la ventana de atención.',
+    output_keys:['on_success'], runtime_status:'real', default_config:{}, config_schema:[],
+  },
+  {
     type: 'action/social_lead_interest', category: 'action', label: 'Detectar interés en redes',
     description: 'Procesa la entrada de QuickChat de la automatización de leads de la clínica.',
     output_keys: ['on_success', 'on_review', 'on_fail', 'on_assistant'], runtime_status: 'real', default_config: {}, config_schema: [],
@@ -1756,12 +1766,19 @@ function normalizeTriggerConfigForTemplate({ triggerType, entryNodeId, nodes }) 
         message: 'Selecciona si se activa siempre o solo cuando la clínica está cerrada.',
       };
     }
+    const afterHours = rawConfig.after_hours_action;
+    if (afterHours !== undefined && (timing !== 'clinic_closed' || !['notice','team','assistant'].includes(afterHours)
+        || (afterHours === 'assistant' && (!Number.isSafeInteger(rawConfig.after_hours_assistant_version) || rawConfig.after_hours_assistant_version < 1)))) {
+      return {ok:false, error:'invalid_trigger_config', message:'Revisa la respuesta elegida para fuera de horario.'};
+    }
     return {
       ok: true,
       trigger_config: {
         channel_scope: channelScope,
         channels: channelScope === 'selected' ? channels : [],
         timing,
+        ...(afterHours ? {after_hours_action:afterHours} : {}),
+        ...(afterHours === 'assistant' ? {after_hours_assistant_version:rawConfig.after_hours_assistant_version} : {}),
         only_unclaimed: true,
         response_buffer_seconds: 90,
       },
@@ -2102,7 +2119,7 @@ function messageReceivedConfigsOverlap(left, right) {
 }
 
 async function findMessageReceivedTriggerConflict(row, triggerConfig) {
-  if (cleanString(row?.trigger_type) !== 'message_received') return null;
+  if (cleanString(row?.trigger_type) !== 'message_received' || triggerConfig?.managed_feature === 'inbound_lead_capture') return null;
   const publicId = cleanString(row?.public_id);
   const templateKey = cleanString(row?.template_key);
   const candidates = await AutomationFlowTemplateV2.findAll({
@@ -2116,6 +2133,7 @@ async function findMessageReceivedTriggerConflict(row, triggerConfig) {
     raw: true,
   });
   return (candidates || []).find((candidate) => {
+    if (candidate.trigger_config?.managed_feature === 'inbound_lead_capture') return false;
     if (publicId && cleanString(candidate.public_id) === publicId) return false;
     if (!publicId && templateKey && cleanString(candidate.template_key) === templateKey) return false;
     return isSameAutomationScope(candidate, row)
@@ -2154,6 +2172,8 @@ function applyTriggerConfigToNodes({ triggerType, entryNodeId, nodes, triggerCon
       channel_scope: cleanString(triggerConfig.channel_scope || 'all_connected').toLowerCase() || 'all_connected',
       channels: Array.isArray(triggerConfig.channels) ? triggerConfig.channels : [],
       timing: cleanString(triggerConfig.timing || 'always').toLowerCase() || 'always',
+      ...(triggerConfig.after_hours_action ? {after_hours_action:triggerConfig.after_hours_action} : {}),
+      ...(triggerConfig.after_hours_action === 'assistant' ? {after_hours_assistant_version:triggerConfig.after_hours_assistant_version} : {}),
       only_unclaimed: true,
       response_buffer_seconds: 90,
     };
@@ -2782,6 +2802,16 @@ function collapseCatalogManagedRowsForScopedList(rows, shouldCollapse) {
   return sourceRows.filter((row) => !hiddenIds.has(Number(row.id)));
 }
 
+function inboundCaptureTemplate(row) {
+  return row?.trigger_config?.managed_feature === 'inbound_lead_capture'
+    || /^inbound_lead_capture_(?:whatsapp|social)__clinic_[1-9]\d*$/.test(row?.template_key || '');
+}
+
+function captureConfiguredInIntake(res) {
+  return res.status(409).json({ success:false, error:'lead_capture_managed_in_intake',
+    message:'Configura la captación desde su tarjeta en Leads.' });
+}
+
 function buildTemplatePermissions(access, item) {
   if (!access || !access.user_id) {
     return {
@@ -2798,8 +2828,8 @@ function buildTemplatePermissions(access, item) {
   const isDraft = !item?.published_at;
   const isSystem = !!item?.is_system;
   const isManagedSystemTemplate = isCatalogManagedTemplate(item);
-  const isReadonlyGenerated =
-    cleanString(item?.trigger_type) === 'patient_reactivation'
+  const isReadonlyGenerated = inboundCaptureTemplate(item)
+    || cleanString(item?.trigger_type) === 'patient_reactivation'
     || cleanString(item?.template_key).startsWith('reactivacion_lista_');
   const canChangeStructure =
     scopeAllowed
@@ -5962,6 +5992,7 @@ exports.createTemplateDraft = async (req, res) => {
     }
 
     const body = req.body || {};
+    if (inboundCaptureTemplate(body) || (Array.isArray(body.nodes) && body.nodes.some(node => node?.type === 'action/inbound_lead_capture'))) return captureConfiguredInIntake(res);
     const publicationSources = ['single_notice_source_id', 'message_copy_source_id', 'acknowledgement_review_source_id'].filter(key => body[key] != null);
     if (publicationSources.length > 1) return res.status(400).json({success:false,error:'publication_operation_ambiguous'});
     const sourceField = publicationSources[0] || 'single_notice_source_id';
@@ -5973,6 +6004,7 @@ exports.createTemplateDraft = async (req, res) => {
       if (!Number.isSafeInteger(body[sourceField]) || body[sourceField] <= 0) return res.status(400).json({ success:false,error:'publication_source_invalid' });
       singleNoticeSource = await AutomationFlowTemplateV2.findByPk(body[sourceField]);
       if (!singleNoticeSource || !hasScopeAccess(access,singleNoticeSource)) return res.status(404).json({success:false,error:'template_version_not_found'});
+      if (inboundCaptureTemplate(singleNoticeSource)) return captureConfiguredInIntake(res);
     }
     const name = cleanString(body.name);
     const triggerType = cleanString(body.trigger_type);
@@ -6301,6 +6333,7 @@ exports.updateTemplateDraft = async (req, res) => {
     if (!row || !hasScopeAccess(access, row)) {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
     }
+    if (inboundCaptureTemplate(row) || (Array.isArray(req.body?.nodes) && req.body.nodes.some(node => node?.type === 'action/inbound_lead_capture'))) return captureConfiguredInIntake(res);
 
     const body = req.body || {};
     const bodyKeys = Object.keys(body || {});
@@ -6568,6 +6601,7 @@ exports.publishTemplateVersion = async (req, res) => {
     if (!row || !hasScopeAccess(access, row)) {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
     }
+    if (inboundCaptureTemplate(row)) return captureConfiguredInIntake(res);
 
     if (row.published_at) {
       return res.status(409).json({ success: false, error: 'already_published' });
@@ -6870,6 +6904,7 @@ exports.deleteTemplate = async (req, res) => {
       return res.status(403).json({ success: false, error: 'forbidden_scope' });
     }
 
+    if (rows.some(inboundCaptureTemplate)) return captureConfiguredInIntake(res);
     const isSystemTemplate = rows.some((row) => !!row.is_system);
     if (isSystemTemplate && !access.is_admin) {
       return res.status(405).json({
@@ -6964,6 +6999,7 @@ exports.executeTemplateVersion = async (req, res) => {
     if (!row || !hasScopeAccess(access, row)) {
       return res.status(404).json({ success: false, error: 'template_version_not_found' });
     }
+    if (inboundCaptureTemplate(row) && !parseBool(req.body?.simulation,false)) return captureConfiguredInIntake(res);
 
     const body = req.body || {};
     const isSimulation = parseBool(body.simulation, false);

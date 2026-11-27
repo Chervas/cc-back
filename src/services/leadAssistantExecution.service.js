@@ -35,6 +35,10 @@ async function enqueueInboundExecution({
       if (error.name !== 'SequelizeUniqueConstraintError' || !(execution = await find())) throw error;
     }
   }
+  return enqueueExistingExecution(execution, enqueueJob, origin);
+}
+
+async function enqueueExistingExecution(execution, enqueueJob, origin) {
   if (execution.status === 'running' || execution.status === 'waiting') {
     await enqueueJob({
       type: 'automations_v2_execute',
@@ -49,4 +53,4 @@ async function enqueueInboundExecution({
   return { execution_id: execution.id };
 }
 
-module.exports = { enqueueInboundExecution };
+module.exports = { enqueueInboundExecution, enqueueExistingExecution };

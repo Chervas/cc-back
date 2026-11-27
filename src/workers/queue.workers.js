@@ -1828,6 +1828,12 @@ createWorker('webhook_whatsapp', async (job) => {
                     wamid,
                     phoneId,
                     provider_sent_at: parseWhatsappTimestamp(msg.timestamp, null)?.toISOString() || null,
+                    provider_type: rawType,
+                    ...(entry?.id ? { wabaId: String(entry.id) } : {}),
+                    ...(msg.context?.id ? { context: { id: msg.context.id } } : {}),
+                    ...(msg.referral?.source_type === 'ad' && (msg.referral.source_id || msg.referral.ctwa_clid) ? {
+                        referral: { source_type: 'ad', source_id: msg.referral.source_id || null, ctwa_clid: msg.referral.ctwa_clid || null },
+                    } : {}),
                     ...(whatsappOriginAssetId ? { whatsapp_origin_asset_id: whatsappOriginAssetId } : {}),
                     ...(whatsappChannelRole === 'secondary' || whatsappChannelRole === 'primary'
                         ? { whatsapp_channel_role: whatsappChannelRole }
@@ -1859,6 +1865,17 @@ createWorker('webhook_whatsapp', async (job) => {
                 },
                 sent_at: new Date(),
             }, { transaction });
+
+            // Honour a commercial dispatch's explicit capture option when no clinic-wide
+            // V2 publication owns this inbound. The existing passive receiver uses the same attribution.
+            const campaignReply = await require('../services/marketingWhatsappReplyLead.service').attributeCampaignInfoReply({
+                db, message: inboundMsg, conversation: conv, binding: { clinicId: conv.clinic_id, phoneId, wabaId: entry.id },
+                transaction, freshDispatch: true,
+            });
+            if (campaignReply) {
+                await inboundMsg.update({ metadata: { ...inboundMsg.metadata, whatsapp_campaign_attribution: campaignReply.attribution } }, { transaction });
+                transaction.afterCommit(() => require('../services/leadCreatedRealtime.service').publishLeadCreated(campaignReply));
+            }
 
             // Mensaje, contador y outbox forman una sola frontera durable.
             conv.last_message_at = new Date();

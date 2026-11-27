@@ -355,10 +355,10 @@ async function failInboundDispatchAttempt(claimId, attemptKey, error, jobRequest
   });
 }
 
-async function loadClinicScope(clinicId) {
+async function loadClinicScope(clinicId, transaction) {
   const clinic = await db.Clinica.findByPk(clinicId, {
     attributes: ['id_clinica', 'grupoClinicaId', 'configuracion'],
-    raw: true,
+    transaction, raw: true,
   });
   return {
     clinic,
@@ -367,11 +367,12 @@ async function loadClinicScope(clinicId) {
   };
 }
 
-async function findEffectiveMessageReceivedTemplate({ clinicId, channel, clinicOpenState = null }) {
-  const scope = await loadClinicScope(clinicId);
+async function findEffectiveMessageReceivedTemplate({ clinicId, channel, clinicOpenState = null, receivedAt, transaction }) {
+  const scope = await loadClinicScope(clinicId, transaction);
   if (!scope.clinicId) return null;
-  const openState = clinicOpenState || await resolveClinicOpenState({ clinicId: scope.clinicId });
+  const openState = clinicOpenState || await resolveClinicOpenState({ clinicId: scope.clinicId, ...(receivedAt ? {now:receivedAt} : {}) });
   const rows = await db.AutomationFlowTemplateV2.findAll({
+    transaction,
     where: {
       trigger_type: 'message_received',
       published_at: { [Op.ne]: null },
@@ -389,6 +390,7 @@ async function findEffectiveMessageReceivedTemplate({ clinicId, channel, clinicO
       const config = row.trigger_config && typeof row.trigger_config === 'object'
         ? row.trigger_config
         : {};
+      if (config.managed_feature === 'inbound_lead_capture') return false;
       if (row.is_system && config.runtime_fallback_enabled !== true) return false;
       return true;
     })
@@ -422,8 +424,8 @@ async function findEffectiveMessageReceivedTemplate({ clinicId, channel, clinicO
     : null;
 }
 
-async function queueGenericMessageBatch({ claim, message, conversation, channel }) {
-  const resolved = await findEffectiveMessageReceivedTemplate({
+async function queueGenericMessageBatch({ claim, message, conversation, channel, selected }) {
+  const resolved = selected !== undefined ? selected : await findEffectiveMessageReceivedTemplate({
     clinicId: positiveInt(claim.clinic_id),
     channel,
   });
@@ -551,6 +553,16 @@ async function markClaimCompleted(claim, ownerType, ownerReferenceId = null, met
   }, { ...metadata, processing_lease_until: null });
 }
 
+async function waitForInboundLeadCapture(claim, attempt, jobRequest, capture) {
+  await db.sequelize.transaction(async transaction => {
+    const row = await db.AutomationInboundMessageClaim.findByPk(claim.id, {transaction,lock:transaction.LOCK.UPDATE});
+    if (claimMetadata(row).processing_attempt !== attempt.attemptKey) throw Error('inbound_capture_claim_lost');
+    await updateClaim(row, {status:'queued',processed_at:null}, {processing_lease_until:null,capture_execution_id:capture.execution_id}, {transaction});
+    if (jobRequest?.id) await db.JobRequest.update({max_attempts:4096},{where:{id:jobRequest.id,status:'running',attempts:jobRequest.attempts},transaction});
+  });
+  return {status:'waiting',nextAllowedAt:new Date(Date.now()+3000),result:{claim_id:claim.id,capture_execution_id:capture.execution_id}};
+}
+
 async function runInboundDispatchJob(payload = {}, jobRequest = null) {
   const claimId = positiveInt(payload.claim_id);
   const messageId = positiveInt(payload.message_id);
@@ -599,11 +611,21 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
     const clinicId = positiveInt(conversation.clinic_id || claim.clinic_id);
     const channel = normalizeChannel(conversation.channel || claim.channel);
     if ((channel === 'instagram' || channel === 'messenger') && message.metadata?.social) {
-      const result = await require('./socialLeadAutomation.service').start({claim, message, conversation});
-      await markClaimCompleted(claim, 'social_lead_interest', result.execution_id, {reason: result.reason || null});
-      return {status: 'completed', result};
+      const capture = await require('./inboundLeadCapture.service').enqueueSocial({ claim, message, conversation });
+      if (capture.pending) return waitForInboundLeadCapture(claim, attempt, jobRequest, capture);
+      if (capture.lead_id) await conversation.reload();
+      const result = await require('./socialLeadAutomation.service').start({ claim, message, conversation });
+      if (!result.execution_id && capture.execution_id) {
+        await markClaimCompleted(claim, 'inbound_lead_capture', capture.execution_id, { reason:'capture_only' });
+        return { status:'completed', result:{ ...capture, reason:'capture_only' } };
+      }
+      await markClaimCompleted(claim, 'social_lead_interest', result.execution_id, { reason: result.reason || null });
+      return { status:'completed', result };
     }
     if (channel === 'whatsapp') {
+      const capture = await require('./inboundLeadCapture.service').enqueueWhatsapp({ claim, message, conversation });
+      if (capture.pending) return waitForInboundLeadCapture(claim, attempt, jobRequest, capture);
+      if (capture.lead_id) await conversation.reload();
       const bulkOptOut = await marketingOptOutService.applyBulkWhatsappOptOut({ clinicId, conversation, inboundMessage: message });
       if (bulkOptOut?.handled) {
         await message.update({ metadata: { ...(message.metadata || {}), bulk_whatsapp_opt_out: bulkOptOut } });
@@ -630,19 +652,6 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
         { verification: mobileVerification.state || 'ignored' });
       return { status: 'completed', result: { claim_id: claim.id, owner: 'patient_mobile_verification' } };
     }
-    const resumeResult = await automationsV2ResumeService.enqueueInboundResponseResume({
-      clinicId,
-      conversationId: conversation.id,
-      patientId: conversation.patient_id,
-      leadId: conversation.lead_id,
-      messageText: message.content,
-      inboundMessageId: message.id,
-      channel,
-    });
-    if (Array.isArray(resumeResult?.errors) && resumeResult.errors.length) {
-      throw new Error('waiting_execution_dispatch_failed');
-    }
-
     const optOutResult = await marketingOptOutService.applyInboundOptOutIfNeeded({
       clinicId,
       conversation,
@@ -659,6 +668,29 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
       });
     }
 
+    if (optOutResult?.applied) {
+      await markClaimCompleted(claim, 'marketing_opt_out', optOutResult.record_id, {
+        intent: cleanString(optOutResult.intent),
+      });
+      return { status: 'completed', result: { claim_id: claim.id, owner: 'marketing_opt_out' } };
+    }
+    if (channel === 'whatsapp' && require('./socialLeadInterestClassification.service').explicitOptOut(message.content)) {
+      await markClaimCompleted(claim, 'marketing_opt_out', null, {reason:'explicit_opt_out_request'});
+      return {status:'completed', result:{claim_id:claim.id, owner:'marketing_opt_out'}};
+    }
+    const resumeResult = await automationsV2ResumeService.enqueueInboundResponseResume({
+      clinicId,
+      conversationId: conversation.id,
+      patientId: conversation.patient_id,
+      leadId: conversation.lead_id,
+      messageText: message.content,
+      inboundMessageId: message.id,
+      channel,
+    });
+    if (Array.isArray(resumeResult?.errors) && resumeResult.errors.length) {
+      throw new Error('waiting_execution_dispatch_failed');
+    }
+
     if (Number(resumeResult?.matched || 0) > 0) {
       await markClaimCompleted(claim, 'wait_response', resumeResult.execution_ids?.[0], {
         matched_executions: resumeResult.execution_ids || [],
@@ -667,12 +699,6 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
         status: 'completed',
         result: { claim_id: claim.id, owner: 'wait_response', matched: resumeResult.matched },
       };
-    }
-    if (optOutResult?.applied) {
-      await markClaimCompleted(claim, 'marketing_opt_out', optOutResult.record_id, {
-        intent: cleanString(optOutResult.intent),
-      });
-      return { status: 'completed', result: { claim_id: claim.id, owner: 'marketing_opt_out' } };
     }
     const transportTransition = await require('./whatsappDispatchWait.service').inboundTransition(message, conversation);
     if (transportTransition) {
@@ -730,7 +756,25 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
       };
     }
 
-    const generic = await queueGenericMessageBatch({ claim, message, conversation, channel });
+    const originalAt = message.metadata?.passive_recovery ? message.sent_at : message.metadata?.provider_sent_at;
+    const receivedAt = parseDate(originalAt) || parseDate(message.sent_at) || parseDate(message.createdAt);
+    const selected = await findEffectiveMessageReceivedTemplate({clinicId, channel, receivedAt});
+    if (channel === 'whatsapp') {
+      const whatsappReply = require('./leadAssistantWhatsapp.service');
+      const outside = whatsappReply.afterHoursChoice(selected);
+      const reply = whatsappReply.current();
+      let response = await reply.recover({claim, message, conversation});
+      if (!response && (!outside || outside.action === 'assistant')) response = await reply.start({claim, message, conversation, selected});
+      if (response?.execution_id) {
+        await markClaimCompleted(claim, 'whatsapp_inbound_reply', response.execution_id);
+        return {status:'completed', result:{claim_id:claim.id, owner:'whatsapp_inbound_reply', ...response}};
+      }
+      if (outside && outside.action !== 'notice') {
+        await markClaimCompleted(claim, 'after_hours_team', outside.flow.id, {reason:'await_clinic_team'});
+        return {status: 'completed', result: {claim_id: claim.id, owner:'after_hours_team'}};
+      }
+    }
+    const generic = await queueGenericMessageBatch({ claim, message, conversation, channel, selected });
     return {
       status: 'completed',
       result: {

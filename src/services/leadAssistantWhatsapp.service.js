@@ -8,15 +8,17 @@ const {
   DEFAULT_WINDOW_MS,
 } = require('./whatsappServiceWindow.service');
 const { resolveForTurn } = require('./leadAssistantPromotionImages.service');
-const { assistantCommercialText, explicitOptOut } = require('./socialLeadInterestClassification.service');
-const { acceptsOrigin } = require('./leadAssistantOrigin.service');
-const { enqueueInboundExecution } = require('./leadAssistantExecution.service');
+const { assistantCommercialText, explicitOptOut, asksForCommercialInformation } = require('./socialLeadInterestClassification.service');
+const { acceptsOrigin, validOrigins } = require('./leadAssistantOrigin.service');
+const { enqueueInboundExecution, enqueueExistingExecution } = require('./leadAssistantExecution.service');
 
 function inbound(claim, message, conversation) {
+  if (!claim || !message || !conversation) return null;
   const meta = message?.metadata;
   if (
     conversation?.channel !== 'whatsapp' ||
     claim?.channel !== 'whatsapp' ||
+    (claim.owner_type && !['dispatching', 'whatsapp_inbound_reply'].includes(claim.owner_type)) ||
     claim.clinic_id !== conversation.clinic_id ||
     claim.conversation_id !== conversation.id ||
     claim.message_id !== message?.id ||
@@ -52,6 +54,9 @@ function inbound(claim, message, conversation) {
     at,
     expiresAt: new Date(at + DEFAULT_WINDOW_MS).toISOString(),
     text: message.content,
+    campaignId: meta.inboundLeadCapture?.origin === 'whatsapp_campaign' ? meta.inboundLeadCapture.campaignId : meta.whatsapp_campaign_attribution?.campaign_id,
+    wabaId: meta.waba_id || meta.wabaId || null,
+    ad: meta.referral?.source_type === 'ad' && (meta.referral.source_id || meta.referral.ctwa_clid) ? {id:meta.referral.source_id || null} : null,
   };
 }
 
@@ -86,32 +91,84 @@ async function route(conversation, phoneId, transaction) {
     : null;
 }
 
-async function plan(db, thread, entry, transaction) {
-  const flow = await db.AutomationFlowTemplateV2.findOne({
-    where: {
-      clinic_id: thread.clinic_id,
-      template_key: 'lead_auto_reply_system__clinic_' + thread.clinic_id,
-      published_at: { [db.Sequelize.Op.ne]: null },
-    },
-    order: [['version', 'DESC']],
-    transaction,
-  });
-  const rule = flow?.trigger_config?.social_entries?.whatsapp_dm;
-  if (
-    !flow?.is_active ||
-    flow.is_system ||
-    !flow.trigger_config?.configured ||
-    flow.trigger_config?.managed_feature !== 'lead_auto_reply' ||
-    +new Date(flow.published_at) > entry.at ||
-    rule?.action !== 'assistant' ||
-    !Number.isSafeInteger(rule.version) ||
-    !['all','leads'].includes(rule.audience) ||
-    await require('./leadAssistantBooking.service').excludedPatient(db,rule,thread,entry.messageId,transaction) ||
-    explicitOptOut(entry.text) ||
-    !await acceptsOrigin(db, rule, thread, entry, transaction)
-  )
-    return null;
-  return { flow, rule };
+function afterHoursChoice(selected) {
+  const flow = selected?.template;
+  if (!flow || selected.clinicOpenState?.open_now !== false || selected.clinicOpenState.has_schedule !== true
+      || flow.trigger_config?.timing !== 'clinic_closed'
+      || !/^system_message_received_after_hours(?:__clinic_[1-9][0-9]*)?$/.test(flow.template_key || '')) return null;
+  return {flow, action: flow.trigger_config.after_hours_action || 'notice'};
+}
+
+async function afterHoursLead(db, thread, entry, flow, version, transaction) {
+  if (!assistantCommercialText(entry.text)) return false;
+  if (await require('./leadAssistantBooking.service').excludedPatient(db, {audience:'leads', version}, thread, entry.messageId, transaction)) return false;
+  if (thread.lead_id) {
+    const lead = await db.LeadIntake.findOne({where:{id:thread.lead_id, clinica_id:thread.clinic_id, archived_at:null},attributes:['id'],raw:true,transaction});
+    if (lead) return true;
+  }
+  if (asksForCommercialInformation(entry.text)) return true;
+  // Follow-up choices in an already qualified conversation may contain just a day or a time.
+  const session = await db.LeadAssistantSession.findOne({where:{conversation_id:thread.id,clinic_id:thread.clinic_id,
+    template_id:flow.id, publication_version:version,state:'active'},attributes:['origin_message_id'],raw:true,transaction});
+  if (!session) return false;
+  const origin = await db.Message.findOne({where:{id:session.origin_message_id,conversation_id:thread.id,direction:'inbound'},attributes:['content'],raw:true,transaction});
+  return !!origin && asksForCommercialInformation(origin.content);
+}
+
+async function plan(db, thread, entry, transaction, selected) {
+  if (explicitOptOut(entry.text)) return null;
+  const resolved = selected === undefined
+    ? await require('./automationInboundMessage.service').findEffectiveMessageReceivedTemplate({
+        clinicId:thread.clinic_id, channel:'whatsapp', receivedAt:new Date(entry.at), transaction})
+    : selected;
+  const outside = afterHoursChoice(resolved);
+  let flow, rule;
+  let campaignId = entry.campaignId || null;
+  if (outside) {
+    flow = outside.flow;
+    const version = flow.trigger_config.after_hours_assistant_version;
+    if (outside.action !== 'assistant' || Number(flow.clinic_id) !== Number(thread.clinic_id)
+        || !flow.is_active || flow.is_system || !Number.isSafeInteger(version) || version <= 0
+        || !flow.nodes?.some(node => node.id === 'after_hours_cleo' && node.type === 'action/attend_with_lead_assistant')) return null;
+    if (!await afterHoursLead(db, thread, entry, flow, version, transaction)) return null;
+    rule = {action:'assistant', audience:'leads', version};
+  } else {
+    flow = await db.AutomationFlowTemplateV2.findOne({
+      where: {clinic_id:thread.clinic_id, template_key:'lead_auto_reply_system__clinic_' + thread.clinic_id,
+        published_at:{[db.Sequelize.Op.ne]:null}}, order:[['version','DESC']], transaction,
+    });
+    rule = flow?.trigger_config?.social_entries?.whatsapp_dm;
+    if (!flow?.is_active || flow.is_system || !flow.trigger_config?.configured || flow.trigger_config?.managed_feature !== 'lead_auto_reply'
+        || !rule || !['message','assistant'].includes(rule.action)) return null;
+    if (rule.action === 'message') {
+      if (typeof rule.text !== 'string' || !rule.text.trim() || rule.text.length > 1000) return null;
+    } else if (!Number.isSafeInteger(rule.version) || rule.version <= 0 || !['leads','all'].includes(rule.audience)) return null;
+    // Campaign verification is independent of whether the campaign opted into creating leads.
+    if (!campaignId && entry.wabaId) {
+      const original = await db.Message.findOne({where:{id:entry.messageId,conversation_id:thread.id}, transaction});
+      const attribution = original && await require('./marketingWhatsappReplyLead.service').resolveCampaignReply({
+        db, message:original, conversation:thread, transaction,
+        binding:{clinicId:thread.clinic_id,phoneId:entry.accountId,wabaId:entry.wabaId},
+      });
+      if (attribution?.commercial && attribution.campaignId) campaignId = attribution.campaignId;
+      else if (attribution?.excluded && rule.origins) return null;
+    }
+    if (rule.origins) {
+      if (!validOrigins(rule.origins)) return null;
+      if (campaignId) {
+        if (!rule.origins.includes('bulk_whatsapp')) return null;
+      } else if ((!rule.origins.includes('whatsapp') || entry.ad) && !await acceptsOrigin(db, rule, thread, entry, transaction, flow.id)) return null;
+    }
+  }
+  if (!flow.published_at || +new Date(flow.published_at) > entry.at ||
+      await require('./leadAssistantBooking.service').excludedPatient(db, rule, thread, entry.messageId, transaction)) return null;
+  return {flow, rule, origin:campaignId ? 'bulk_whatsapp' : entry.ad ? 'meta_ads' : 'whatsapp', campaignId};
+}
+
+async function contactRestrictions(thread, transaction) {
+  return require('./marketingOptOut.service').getActiveContactRestrictionsForPatient({
+    clinicIds:[thread.clinic_id], patientId:thread.patient_id, phone:phone(thread.contact_id),
+  }, transaction);
 }
 
 async function supersedingReply(db, conversationId, messageId, executionId, transaction) {
@@ -188,11 +245,17 @@ async function authorizeDelivery(db, { message, conversation, intent, selectedBi
     return false;
   if (await supersedingReply(db, conversation.id, entry.messageId, message.metadata.execution_id))
     return false;
+  const held = await contactRestrictions(conversation);
+  if (held.marketing_opt_out || held.whatsapp_number_invalid || held.whatsapp_channel_opt_out) return false;
   const session = await db.LeadAssistantSession.findOne({
-    where: { conversation_id: conversation.id, clinic_id: conversation.clinic_id, template_id: marker.templateId, publication_version: marker.version },
-    attributes: ['state'], raw: true,
+    where: { conversation_id: conversation.id, clinic_id: conversation.clinic_id }, raw: true,
   });
-  if (!session || session.state === 'operator') return false;
+  if (session?.state === 'operator') return false;
+  if (configured.rule.action === 'message') {
+    return marker.action === 'message' && payload.type === 'text' && !marker.selection &&
+      !message.metadata.promotionImage && message.content === configured.rule.text && !['human','unassigned'].includes(session?.state);
+  }
+  if (!session || Number(session.template_id) !== Number(marker.templateId) || session.publication_version !== marker.version) return false;
   if (payload.type === 'text') return !marker.selection && !message.metadata.promotionImage;
   const image = await resolveForTurn(db, conversation, marker.selection);
   return (
@@ -212,25 +275,28 @@ function create({
   analyze,
   resolveRoute = route,
   send = (args) => require('./whatsapp.service').sendMessage(args),
-  restrictions = (thread, transaction) =>
-    require('./marketingOptOut.service').getActiveContactRestrictionsForPatient(
-      {
-        clinicIds: [thread.clinic_id],
-        patientId: thread.patient_id,
-        phone: phone(thread.contact_id),
-      },
-      transaction
-    ),
+  restrictions = contactRestrictions,
   refresh = (thread, message) =>
     require('./socket.service').emit('message:refresh', { id: message.id, conversation_id: thread.id }, [
       'clinic:' + thread.clinic_id,
     ]),
 }) {
-  async function start({ claim, message, conversation }) {
+  async function recover({claim, message, conversation}) {
+    // A previous attempt can commit the execution and crash before completing the inbound claim.
+    const execution = await db.FlowExecutionV2.findOne({where:{
+      idempotency_key:'lead_assistant_whatsapp:' + claim.id, clinic_id:conversation.clinic_id,
+      trigger_type:'mensaje_recibido', trigger_entity_type:'message', trigger_entity_id:message.id,
+    }});
+    if (!execution) return null;
+    return enqueueExistingExecution(execution, enqueueJob, 'lead_assistant');
+  }
+
+  async function start({ claim, message, conversation, selected }) {
     const entry = inbound(claim, message, conversation);
-    const configured = entry && (await plan(db, conversation, entry));
+    const configured = entry && (await plan(db, conversation, entry, undefined, selected));
     if (!configured) return null;
     const { flow } = configured;
+    // Claim and flow identity together prevent a retried dispatcher from sending two replies.
     return enqueueInboundExecution({
       db,
       createExecution,
@@ -246,6 +312,8 @@ function create({
           type: 'mensaje_recibido',
           data: {
             event_kind: 'whatsapp_dm',
+            reply_origin: configured.origin,
+            ...(configured.campaignId ? {campaign_id:configured.campaignId} : {}),
             claim_id: claim.id,
             conversation_id: conversation.id,
             message_id: message.id,
@@ -294,6 +362,8 @@ function create({
       )
         return 'automation_inactive';
       if (Date.parse(entry.expiresAt) <= Date.now()) return 'dm_window_closed';
+      const session = await db.LeadAssistantSession.findOne({where:{conversation_id:c.id, clinic_id:c.clinic_id}, attributes:['state'], raw:true, transaction});
+      if (session?.state === 'operator' || (rule.action === 'message' && ['human','unassigned'].includes(session?.state))) return 'human_takeover';
       const held = await restrictions(c, transaction);
       if (held.marketing_opt_out || held.whatsapp_number_invalid || held.whatsapp_channel_opt_out)
         return 'marketing_opt_out';
@@ -355,7 +425,10 @@ function create({
                 claimId: claim.id,
                 phoneId: entry.accountId,
                 templateId: execution.template_version_id,
-                version: rule.version,
+                action: rule.action,
+                origin: configured.origin,
+                ...(configured.campaignId ? {campaignId:configured.campaignId} : {}),
+                ...(rule.version ? {version: rule.version} : {}),
                 expiresAt: entry.expiresAt,
                 ...(image ? { selection: command.selection } : {}),
               },
@@ -428,6 +501,10 @@ function create({
       refresh(c, message);
       return result;
     }
+    if (rule.action === 'message') {
+      const result = await deliver(thread, {text:rule.text, attemptId:saved.attemptId}, {blockReason});
+      return {reason:result.reason || (result.outcome === 'sent' ? 'whatsapp_prepared_sent' : 'whatsapp_prepared_unconfirmed'), outcome:result.outcome};
+    }
     const transport = {
       availability: async (c) => ({
         dm: { available: !!(await resolveRoute(c, entry.accountId)), reason: 'whatsapp_reply_unavailable' },
@@ -448,7 +525,7 @@ function create({
       analyze,
     });
   }
-  return { start, run };
+  return { start, run, recover };
 }
 let singleton;
 function current() {
@@ -459,4 +536,4 @@ function current() {
     analyze: (args) => require('./aiOrchestrator.service').analyzeStructured(args),
   }));
 }
-module.exports = { create, current, authorizeDelivery };
+module.exports = { create, current, authorizeDelivery, afterHoursChoice };
