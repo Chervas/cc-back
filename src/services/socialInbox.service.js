@@ -206,13 +206,13 @@ function create({
     const route = await db.sequelize.transaction((t) => resolve(db, threadIdentity(c), t));
     return route && route.clinicId === c.clinic_id ? { ...success, route } : blocked('account_unassigned');
   }
-  async function context(c, kind, localOnly = false) {
+  async function context(c, kind, { localOnly = false, prepareReply = false } = {}) {
     if (!isSocial(c)) return blocked('channel_unsupported');
     if (c.channel === 'messenger') return blocked('messenger_receive_only');
     try {
       const local = await localContext(c);
       if (!local.available || localOnly) return local;
-      return { ...(await provider.availability(local.route, kind)), route: local.route };
+      return { ...(await provider.availability(local.route, kind, { prepareReply })), route: local.route };
     } catch (err) {
       return blocked(
         ['provider_unauthorized', 'credential_revoked', 'scope_denied', 'operation_denied',
@@ -226,7 +226,7 @@ function create({
     // The inbox can offer composition under the current local route and window.
     // The send command always rechecks the live grant and page subscription.
     let local;
-    const accessFor = kind => historyView ? (local ??= context(c, kind, true)) : context(c, kind);
+    const accessFor = kind => historyView ? (local ??= context(c, kind, { localOnly: true })) : context(c, kind);
     const pagePending = messages.find((m) => m.status === 'sending' && m.metadata?.socialAttempt);
     const unresolved =
       pagePending ||
@@ -308,7 +308,7 @@ function create({
         return (await reconcile(c, saved.message)) || saved;
       return saved;
     }
-    const access = await context(c, kind);
+    const access = await context(c, kind, { prepareReply: true });
     if (!access.available) return blocked(access.reason);
     const reservation = await db.sequelize.transaction(async (t) => {
       const route = await resolve(db, threadIdentity(c), t);
