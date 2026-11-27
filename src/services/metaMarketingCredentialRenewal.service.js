@@ -2,7 +2,7 @@
 const {randomUUID,randomBytes}=require('node:crypto'),{Op}=require('sequelize');
 const C=require('./metaMarketingCredentialRenewal.contract'),{fromRenewal}=require('../../services/platform-audit/src/meta-credential-renewal-event');
 const SocialConsent=require('../../services/integrations-broker/src/meta-marketing-social-consent');
-const {configuredQuickChat}=require('./metaMarketingMessagingScopes');
+const {configuredQuickChat,permittedConsentScopes}=require('./metaMarketingMessagingScopes');
 const plain=value=>value?.get?value.get({plain:true}):value;
 const actor=row=>({scopeKey:row.scope_key,actorId:Number(row.actor_user_id),sessionRef:row.session_ref,sessionExpiresAt:row.session_expires_at});
 function createService({models,sessions,client,now=()=>new Date(),enabled=()=>process.env.META_MARKETING_CREDENTIAL_RENEWAL_ENABLED==='true',returnOrigin=C.frontendOrigin(),audit:providedAudit,quickChatTargets=configuredQuickChat}={}){
@@ -88,11 +88,11 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     if(!C.exact(value,'renewalId,flowId,enrollmentId,authUrl,expiresAt'+(continued?',continuedQuickChat':''))||value.renewalId!==row.renewal_id||value.flowId!==row.renewal_id
       ||value.enrollmentId!==row.enrollment_id||value.expiresAt!==+row.expires_at)C.fail('broker_response_invalid');
     let url;try{url=new URL(value.authUrl);}catch{C.fail('broker_response_invalid');}
-    const accounts=socialTargets(row);
+    const accounts=socialTargets(row), permittedFor=targets=>permittedConsentScopes(row.scopeValues,targets,row.scope_key,row.clinicIds);
     let permitted=[row.scopeValues];
-    if(payload.quickChat)permitted=[SocialConsent.scopesFor(row.scopeValues,accounts)];
+    if(payload.quickChat)permitted=permittedFor(accounts);
     if(continued)permitted=['instagram','messenger','both'].map(channel=>accounts.filter(a=>channel==='both'||a.channel===channel))
-      .filter(targets=>targets.length).map(targets=>SocialConsent.scopesFor(row.scopeValues,targets));
+      .filter(targets=>targets.length || SocialConsent.singleChannels(['messenger'],row.scope_key,row.clinicIds).length).flatMap(permittedFor);
     const returnedScopes=url.searchParams.get('scope');
     if(!permitted.some(scopes=>scopes.join(',')===returnedScopes)||payload.quickChat&&(!accounts.length||payload.quickChatTargetsDigest!==SocialConsent.targetDigest(accounts)))C.fail('broker_response_invalid');
     const expected={client_id:row.app_id,redirect_uri:row.redirect_uri,response_type:'code',scope:returnedScopes,state:payload.state};
@@ -132,7 +132,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     if(pointer){const [changed]=await P.update(value,{where:{enrollment_id:row.enrollment_id,epoch:Number(row.expected_epoch),version_id:row.expected_version_id,candidate_digest:row.expected_candidate_digest},transaction,logging:false});if(changed!==1)C.fail('meta_renewal_version_changed',409);}
     else{if(context.effective.epoch!==0)C.fail('meta_renewal_version_changed',409);await P.create(value,{transaction,logging:false});}
     const next=await update(row,{state:'active',owner_receipt:ownerReceipt,completed_at:now(),lease_token:null,lease_until:null,last_error:null},transaction);
-    await require('./socialInboxSubscriptions.service').enqueuePages(models,context.enrollment,checked.versionId,transaction);
+    await require('./socialInboxSubscriptions.service').enqueuePages(models,context.enrollment,checked.versionId,transaction,{confirmedPages:remote.quickChatSubscriptionPages});
     await record(next,'meta_credential_renewal_activated',transaction);return next;
   }
   async function queueCancel(id,code=null,input=null){return requestTx(id,async(row,transaction)=>{if(C.TERMINAL.includes(row.state))return row;

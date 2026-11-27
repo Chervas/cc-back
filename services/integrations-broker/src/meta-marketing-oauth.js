@@ -3,7 +3,7 @@ const K=require('./meta-marketing-credential-shape');
 const { BrokerError, fail } = require('./errors'), { eventFor } = require('./audit');
 const C = require('./meta-marketing-oauth-contract'), D = require('./meta-marketing-discovery-contract'), { GRAPH_VERSION } = require('./meta-marketing-contract');
 const SocialConsent = require('./meta-marketing-social-consent');
-function createMetaMarketingOAuth({ store, policy, secrets, http, socialInbox, assertConsentAvailable, now = () => Date.now(), assetDiscovery = false, onAbort = () => {}, resolvePolicy }) {
+function createMetaMarketingOAuth({ store, policy, secrets, http, socialInbox, socialInboxAdvancedChannels = [], assertConsentAvailable, now = () => Date.now(), assetDiscovery = false, onAbort = () => {}, resolvePolicy }) {
   if(resolvePolicy!==undefined&&typeof resolvePolicy!=='function')fail('invalid_request');
   // This table is installed only by the explicit onboarding runtime, not the generic broker.
   store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_oauth_flows (
@@ -18,7 +18,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, socialInbox, a
   }
   // A process may die after Meta consumed the one-use code. Keep its uncertain
   // state until an explicit abort; never replay it or mutate another owner's work at startup.
-  const social = socialInbox?.length ? SocialConsent.journal(store) : null;
+  const social = (socialInbox?.length || socialInboxAdvancedChannels.length) ? SocialConsent.journal(store) : null;
   const running = new Map(), renewalContexts = new Map(); let closed = false;
   const rowFor = id => store.db.prepare('SELECT * FROM meta_marketing_oauth_flows WHERE id=?').get(id);
   function checked(request, binding, principal) {
@@ -167,14 +167,14 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, socialInbox, a
                 scope_digest,clinic_digest,created_at,expires_at,updated_at,state,lane) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'awaiting',?)`)
                 .run(id,principal.id,request.tenantRef,request.connectionRef,request.assetRef,C.hash(p.state),K.fingerprint(binding),p.scopeDigest,p.clinicSetDigest,now(),p.expiresAt,now(),lane);
               if (ordinaryLogin) {
-                const targets = socialInbox.filter(account => b.clinicIds.includes(account.clinicId));
-                social.begin(id, 'initial:' + id, targets, false);
+                const targets = (socialInbox || []).filter(account => b.clinicIds.includes(account.clinicId));
+                social.begin(id, 'initial:' + id, targets, false, SocialConsent.singleChannels(socialInboxAdvancedChannels,b.scopeKey,b.clinicIds));
               }
             });
           }
           if (signal.aborted) fail('provider_timeout');
           const initial = ordinaryLogin && social.find(id);
-          const requestedScopes = initial ? SocialConsent.scopesFor(b.scopes, JSON.parse(initial.accounts))
+          const requestedScopes = initial ? SocialConsent.scopesFor(b.scopes, JSON.parse(initial.accounts),JSON.parse(initial.channels || '[]'))
             : renewalContexts.get(id)?.quickChat?.scopes || b.scopes;
           const params = new URLSearchParams({ client_id:b.appId,redirect_uri:b.redirectUri,response_type:'code',...(K.business(binding)?{config_id:b.businessLogin.configId,override_default_response_type:'true'}:{scope:requestedScopes.join(',')}),state:p.state });
           return { requestId:request.requestId,data:{flowId:id,authUrl:`https://www.facebook.com/${K.graphVersion(binding)}/dialog/oauth?${params}`,expiresAt:p.expiresAt},replayed:!!old };
@@ -198,7 +198,7 @@ function createMetaMarketingOAuth({ store, policy, secrets, http, socialInbox, a
         try {
           const initial = ordinaryLogin && social.find(id);
           const consent = initial ? {
-            inspect: raw => SocialConsent.inspectInitial(raw, binding, JSON.parse(initial.accounts), now()),
+            inspect: raw => SocialConsent.inspectInitial(raw, binding, JSON.parse(initial.accounts), now(),JSON.parse(initial.channels || '[]')),
             capture(digest, proof) {
               if (!proof || proof.appId !== b.appId || proof.tokenType !== 'USER') fail('oauth_identity_mismatch');
               social.capture(id, digest, proof);

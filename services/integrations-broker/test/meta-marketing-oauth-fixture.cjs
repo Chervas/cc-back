@@ -5,7 +5,7 @@ const { BrokerStore } = require('../src/store'); const { Broker } = require('../
 const { createMetaMarketingOAuth, createMetaMarketingOAuthOperations } = require('../src/meta-marketing-oauth'); const { createMetaMarketingOAuthSecrets } = require('../src/meta-marketing-oauth-secrets');
 const { createMetaMarketingOAuthHttp } = require('../src/meta-marketing-oauth-http'); const C = require('../src/meta-marketing-oauth-contract'); const { ACCOUNT, SECRET_KEY } = require('../src/google-main');
 const TOKEN = 'FICTITIOUS_META_OAUTH_TOKEN'; const APP = '0123456789abcdef'.repeat(2);
-function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, socialInbox, subscriptionPacer, assertConsentAvailable, socialConsentOnly = false, adsManagement = false, business = false, agency = false, migrationDays = 366, businessPermissionProfile = 'legacy-v1', businessRegistry } = {}) {
+function fixture(t, { discovery = false, enrollment = false, renewal = false, leads = false, socialInbox, socialInboxAdvancedChannels, singleClinic = false, baseInstagram = true, subscriptionPacer, assertConsentAvailable, socialConsentOnly = false, adsManagement = false, business = false, agency = false, migrationDays = 366, businessPermissionProfile = 'legacy-v1', businessRegistry } = {}) {
   business=business||agency;
   renewal=renewal||business;leads=leads||business;
   enrollment=enrollment||renewal;
@@ -17,8 +17,9 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
   const binding = { connectionRef: 'connection:meta-enroll-qa', provider: C.PROVIDER, initialState: 'active', expiresAt: Date.now() + 86400000,
     secretArn: prefix + 'qa-candidate-abcdef', clientSecretArn: prefix + 'qa-app-abcdef', metaMarketingOAuth: {
       appId: '101', redirectUri: 'https://app.example.invalid/oauth/meta/marketing/callback', appVersionId: 'a'.repeat(32), slotVersionId: 's'.repeat(32),
-      scopeKey: 'group:9', clinicIds: [71, 72], scopes: ['public_profile', 'ads_read', 'pages_read_engagement', 'instagram_basic'],
+      scopeKey: singleClinic ? 'clinic:71' : 'group:9', clinicIds: singleClinic ? [71] : [71, 72], scopes: ['public_profile', 'ads_read', 'pages_read_engagement', 'instagram_basic'],
     } };
+  if (!baseInstagram) binding.metaMarketingOAuth.scopes = binding.metaMarketingOAuth.scopes.filter(scope => scope !== 'instagram_basic');
   if(business)binding.expiresAt=Date.now()+migrationDays*86400000;
   const businessConfig=businessRegistry||(agency?require('./meta-marketing-agency-fixture.cjs').config():business?{enabled:true,cohort:'meta-marketing-business-v1',configId:'777',graphVersion:'v27.0',providerBusinessId:'901',scopeKeys:['group:9']}:undefined);
   assert(['legacy-v1','paid-leads-v2'].includes(businessPermissionProfile));
@@ -31,7 +32,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
   const leadAds=leads?{enabled:true,cohort:'meta-marketing-lead-ads-v1',verifyTokenRef:{secretArn:prefix+'qa-lead-verify-abcdef',versionId:'v'.repeat(32)},
     pairs:[{pageAssetRef:'meta-facebook_page:401',adAccountAssetRef:'meta-ad_account:301',recipientClinicId:71}]}:undefined;
   const principal = (id, keyId, key) => ({ id, keyId, enabled: true, maxPerMinute: 20, publicKey: key.publicKey.export({ type: 'spki', format: 'pem' }) });
-  const grant = { connectionRef: binding.connectionRef, tenantRef: 'clinic:71', assetRef: 'meta-enroll:group:9' };
+  const grant = { connectionRef: binding.connectionRef, tenantRef: 'clinic:71', assetRef: 'meta-enroll:' + binding.metaMarketingOAuth.scopeKey };
   const policy = { audience: 'broker:meta-oauth-qa', version: 'meta-oauth-qa-v1', maxBacklog: 100,
     principals: [principal('gateway:staging:meta-marketing-oauth', 'qa-gateway', gateway), principal('control:staging:meta-marketing-oauth', 'qa-control', control)],
     connections: [binding], grants: [{ ...grant, principalId: 'gateway:staging:meta-marketing-oauth', operations: Object.values(C.OPERATIONS) },
@@ -46,7 +47,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
   if(business){const B=require('../src/meta-marketing-business-contract'),T=require('../src/meta-marketing-credential-maintenance-contract');policy.grants[0].operations.push(...Object.values(B.OPERATIONS));policy.grants[1].operations.push(B.OPERATIONS.status,B.OPERATIONS.abort,B.OPERATIONS.drain,...Object.values(T.OPERATIONS));}
   const records = new Map();
   const seed = (arn, version, value) => records.set(arn, new Map([[version, { body: JSON.stringify(value), stages: ['AWSCURRENT'] }]]));
-  seed(binding.secretArn, binding.metaMarketingOAuth.slotVersionId, { version: 1, provider: 'meta-marketing-oauth-slot', connectionRef: binding.connectionRef, scopeKey: 'group:9', clinicSetDigest: C.clinicDigest(binding.metaMarketingOAuth), appId: '101' });
+  seed(binding.secretArn, binding.metaMarketingOAuth.slotVersionId, { version: 1, provider: 'meta-marketing-oauth-slot', connectionRef: binding.connectionRef, scopeKey: binding.metaMarketingOAuth.scopeKey, clinicSetDigest: C.clinicDigest(binding.metaMarketingOAuth), appId: '101' });
   seed(binding.clientSecretArn, binding.metaMarketingOAuth.appVersionId, { version: 1, provider: 'meta-app', appId: '101', appSecret: APP });
   const state = { clock: Date.now(), awsCalls: [], httpCalls: [], codes: 0, puts: 0, heldTokens: [], records,
     beforeAws: null, afterAws: null, beforeCode: null, afterGraph: null, failPut: false, losePut: false };
@@ -99,6 +100,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
             assert.equal(url.pathname,'/v24.0/201/'+kind);assert.equal(url.searchParams.get('limit'),'100');assert(!url.searchParams.get('fields').includes('access_token'));
             response=kind==='adaccounts'?{data:[{id:'act_301',account_id:'301',name:'Cuenta ficticia',account_status:1,currency:'EUR',timezone_name:'Europe/Madrid'}]}
               :{data:[{id:'401',name:'Página ficticia',instagram_business_account:{id:'501',name:'Instagram ficticio',username:'qa_ficticio'}}]};
+            if (!baseInstagram && kind==='accounts' && !url.searchParams.get('fields').includes('instagram_business_account')) delete response.data[0].instagram_business_account;
             state.lastAfter=url.searchParams.get('after');
           } else if(kind.startsWith('asset_')){
             assert.equal(settings.headers.authorization,'Bearer '+TOKEN);assert.match(url.searchParams.get('appsecret_proof'),/^[a-f0-9]{64}$/);
@@ -149,10 +151,10 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
   function make(target = new BrokerStore(filename), chosenPolicy = policy) {
     stores.push(target);let enroll,renewer,businessOwner,maintenance;
     const activeHttp=agency?createMetaMarketingOAuthHttp({request:chosenRequest,now,agencyBootstrap:require('../src/meta-marketing-agency-bootstrap').createAgencyBootstrap({store:target,policy:chosenPolicy,now})}):http;
-    const engine = createMetaMarketingOAuth({ store: target, policy: chosenPolicy, secrets, http:activeHttp, socialInbox, assertConsentAvailable, now, assetDiscovery:discovery,onAbort:id=>enroll?.abortFlow(id) }); engines.push(engine);
+    const engine = createMetaMarketingOAuth({ store: target, policy: chosenPolicy, secrets, http:activeHttp, socialInbox, socialInboxAdvancedChannels, assertConsentAvailable, now, assetDiscovery:discovery,onAbort:id=>enroll?.abortFlow(id) }); engines.push(engine);
     const epochs=renewal?require('../src/meta-marketing-credential-epochs').createMetaMarketingCredentialEpochs({store:target,now}):null;
-    if(enrollment){enroll=require('../src/meta-marketing-enrollment').createMetaMarketingEnrollment({store:target,secrets,http:activeHttp,environment:'staging',now,socialInbox,subscriptionPacer,...(businessConfig?{businessConfig}:{}),...(epochs?{credentialEpochs:epochs}:{}),...(leadAds?{leadAds,leadsHttp:{read:()=>assert.fail('FICTITIOUS_LEAD_RPC_NOT_EXPECTED')}}:{})});engines.push(enroll);}
-    if(renewal){renewer=require('../src/meta-marketing-credential-renewal').createMetaMarketingCredentialRenewal({store:target,epochs,enrollment:enroll,oauth:engine,secrets,http:activeHttp,socialInbox,environment:'staging',now});engines.push(renewer);}
+    if(enrollment){enroll=require('../src/meta-marketing-enrollment').createMetaMarketingEnrollment({store:target,secrets,http:activeHttp,environment:'staging',now,socialInbox,socialInboxAdvancedChannels,subscriptionPacer,...(businessConfig?{businessConfig}:{}),...(epochs?{credentialEpochs:epochs}:{}),...(leadAds?{leadAds,leadsHttp:{read:()=>assert.fail('FICTITIOUS_LEAD_RPC_NOT_EXPECTED')}}:{})});engines.push(enroll);}
+    if(renewal){renewer=require('../src/meta-marketing-credential-renewal').createMetaMarketingCredentialRenewal({store:target,epochs,enrollment:enroll,oauth:engine,secrets,http:activeHttp,socialInbox,socialInboxAdvancedChannels,environment:'staging',now});engines.push(renewer);}
     if(business){businessOwner=require('../src/meta-marketing-business').createMetaMarketingBusiness({store:target,epochs,enrollment:enroll,oauth:engine,secrets,http:activeHttp,environment:'staging',config:businessConfig,now});maintenance=require('../src/meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({store:target,epochs,enrollment:enroll,secrets,http:activeHttp,businessHttp:require('../src/meta-marketing-business-issuer-http').createIssuerHttp({request:chosenRequest,now}),environment:'staging',config:businessConfig,now});engines.push(businessOwner,maintenance);}
     if(business)target.setConnectionAuthorityResolver(ref=>enroll.connectionAuthority(ref,chosenPolicy));
     return { store: target, engine,enrollment:enroll,renewal:renewer,businessOwner,maintenance,epochs, broker: new Broker({ store: target, policy: chosenPolicy, secrets,policyResolver:enroll,
@@ -182,6 +184,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
   if(renewal)config.credentialRenewal=true;
   if(leadAds)config.leadAds=leadAds;
   if(socialInbox)config.socialInbox=socialInbox;
+  if(socialInboxAdvancedChannels)config.socialInboxAdvancedChannels=socialInboxAdvancedChannels;
   if(businessConfig){if(businessRegistry){for(const c of businessRegistry.active)config[require('../src/meta-marketing-business-issuer').family(c)===require('../src/meta-marketing-agency-contract')?'agencySystemUser':'businessLogin']=c;if(businessRegistry.history.length)config.businessCredentialHistory=businessRegistry.history;}else config[agency?'agencySystemUser':'businessLogin']=businessConfig;}
   t.after(() => { for (const engine of engines) engine.close(); for (const store of stores) try { store.close(); } catch {} fs.rmSync(dir, { recursive: true, force: true }); });
   return { dir, filename, binding, policy, state, records, secrets, aws, http, request:chosenRequest, config,businessTokens,businessConfig, now, make, command, signed, execute,

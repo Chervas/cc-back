@@ -33,7 +33,7 @@ function fixture(t, group = false, automatic = false, twoPages = false) {
       }
     },
   };
-  store.db.exec('CREATE TABLE asset_revocations(asset TEXT); CREATE TABLE meta_marketing_enrollment_claims(asset TEXT);');
+  store.db.exec('CREATE TABLE asset_revocations(asset TEXT); CREATE TABLE meta_marketing_enrollment_claims(asset TEXT,enrollment TEXT);');
   t.after(() => store.db.close());
   const environment = 'staging';
   const accountId = '000000000001';
@@ -131,7 +131,7 @@ function fixture(t, group = false, automatic = false, twoPages = false) {
       authorize();
       if (rejection) throw rejection;
       const id = parentPageId === '32' ? '41' : '40';
-      return { asset: { id }, assetSetDigest: 'd'.repeat(64),
+      return { asset: { id }, assetSetDigest: require('../src/meta-marketing-instagram-selection').extendInstagramSelection({scopeKey, selected:assets, expectedAssetSetDigest:assetSetDigest(assets), parentPageId, instagramId:id}).assetSetDigest,
         profile: { assetRef: 'meta-instagram_business:' + id, kind: 'instagram_business', id, name: 'Navae ficticia', username: 'test_navae' } };
     },
   });
@@ -159,7 +159,7 @@ function fixture(t, group = false, automatic = false, twoPages = false) {
   const ordinaryBegin = id => oauth.execute({ binding, principal: gateway, policy, request: { ...requestFields, requestId: id,
     operation: C.OPERATIONS.begin, payload: { state: randomBytes(32).toString('base64url'), scopeDigest: 'f'.repeat(64),
       clinicSetDigest: C.clinicDigest(binding.metaMarketingOAuth), expiresAt: now + 600000 } } });
-  return { attempt, binding, credential, store, get allocations(){return allocations;}, get exchanges() { return exchanges; }, retain: retained, exec, ordinaryBegin,
+  return { attempt, binding, credential, store, assets, row, now, get allocations(){return allocations;}, get exchanges() { return exchanges; }, retain: retained, exec, ordinaryBegin,
     set rejection(value) { rejection = value; }, set afterRetainDescribe(value) { afterRetainDescribe = value; } };
 }
 
@@ -199,7 +199,7 @@ test('cancellation before Owner begin is durable, wrong parents and existing cla
   const scoped = f.attempt();
   await assert.rejects(scoped.begin({ parentPageId: '999' }), { code: 'scope_denied' });
   await scoped.begin();
-  f.store.db.prepare('INSERT INTO meta_marketing_enrollment_claims VALUES (?)').run('meta-instagram_business:40');
+  f.store.db.prepare('INSERT INTO meta_marketing_enrollment_claims(asset) VALUES (?)').run('meta-instagram_business:40');
   await assert.rejects(scoped.finish(), { code: 'scope_denied' });
   assert.equal((await scoped.abort()).status, 'aborted');
   assert.equal((await scoped.status()).status, 'aborted');
@@ -328,4 +328,20 @@ test('a confirmed group page remains active while a second page completes its ow
   assert.equal(staged.candidate.profile.id, '41');
   assert.equal((await capilar.confirm(staged.candidate.digest, '41')).status, 'active');
   assert.equal((await first.status()).candidate.profile.id, '40');
+});
+
+test('single-clinic messaging derives the Instagram extension only from the confirmed owner selection and matching credential subject', async t => {
+  const f=fixture(t), single=require('../src/meta-marketing-social-single').createSingleClinicSocial({store:f.store,channels:['instagram'],now:()=>f.now});
+  const targets=(subject=f.credential.metadata.subjectId)=>single.targets(f.row,f.binding,f.assets,subject);
+  const attempt=f.attempt(); await attempt.begin(); const staged=await attempt.finish();
+  assert.deepEqual(targets(),[]);
+  await attempt.confirm(staged.candidate.digest);
+  assert.deepEqual(targets(),[{channel:'instagram',clinicId:10,pageId:'30',accountId:'40'}]);
+  assert.deepEqual(targets('999'),[]);
+  f.store.db.prepare('INSERT INTO meta_marketing_enrollment_claims(asset,enrollment) VALUES(?,?)').run('meta-instagram_business:40',f.row.id);
+  assert.equal(single.owners('instagram','40').length,2);
+  assert.deepEqual(targets(),[]);
+  f.store.db.prepare('DELETE FROM meta_marketing_enrollment_claims').run();
+  f.store.db.prepare('INSERT INTO asset_revocations VALUES(?)').run('meta-instagram_business:40');
+  assert.deepEqual(targets(),[]);
 });

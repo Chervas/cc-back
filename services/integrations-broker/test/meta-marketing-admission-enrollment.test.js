@@ -180,3 +180,35 @@ test('runtime configuration requires enrollment to be confined to opted-in disco
   discoveryOnly.admission.enrollmentScopeKeys = [];
   validateConfig(discoveryOnly);
 });
+
+test('a signed multi-clinic webhook uses the app anchor and independently resolves each admitted recipient against its own current clinical grant', async t => {
+  const Social=require('../src/meta-marketing-social'), {createHmac}=require('node:crypto');
+  const fixtures=admissionFixture(t,{leads:true,enrollment:true,credentialEpochs:true,leadIngress:true,
+    enrollmentScopeKeys:['clinic:123','clinic:124'],socialInboxAdvancedChannels:['messenger']});
+  async function connected(clinic, page) {
+    const command=fixtures.command('clinic:'+clinic,[clinic]); await fixtures.prepare(command);
+    const begin=fixtures.beginCommand(command), url=await fixtures.execute(begin);
+    const scopes=new URL(url.data.authUrl).searchParams.get('scope').split(',');
+    fixtures.f.state.afterGraph=(kind,value)=>{
+      if(kind==='inspect') value.data.scopes=scopes;
+      if(kind==='accounts') value.data=[{id:page,name:'Fictitious Page '+page}];
+      return value;
+    };
+    const send=(operation,payload)=>fixtures.execute({...command,operation,payload,requestId:randomUUID()});
+    const staged=await send(C.OPERATIONS.finish,{flowId:begin.requestId,state:begin.payload.state,code:'FICTITIOUS_CODE_'+clinic});
+    const enrollmentId=randomUUID(), scopeDigest=begin.payload.scopeDigest;
+    const p=await send(E.OPERATIONS.prepare,{enrollmentId,flowId:begin.requestId,scopeDigest,candidateDigest:staged.data.candidate.digest,assetRefs:['meta-facebook_page:'+page]});
+    const active=await send(E.OPERATIONS.activate,{enrollmentId,scopeDigest,selectionDigest:p.data.selectionDigest});
+    assert.deepEqual(active.data.quickChatSubscriptionPages,[page]);
+    return {send,command,enrollmentId};
+  }
+  const a=await connected(123,'401'), b=await connected(124,'402');
+  const raw=Buffer.from(JSON.stringify({object:'page',entry:[{id:'401'},{id:'402'},{id:'499'}]}));
+  const payload={rawBase64:raw.toString('base64'),signature:'sha256='+createHmac('sha256',require('./meta-marketing-oauth-fixture.cjs').APP).update(raw).digest('hex')};
+  const read=()=>fixtures.execute({...a.command,requestId:randomUUID(),operation:Social.verify,assetRef:'meta-facebook_page:401',payload},fixtures.current,'leadIngress');
+  const before=fixtures.f.state.httpCalls.length;
+  assert.deepEqual((await read()).data.destinations,[{accountId:'401',clinicId:123},{accountId:'402',clinicId:124}]);
+  await b.send(E.OPERATIONS.revoke,{enrollmentId:b.enrollmentId});
+  assert.deepEqual((await read()).data.destinations,[{accountId:'401',clinicId:123}]);
+  assert.equal(fixtures.f.state.httpCalls.length,before);
+});

@@ -49,7 +49,7 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
       }catch{finish(new BrokerError('provider_failed'));req?.destroy();}
     }),authorize);
   }
-  return async({binding,metadata,token,appSecret,signal,authorize,assetRefs,includeAvatars=false})=>{
+  return async({binding,metadata,token,appSecret,signal,authorize,assetRefs,includeAvatars=false,socialDiscovery})=>{
     if(!Buffer.isBuffer(token)||!tokenText(token.toString('utf8'))||!Buffer.isBuffer(appSecret)||!/^[a-f0-9]{32}$/.test(appSecret.toString('ascii'))||!(signal instanceof AbortSignal))fail('invalid_request');
     if(typeof authorize!=='function')fail('invalid_request');
     if(assetRefs!==undefined&&(!Array.isArray(assetRefs)||!assetRefs.length||assetRefs.length>100||new Set(assetRefs).size!==assetRefs.length
@@ -61,7 +61,7 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
     const inspect=require('./meta-marketing-http').createMetaMarketingHttp({request,timeoutMs,pacer,appId:metadata.appId,now,authorize,graphVersion:metadata.graphVersion});
     const wipe=()=>{ownToken.fill(0);ownApp.fill(0);appToken.fill(0);};signal.addEventListener('abort',wipe,{once:true});
     try{
-      const verify=async()=>{authorize();if(signal.aborted)fail('provider_timeout');const raw=await inspect({action:'inspect',id:metadata.appId,token:appToken,candidate:ownToken,signal});authorize();if(signal.aborted)fail('provider_timeout');D.fresh(raw,binding,metadata,now());};
+      const verify=async(linked)=>{authorize();if(signal.aborted)fail('provider_timeout');const raw=await inspect({action:'inspect',id:metadata.appId,token:appToken,candidate:ownToken,signal});authorize();if(signal.aborted)fail('provider_timeout');D.fresh(raw,binding,metadata,now());if(linked && socialDiscovery) socialDiscovery.capture(raw,linked);};
       await verify();const available=D.kinds(metadata),assets=[],seen=new Set(),budget={pages:0,bytes:0};
       const proof=createHmac('sha256',ownApp).update(ownToken).digest('hex');
       const push=a=>{
@@ -72,7 +72,9 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
         assets.push(a);
         pending?.delete(a.assetRef);
       };
-      const edges=[];
+      const edges=[], linked=[];
+      const socialPages=new Set(socialDiscovery?.pages || []);
+      let socialFields=socialPages.size>0;
       if(available.includes('ad_account')&&(!wanted||assetRefs.some(ref=>ref.startsWith('meta-ad_account:'))))edges.push([K.business(binding)?'assigned_ad_accounts':'adaccounts','id,account_id,name,account_status,currency,timezone_name']);
       const includeInstagram=available.includes('instagram_business')&&(!wanted||assetRefs.some(ref=>ref.startsWith('meta-instagram_business:')));
       if(available.includes('facebook_page')&&(!wanted||includeInstagram||assetRefs.some(ref=>ref.startsWith('meta-facebook_page:'))))edges.push([K.business(binding)?'assigned_pages':'accounts','id,name'+(includeInstagram?',instagram_business_account{id,name,username}':'')]);
@@ -90,7 +92,15 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
           authorize();
           const requestPage=fields=>page({subjectId:metadata.subjectId,edge,fields,after,token:ownToken,proof,signal,budget,appId:metadata.appId,authorize,graphVersion:K.graphVersion(binding)});
           let r;
-          try{r=await requestPage(photos?fieldsWithPhotos:fields);}
+          try{
+            if(socialFields && !includeInstagram && !adAccounts && !photos) {
+              try { r=await requestPage(fields+',instagram_business_account{id}'); }
+              catch(error) {
+                if(!['provider_failed','provider_unauthorized'].includes(error.code))throw error;
+                socialFields=false;authorize();r=await requestPage(fields);
+              }
+            } else r=await requestPage(photos?fieldsWithPhotos:fields);
+          }
           catch(error){if(!photos||error?.code!=='provider_failed')throw error;photos=false;authorize();r=await requestPage(fields);}
           if(signal.aborted)fail('provider_timeout');
           authorize();
@@ -100,10 +110,11 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
               if(!C.exact(raw,'id,account_id,name,account_status,currency,timezone_name'))fail('provider_failed');push(D.project(raw,'ad_account'));
             }else{
               if(!included('facebook_page',raw?.id)&&!included('instagram_business',raw?.instagram_business_account?.id))continue;
-              if(!raw||Object.getPrototypeOf(raw)!==Object.prototype||Object.keys(raw).some(k=>!['id','name',...(photos?['picture']:[]),...(available.includes('instagram_business')?['instagram_business_account']:[])].includes(k)))fail('provider_failed');
+              if(!raw||Object.getPrototypeOf(raw)!==Object.prototype||Object.keys(raw).some(k=>!['id','name',...(photos?['picture']:[]),...((available.includes('instagram_business')||socialFields)?['instagram_business_account']:[])].includes(k)))fail('provider_failed');
               const picture=photos&&raw.picture?.data?.is_silhouette!==true ? raw.picture?.data?.url : undefined;
               if(included('facebook_page',raw.id))push(project(raw,'facebook_page',null,picture));
-              if(raw.instagram_business_account!=null&&included('instagram_business',raw.instagram_business_account.id)){
+              if(socialPages.has(raw.id) && M.graphId(raw.instagram_business_account?.id)) linked.push({pageId:raw.id,accountId:raw.instagram_business_account.id});
+              if(includeInstagram&&raw.instagram_business_account!=null&&included('instagram_business',raw.instagram_business_account.id)){
                 const ig=raw.instagram_business_account,avatar=photos&&Object.hasOwn(ig,'profile_picture_url');
                 if(!C.exact(ig,'id,name,username'+(avatar?',profile_picture_url':'')))fail('provider_failed');
                 push(project(ig,'instagram_business',raw.id,avatar?ig.profile_picture_url:undefined));
@@ -116,7 +127,7 @@ function createMetaMarketingDiscoveryHttp({request=https.request,timeoutMs=8000,
           if(pending&&![...pending].some(ref=>ref.startsWith('meta-ad_account:')===adAccounts))break;
         }while(after);
       }
-      await verify();return assets;
+      await verify(linked);return assets;
     }catch(e){throw require('./meta-marketing-graph-pacing').safeError(e);}
     finally{signal.removeEventListener('abort',wipe);wipe();}
   };

@@ -7,8 +7,9 @@ const A=require('./meta-marketing-ads-contract'),X=require('./meta-marketing-enr
 const P=require('./meta-marketing-admission-contract');
 const L=require('./meta-marketing-leads-contract'),{timingSafeEqual}=require('node:crypto');
 const V=require('./meta-marketing-enrollment-assets-contract'),R=require('./meta-marketing-credential-renewal-contract');
-function createMetaMarketingEnrollment({store,secrets,http,environment,socialInbox,subscriptionPacer,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,leadRecovery,credentialEpochs,businessConfig,enrolledAssetAccess,resolvePolicy,admissionAdsReadScopeKeys}){
-  const socialConsent=socialInbox && credentialEpochs && require('./meta-marketing-social-consent').journal(store);
+function createMetaMarketingEnrollment({store,secrets,http,environment,socialInbox,socialInboxAdvancedChannels=[],subscriptionPacer,now=()=>Date.now(),adsRead,adsHttp,leadAds,leadsHttp,leadRecovery,credentialEpochs,businessConfig,enrolledAssetAccess,resolvePolicy,admissionAdsReadScopeKeys}){
+  const single=require('./meta-marketing-social-single').createSingleClinicSocial({store,channels:socialInboxAdvancedChannels,now});
+  const socialConsent=(socialInbox || socialInboxAdvancedChannels.length) && credentialEpochs && require('./meta-marketing-social-consent').journal(store);
   if(resolvePolicy!==undefined&&typeof resolvePolicy!=='function')fail('invalid_request');
   if(admissionAdsReadScopeKeys!==undefined&&(!Array.isArray(admissionAdsReadScopeKeys)||admissionAdsReadScopeKeys.length>64
     ||admissionAdsReadScopeKeys.some((key,i)=>!P.scopeKey(key)||i>0&&key<=admissionAdsReadScopeKeys[i-1])
@@ -159,6 +160,44 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
     return {pageAssetRef:page.assetRef,adAccountAssetRef:account.assetRef,recipientClinicId:null};
   }
   const receiptIngress=(request,principal)=>Boolean(leadAds&&principal.id===L.ingressPrincipal(environment)&&(L.RECEPTION_OPERATIONS.includes(request.operation)||request.operation===Social.verify));
+  function singleTargets(row,binding,pageId,expectedVersion) {
+    if(!socialConsent || !single.scope(binding).length)return [];
+    const active=enrollmentActive(row,binding,{requireActive:true});
+    if(expectedVersion && active.credential.versionId!==expectedVersion)return [];
+    const proof=socialConsent.active(row.id,active.credential,row.flow);
+    if(!proof?.projection)return [];
+    const metadata=JSON.parse(proof.projection);
+    if(metadata.appId!==active.metadata.appId || metadata.subjectId!==active.metadata.subjectId)return [];
+    return single.targets(row,binding,active.assets,active.metadata.subjectId,pageId).filter(a=>single.authorized(proof,a));
+  }
+  function compatibleExplicit(target) {
+    return !(socialInbox||[]).some(a=>a.channel===target.channel && a.accountId===target.accountId &&
+      (a.clinicId!==target.clinicId || a.pageId!==target.pageId));
+  }
+  function subscriptionPages(row,binding,versionId) {
+    const pages=singleTargets(row,binding,undefined,versionId).filter(a=>a.channel==='messenger' && compatibleExplicit(a)).map(a=>a.pageId).sort();
+    return pages.length ? {quickChatSubscriptionPages:pages} : {};
+  }
+  function physicalSocialTarget(channel,accountId,anchor,principal,policy) {
+    const owners=single.owners(channel,accountId);
+    if(owners.length>1)return {conflict:true};
+    if(!owners.length)return null;
+    try {
+      const recipient=rowFor(owners[0].enrollment);
+      if(!recipient || recipient.state!=='active')return null;
+      const req={operation:principal.id===L.ingressPrincipal(environment)?Social.verify:Social.status,connectionRef:recipient.connection,tenantRef:recipient.tenant};
+      const recipientPolicy=resolvePolicy?resolvePolicy(req,principal,policy):policy;
+      const binding=grantBinding(recipient,source(recipientPolicy,recipient.connection));
+      const b=K.bindingFor(binding), app=anchor && K.bindingFor(anchor);
+      if((app && (b.appId!==app.appId || binding.clientSecretArn!==anchor.clientSecretArn || b.appVersionId!==app.appVersionId)) ||
+         recipient.principal!==roles.gateway || recipient.scope!=='meta-enroll:'+b.scopeKey || recipient.tenant!=='clinic:'+b.clinicIds[0])return null;
+      const matches=singleTargets(recipient,binding).filter(a=>a.channel===channel&&a.accountId===accountId);
+      return matches.length===1?matches[0]:null;
+    } catch(error) {
+      if(error instanceof BrokerError)return null;
+      throw error;
+    }
+  }
   function assetOwner(request,principal,policy){
     const lookup=get('SELECT enrollment FROM meta_marketing_enrollment_assets WHERE asset=?',request.assetRef);
     if(!lookup)fail('scope_denied');const row=rowFor(lookup.enrollment),binding=grantBinding(row,source(policy,request.connectionRef));
@@ -177,7 +216,16 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
       if (Social.ops.includes(request.operation)) {
         if (request.operation===Social.send && request.payload.attemptId!==request.requestId) fail('invalid_request');
         if ((request.operation===Social.verify)!==ingress) fail('scope_denied');
-        Social.authorize(socialInbox,asset,request,b.clinicIds);
+        const explicit=(socialInbox||[]).filter(a=>a.pageId===asset.id && b.clinicIds.includes(a.clinicId) &&
+          (request.operation===Social.verify || (a.channel===request.payload.channel && a.accountId===request.payload.accountId && a.clinicId===request.payload.clinicId)));
+        if(request.operation===Social.verify) {
+          Social.authorize(explicit.length?explicit:singleTargets(row,binding,asset.id),asset,request,b.clinicIds);
+        } else {
+          const p=request.payload;
+          const owner=physicalSocialTarget(p.channel,p.accountId,null,principal,policy);
+          if(owner && (owner.conflict || owner.clinicId!==p.clinicId || owner.pageId!==asset.id || !compatibleExplicit(owner)))fail('scope_denied');
+          Social.authorize(explicit.length?explicit:owner?[owner]:[],asset,request,b.clinicIds);
+        }
       }
       if(adsOperation(request.operation)){
         if(asset.kind!=='ad_account'||!b.scopes.includes('ads_read'))fail('scope_denied');
@@ -208,7 +256,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
     let accessBlocked=true;try{enrollmentActive(row,binding,{requireActive:true});accessBlocked=false;}catch{}
     return {enrollmentId:row.id,flowId:row.flow,scopeKey:K.bindingFor(binding).scopeKey,scopeDigest:row.scope_digest,
       candidateDigest:row.candidate_digest,selectionDigest:row.selection_digest,clinicSetDigest:C.clinicDigest(K.bindingFor(binding)),
-      assets:row.flow?selected(row):[],status:succession(row.id)?'superseded':row.state,accessBlocked,preparedAt:row.prepared_at,activatedAt:row.activated_at};
+      assets:row.flow?selected(row):[],...(!accessBlocked && row.state==='active' ? subscriptionPages(row,binding,row.flow) : {}),status:succession(row.id)?'superseded':row.state,accessBlocked,preparedAt:row.prepared_at,activatedAt:row.activated_at};
   }
   const stop=predicate=>{for(const task of running.values())if(predicate(task))task.controller.abort();};
   const abortFlow=flowId=>stop(task=>task.flowId===flowId);
@@ -330,7 +378,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
     if(running.has(enrollmentId)||running.size>=2)fail('oauth_flow_busy');
     const task={enrollmentId,flowId,assets:row?.flow?selected(row):[],controller:new AbortController()};running.set(enrollmentId,task);
     const signal=task.controller.signal,timer=setTimeout(()=>task.controller.abort(),25000);timer.unref?.();let reserved=false,revision;
-    let credentialEpoch;
+    let credentialEpoch, socialProjection;
     const check=()=>{
       if(signal.aborted)fail('provider_timeout');authorityNow();
       const current=store.connection(binding.connectionRef,now());if(revision!==undefined&&current.revision!==revision)fail('connection_blocked');revision=current.revision;
@@ -372,7 +420,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
         if(previous && previous.digest!==digest)fail('idempotency_conflict');
         data=previous?.state==='completed'&&previous.result?JSON.parse(previous.result).data:{available:false,reason:'reconciliation_required'};
       }else if(request.operation===Social.verify){
-        data=await secrets.withApplication(binding,secret=>({...Social.verifyBody(request.payload,secret,socialInbox),appId:K.bindingFor(binding).appId}),signal);
+        data=await secrets.withApplication(binding,secret=>({...Social.verifyBody(request.payload,secret,socialInbox||[], socialInboxAdvancedChannels.length ? (channel,accountId)=>physicalSocialTarget(channel,accountId,binding,principal,policy) : undefined),appId:K.bindingFor(binding).appId}),signal);
       }else if(leadOperation(request.operation)&&[L.OPERATIONS.receiptAccept,L.OPERATIONS.challenge].includes(request.operation)){
         if(request.operation===L.OPERATIONS.receiptAccept){
           const raw=Buffer.from(request.payload.rawBase64,'base64');try{data=await secrets.withApplication(binding,appSecret=>{context=check();return leadReceipts.accept({raw,signature:request.payload.signature,appSecret,
@@ -389,11 +437,12 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
               const proof=socialConsent && socialConsent.active(row.id,context.credential,row.flow);
               const p=request.payload;
               const hasConsent=proof && JSON.parse(proof.accounts).some(a=>a.channel===p.channel&&a.accountId===p.accountId&&a.clinicId===p.clinicId&&a.pageId===context.asset.id);
+              const singleConsent=proof?.projection && singleTargets(row,binding,context.asset.id).some(a=>a.channel===p.channel && a.accountId===p.accountId && a.clinicId===p.clinicId && a.pageId===context.asset.id);
               if(request.operation===Social.subscribe){
                 if(p.enrollmentId!==row.id||p.versionId!==(context.credential?.versionId??context.flow.id))fail('secret_version_changed');
-                if(!hasConsent)return {available:false,reason:'social_consent_absent'};
+                if(!hasConsent && !singleConsent)return {available:false,reason:'social_consent_absent'};
               }
-              const metadata=hasConsent?JSON.parse(proof.metadata):borrowed.metadata;
+              const metadata=hasConsent?JSON.parse(proof.metadata):singleConsent?JSON.parse(proof.projection):borrowed.metadata;
               if(metadata.appId!==borrowed.metadata.appId || metadata.subjectId!==borrowed.metadata.subjectId)fail('oauth_identity_mismatch');
               return Social.execute({...borrowed,metadata,subscriptionPacer,asset:context.asset,operation:request.operation,payload:p,signal,authorize:check,
                 context:{principalId:principal.id,tenantRef:request.tenantRef,binding:{connectionRef:request.connectionRef},policyVersion:policy.version,generation:[row.id,context.flow.id,context.credential?.versionId??context.flow.id]}});
@@ -409,7 +458,9 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
               context:{principalId:principal.id,tenantRef:request.tenantRef,policyVersion:policy.version}});
             return http.readCandidate({binding,...borrowed,asset:context.asset,operation:request.operation,signal,authorize:check});
           }
-          const inventory=await http.discover({binding,...borrowed,signal,authorize:check});D.checkAssets(inventory,borrowed.metadata);
+          const opt=name==='activate' ? single.discovery(socialConsent?.find?.(flowId),row,binding,context.assets,borrowed.metadata.subjectId,value=>{socialProjection=value;}) : {};
+          const inventory=await http.discover({binding,...borrowed,signal,authorize:check,...opt});D.checkAssets(inventory,borrowed.metadata);
+          if(opt.socialDiscovery && !socialProjection)fail('oauth_credentials_incomplete');
           const refs=name==='prepare'?request.payload.assetRefs:context.assets.map(a=>a.assetRef);
           const result=E.assets(refs.map(ref=>{const value=inventory.find(a=>a.assetRef===ref);if(!value)fail('scope_denied');return E.identity(value);}));
           if(row&&JSON.stringify(result)!==JSON.stringify(context.assets))fail('scope_denied');
@@ -431,6 +482,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
             for(const a of assets)store.db.prepare('INSERT INTO meta_marketing_enrollment_assets VALUES (?,?)').run(a.assetRef,enrollmentId);
             for(const ref of new Set(assets.flatMap(physical)))store.db.prepare('INSERT INTO meta_marketing_enrollment_claims VALUES (?,?)').run(ref,enrollmentId);
           }
+          if(name==='activate' && socialProjection)socialConsent.project(flowId,context.flow.secret_digest,socialProjection);
           if(name==='activate')store.db.prepare("UPDATE meta_marketing_enrollments SET state='active',activated_at=COALESCE(activated_at,?),updated_at=? WHERE id=? AND state='prepared'").run(now(),now(),enrollmentId);
           row=rowFor(enrollmentId);response.data=receipt(row,binding);
         },
@@ -446,7 +498,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
     authorize:context=>E.authorize(context,environment),...(name==='assets'?{persistResult:false}:{}),execute:name==='assets'?inventory:execute}]));
   for(const op of M.OPERATIONS)operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>M.validate(op,payload),execute};
   if(adsRead||admittedAdsScopes.length)for(const op of Object.values(A.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>A.validate(op,payload),execute};
-  if(socialInbox)for(const op of Social.ops)operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:Social.checks[op],persistResult:false,execute};
+  if(socialInbox || socialInboxAdvancedChannels.length)for(const op of Social.ops)operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:Social.checks[op],persistResult:false,execute};
   if(leadAds)for(const op of Object.values(L.OPERATIONS))operations[op]={provider:C.PROVIDER,control:'meta_marketing_oauth',validate:payload=>L.validate(op,payload),persistResult:false,execute};
   operations[M.REVOKE]={provider:C.PROVIDER,control:'revoke_asset',validate:payload=>M.validate(M.REVOKE,payload),onRevoked:request=>abortAsset(request.assetRef)};
   return {operations,resolve,abortFlow,
@@ -455,7 +507,7 @@ function createMetaMarketingEnrollment({store,secrets,http,environment,socialInb
       const sources=policy.connections.filter(b=>b.connectionRef===connectionRef);
       return sources.length===1&&policy.principals.some(p=>p.id===roles.gateway&&p.enabled===true)&&providerLifecycleAuthority(connectionRef,sources[0]);
     },
-    bindingForEnrollment:grantBinding,
+    bindingForEnrollment:grantBinding,subscriptionPages,
     receiptForEnrollment(id,binding){const row=rowFor(id);if(!row)fail('scope_denied');return receipt(row,grantBinding(row,binding));},
     activeOperations(id){return [...running.values()].filter(t=>t.enrollmentId===id).length;},
     commitBusinessHandover({oldEnrollmentId,newEnrollmentId,flow,binding,assets,handoverId,receiptRefs}){

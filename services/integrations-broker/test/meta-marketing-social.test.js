@@ -336,3 +336,156 @@ test('signed subscription accepts only the current consent, destination and cred
   assert.deepEqual((await subscribe()).data, { available: true });
   assert.deepEqual(provider.writes, [['feed', 'leadgen', 'messages']]);
 });
+
+async function singleOnboarding(t, { channels=['instagram','messenger'], selected=['meta-facebook_page:401','meta-instagram_business:501'],
+    singleClinic=true, grant=true, granular, socialInbox, baseInstagram=true }={}) {
+  const { randomUUID } = require('node:crypto'), E = require('../src/meta-marketing-enrollment-contract');
+  const owner = require('./meta-marketing-oauth-fixture.cjs').fixture(t,{renewal:true,leads:true,singleClinic,baseInstagram,socialInbox,socialConsentOnly:true,socialInboxAdvancedChannels:channels});
+  const flow=await owner.begin(), requested=new URL(flow.result.data.authUrl).searchParams.get('scope').split(',');
+  owner.state.afterGraph = (kind, value) => {
+    if(kind==='inspect' && grant) {
+      value.data.scopes=requested;
+      value.data.granular_scopes.push(...(granular || [
+        {scope:'instagram_manage_messages',target_ids:['501','999']},{scope:'pages_messaging',target_ids:['401','998']},
+      ]).filter(v=>requested.includes(v.scope)));
+    }
+    return value;
+  };
+  const stage=await owner.finish(flow), enrollmentId=randomUUID(), scopeDigest=flow.payload.scopeDigest;
+  const prepare=await owner.execute(E.OPERATIONS.prepare,{enrollmentId,flowId:flow.flowId,scopeDigest,
+    candidateDigest:stage.data.candidate.digest,assetRefs:selected});
+  const activate=await owner.execute(E.OPERATIONS.activate,{enrollmentId,scopeDigest,selectionDigest:prepare.data.selectionDigest});
+  const call=(operation,channel,extra={},clinicId=71)=>owner.execute(operation,{
+    channel,clinicId,kind:'dm',accountId:channel==='instagram'?'501':'401',...extra},{assetRef:'meta-facebook_page:401'},'reader');
+  return {owner,requested,flow,enrollmentId,grant:activate.data,call};
+}
+
+function signedIngress(t,owner) {
+  const {generateKeyPairSync,createHmac}=require('node:crypto'), {Broker}=require('../src/broker');
+  const id=require('../src/meta-marketing-leads-contract').ingressPrincipal('staging');
+  const keys=generateKeyPairSync('ed25519');
+  owner.policy.principals.push({id,keyId:id,enabled:true,maxPerMinute:50,publicKey:keys.publicKey.export({type:'spki',format:'pem'})});
+  const broker=new Broker({store:owner.current.store,policy:owner.policy,secrets:owner.secrets,operations:owner.current.enrollment.operations,
+    policyResolver:owner.current.enrollment,transportProfile:'meta-marketing',now:owner.now});
+  return (channel,ids,secret=require('./meta-marketing-oauth-fixture.cjs').APP)=>{
+    const body=Buffer.from(JSON.stringify({object:channel,entry:ids.map(id=>({id,messaging:[]}))}));
+    const cmd=owner.command(social.verify,{rawBase64:body.toString('base64'),signature:'sha256='+createHmac('sha256',secret).update(body).digest('hex')},{assetRef:'meta-facebook_page:401'});
+    const signed=require('../src/auth').signRequest(cmd,{keyId:id,privateKey:keys.privateKey,audience:owner.policy.audience,now:owner.now()});
+    return broker.execute(signed.raw,signed.headers);
+  };
+}
+
+test('single-clinic ordinary OAuth with no account list projects the selected Page and IG, verifies signed ingress and checks live permissions before a send',async t=>{
+  const s=await singleOnboarding(t);
+  assert(s.requested.includes('pages_messaging')&&s.requested.includes('instagram_manage_messages'));
+  assert.deepEqual(s.grant.quickChatSubscriptionPages,['401']);
+  const record=require('../src/meta-marketing-social-consent').journal(s.owner.current.store).find(s.flow.flowId);
+  assert.deepEqual(JSON.parse(record.accounts),[]);
+  assert.equal(record.metadata.includes('999'),false);
+  assert.deepEqual(JSON.parse(record.projection).granularScopes.find(g=>g.scope==='instagram_manage_messages').targetIds,['501']);
+  assert.deepEqual(JSON.parse(record.projection).granularScopes.find(g=>g.scope==='pages_messaging').targetIds,['401']);
+  assert(!record.projection.includes('998')&&!record.projection.includes('999'));
+  const ingress=signedIngress(t,s.owner), graphCount=s.owner.state.httpCalls.length;
+  assert.deepEqual((await ingress('page',['401','997'])).data.destinations,[{accountId:'401',clinicId:71}]);
+  assert.deepEqual((await ingress('instagram',['996','501'])).data.destinations,[{accountId:'501',clinicId:71}]);
+  await assert.rejects(ingress('page',['401'],'FICTITIOUS_WRONG_SECRET'),{code:'invalid_signature'});
+  assert.equal(graphCount,s.owner.state.httpCalls.length);
+  const provider=fixture(); t.mock.method(globalThis,'fetch',provider.ctx.transport);
+  await assert.rejects(s.call(social.status,'instagram',{},72),{code:'scope_denied'});
+  await assert.rejects(s.call(social.status,'instagram',{accountId:'997'}),{code:'scope_denied'});
+  assert.equal(provider.commands.length,0);
+  assert.equal((await s.call(social.status,'instagram')).data.available,true);
+  const attemptId=require('node:crypto').randomUUID();
+  const send=(object={})=>s.owner.execute(social.send,{clinicId:71,channel:'instagram',kind:'dm',accountId:'501',recipient:'771',text:'Fictitious QA',attemptId,...object},
+    {requestId:attemptId,assetRef:'meta-facebook_page:401'},'reader');
+  await send();
+  assert.equal(provider.commands.filter(c=>c.method==='POST').length,1);
+  assert(provider.commands.some(c=>c.endpoint==='debug_token'));
+  await s.owner.execute(require('../src/meta-marketing-contract').REVOKE,{}, {assetRef:'meta-instagram_business:501'},'assetControl');
+  await assert.rejects(s.call(social.status,'instagram'));
+  await assert.rejects(ingress('instagram',['501']));
+  assert.equal(provider.commands.filter(c=>c.method==='POST').length,1);
+});
+
+test('single-clinic switches cannot authorize groups, disabled channels, declined grants, or foreign granular targets',async t=>{
+  for (const variant of [
+    {singleClinic:false}, {channels:[]}, {channels:['messenger']}, {grant:false},
+    {granular:[{scope:'instagram_manage_messages',target_ids:['777']},{scope:'instagram_manage_comments',target_ids:[]}]}
+  ]){
+    await t.test(JSON.stringify(variant),async t=>{
+      const s=await singleOnboarding(t,variant);
+      const spy=t.mock.method(globalThis,'fetch',()=>assert.fail('Unexpected Graph call'));
+      await assert.rejects(s.call(social.status,'instagram'));
+      assert.equal(spy.mock.callCount(),0);
+      if(variant.singleClinic===false||!variant.channels?.length && variant.channels!==undefined || variant.channels?.length===1)
+        assert(!s.requested.includes('instagram_manage_messages'));
+    });
+  }
+});
+
+test('ordinary renewal opts in an existing single-clinic grant without explicit targets and pins the projection to the new effective token',async t=>{
+  const {randomUUID,randomBytes}=require('node:crypto'),C=require('../src/meta-marketing-oauth-contract'),R=require('../src/meta-marketing-credential-renewal-contract');
+  const s=await singleOnboarding(t,{grant:false}), f=s.owner, id=randomUUID(), row=f.current.store.db.prepare('SELECT * FROM meta_marketing_enrollments WHERE id=?').get(s.enrollmentId);
+  const current=f.current.epochs.current(row,f.binding);
+  const p={renewalId:id,flowId:id,enrollmentId:row.id,expectedEpoch:current.epoch,expectedVersionId:current.versionId,
+    expectedCandidateDigest:current.digest,scopeDigest:row.scope_digest,assetSetDigest:R.assetSetDigest(s.grant.assets),
+    clinicSetDigest:C.clinicDigest(f.binding.metaMarketingOAuth),state:randomBytes(32).toString('base64url'),expiresAt:f.now()+600000};
+  const start=await f.execute(R.OPERATIONS.begin,p);
+  assert.equal(start.data.continuedQuickChat,true);
+  const granted=new URL(start.data.authUrl).searchParams.get('scope').split(',');
+  f.state.afterGraph=(kind,value)=>{if(kind==='inspect'){value.data.scopes=granted;value.data.granular_scopes.push({scope:'pages_messaging',target_ids:['401','997']});}return value;};
+  const finish=await f.execute(R.OPERATIONS.finish,{renewalId:id,flowId:id,state:p.state,code:'FICTITIOUS_RENEWAL_'+id});
+  await assert.rejects(s.call(social.status,'messenger'),{code:'scope_denied'});
+  const activated=await f.execute(R.OPERATIONS.activate,{renewalId:id,enrollmentId:row.id,expectedEpoch:p.expectedEpoch,expectedVersionId:p.expectedVersionId,
+    expectedCandidateDigest:p.expectedCandidateDigest,candidateVersionId:id,candidateDigest:finish.data.candidate.digest});
+  const j=require('../src/meta-marketing-social-consent').journal(f.current.store);
+  assert(!j.active(row.id,{versionId:id,digest:current.digest},row.flow));
+  assert.deepEqual(activated.data.quickChatSubscriptionPages,['401']);
+  R.validateResponse(R.OPERATIONS.activate,activated.data,{renewalId:id,enrollmentId:row.id,expectedEpoch:p.expectedEpoch,expectedVersionId:p.expectedVersionId,expectedCandidateDigest:p.expectedCandidateDigest,candidateVersionId:id,candidateDigest:finish.data.candidate.digest},f.binding);
+  const projection=j.active(row.id,activated.data.effectiveCredential,row.flow);
+  assert.deepEqual(JSON.parse(projection.projection).granularScopes.find(g=>g.scope==='pages_messaging').targetIds,['401']);
+  const provider=fixture();t.mock.method(globalThis,'fetch',provider.ctx.transport);
+  assert.equal((await s.call(social.status,'messenger')).data.available,true);
+});
+
+test('an active single-clinic route conflicting with an explicit clinic or parent Page blocks signed ingress and both destinations before reading or sending',async t=>{
+  for (const conflict of [{clinicId:72, pageId:'401'},{clinicId:71, pageId:'402'}]) await t.test(JSON.stringify(conflict),async t=>{
+    const s=await singleOnboarding(t,{socialInbox:[{channel:'instagram',accountId:'501',...conflict}]});
+    const ingress=signedIngress(t,s.owner);
+    assert.deepEqual((await ingress('instagram',['501'])).data.destinations,[]);
+    assert.deepEqual((await ingress('page',['401'])).data.destinations,[{accountId:'401',clinicId:71}]);
+    const spy=t.mock.method(globalThis,'fetch',()=>assert.fail('unexpected Meta call'));
+    for (const target of [{clinicId:71,pageId:'401'},conflict]) {
+      const base={clinicId:target.clinicId,channel:'instagram',accountId:'501',kind:'dm'};
+      const id=require('node:crypto').randomUUID(), overr={requestId:id,assetRef:'meta-facebook_page:'+target.pageId};
+      await assert.rejects(s.owner.execute(social.status,base,overr,'reader'),{code:'scope_denied'});
+      await assert.rejects(s.owner.execute(social.send,{...base,recipient:'771',text:'FICTITIOUS',attemptId:id},overr,'reader'),{code:'scope_denied'});
+    }
+    assert.equal(spy.mock.callCount(),0);
+  });
+});
+
+test('a Page-only initial grant records only its linked IG from the existing selected inventory call; a later client cannot use it before the physical extension is confirmed',async t=>{
+  const s=await singleOnboarding(t,{baseInstagram:false,selected:['meta-facebook_page:401']});
+  assert(s.requested.includes('instagram_basic'));
+  assert(!s.owner.binding.metaMarketingOAuth.scopes.includes('instagram_basic'));
+  const record=require('../src/meta-marketing-social-consent').journal(s.owner.current.store).find(s.flow.flowId);
+  assert.deepEqual(JSON.parse(record.projection).granularScopes.find(g=>g.scope==='instagram_manage_messages').targetIds,['501']);
+  assert(!record.projection.includes('999'));
+  const spy=t.mock.method(globalThis,'fetch',()=>assert.fail('unexpected Graph call'));
+  await assert.rejects(s.call(social.status,'instagram'),{code:'scope_denied'});
+  assert.equal(spy.mock.callCount(),0);
+});
+
+test('ordinary renewal losing a previously granted permission on the selected Page cannot replace its working credential',async t=>{
+  const {randomUUID,randomBytes}=require('node:crypto'),C=require('../src/meta-marketing-oauth-contract'),R=require('../src/meta-marketing-credential-renewal-contract');
+  const s=await singleOnboarding(t,{channels:['messenger']}),f=s.owner, id=randomUUID();
+  const row=f.current.store.db.prepare('SELECT * FROM meta_marketing_enrollments WHERE id=?').get(s.enrollmentId),current=f.current.epochs.current(row,f.binding);
+  const p={renewalId:id,flowId:id,enrollmentId:row.id,expectedEpoch:current.epoch,expectedVersionId:current.versionId,
+    expectedCandidateDigest:current.digest,scopeDigest:row.scope_digest,assetSetDigest:R.assetSetDigest(s.grant.assets),
+    clinicSetDigest:C.clinicDigest(f.binding.metaMarketingOAuth),state:randomBytes(32).toString('base64url'),expiresAt:f.now()+600000};
+  await f.execute(R.OPERATIONS.begin,p);
+  f.state.afterGraph=(kind,value)=>{if(kind==='inspect'){value.data.scopes=s.requested;value.data.granular_scopes.push({scope:'pages_messaging',target_ids:['999']});}return value;};
+  await assert.rejects(f.execute(R.OPERATIONS.finish,{renewalId:id,flowId:id,state:p.state,code:'FICTITIOUS_RENEWAL_'+id}),{code:'oauth_credentials_incomplete'});
+  assert.equal(f.current.epochs.current(row,f.binding).versionId,current.versionId);
+});

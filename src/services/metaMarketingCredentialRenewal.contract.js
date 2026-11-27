@@ -28,7 +28,10 @@ function request(row){
   return {...row,clinicIds,selected,candidate,scopeValues:scopes};
 }
 function receipt(value,row,{allowAbortedVersionDrift=false}={}){
-  if(!C.exact(value,'renewalId,flowId,enrollmentId,status,grantDigest,assetSetDigest,effectiveCredential,candidate,activationApplied')
+  const announced=value && Object.hasOwn(value,'quickChatSubscriptionPages');
+  if(announced && (!value.activationApplied||!require('../../services/integrations-broker/src/meta-marketing-social-consent')
+    .validSubscriptionPages(value.quickChatSubscriptionPages,row.scope_key,row.clinicIds,row.selected)))fail('broker_response_invalid');
+  if(!C.exact(value,'renewalId,flowId,enrollmentId,status,grantDigest,assetSetDigest,effectiveCredential,candidate,activationApplied'+(announced?',quickChatSubscriptionPages':''))
     ||value.renewalId!==row.renewal_id||value.flowId!==row.renewal_id||!U.STATES.includes(value.status)||typeof value.activationApplied!=='boolean')fail('broker_response_invalid');
   if(value.status==='not_found'){
     if(['enrollmentId','grantDigest','assetSetDigest','effectiveCredential','candidate'].some(key=>value[key]!==null)||value.activationApplied)fail('broker_response_invalid');

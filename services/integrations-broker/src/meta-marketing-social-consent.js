@@ -25,6 +25,25 @@ function config(rows) {
   return rows;
 }
 
+function advancedChannels(value) {
+  if (!Array.isArray(value) || value.length > 2 || new Set(value).size !== value.length ||
+      value.some(channel => !['instagram', 'messenger'].includes(channel))) fail('invalid_request');
+  return [...value].sort();
+}
+
+function singleChannels(channels, scopeKey, clinicIds) {
+  if (!Array.isArray(clinicIds) || clinicIds.length !== 1 || !Number.isSafeInteger(clinicIds[0]) ||
+      clinicIds[0] < 1 || scopeKey !== 'clinic:' + clinicIds[0]) return [];
+  return advancedChannels(channels || []);
+}
+
+function validSubscriptionPages(pages, scopeKey, clinicIds, assets) {
+  return singleChannels(['messenger'], scopeKey, clinicIds).length === 1 &&
+    Array.isArray(pages) && pages.length > 0 && pages.length <= 100 &&
+    pages.every((id, i) => graphId(id) && (!i || id > pages[i-1]) &&
+      (!assets || assets.some(a => a.kind === 'facebook_page' && a.id === id)));
+}
+
 function targetsFor(accounts, assets, clinicIds) {
   const pages = new Set(assets.filter(asset => asset.kind === 'facebook_page').map(asset => asset.id));
   return (accounts || []).filter(row => pages.has(row.pageId) && clinicIds.includes(row.clinicId))
@@ -40,9 +59,9 @@ function targetDigest(accounts) {
   return C.hash(JSON.stringify(accounts.map(a => [a.clinicId, a.channel, a.pageId, a.accountId])));
 }
 
-function scopesFor(scopes, accounts) {
+function scopesFor(scopes, accounts, channels = []) {
   const requested = new Set(scopes);
-  for (const { channel } of accounts) {
+  for (const channel of new Set([...accounts.map(row => row.channel), ...channels])) {
     if (!['instagram', 'messenger'].includes(channel)) fail('invalid_request');
     for (const name of ['pages_show_list', 'pages_read_engagement', 'pages_manage_metadata', 'pages_messaging']) requested.add(name);
     if (channel === 'instagram')
@@ -57,7 +76,11 @@ function journal(store) {
     renewal TEXT PRIMARY KEY, enrollment TEXT NOT NULL, accounts TEXT NOT NULL,
     candidate_digest TEXT, metadata TEXT
   )`);
-  const find = id => db.prepare('SELECT * FROM meta_marketing_social_consents WHERE renewal=?').get(id);
+  db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_social_single_consents (
+    renewal TEXT PRIMARY KEY, channels TEXT NOT NULL, projection TEXT
+  )`);
+  const find = id => db.prepare(`SELECT c.*,s.channels,s.projection FROM meta_marketing_social_consents c
+    LEFT JOIN meta_marketing_social_single_consents s ON s.renewal=c.renewal WHERE c.renewal=?`).get(id);
   function active(enrollment, credential, originalFlow) {
     const row = find(credential.versionId);
     if (!row || row.candidate_digest !== credential.digest || !row.metadata) return null;
@@ -67,14 +90,22 @@ function journal(store) {
   }
   return {
     find, active,
-    begin(id, enrollment, accounts, replay) {
+    begin(id, enrollment, accounts, replay, channels = []) {
       const old = find(id);
       const serialized = JSON.stringify(accounts);
       if (replay) {
-        if ((old?.accounts || '[]') !== serialized || (old && old.enrollment !== enrollment)) fail('idempotency_conflict');
-      } else if (accounts.length) {
+        if ((old?.channels || '[]') !== JSON.stringify(channels) || (old?.accounts || '[]') !== serialized || (old && old.enrollment !== enrollment)) fail('idempotency_conflict');
+      } else if (accounts.length || channels.length) {
+        if (channels.length) db.prepare('INSERT INTO meta_marketing_social_single_consents(renewal,channels) VALUES(?,?)').run(id, JSON.stringify(channels));
         db.prepare('INSERT INTO meta_marketing_social_consents(renewal,enrollment,accounts) VALUES(?,?,?)').run(id,enrollment,serialized);
       }
+    },
+    project(id, digest, metadata) {
+      const record = find(id);
+      if (!record?.channels || !record.metadata || record.candidate_digest !== digest) fail('secret_version_changed');
+      const original = JSON.parse(record.metadata);
+      if (metadata.subjectId !== original.subjectId || metadata.appId !== original.appId || metadata.tokenType !== 'USER') fail('oauth_identity_mismatch');
+      db.prepare('UPDATE meta_marketing_social_single_consents SET projection=? WHERE renewal=?').run(JSON.stringify(metadata),id);
     },
     capture(id, digest, metadata) {
       const updated = db.prepare('UPDATE meta_marketing_social_consents SET candidate_digest=?,metadata=? WHERE renewal=? AND candidate_digest IS NULL')
@@ -90,8 +121,8 @@ function hasPermission(metadata, scope, account) {
   return !granular || granular.targetIds.includes(account.pageId) || granular.targetIds.includes(account.accountId);
 }
 
-function inspect(raw, binding, original, accounts, now, activeConsent) {
-  const checked = inspectInitial(raw, binding, accounts, now);
+function inspect(raw, binding, original, accounts, now, activeConsent, channels = []) {
+  const checked = inspectInitial(raw, binding, accounts, now, channels);
   if (checked.subjectId !== original.subjectId || checked.appId !== original.appId || checked.tokenType !== 'USER') fail('oauth_identity_mismatch');
 
   const previousAccounts = activeConsent ? JSON.parse(activeConsent.accounts) : [];
@@ -108,10 +139,10 @@ function inspect(raw, binding, original, accounts, now, activeConsent) {
 
 // Marketing keeps the scopes pinned to its binding. For the normal Meta login,
 // record only the additional scope/asset evidence actually returned by Meta.
-function inspectInitial(raw, binding, accounts, now) {
+function inspectInitial(raw, binding, accounts, now, channels = [], ceiling) {
   const base = C.bindingFor(binding);
   const granted = Array.isArray(raw?.data?.scopes) ? raw.data.scopes : [];
-  const scopes = scopesFor(base.scopes, accounts).filter(scope => base.scopes.includes(scope) || granted.includes(scope));
+  const scopes = scopesFor(base.scopes, accounts, channels).filter(scope => base.scopes.includes(scope) || (granted.includes(scope) && (!ceiling || ceiling.includes(scope))));
   const proof = C.inspected(raw, { ...binding, metaMarketingOAuth: { ...base, scopes } }, now);
   const ids = new Set(accounts.flatMap(account => [account.pageId, account.accountId]));
   return { ...proof, granularScopes: proof.granularScopes.map(entry => ({
@@ -119,4 +150,4 @@ function inspectInitial(raw, binding, accounts, now) {
   })) };
 }
 
-module.exports = { config, targetsFor, targetDigest, sameTarget, scopesFor, journal, inspect, inspectInitial };
+module.exports = { config, advancedChannels, singleChannels, validSubscriptionPages, hasPermission, targetsFor, targetDigest, sameTarget, scopesFor, journal, inspect, inspectInitial };

@@ -10,9 +10,13 @@ const C=require('../src/meta-marketing-oauth-contract');
 const {ACCOUNT,SECRET_KEY}=require('../src/google-main');
 
 function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false,enrollmentScopeKeys,adsReadScopeKeys,adsHttp,credentialEpochs=false,
-  leads=false,leadAds,leadsHttp,enrolledAssetAccess,leadIngress=false}={}){
+  leads=false,leadAds,leadsHttp,enrolledAssetAccess,leadIngress=false,socialInboxAdvancedChannels}={}){
   const hasDiscovery=discovery||enrollment;
   const f=fixture(t,{discovery:hasDiscovery,enrollment,leads,adsManagement:leads}),P=require('../src/meta-marketing-admission-contract');
+  if(socialInboxAdvancedChannels && leads) {
+    leadAds ||= f.config.leadAds;
+    leadsHttp ||= {read:()=>assert.fail('unexpected fictitious lead read')};
+  }
   if(leadAds)f.config.leadAds=leadAds;
   if(enrolledAssetAccess)f.config.enrolledAssetAccess=enrolledAssetAccess;
   if(leadIngress){
@@ -75,11 +79,11 @@ function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false
       prefix:'/clinicaclick/integrations/prod/meta-marketing/staging/',kmsKeyArn:SECRET_KEY});
     let resourceEnrollment;
     const resolvePolicy=admission?(request,principal,base)=>admission.resolve(request,principal,base):undefined;
-    const engine=createMetaMarketingOAuth({store,policy:f.policy,secrets,http:f.http,now:f.now,assetDiscovery:hasDiscovery,
+    const engine=createMetaMarketingOAuth({store,policy:f.policy,secrets,http:f.http,now:f.now,assetDiscovery:hasDiscovery,socialInboxAdvancedChannels,
       onAbort:id=>resourceEnrollment?.abortFlow(id),
       ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base)}:{})});
     const epochs=credentialEpochs?require('../src/meta-marketing-credential-epochs').createMetaMarketingCredentialEpochs({store,now:f.now}):null;
-    if(enrollment)resourceEnrollment=createMetaMarketingEnrollment({store,secrets,http:f.http,environment:'staging',now:f.now,
+    if(enrollment)resourceEnrollment=createMetaMarketingEnrollment({store,secrets,http:f.http,environment:'staging',now:f.now,socialInboxAdvancedChannels,
       ...(chosenSettings.adsReadScopeKeys?{admissionAdsReadScopeKeys:chosenSettings.adsReadScopeKeys,adsHttp}:{}),
       ...(leadAds?{leadAds,leadsHttp}:{}),...(enrolledAssetAccess?{enrolledAssetAccess}:{}),
       ...(epochs?{credentialEpochs:epochs}:{}),

@@ -40,3 +40,23 @@ test('disabled setup, wrong runtime, disabled grants, provider throttling and tr
   f.setResult(Object.assign(Error(),{code:'rate_limited',retryAfterMs:4000}));assert.equal((await run()).backoffMs,4000);
   f.setResult(Error('transport unavailable'));await assert.rejects(run(),/transport unavailable/);
 });
+
+test('only Facebook Pages named in a single-clinic owner receipt and resolved by the current CRM mapping enqueue and subscribe', async()=>{
+  const f=setup(),jobs=[], options={targets:[],env,confirmedPages:['401'],inventory:async()=>({routes:[target,{...target,pageId:'999',accountId:'999'}]}),enqueue:async(job)=>jobs.push(job)};
+  const grant={enrollment_id:enrollmentId,scope_key:'clinic:72',selected:[{kind:'facebook_page',id:'401'}],clinicIds:[72]};
+  await service.enqueuePages(f.db,grant,versionId,f.t,{...options,confirmedPages:undefined});
+  assert.deepEqual(jobs,[]);
+  await assert.rejects(service.enqueuePages(f.db,{...grant,scope_key:'group:29'},versionId,f.t,options),/social_job_scope/);
+  await assert.rejects(service.enqueuePages(f.db,grant,versionId,f.t,{...options,confirmedPages:['999']}),/social_job_scope/);
+  await service.enqueuePages(f.db,grant,versionId,f.t,options);
+  assert.equal(jobs.length,1);
+  assert.deepEqual(jobs[0].payload,{...data,singleClinic:true});
+  const run=()=>service.run(f.db,jobs[0].payload,{...f.opts,targets:[]});
+  f.setActive({state:'active',scope_key:'group:29',clinic_ids:'[72]',flow_id:versionId});
+  assert.equal((await run()).reason,'social_target_disabled');
+  f.setActive({state:'active',scope_key:'clinic:72',clinic_ids:'[72]',flow_id:versionId});
+  assert.deepEqual(await run(),{subscribed:true});
+  f.setPointer({version_id:randomUUID()});
+  assert.equal((await run()).reason,'credential_changed');
+  assert.equal(f.calls.length,1);
+});
