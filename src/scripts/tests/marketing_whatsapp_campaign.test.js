@@ -11,6 +11,18 @@ const { imageHeader, withCampaignImage, resolveCampaignImage } = require('../../
 const { buildLeadAttributionView, buildMarketingOriginWhere } = require('../../lib/lead-attribution-view');
 const { fillExistingPatientNames } = require('../../services/leadPatientNameProjection.service');
 
+test('first-visit enquiries and scheduling constraints preserve opt-outs and existing appointment management', () => {
+  const { asksForCommercialInformation } = require('../../services/socialLeadInterestClassification.service');
+  for (const text of ['¿Tenéis disponibilidad para una primera valoración?', '¿Hay hueco para una primera visita?',
+    'Me interesa, pero no puedo hasta el lunes.', 'Estoy interesada pero hasta el lunes no puedo']) {
+    assert.equal(asksForCommercialInformation(text), true, text);
+  }
+  for (const text of ['Quiero cambiar mi cita, ¿hay hueco para una primera visita?', 'Me interesa pero ya no quiero ir',
+    'Me interesa cancelar mi cita', '¿Tenéis mi factura?', 'Me interesa pero no puedo hasta el lunes. No me escribáis.']) {
+    assert.equal(asksForCommercialInformation(text), false, text);
+  }
+});
+
 test('the literal INFO keyword remains identifiable', () => {
   for (const value of ['INFO', ' info ', '¡Info!', '¿INFO?']) assert.equal(isInfoReply(value), true);
   for (const value of ['', 'BAJA', 'información', 'Gracias, info', 'INFO BAJA']) assert.equal(isInfoReply(value), false);

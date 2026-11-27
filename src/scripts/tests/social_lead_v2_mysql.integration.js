@@ -108,8 +108,13 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   });
   assert.equal(status.active, true);
   assert.equal(status.readiness.ready, true);
-  assert.deepEqual((await configService.getStatus(41)).config.social_entries, entries);
+  const savedEntries = (await configService.getStatus(41)).config.social_entries;
+  for (const [channel, rule] of Object.entries(entries)) {
+    assert.deepEqual(savedEntries[channel], { ...rule, inbound_capture_separate: true });
+  }
   const flow = await db.AutomationFlowTemplateV2.findByPk(status.flow.id);
+  // An existing installation can have a reply publication from before independent capture.
+  await flow.update({trigger_config:{...flow.trigger_config,social_entries:entries}});
   let expectedFlowId = flow.id;
   const at = Math.max(Date.now(), flow.published_at.getTime());
   const dispatch = require('../../services/automationInboundMessage.service');

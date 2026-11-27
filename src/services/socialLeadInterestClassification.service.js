@@ -58,8 +58,13 @@ function asksForCommercialInformation(raw) {
   const firstClause = body.split(/\s+pero\s+/u, 1)[0];
   if (/\b(?:no me interesa|no (?:estoy|estamos) interesad|ya no|no (?:lo |la )?quiero|no me contact)/.test(body)) return false;
   if (!NEGATION.test(firstClause) && AFFIRMS_INTEREST.test(firstClause) && /\b(?:promocion|oferta|bono|tratamiento)\b/.test(firstClause)) return true;
+  // An affirmative answer with a time constraint is distinct from declining the offer.
+  if (/^(?:si[, ]+)?(?:me interesa|nos interesa|estoy interesad[oa]|estamos interesad[oa]s)[,.! ]+pero (?:hasta .{1,25} no (?:puedo|podemos)|no (?:puedo|podemos)(?: ir| venir)? (?:hasta|antes de) (?:el |la |las )?[a-z0-9 :]+)[.! ]*$/.test(body)) return true;
   if (NEGATION.test(body)) return false;
   if (genericInfoRequest(raw) || EXPLICIT_INFO.test(body)) return true;
+  if (/\b(?:huecos?|disponibilidad) para (?:una? |la )?(?:primera (?:consulta|valoracion|visita)|valoracion inicial)\b/.test(body)
+    && !/\b(?:cambiar|cancelar|mover|reprogramar|anular|mi cita)\b/.test(body)
+    && (/[?¿]/.test(body) || /\b(?:hay|teneis|tienen|busco|quisiera)\b/.test(body))) return true;
   const offer = /\b(?:descuentos?|ofertas?|promocion(?:es)?|promos?|precios?|tarifas?|presupuestos?|bonos?)\b/;
   if (!offer.test(body)) return false;
   return /[?¿]/.test(body) || /\b(?:teneis|tienen|hay|haceis|ofreceis|quisiera|quiero saber|me gustaria saber|me podeis decir)\b/.test(body);

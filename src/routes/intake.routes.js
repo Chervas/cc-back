@@ -18,6 +18,8 @@ router.post('/whatsapp-origin', intakeController.registerWhatsappOrigin);
 
 // Rutas protegidas
 router.use(protect);
+router.get('/lead-capture/:clinicId/:channel', intakeController.inboundLeadCaptureConfig);
+router.put('/lead-capture/:clinicId/:channel', intakeController.inboundLeadCaptureConfig);
 router.get('/config/admin', intakeController.getIntakeConfigAdmin);
 router.get('/verify-snippet', intakeController.verifySnippetInstalled);
 router.post('/analytics-preparation/:action', intakeController.prepareAnalytics);
@@ -32,6 +34,7 @@ router.post('/leads/assistant-draft/:clinicId/approve', intakeController.leadAss
 router.route('/leads/assistant-draft/:clinicId')
   .get(intakeController.leadAssistantDraft)
   .put(intakeController.leadAssistantDraft);
+router.route('/leads/after-hours/:clinicId').get(intakeController.afterHoursLeadSettings).put(intakeController.afterHoursLeadSettings);
 router.get('/leads/auto-reply/status', intakeController.getLeadAutoReplyStatus);
 router.get('/leads/auto-reply/pending', intakeController.getLeadAutoReplyPendingPreview);
 router.post('/leads/auto-reply/pending/send', intakeController.startLeadAutoReplyPendingSend);

@@ -1387,6 +1387,12 @@ function buildDispatchFilterFromBody(body = {}, fallbackContext = null) {
   };
 }
 
+function whatsappLeadCapturePolicy(value) {
+  if (value === undefined || value === null) return 'inherit';
+  if (!['inherit', 'enabled', 'disabled'].includes(value)) throw Object.assign(new Error('Opción de captación de WhatsApp no válida.'), {status:400});
+  return value;
+}
+
 function getDispatchItemFilter(dispatch = {}) {
   const filter = dispatch?.filter && typeof dispatch.filter === 'object' ? dispatch.filter : null;
   if (!filter || !normalizeText(filter.import_batch_id)) return null;
@@ -7038,6 +7044,7 @@ async function createCampaign(scope, body = {}, userId = null) {
           ? { whatsapp_dispatch_window: normalizeWhatsappDispatchWindow(body.whatsapp_dispatch_window) } : {}),
         template_usage: templateUsage,
         template_commercial: templateCommercial,
+        whatsapp_lead_capture_policy: whatsappLeadCapturePolicy(body.whatsapp_lead_capture_policy),
         capture_whatsapp_info_leads: recordKind === 'campaign' && !isReviewRequest && templateCommercial
           && channels.includes('whatsapp') && body.capture_whatsapp_info_leads === true,
         sender_name: campaignSenderName || null,
@@ -7509,6 +7516,7 @@ async function updateCampaign(scope, campaignId, body = {}, userId = null) {
   const draftWhatsapp = normalizeChannels(nextCriteria.channels || list.action_mode || list.channel).includes('whatsapp');
   if (whatsappDraftEditable && normalizeMassSendRecordKind(nextCriteria.record_kind, 'campaign') === 'campaign'
     && !isReviewRequestList(list)) {
+    if (body.whatsapp_lead_capture_policy !== undefined) nextCriteria.whatsapp_lead_capture_policy = whatsappLeadCapturePolicy(body.whatsapp_lead_capture_policy);
     if (body.capture_whatsapp_info_leads !== undefined || !draftWhatsapp) {
       nextCriteria.capture_whatsapp_info_leads = draftWhatsapp && body.capture_whatsapp_info_leads === true;
     }
@@ -8838,7 +8846,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
   const templateCommercial = resolveTemplateCommercialFromMetaCategory(template, requestedTemplateCommercial);
   const isReviewRequest = isReviewRequestList(list) || isReviewRequestBody(body) || isReviewTemplateUsage(templateUsage);
   if (!isReviewRequest && !isWelcomeDispatch && getDispatchConfig(list).job_id
-    && (body.whatsapp_header_image_asset_id !== undefined || body.capture_whatsapp_info_leads !== undefined)) {
+    && (body.whatsapp_header_image_asset_id !== undefined || body.capture_whatsapp_info_leads !== undefined || body.whatsapp_lead_capture_policy !== undefined)) {
     throw Object.assign(new Error('La imagen y la recepción de leads quedan fijadas al iniciar el envío.'), { status: 409 });
   }
   const campaignImage = !isReviewRequest && !isWelcomeDispatch && needsWhatsappTemplate && templateHasImageHeader(template)
@@ -9032,6 +9040,7 @@ async function prepareCampaign(scope, campaignId, body = {}, userId = null) {
       template_commercial: templateCommercial,
       ...(!isWelcomeDispatch ? {
         whatsapp_header_image: campaignImage,
+        whatsapp_lead_capture_policy: whatsappLeadCapturePolicy(body.whatsapp_lead_capture_policy ?? list.criteria?.whatsapp_lead_capture_policy),
         capture_whatsapp_info_leads: !isReviewRequest && needsWhatsappTemplate && templateCommercial
           && (body.capture_whatsapp_info_leads ?? list.criteria?.capture_whatsapp_info_leads) === true,
       } : {}),
@@ -10217,6 +10226,7 @@ async function startCampaignDispatch(scope, campaignId, body = {}, actor = null)
     whatsapp_template_id: template?.id || null,
     template_snapshot: buildTemplateSnapshot(template),
     whatsapp_header_image: isCampaignDispatch ? list.criteria?.whatsapp_header_image || null : null,
+    whatsapp_lead_capture_policy: whatsappLeadCapturePolicy(list.criteria?.whatsapp_lead_capture_policy),
     capture_whatsapp_info_leads: isCampaignDispatch && list.criteria?.capture_whatsapp_info_leads === true,
     sender_origin_id: clinicConfig.originId || null,
     sender_snapshot: buildWhatsappSenderSnapshot(clinicConfig),
@@ -10814,8 +10824,9 @@ async function sendDispatchItem({
       source: 'marketing_bulk_sends',
       dispatch_context: dispatchContext || 'campaign',
       ...(dispatchContext === 'campaign' && templateCommercial && !isReviewRequestList(list)
-        && dispatch.capture_whatsapp_info_leads === true ? {
-          capture_whatsapp_info_leads: true,
+        ? {
+          whatsapp_lead_capture_policy: whatsappLeadCapturePolicy(dispatch.whatsapp_lead_capture_policy),
+          ...(dispatch.capture_whatsapp_info_leads === true ? { capture_whatsapp_info_leads:true } : {}),
           delivery_clinic_id: clinicConfig.clinicId || getClinicIdForList(list),
         } : {}),
       list_id: list.id,
@@ -12080,7 +12091,12 @@ async function materializeInboundReply({ conversation, inboundMessage }) {
     });
   }
   await refreshListCounters(listId);
-  return { applied: true, list_id: listId, item_id: itemId, ...(reviewRating ? { review_rating: reviewRating } : {}) };
+  return {
+    applied: true, list_id: listId, item_id: itemId,
+    ...(reviewRating ? { review_rating: reviewRating } : {}),
+    // Ordinary campaign attribution records the reply but leaves its response to the inbox dispatcher.
+    ...(!isReviewRequestList(list) ? {classification_delegated_to:'automations_v2'} : {}),
+  };
 }
 
 async function removeCampaign(scope, campaignId, userId = null) {

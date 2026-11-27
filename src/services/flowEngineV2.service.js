@@ -6722,10 +6722,20 @@ async function processNode(node, context, runtime = {}) {
   }
 
   switch (nodeType) {
+    case 'action/inbound_lead_capture': {
+      const output = simulation ? {simulated:true,no_send:true} : await require('./inboundLeadCapture.service').run(runtime.execution);
+      if (output.pending) return { kind:'waiting',output:{reason:'classification_in_progress'},
+        wait_until:new Date(Math.min(Date.parse(output.waitUntil),Date.now()+3000)),
+        waiting_meta:{type:'delay',resume_mode:'retry_current_node',runtime_namespace:CURRENT_RUNTIME_NAMESPACE} };
+      return {kind:'success',output,next_node_id:readOutputTarget(node,'on_success')};
+    }
+    case 'action/reply_with_prepared_whatsapp':
     case 'action/attend_with_lead_assistant':
     case 'action/social_lead_interest': {
       if (simulation) return {kind: 'success', output: {simulated: true}, next_node_id: readOutputTarget(node, 'on_success')};
-      const whatsappAssistant = nodeType === 'action/attend_with_lead_assistant' && runtime.execution.context?.trigger?.data?.event_kind === 'whatsapp_dm';
+      const whatsappAssistant = runtime.execution.context?.trigger?.data?.event_kind === 'whatsapp_dm';
+      if (nodeType === 'action/reply_with_prepared_whatsapp' && !whatsappAssistant)
+        return {kind:'success',output:{reason:'whatsapp_entry_unavailable'},next_node_id:readOutputTarget(node,'on_success')};
       const result = whatsappAssistant ? await require('./leadAssistantWhatsapp.service').current().run(runtime.execution)
         : await require('./socialLeadAutomation.service').run(runtime.execution, nodeType === 'action/attend_with_lead_assistant');
       return {

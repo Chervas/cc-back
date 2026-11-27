@@ -70,7 +70,8 @@ function create({
       )
     )
       return null;
-    if (rule.action === 'assistant' && !await acceptsOrigin(db, rule, conversation, entry, transaction, flow.id)) return null;
+    if (rule.action === 'message' && rule.audience && await require('./leadAssistantBooking.service').excludedPatient(db,rule,conversation,entry.messageId,transaction)) return null;
+    if ((rule.action === 'assistant' || (rule.action === 'message' && rule.origins)) && !await acceptsOrigin(db, rule, conversation, entry, transaction, flow.id)) return null;
     return { flow, rule };
   }
 
@@ -80,7 +81,8 @@ function create({
       await message.update({ metadata: { ...message.metadata, socialContactOptOut: true } }, { transaction });
     }
     const eligible = await plan(conversation, { ...entry, messageId: message.id }, transaction);
-    if (!eligible) return;
+    const capture=await require('./inboundLeadCaptureConfig.service').current(db,conversation.clinic_id,'social',transaction);
+    if (!eligible && !require('./inboundLeadCaptureConfig.service').effective(capture,Date.parse(entry.at))) return;
     return dispatch(
       {
         inboundMessage: message,
@@ -88,7 +90,7 @@ function create({
         clinicId: conversation.clinic_id,
         channel: entry.channel,
         providerMessageId: receiptKey,
-        socialTemplateId: eligible.flow.id,
+        socialTemplateId: eligible?.flow?.id,
       },
       { transaction },
     );
@@ -181,7 +183,7 @@ function create({
     const initial = await db.Message.findByPk(entry.messageId);
     if (!initial || initial.conversation_id !== thread.id || initial.direction !== 'inbound')
       throw Error('social_lead_message_scope');
-    let decision = initial.metadata?.socialLead?.decision;
+    let decision = initial.metadata?.socialLead?.decision || initial.metadata?.inboundLeadCapture?.decision;
     if (!decision && assistantNode && entry.type==='dm') {
       const calendar=require('./leadAssistantCalendar.service');
       if ((assistantCommercialText(entry.text) && calendar.bookingRequest(entry.text)) ||
@@ -221,7 +223,10 @@ function create({
         return existing;
       }
       const record = { key, executionId: execution.id, decision, attemptId: randomUUID() };
-      if (decision.kind === 'interest') {
+      const capture = await require('./inboundLeadCaptureConfig.service').current(db, clinicId, 'social', transaction);
+      const separate = eligible.rule.inbound_capture_separate === true || capture?.trigger_config?.managed_feature === 'inbound_lead_capture';
+      if (separate) record.leadId = c.lead_id || null;
+      if (!separate && decision.kind === 'interest') {
         let lead;
         let created = false;
         if (c.lead_id) {

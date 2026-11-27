@@ -51,7 +51,7 @@ async function tick() {
             db, message, conversation, binding: b, transaction,
           }) : null;
         campaignReply = await require('./marketingWhatsappReplyLead.service').attributeCampaignInfoReply({
-          db, message, conversation, binding: b, transaction,
+          db, message, conversation, binding: b, transaction, freshDispatch: true,
         });
         await require('./automationInboundMessage.service').enqueueInboundDispatch({ inboundMessage: message,
           conversation, clinicId: b.clinicId, channel: 'whatsapp', providerMessageId: message.metadata.wamid }, { transaction });
