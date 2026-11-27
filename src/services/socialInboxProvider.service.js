@@ -42,7 +42,7 @@ function provider(env = process.env) {
       }),
     reconcile: (r, kind, recipient, text, attemptId) =>
       call(S.outcome, r, { kind, recipient, text, attemptId }),
-    availability: (r, kind) => call(S.status, r, { kind }),
+    availability: (r, kind, { prepareReply = false } = {}) => call(S.status, r, { kind, ...(prepareReply ? { prepareReply: true } : {}) }),
     send: (r, kind, recipient, text, attemptId) =>
       call(S.send, r, { kind, recipient, text, attemptId }, attemptId),
   };
