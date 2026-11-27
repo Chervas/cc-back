@@ -16,7 +16,7 @@ const {
 const review = () =>
   Object.assign(new Error('assistant_booking_review'), { code: 'assistant_booking_review' });
 
-async function resolveIdentity({ db, thread, lead, contact, transaction, audience }) {
+async function resolveIdentity({ db, thread, lead, contact, transaction, audience, onNewPatient }) {
   const cid = thread.clinic_id;
   const known =
     thread.patient_id ||
@@ -82,6 +82,7 @@ async function resolveIdentity({ db, thread, lead, contact, transaction, audienc
     { paciente_id: newPatient.id_paciente, clinica_id: cid, es_principal: true },
     { transaction }
   );
+  onNewPatient?.();
   return newPatient.id_paciente;
 }
 
@@ -95,6 +96,7 @@ async function reserve({
   scope,
   actorId,
   contact,
+  allowLeadPair = false,
   requestKey,
   transaction,
   capabilities,
@@ -119,7 +121,9 @@ async function reserve({
   const catalog = await loadScopedTreatment({ db, clinic, treatmentId: treatment.id, transaction });
   if (!catalog.activo || bookingVisibility(catalog)) throw review();
   const profile = requireOperationalProfile(catalog, { capabilities });
-  const patientId = await getPatient({ db, thread, lead, contact, transaction, audience: scope.audience });
+  let newPatient = false;
+  const patientId = await getPatient({ db, thread, lead, contact, transaction, audience: scope.audience,
+    onNewPatient: () => { newPatient = true; } });
   const values = {
     clinica_id: cid,
     paciente_id: patientId,
@@ -162,6 +166,12 @@ async function reserve({
     transaction,
     capabilities,
     visitBirth: birth,
+    adjustLeadPair: allowLeadPair && newPatient && lead && !thread.patient_id
+      ? async params => {
+        const adjusted = await require('./leadAssistantOverlap.service').lockedPairContext(params);
+        if (adjusted !== params.context) provenance.shared_lead_slot = true;
+        return adjusted;
+      } : null,
     selections: chosen.selections,
     expectedPlanSha256: chosen.receipt,
     persist: async ({ values: locked, existing, sealedBirth }) => {

@@ -223,7 +223,7 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
   additionalStaffIds = undefined, supportOnly = false, expectedRange = null, importEquipmentAssignment = null,
   trustedProgramSeries = null, reschedulePatientOverlap = null, durationSelection, expectedPlanSha256,
   visitBirth = null, restrictionConfirmation = null, administrativeRestore = false, rescheduleNotice = null,
-  trustedDentalReservation = null, replayOnly = false }) {
+  trustedDentalReservation = null, replayOnly = false, adjustLeadPair = null }) {
   if (!capabilities.simple) throw bookingError('booking_profile_runtime_unavailable', 'La reserva de perfiles todavía no está activada.');
   durationSelection = normalizeDurationSelection(durationSelection);
   // Internal documentary reconciliation only, never forwarded from an HTTP
@@ -548,6 +548,9 @@ async function mutateAppointmentBooking({ db, appointmentValues, existingAppoint
         if (programScheduleException.actorId !== Number(values.updated_by || values.created_by)) throw new Error('program_series_context_invalid');
         context = require('../lib/program-schedule-confirmation').programScheduleContext(context,
           programScheduleException.doctorIds, start, end);
+      }
+      if (!existing && !force && !manualRestrictions && !extraStaff.length && typeof adjustLeadPair === 'function') {
+        context = await adjustLeadPair({ db, clinic, profile, context, start, end, values, transaction: tx });
       }
       const supportFree = extraStaff.every(id => isFree(context.doctors.get(id), start, end));
       const permitsProfileForce = !extraStaff.length && ((!session && !trustedProgramSession && !preparedSeries)

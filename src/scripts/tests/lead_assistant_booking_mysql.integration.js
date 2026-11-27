@@ -78,7 +78,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   async function enter(
     c,
     text,
-    { open = true, send = true, canManage = true, audience = 'leads', beforeCheck, expiresAt } = {}
+    { open = true, send = true, canManage = true, audience = 'leads', version = 3, beforeCheck, expiresAt } = {}
   ) {
     const execution = { id: ++sequence, template_version_id: 51, group_id: 50, created_by: 1 };
     const initial = await db.Message.create({
@@ -107,7 +107,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       },
       initial,
       saved,
-      rule: { version: 3, audience },
+      rule: { version, audience },
       analyze: () => assert.fail('A booking turn must not send identities or calendar records to a model.'),
       recordHandoff: async () => ({ recorded: false }),
       blockReason: async () => null,
@@ -298,6 +298,74 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.match(review.result.reason, /handoff/);
   assert.equal((await impostor.reload()).patient_id, null);
   assert.equal(await db.CitaPaciente.count(), 4);
+  const policy = 'Mucha gente falla, por lo que a los leads, los citamos doblandolso a la misma hora siempre y cuando no haya una cita ya agendada a esa que no sea un lead. (Doblando es 2 a la vez como mucho)';
+  const { allowsLeadPair } = require('../../services/leadAssistantOverlap.service');
+  assert(allowsLeadPair(policy));
+  assert(allowsLeadPair('Se permite montar dos leads a la misma hora. Si hay una cita de paciente, se respeta.'));
+  for (const text of ['', '¿Podemos doblar los leads?', 'Nunca se permite doblar leads.', 'No se puede montar otra cita con un lead.', 'Explica a los leads que buscaremos hora.']) assert.equal(allowsLeadPair(text), false, text);
+  const originalPub = await db.LeadAssistantPublication.findOne({ where: { clinic_id: 100, version: 3 } });
+  await db.LeadAssistantPublication.create({ clinic_id: 100, version: 4, approved_by: 1, approved_at: new Date(),
+    fields: { ...originalPub.fields, booking: originalPub.fields.booking + '\n' + policy } });
+  const withPair = (c, text, options) => enter(c, text, { version: 4, ...options });
+  const extra = await Promise.all(Array.from({ length: 11 }, (_, i) => thread('whatsapp', '+3460012350' + i)));
+  const ask = date => 'Quiero reservar el ' + date + ' a las 09:00';
+  const save = c => withPair(c, 'Confirmo la primera');
+  const pairDay = '2030-01-11';
+  const freeProposals = await Promise.all(extra.slice(0, 2).map(c => withPair(c, ask(pairDay))));
+  const freeSlot = (await freeProposals[0].booking()).slots[0];
+  assert.equal((await freeProposals[1].booking()).slots[0].start, freeSlot.start);
+  assert.equal((await (await save(extra[0])).booking()).stage, 'booked');
+  assert.equal((await (await save(extra[1])).booking()).stage, 'booked', 'A second lead may confirm an initially free slot');
+  assert.equal(await db.CitaPaciente.count({ where: { inicio: new Date(freeSlot.start) } }), 2);
+  assert.equal((await (await withPair(extra[2], ask(pairDay))).booking()).stage, 'service');
+  // A first visit scheduled outside Cleo is also a lead appointment.
+  const testDate = '2030-01-14';
+  const manualOffer = await (await withPair(extra[3], ask(testDate))).booking();
+  const requested = manualOffer.slots[0];
+  const leadAppointment = await db.CitaPaciente.create({
+    clinica_id: 100, paciente_id: confirmed.patientId, tratamiento_id: treatment.id_tratamiento,
+    doctor_id: requested.doctorId, instalacion_id: requested.roomId, inicio: new Date(requested.start),
+    fin: new Date(requested.end), estado: 'pendiente', tipo_cita: 'primera_sin_trat', lead_intake_id: extra[4].lead_id,
+  });
+  await db.LeadIntake.update({ call_outcome_appointment_id: leadAppointment.id_cita }, { where: { id: extra[4].lead_id } });
+  assert.equal((await (await withPair(extra[5], ask(testDate))).booking()).slots[0].start, requested.start,
+    'An already occupied lead-only slot can be offered');
+  const results = await Promise.all([extra[3], extra[5]].map(save));
+  assert.deepEqual((await Promise.all(results.map(item => item.booking()))).map(item => item.stage).sort(), ['booked', 'offered']);
+  assert.equal(await db.CitaPaciente.count({ where: { inicio: new Date(requested.start) } }), 2);
+  // A subsequent non-lead appointment can block part of the requested visit.
+  const patientDate = '2030-01-15';
+  const before = (await (await withPair(extra[6], ask(patientDate))).booking()).slots[0];
+  const normal = await db.CitaPaciente.create({
+    clinica_id: 100, paciente_id: confirmed.patientId, tratamiento_id: treatment.id_tratamiento,
+    doctor_id: before.doctorId, instalacion_id: before.roomId, inicio: new Date(+new Date(before.start) + 15 * 60000),
+    fin: new Date(before.end), estado: 'pendiente', tipo_cita: 'continuacion', lead_intake_id: extra[4].lead_id,
+  });
+  assert.equal((await (await save(extra[6])).booking()).stage, 'offered');
+  await normal.update({ inicio: new Date(before.start), tipo_cita: 'primera_con_trat', lead_intake_id: null });
+  assert.equal((await (await withPair(extra[7], ask(patientDate))).booking()).stage, 'service');
+  const blockedDate = '2030-01-16';
+  const availableBeforeBlock = (await (await withPair(extra[8], ask(blockedDate))).booking()).slots[0];
+  const manualValues = { clinica_id: 100, paciente_id: confirmed.patientId, tratamiento_id: treatment.id_tratamiento,
+    doctor_id: availableBeforeBlock.doctorId, instalacion_id: availableBeforeBlock.roomId,
+    inicio: new Date(availableBeforeBlock.start), fin: new Date(availableBeforeBlock.end), estado: 'pendiente',
+    tipo_cita: 'primera_sin_trat', lead_intake_id: extra[9].lead_id };
+  const manualLead = await db.CitaPaciente.create(manualValues);
+  const roomBlock = await db.InstalacionBloqueo.create({ instalacion_id: manualValues.instalacion_id,
+    fecha_inicio: manualValues.inicio, fecha_fin: manualValues.fin, motivo: 'Bloqueo de prueba' });
+  assert.equal((await (await withPair(extra[10], ask(blockedDate))).booking()).stage, 'service');
+  await roomBlock.destroy();
+  const conflictingPatient = await db.CitaPaciente.create({ ...manualValues, lead_intake_id: null,
+    inicio: new Date(+manualValues.inicio + 15 * 60000), tipo_cita: 'continuacion' });
+  assert.equal((await (await save(extra[8])).booking()).stage, 'offered');
+  await conflictingPatient.destroy();
+  await db.LeadAttributionAudit.create({ lead_intake_id: extra[9].lead_id, attribution_steps: {
+    type: 'lead_patient_context_v1', lead_patient_context_v1: { relationship: 'existing_patient' } } });
+  assert.equal((await (await withPair(extra[10], ask(blockedDate))).booking()).stage, 'service');
+  await manualLead.update({ estado: 'cancelada' });
+  assert.equal((await (await withPair(extra[10], ask(blockedDate))).booking()).stage, 'offered');
+  const secondInPair = await db.CitaPaciente.findOne({ where: { lead_intake_id: extra[1].lead_id } });
+  assert.equal(secondInPair.import_metadata.source_quickchat_assistant.shared_lead_slot, true);
   assert(
     !reads.some((s) =>
       /\b(?:HistoriasClinicas|DocumentsPaciente|DocumentosPaciente|ClinicalDocuments|ClinicalHistoryEntries)\b/i.test(
@@ -315,6 +383,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       'La comprobación de identidad debe leer únicamente los identificadores administrativos permitidos.'
     );
   report.assertions = [
+    'Dos leads por hora solo con autorización publicada, incluidas citas manuales y confirmaciones concurrentes. Un paciente bloquea todo el intervalo.',
     'Oferta sin escritura y confirmación local con profesional, sala y recibo del plan real',
     'Mismo mensaje repetido y segundo mensaje de aceptación conservan la misma cita',
     'Hueco ocupado por otro lead devuelve alternativas vigentes sin otra cita',

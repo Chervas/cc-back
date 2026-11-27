@@ -308,7 +308,7 @@ async function loadBookingContext({ db, clinic, profile, start, end, transaction
 async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, stepMinutes = 15, limit = 100,
   doctorId = null, installationId = null, capabilities = bookingCapabilities(), now = new Date(), additionalStaffIds = [],
   patientId = null, existingAppointmentId = null, voucherId = null, durationSelection,
-  startingDoctorId = null, startingInstallationId = null, guidedStartLocal = null, guidedSelection = null }) {
+  extraSlots = null, startingDoctorId = null, startingInstallationId = null, guidedStartLocal = null, guidedSelection = null }) {
   additionalStaffIds = normalizeAdditionalStaff(additionalStaffIds);
   if (additionalStaffIds.length && !capabilities.multi) throw bookingError('booking_profile_runtime_unavailable', 'El personal de apoyo todavía no está activado.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date)) || !Number.isInteger(days) || days < 1 || days > 7
@@ -356,6 +356,10 @@ async function searchTreatmentSlots({ db, clinic, treatmentId, date, days = 1, s
   };
   const slots = solutionsForCalendar({ profile, context, date, days, stepMinutes, limit, selections, now, additionalStaffIds,
     allowConfirmedOverlap: true, allowRestrictionProposals: !!(startingDoctorId || startingInstallationId || doctorId && installationId) });
+  if (typeof extraSlots === 'function') {
+    slots.push(...await extraSlots({ db, clinic, profile, context, start, end, now }, solutionsForCalendar));
+    slots.sort((a, b) => a.start_at.localeCompare(b.start_at));
+  }
   return { clinic_id: Number(clinic.id_clinica), treatment_id: Number(treatmentId), timezone: timeZone,
     duration_minutes: bookingProfileDurationMinutes(profile), capabilities, slots };
 }

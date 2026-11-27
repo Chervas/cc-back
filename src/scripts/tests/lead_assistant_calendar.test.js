@@ -36,3 +36,20 @@ test('needs unambiguous consent to one offered option', () => {
     assert.equal(selection(q, slots), null);
   assert.equal(readContact('no me contactes'), null);
 });
+
+test('only explicit booking instructions allow two first visits for leads', () => {
+  const { allowsLeadPair } = require('../../services/leadAssistantOverlap.service');
+  for (const text of [
+    'Se pueden citar dos leads a la misma hora',
+    'Se permite montar dos leads si no hay cita de paciente',
+    'Pueden montar dos leads. Si ya hay una cita agendada que no es lead, no montar.',
+    'Se permite doblar leads, pero no montar si hay una cita de paciente.',
+  ]) assert.equal(allowsLeadPair(text), true, text);
+  for (const text of [
+    'Solo si hay permiso se pueden doblar los leads',
+    'Se permite montar dos leads los viernes',
+    'Se pueden montar dos leads. Doblar leads está prohibido.',
+    '¿Se pueden montar dos leads a la vez?',
+    'No está permitido citar dos leads a la misma hora',
+  ]) assert.equal(allowsLeadPair(text), false, text);
+});

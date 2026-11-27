@@ -253,10 +253,14 @@ async function processTurn({
         'nombre',
         'telefono',
         'archived_at',
+        'es_paciente',
         'external_source',
       ],
       raw: true,
     }));
+  const allowLeadPair = !thread.patient_id && !lead?.es_paciente
+    && (lead || thread.channel === 'whatsapp')
+    && require('./leadAssistantOverlap.service').allowsLeadPair(fields.booking);
   const currentOffer =
     pending?.treatment?.id === treatment.id && pending.stage !== 'booked' && pending.slots?.length;
   const professional = await localProfessional(db, thread.clinic_id, raw);
@@ -278,6 +282,7 @@ async function processTurn({
       treatment,
       calendar: requestedRange,
       patientId: thread.patient_id,
+      pairLead: allowLeadPair ? { id: lead?.id || null } : null,
       professionalId,
       now,
       capabilities,
@@ -467,6 +472,7 @@ async function processTurn({
         scope,
         actorId: execution.created_by,
         chosen: selected,
+        allowLeadPair: !!allowLeadPair,
         contact,
         requestKey: pending.requestKey,
         transaction,
