@@ -5722,7 +5722,19 @@ async function handleSendSystemNotification(node, context, runtime) {
   });
 
   let usedAdminFallback = false;
-  if (!userIds.length) {
+  const socialLeadNotice = node.id === 'social_notify' && runtime?.execution?.trigger_type === 'mensaje_recibido'
+    && String(runtime.execution.idempotency_key || '').startsWith('social_lead:');
+  if (socialLeadNotice) {
+    const memberships = await UsuarioClinica.findAll({
+      where: { id_clinica: clinicId, estado_invitacion: 'aceptada', rol_clinica: { [Op.in]: ['personaldeclinica', 'propietario'] } },
+      attributes: ['id_usuario', 'rol_clinica'], raw: true,
+    });
+    const recipients = new Set(userIds);
+    const team = memberships.filter(member => recipients.has(Number(member.id_usuario)));
+    userIds = Array.from(new Set((team.length ? team : memberships.filter(member => member.rol_clinica === 'propietario'))
+      .map(member => Number(member.id_usuario))));
+    if (!userIds.length) throw new Error('social_notification_clinic_team_unavailable');
+  } else if (!userIds.length) {
     userIds = await resolveTaskAssigneeUserIds({
       clinicId,
       assigneeType: 'role',
@@ -6710,6 +6722,15 @@ async function processNode(node, context, runtime = {}) {
   }
 
   switch (nodeType) {
+    case 'action/social_lead_interest': {
+      if (simulation) return {kind: 'success', output: {simulated: true}, next_node_id: readOutputTarget(node, 'on_success')};
+      const result = await require('./socialLeadAutomation.service').run(runtime.execution);
+      return {
+        kind: 'success', output: result,
+        context_patch: result.lead_id ? {lead: {id: result.lead_id, lead_intake_id: result.lead_id}} : {},
+        next_node_id: readOutputTarget(node, result.attention ? 'on_review' : 'on_success'),
+      };
+    }
     case 'action/resolve_program_appointment_details':
       if (!isProgramBookingProtocol(runtime.execution)) throw new Error('program_details_execution_scope');
       if (simulation) return { kind: 'success', output: { simulated: true, no_send: true }, next_node_id: readOutputTarget(node, 'on_success') };
