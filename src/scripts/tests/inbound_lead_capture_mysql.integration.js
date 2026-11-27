@@ -280,13 +280,16 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal((await capture.enqueue(older)).pending, false);
   const recovered = await inbound(plain, 'INFO', { historical: true });
   assert.equal((await capture.enqueue(recovered)).pending, false);
-  const original = await inbound(plain, 'INFO');
+  const original = await inbound(plain, 'INFO', {whatsapp_identity: {
+    bsuid:'ES.Fixture123', phone:plain.contact_id, businessId:'901', profileObserved:true, displayName:'Perfil de prueba',
+  }});
   const [one, two] = await Promise.all([capture.enqueue(original), capture.enqueue(original)]);
   assert.equal(one.execution_id, two.execution_id);
   const execution = await db.FlowExecutionV2.findByPk(one.execution_id);
   const parallel = await Promise.all([capture.run(execution), capture.run(execution)]);
   const winner = parallel.find((row) => row.leadId);
   assert.ok(winner);
+  assert.equal((await db.LeadIntake.findByPk(winner.leadId)).nombre, 'Perfil de prueba');
   assert(parallel.every((row) => row.pending || row.leadId === winner.leadId));
   await execution.update({ status: 'completed' });
   assert.equal((await capture.enqueue(original)).lead_id, winner.leadId);
@@ -294,6 +297,10 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(second.result.leadId, winner.leadId);
   const before = await db.LeadIntake.count();
   await perform(await inbound(await contact('whatsapp', '34600000043'), 'STOP'));
+  assert.equal(await db.LeadIntake.count(), before);
+  const followUp = await perform(await inbound(await contact('whatsapp', '34600000049'), 'No he notado ningún cambio después de mi sesión'));
+  assert.equal(followUp.result.reason, 'post_treatment_follow_up');
+  assert.equal(followUp.result.outcome, 'discarded');
   assert.equal(await db.LeadIntake.count(), before);
   const sg = await config.save(db, 41, 'social', 11, true);
   const sf = await db.AutomationFlowTemplateV2.findByPk(sg.template_id);

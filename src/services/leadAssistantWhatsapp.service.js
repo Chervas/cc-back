@@ -8,7 +8,7 @@ const {
   DEFAULT_WINDOW_MS,
 } = require('./whatsappServiceWindow.service');
 const { resolveForTurn } = require('./leadAssistantPromotionImages.service');
-const { campaignCopy, appointmentIntent } = require('../lib/inbound-commercial-language');
+const { campaignCopy, postTreatmentFollowUp, appointmentIntent } = require('../lib/inbound-commercial-language');
 const { assistantCommercialText, explicitOptOut, asksForCommercialInformation } = require('./socialLeadInterestClassification.service');
 const { acceptsOrigin, validOrigins } = require('./leadAssistantOrigin.service');
 const { enqueueInboundExecution, enqueueExistingExecution } = require('./leadAssistantExecution.service');
@@ -117,7 +117,7 @@ async function afterHoursLead(db, thread, entry, flow, version, transaction) {
 }
 
 async function plan(db, thread, entry, transaction, selected) {
-  if (explicitOptOut(entry.text) || campaignCopy(entry.text).quoted || appointmentIntent(entry.text)) return null;
+  if (explicitOptOut(entry.text) || campaignCopy(entry.text).quoted || appointmentIntent(entry.text) || postTreatmentFollowUp(entry.text)) return null;
   const resolved = selected === undefined
     ? await require('./automationInboundMessage.service').findEffectiveMessageReceivedTemplate({
         clinicId:thread.clinic_id, channel:'whatsapp', receivedAt:new Date(entry.at), transaction})

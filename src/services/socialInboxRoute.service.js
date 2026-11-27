@@ -33,7 +33,9 @@ async function currentEnrollment(db, enrollmentId, transaction, expectedConnecti
 }
 
 async function resolveRoute(db, recipient, transaction) {
-  return resolveRecipient(db, recipient, transaction);
+  if (transaction) return resolveRecipient(db, recipient, transaction);
+  // The enrollment and asset bindings must be checked under the same locks in background jobs as in intake.
+  return db.sequelize.transaction(t => resolveRecipient(db, recipient, t));
 }
 
 async function resolveRecipient(db, { channel, accountId }, transaction, knownEnrollment) {

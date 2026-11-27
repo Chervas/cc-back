@@ -7394,7 +7394,7 @@ exports.getExecution = async (req, res) => {
     const data = mapExecution(execution, { includeContext });
     if (execution.idempotency_key === `inbound_capture:${execution.clinic_id}:${execution.trigger_entity_id}`) {
       const message = await Message.findByPk(execution.trigger_entity_id, {
-        attributes: ['id', 'conversation_id', 'direction', 'metadata'], raw: true,
+        attributes: ['id', 'conversation_id', 'direction', 'content', 'metadata'], raw: true,
       });
       if (message) {
         const [presented] = await capturePresentation.presentMessages([message], {

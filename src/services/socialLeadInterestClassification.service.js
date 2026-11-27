@@ -1,6 +1,6 @@
 'use strict';
 
-const { campaignCopy, appointmentIntent, withdrawalText } = require('../lib/inbound-commercial-language');
+const { campaignCopy, postTreatmentFollowUp, appointmentIntent, withdrawalText } = require('../lib/inbound-commercial-language');
 
 const verdict = (kind, privateRequested = false) => ({ kind, privateRequested });
 const normalize = value => value.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -55,7 +55,7 @@ function genericInfoRequest(raw) {
 
 // A request can identify commercial interest without authorizing an outbound message.
 function asksForCommercialInformation(raw) {
-  if (campaignCopy(raw).quoted || appointmentIntent(raw) || !assistantCommercialText(raw)) return false;
+  if (campaignCopy(raw).quoted || appointmentIntent(raw) || postTreatmentFollowUp(raw) || !assistantCommercialText(raw)) return false;
   const body = normalize(raw);
   if (/\b(?:baja|stop|unsubscribe|responde info|responder info|contesta info)\b/.test(body)) return false;
   // A scheduling constraint after an affirmative statement is common in campaign replies.
@@ -82,6 +82,7 @@ async function classifyInterest(entry, { clinicId, groupId, beforeDispatch, anal
   const text = scrub(entry.text);
   const original = normalize(entry.text);
   if (explicitOptOut(entry.text)) return verdict('opt_out');
+  if (postTreatmentFollowUp(entry.text)) return verdict('ignore');
   if (campaignCopy(entry.text).quoted || appointmentIntent(entry.text)) return verdict('review');
   if (INSTRUCTIONS.test(original) || EMBEDDED_COMMAND.test(original) || NEGATION.test(original) || sensitive(original)) return verdict('review');
   if (!text) return verdict('review');
@@ -147,7 +148,7 @@ async function classifyInterest(entry, { clinicId, groupId, beforeDispatch, anal
 function assistantCommercialText(raw) {
   if (typeof raw !== 'string' || !raw.trim() || raw.length > 1000) return null;
   const normalized = normalize(raw);
-  if (explicitOptOut(raw) || campaignCopy(raw).quoted || appointmentIntent(raw) || sensitive(normalized) || INSTRUCTIONS.test(normalized) || EMBEDDED_COMMAND.test(normalized)) return null;
+  if (explicitOptOut(raw) || campaignCopy(raw).quoted || appointmentIntent(raw) || postTreatmentFollowUp(raw) || sensitive(normalized) || INSTRUCTIONS.test(normalized) || EMBEDDED_COMMAND.test(normalized)) return null;
   return scrub(raw) || null;
 }
 module.exports = { classifyInterest, explicitOptOut, assistantCommercialText, genericInfoRequest, asksForCommercialInformation };

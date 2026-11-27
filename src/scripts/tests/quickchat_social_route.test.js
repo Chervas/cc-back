@@ -25,7 +25,6 @@ test('saved group destinations separate Instagram extension and Page messages un
     selected,
   };
   t.mock.method(E, 'request', (row) => row);
-  t.mock.method(binding, 'createBindings', () => ({ committed: async () => ({ digest: 'snapshot' }) }));
   const mappings = selected.map((p, i) => ({
     id: 11 + i,
     metaAssetId: p.id,
@@ -69,7 +68,16 @@ test('saved group destinations separate Instagram extension and Page messages un
       findAll: async ({ where }) => shares.filter((s) => [].concat(where.assetId).includes(s.assetId)),
     },
   };
-  const lookup = (channel, accountId) => resolveRoute(db, { channel, accountId }, {});
+  let opened = 0;
+  const transaction = { LOCK: { UPDATE: 'UPDATE' } };
+  db.sequelize = { transaction: async callback => { opened++; return callback(transaction); } };
+  t.mock.method(binding, 'createBindings', () => ({ committed: async (_, txn) => {
+    assert.equal(txn, transaction);
+    return { digest: 'snapshot' };
+  } }));
+  const lookup = (channel, accountId) => resolveRoute(db, { channel, accountId }, transaction);
+  assert.equal((await resolveRoute(db, {channel: 'instagram', accountId: '501'})).clinicId, 41);
+  assert.equal(opened, 1);
   for (const [channel, id, clinic] of [
     ['instagram', '501', 41],
     ['instagram', '502', 42],
@@ -80,7 +88,7 @@ test('saved group destinations separate Instagram extension and Page messages un
     assert.equal(r.clinicId, clinic);
     assert.equal(r.connectionRef, 'shared');
   }
-  const snapshot = () => routesForEnrollment(db, enrollment.enrollment_id, {});
+  const snapshot = () => routesForEnrollment(db, enrollment.enrollment_id, transaction);
   const first = await snapshot();
   assert.equal(first.status, 'resolved');
   assert.deepEqual(first.routes.map(r => [r.clinicId, r.channel, r.accountId, r.pageId]), [

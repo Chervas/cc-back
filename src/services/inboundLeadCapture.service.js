@@ -6,9 +6,9 @@ const { isRevokedMessage } = require('../lib/automation-conversation-context');
 const routes = require('./socialInboxRoute.service');
 const config = require('./inboundLeadCaptureConfig.service');
 const campaigns = require('./marketingWhatsappReplyLead.service');
-const { campaignCopy, appointmentIntent } = require('../lib/inbound-commercial-language');
+const { campaignCopy, postTreatmentFollowUp, appointmentIntent } = require('../lib/inbound-commercial-language');
 const classifierErrors = new Set(['inbound_capture_classifier_invalid', 'inbound_capture_classifier_unavailable']);
-const { phone, parseContact } = require('../lib/whatsapp-contact-identity');
+const { phone, parseContact, inboundProfileLabel } = require('../lib/whatsapp-contact-identity');
 const {
   classifyInterest,
   explicitOptOut,
@@ -50,6 +50,7 @@ function whatsappEntry(claim, message, thread) {
     source: 'new',
     echo: false,
     senderId: thread.contact_id,
+    alias: inboundProfileLabel(meta, thread.contact_id),
     accountId,
     wabaId,
     ad:
@@ -273,6 +274,8 @@ function create({
         decision = { kind: 'opt_out', privateRequested: false };
       else if (campaignCopy(entry.text).quoted)
         decision = { kind: 'ignore', privateRequested: false, reason: 'quoted_campaign' };
+      else if (postTreatmentFollowUp(entry.text))
+        decision = { kind: 'ignore', privateRequested: false, reason: 'post_treatment_follow_up' };
       else if (appointment)
         decision = { kind: appointment === 'appointment_management' ? 'ignore' : 'review', privateRequested: false, reason: appointment };
       else if (entry.channel === 'whatsapp' && asksForCommercialInformation(entry.text))
