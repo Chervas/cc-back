@@ -338,6 +338,10 @@ async function processTurn({
       }
     }
     const slots = /\b(?:dos|2) (?:alternativas|opciones|huecos)\b/i.test(fields.booking) ? available.slice(0, 2) : available;
+    const repeated = currentOffer && !afterConflict;
+    const assessment = !offer && /\b(?:valoracion|primera visita)\b/.test(cal.normalize(treatment.name));
+    const introduction = repeated ? 'Las horas que tengo disponibles son ' : assessment && subject.area
+      ? 'Para una primera valoración puedo darte cita ' : 'Para tu tratamiento puedo darte cita ';
     return materialize(async () =>
       slots.length
         ? {
@@ -349,7 +353,7 @@ async function processTurn({
             ...(afterConflict && pending.contact ? { contact: pending.contact } : {}),
             slots,
             requestKey: randomUUID(),
-            reply: prefix + 'Para tu tratamiento puedo darte cita ' + cal.displayOptions(slots, timezone) +
+            reply: prefix + introduction + cal.displayOptions(slots, timezone) +
               (slots.length === 1 ? '. ¿Te viene bien?' : '. ¿Cuál te viene mejor?'),
           }
         : {

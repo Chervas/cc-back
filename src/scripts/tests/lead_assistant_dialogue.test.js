@@ -145,3 +145,11 @@ test('alternatives and prices require an active indication for the requested are
   const modality=ask('¿La valoración es por teléfono?');assert.match(modality,/No tengo confirmado/);
   assert.deepEqual(requestedHumanHandoff('Sí, por favor',modality),{requestedCallback:true});
 });
+
+test('when the contact explicitly asks about the double chin, the answer does not ask them to identify the same goal again',async()=>{
+ const {generateAnswer}=require('../../services/leadAssistantDialogue.service');
+ const answer=await generateAnswer({fields:{context:'Centro',guardrails:'No diagnosticar',booking:'Agenda'},
+   clinicName:'Centro',offer:{title:'Cuidado de cuello',description:'Una sesión.',guide:'Beneficios: La piel se ve más hidratada.',images:[]},
+   userText:'¿Esto sirve para reducir la papada?',readHistory:async()=>[],analyze:()=>assert.fail('the documented goal is sufficient')});
+ assert.match(answer.reply,/papada/);assert.doesNotMatch(answer.reply,/qué te preocupa|lo que te preocupa/i);
+});

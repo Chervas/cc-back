@@ -119,11 +119,11 @@ function volumeClarification(offer, question, previous, repair) {
   if (!benefit || benefit.length > 250) return null;
   if (/\b(?:reduc\w*|disminu\w*|elimin\w*|quit\w*|retir\w*|perd\w*|trat\w*|molde\w*|remodel\w*|defin\w*)\b.{0,48}\b(?:volumen|grasa|contorno|papada)\b|\b(?:liposucci[oó]n|lip[oó]lisis)\b/iu.test(offer.description+' '+offer.guide))
     return null;
-  const target = /\bcuello\b/i.test(question) ? 'el volumen del cuello' : 'volumen';
+  const target = /\bpapada\b/i.test(question) ? 'la papada' : /\bcuello\b/i.test(question) ? 'el volumen del cuello' : 'volumen';
   if (repair || clarified)
     return 'Para reducir '+target+', necesitarías una valoración para saber qué opciones encajan contigo. Esta promoción se centra en otro objetivo. ¿Quieres que te mire horarios?';
-  return 'Si buscas reducir '+target+', ese resultado no se indica para esta promoción. ' + benefit +
-    ' ¿Lo que te preocupa es el volumen o el aspecto de la piel?';
+  const clarification = /\b(?:papada|volumen|grasa)\b/i.test(question) ? '' : ' ¿Lo que te preocupa es el volumen o el aspecto de la piel?';
+  return 'Si buscas reducir '+target+', ese resultado no se indica para esta promoción. ' + benefit + clarification;
 }
 
 async function generateAnswer({ fields, clinicName, timezone, offer, userText, askPromotion, readHistory,
