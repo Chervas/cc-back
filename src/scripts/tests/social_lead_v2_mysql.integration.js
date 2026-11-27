@@ -110,6 +110,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
           tenantRef: 'group-test',
         };
   let automation;
+  const changedThreads = [];
   const scheduler = require.resolve('../../services/jobScheduler.service');
   require.cache[scheduler] = {
     id: scheduler,
@@ -175,6 +176,11 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     },
     checkPatientRestrictions: async () => ({ marketing_opt_out: false }),
     publishLead: ({ lead }) => published.push(lead.id),
+    notifyConversation: (clinicId, packet) =>
+      changedThreads.push({
+        clinicId,
+        body: require('../../lib/socket-payload').packetFor('message:refresh', packet).body,
+      }),
   });
   const owner = require('../../services/socialLeadAutomation.service');
   owner.start = automation.start;
@@ -249,6 +255,12 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const c = await db.Conversation.findByPk(claims[0].threadId);
   assert.equal(c.lead_id, result.lead_id);
   assert.equal(published.length, 1);
+  assert.deepEqual(changedThreads, [
+    {
+      clinicId: 41,
+      body: { id: first.trigger_entity_id, conversation_id: c.id, realtime_refresh: true, metadata: {} },
+    },
+  ]);
   const lead = await db.LeadIntake.findByPk(c.lead_id);
   assert.equal(lead.telefono, null);
   assert.equal(lead.email, null);

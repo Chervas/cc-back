@@ -23,6 +23,7 @@ function create({
   enqueueJob,
   classify,
   publishLead,
+  notifyConversation,
   checkPatientRestrictions,
   resolve = routes.resolveRoute,
 }) {
@@ -252,7 +253,10 @@ function create({
           record.reason = 'lead_link_requires_review';
         else {
           record.leadId = lead.id;
-          if (!c.lead_id) await c.update({ lead_id: lead.id }, { transaction });
+          if (!c.lead_id) {
+            await c.update({ lead_id: lead.id }, { transaction });
+            transaction.afterCommit(() => notifyConversation(clinicId, { id: m.id, conversation_id: c.id }));
+          }
           if (created) {
             await db.LeadAttributionAudit.create(
               {
@@ -365,6 +369,8 @@ function service() {
     enqueueJob: require('./jobRequests.service').enqueueUniqueJobRequest,
     classify: (...args) => require('./socialLeadInterestClassification.service').classifyInterest(...args),
     publishLead: require('./leadCreatedRealtime.service').publishLeadCreated,
+    notifyConversation: (clinicId, packet) =>
+      require('./socket.service').emit('message:refresh', packet, [`clinic:${clinicId}`]),
     checkPatientRestrictions: require('./marketingOptOut.service').getActiveContactRestrictionsForPatient,
   }));
 }
