@@ -224,15 +224,23 @@ function pickTreatment(choices, text, offer, previous) {
   return choices.find((c) => c.id === previous) || (choices.length === 1 ? choices[0] : null);
 }
 
+function timeLabel(slot, timezone) {
+  return new Intl.DateTimeFormat('es-ES', { timeZone: timezone, hour: '2-digit', minute: '2-digit' }).format(new Date(slot.start));
+}
+
 function display(slot, timezone) {
-  return new Intl.DateTimeFormat('es-ES', {
-    timeZone: timezone,
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(slot.start));
+  const day = new Intl.DateTimeFormat('es-ES', {
+    timeZone: timezone, weekday: 'long', day: 'numeric', month: 'long',
+  }).format(new Date(slot.start)).replace(',', '');
+  return day + ' a las ' + timeLabel(slot, timezone);
+}
+
+function displayOptions(slots, timezone) {
+  const labels = slots.map((slot, i) => {
+    const sameDay = i > 0 && slot.local.slice(0, 10) === slots[i - 1].local.slice(0, 10);
+    return sameDay ? 'a las ' + timeLabel(slot, timezone) : 'el ' + display(slot, timezone);
+  });
+  return new Intl.ListFormat('es', { type: 'disjunction' }).format(labels);
 }
 
 async function available({
@@ -314,6 +322,7 @@ module.exports = {
   services,
   pickTreatment,
   display,
+  displayOptions,
   available,
   resolveClinicTimezone,
 };

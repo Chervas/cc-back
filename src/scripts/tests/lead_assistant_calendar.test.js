@@ -55,3 +55,12 @@ test('only explicit booking instructions allow two first visits for leads', () =
     'No está permitido citar dos leads a la misma hora',
   ]) assert.equal(allowsLeadPair(text), false, text);
 });
+
+test('offers agenda times in spoken order and collects email and phone together', () => {
+  const { displayOptions } = require('../../services/leadAssistantCalendar.service');
+  const slots = ['2030-01-07T09:00', '2030-01-07T09:15', '2030-01-08T10:00'].map(local => ({ local, start: local + ':00+01:00' }));
+  assert.equal(displayOptions(slots.slice(0, 2), 'Europe/Madrid'), 'el lunes 7 de enero a las 09:00 o a las 09:15');
+  assert.equal(displayOptions([slots[0], slots[2]], 'Europe/Madrid'), 'el lunes 7 de enero a las 09:00 o el martes 8 de enero a las 10:00');
+  assert.deepEqual(readContact('Mi móvil es 600123453 y mi correo es prueba@example.org'),
+    { name: null, phone: '+34600123453', email: 'prueba@example.org' });
+});

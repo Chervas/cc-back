@@ -19,9 +19,10 @@ function readContact(text) {
   const phone = phoneText ? normalizePhoneE164(phoneText[0].trim()) : null;
   const raw = withoutEmail
     .replace(phoneText?.[0] || '\u0000', '')
-    .replace(/\b(?:tel[eé]fono|m[oó]vil)(?: es)?\b\s*:?/gi, '')
+    .replace(/\b(?:mi )?(?:tel[eé]fono|m[oó]vil)(?: es)?\b\s*:?/gi, '')
     .replace(/^(?:me llamo|mi nombre es|a nombre de|soy)\s+/i, '')
     .replace(/\b(?:mi )?(?:correo(?: electr[oó]nico)?|e-?mail)(?: es)?\b\s*:?/gi, '')
+    .replace(/(?:^|[,;\s])y(?=[,;\s]*$)/i, '')
     .replace(/^[,;\s-]+|[,.\s;-]+$/g, '')
     .trim();
   const name =
@@ -121,7 +122,9 @@ async function processTurn({
   const contactTurn = pending?.stage === 'contact' && readContact(raw) && !wantsHumanInput(raw);
   const choice =
     pending?.slots?.length &&
-    cal.selection(raw, pending.slots, pending.stage === 'confirm' ? pending.selected : null);
+    (cal.selection(raw, pending.slots, pending.stage === 'confirm' ? pending.selected : null) ||
+      (pending.stage === 'offered' && pending.slots.length === 1 && /^(?:sí|si|vale|me viene bien|de acuerdo)[.! ]*$/i.test(raw)
+        ? { index: 0, confirmed: false } : null));
   const requestBooking = !!assistantCommercialText(raw) && cal.bookingRequest(raw);
   if (wantsHumanInput(raw)) return null;
   const revisesDate =
@@ -252,6 +255,7 @@ async function processTurn({
         'campana_id',
         'nombre',
         'telefono',
+        'email',
         'archived_at',
         'es_paciente',
         'external_source',
@@ -308,24 +312,15 @@ async function processTurn({
             ...(afterConflict && pending.contact ? { contact: pending.contact } : {}),
             slots,
             requestKey: randomUUID(),
-            reply:
-              prefix +
-              'Para ' +
-              treatment.name +
-              ' en ' +
-              clinic.nombre_clinica +
-              ' tengo ' +
-              slots.map((s, i) => i + 1 + ') ' + cal.display(s, timezone)).join(' · ') +
-              '. ¿Cuál te va mejor?',
+            reply: prefix + 'Para tu tratamiento puedo darte cita ' + cal.displayOptions(slots, timezone) +
+              (slots.length === 1 ? '. ¿Te viene bien?' : '. ¿Cuál te viene mejor?'),
           }
         : {
             stage: 'service',
             treatment,
             reply:
               prefix +
-              'No encuentro un hueco disponible para ' +
-              treatment.name +
-              ' en esas fechas. ¿Qué otro día te iría bien?',
+              'No tengo hueco para tu tratamiento en esas fechas. ¿Qué otro día te iría bien?',
           }
     );
   }
@@ -336,13 +331,11 @@ async function processTurn({
         'Tu cita ya está reservada para el ' + cal.display(pending.slots[pending.selected], timezone) + '.',
     }));
   }
-  if (unspecifiedYes && currentOffer) {
+  if (unspecifiedYes && currentOffer && !choice) {
     return materialize(async () => ({
       ...pending,
       reply:
-        '¿Cuál de estos horarios quieres reservar? ' +
-        pending.slots.map((s, i) => i + 1 + ') ' + cal.display(s, timezone)).join(' · ') +
-        '.',
+        'Puedo darte cita ' + cal.displayOptions(pending.slots, timezone) + '. ¿Cuál prefieres?',
     }));
   }
   if (!currentOffer || (!choice && !contactTurn)) return propose();
@@ -370,19 +363,26 @@ async function processTurn({
   const needsEmail = fields.booking.split(/\r?\n/).some(line =>
     /\b(?:pregunta|pide|solicita|recoge)\w*\b.{0,190}\b(?:correo electr[oó]nico|email|e-mail)\b/i.test(line) &&
     !/\bno\s+(?:(?:hace falta|debes?)\s+)?(?:pregunt|pid|solicit|recog)/i.test(line));
-  if (needsEmail) contact.email = entered?.email || pending.contact?.email || null;
+  if (needsEmail) contact.email = entered?.email || pending.contact?.email || lead?.email || null;
   const needsSurname = /\bnombre y (?:un )?apellido/i.test(fields.booking);
   const missing = [];
   if (!thread.patient_id && (!contact.name || (needsSurname && !contact.name.trim().includes(' ')))) missing.push(needsSurname ? 'tu nombre y un apellido' : 'tu nombre');
-  if (!thread.patient_id && !contact.phone) missing.push('un teléfono de contacto');
+  if (!thread.patient_id && !contact.phone) missing.push('tu número de móvil');
   if (needsEmail && !contact.email) missing.push('tu correo electrónico');
   if (missing.length) {
     const need = new Intl.ListFormat('es').format(missing);
+    const needsReminderDetails = (!thread.patient_id && !contact.phone) || (needsEmail && !contact.email);
+    const question = needsReminderDetails
+      ? (knownPhone && needsEmail && !contact.email
+          ? 'Para el recordatorio ya tengo el móvil desde el que me escribes. ¿Me indicas ' + need + '?'
+          : 'Para enviarte el recordatorio de la cita, ¿me indicas ' + need + '?')
+      : '¿A qué nombre dejo la cita del ' + cal.display(selected, timezone) + '? ' +
+        (needsSurname ? 'Con tu nombre y un apellido es suficiente.' : '');
     return materialize(async () => ({
       ...common,
       stage: 'contact',
       contact,
-      reply: 'Para preparar la cita del ' + cal.display(selected, timezone) + ', ¿me indicas ' + need + '?',
+      reply: question.trim(),
     }));
   }
   if (!choice?.confirmed)
@@ -391,11 +391,7 @@ async function processTurn({
       stage: 'confirm',
       contact,
       reply:
-        '¿Confirmas la cita de ' +
-        treatment.name +
-        ' en ' +
-        clinic.nombre_clinica +
-        ' para el ' +
+        '¿Confirmas tu cita para el ' +
         cal.display(selected, timezone) +
         (contact.name ? ' a nombre de ' + contact.name : '') +
         '?',
@@ -502,11 +498,7 @@ async function processTurn({
         appointmentId: booked.id,
         patientId: booked.patientId,
         reply:
-          'Tu cita de ' +
-          treatment.name +
-          ' ha quedado reservada en ' +
-          clinic.nombre_clinica +
-          ' para el ' +
+          'Tu cita ha quedado reservada para el ' +
           cal.display(selected, timezone) +
           '. Gracias.',
       };

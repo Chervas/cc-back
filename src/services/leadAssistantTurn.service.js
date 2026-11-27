@@ -110,7 +110,7 @@ async function attend({
   blockReason,
   analyze,
   bookingOptions,
-  recordHandoff = (scope) => handoff(db, scope),
+  recordHandoff = (scope, prepareReply) => handoff(db, scope, { prepareReply }),
 }) {
   const scope = {
     clinicId: thread.clinic_id,
@@ -175,12 +175,13 @@ async function attend({
       );
       refreshAfterCommit(transaction, c.clinic_id, c.id, message.id);
     }
-    if (
-      session.state !== 'active' ||
-      session.template_id !== scope.templateId ||
-      session.publication_version !== scope.version
-    )
+    if (session.template_id !== scope.templateId || session.publication_version !== scope.version) return null;
+    if (session.state !== 'active') {
+      const receipt = message.metadata?.assistantHandoffReply;
+      if (receipt && ['human', 'unassigned'].includes(session.state) && session.state === receipt.state &&
+          receipt.executionId === execution.id && receipt.attemptId === saved.attemptId) return { receipt };
       return null;
+    }
     const humanMessage = await db.Message.findOne({
       where: {
         conversation_id: c.id,
@@ -255,7 +256,31 @@ async function attend({
     return { turn, offer, originMessageId: turn.contextStartId || contextStartId };
   });
   if (!lockTurn) return stopped('assistant_turn_unavailable');
+  if (lockTurn.receipt) return deliverReceipt(lockTurn.receipt);
   const { turn, offer } = lockTurn;
+  const commentId = entry.type === 'comment' ? scope.messageId : null;
+
+  // Store the exact acknowledgement with the staff notification. A retry
+  // reconciles the same channel attempt without reopening an assistant session.
+  async function handoffAndReply(prepare) {
+    const destination = await recordHandoff(scope, (route) => {
+      const reply = prepare(route);
+      return reply && { ...reply, executionId: execution.id, attemptId: saved.attemptId, commentMessageId: commentId };
+    });
+    return destination.reply ? deliverReceipt(destination.reply) : {
+      reason: destination.recorded ? 'assistant_handoff_recorded' : 'assistant_handoff_unassigned',
+      attention: false,
+    };
+  }
+  async function deliverReceipt(receipt) {
+    const reason = await sessionBlockReason(receipt.state);
+    if (reason) return stopped(reason);
+    const sent = await social.reply(thread, {
+      actorId: execution.created_by, attemptId: receipt.attemptId,
+      text: receipt.text, commentMessageId: receipt.commentMessageId,
+    }, { executionId: execution.id, blockReason: (transaction) => sessionBlockReason(receipt.state, transaction) });
+    return { outcome: sent.outcome, reason: sent.reason || receipt.reason, attention: receipt.attention || sent.outcome !== 'sent' };
+  }
   const raw = String(entry.text || '').trim();
   const human = raw.length <= 1000 && raw ? dialogue.requestedHumanHandoff(raw) : null;
   const userText = assistantCommercialText(raw);
@@ -312,35 +337,31 @@ async function attend({
       };
     }
   }
-  if (appointment?.review || !userText || human || saved.decision.kind === 'review') {
-    const destination = await recordHandoff(scope);
-    if (destination.recorded && (human || appointment?.review)) {
-      const text = dialogue.formatHandoffReceipt({
-        firstTurn: turn.firstTurn, tone: publication.fields.tone,
-        clinicName: clinic.nombre_clinica,
-        recorded: true,
-        destination: destination.destination,
-        requestedCallback: !!human?.requestedCallback,
-      });
-      await social.reply(
-        thread,
-        { actorId: execution.created_by, attemptId: saved.attemptId, text, commentMessageId: null },
-        { executionId: execution.id, blockReason }
-      );
-    }
-    return {
-      reason: destination.recorded ? 'assistant_handoff_recorded' : 'assistant_handoff_unassigned',
-      attention: false,
-    };
+  function passToTeam(reason) {
+    return handoffAndReply((destination) => {
+      if (!destination.recorded) return {
+        reason: 'assistant_handoff_unassigned', attention: true,
+        text: dialogue.formatCommercialReply({ firstTurn: turn.firstTurn, tone: publication.fields.tone,
+          clinicName: clinic.nombre_clinica, draft: 'Esta consulta necesita atención del equipo. Puedes contactar con la recepción de la clínica.' }),
+      };
+      return { reason, attention: false, text: dialogue.formatHandoffReceipt({
+        firstTurn: turn.firstTurn, tone: publication.fields.tone, clinicName: clinic.nombre_clinica,
+        recorded: true, destination: destination.destination, requestedCallback: !!human?.requestedCallback,
+      }) };
+    });
   }
-  async function stillOwnsTurn(transaction) {
+  if (appointment?.review || !userText || human || saved.decision.kind === 'review') {
+    return passToTeam('assistant_handoff_recorded');
+  }
+  function stillOwnsTurn(transaction) { return sessionBlockReason('active', transaction); }
+  async function sessionBlockReason(state, transaction) {
     const blocked = await blockReason(transaction);
     if (blocked) return blocked;
     const active = await db.LeadAssistantSession.findOne({
       where: {
         conversation_id: thread.id,
         clinic_id: scope.clinicId,
-        state: 'active',
+        state,
         template_id: scope.templateId,
         publication_version: scope.version,
       },
@@ -350,7 +371,6 @@ async function attend({
     });
     return active ? null : 'assistant_turn_unavailable';
   }
-  const commentId = entry.type === 'comment' ? scope.messageId : null;
   if (!turn.answer) {
     const availability = await social.availability(thread, commentId ? [initial] : []);
     const window = commentId ? availability.comments[commentId] : availability.dm;
@@ -358,15 +378,21 @@ async function attend({
   }
   if (offer?.restriction) {
     const response = require('../lib/lead-assistant-promotion-validity').restrictionReply(offer.restriction,raw);
-    const destination = response.handoff ? await recordHandoff(scope) : null;
-    const receipt = destination?.recorded ? dialogue.formatHandoffReceipt({
-      firstTurn:false, recorded:true, destination:destination.destination,
-    }) : '';
-    const text = dialogue.formatCommercialReply({firstTurn:turn.firstTurn, tone:publication.fields.tone,
-      clinicName:clinic.nombre_clinica, draft:[response.text,receipt].filter(Boolean).join(' ')});
-    const sent = await social.reply(thread,{actorId:execution.created_by,attemptId:saved.attemptId,text,commentMessageId:commentId},
-      {executionId:execution.id,blockReason:destination ? blockReason : stillOwnsTurn});
-    return {outcome:sent.outcome,reason:offer.restriction.reason,attention:response.handoff && !destination?.recorded};
+    const prepare = (destination) => {
+      const acknowledgement = destination?.recorded ? dialogue.formatHandoffReceipt({
+        firstTurn: false, recorded: true, destination: destination.destination,
+      }) : '';
+      return {
+        reason: offer.restriction.reason, attention: response.handoff && !destination?.recorded,
+        text: dialogue.formatCommercialReply({ firstTurn: turn.firstTurn, tone: publication.fields.tone,
+          clinicName: clinic.nombre_clinica, draft: [response.text, acknowledgement].filter(Boolean).join(' ') }),
+      };
+    };
+    if (response.handoff) return handoffAndReply(prepare);
+    const { text, reason } = prepare(null);
+    const sent = await social.reply(thread, { actorId: execution.created_by, attemptId: saved.attemptId, text, commentMessageId: commentId },
+      { executionId: execution.id, blockReason: stillOwnsTurn });
+    return { outcome: sent.outcome, reason: sent.reason || reason, attention: sent.outcome !== 'sent' };
   }
   let answer = turn.answer;
   if (!answer) {
@@ -427,7 +453,7 @@ async function attend({
       !dialogue.supportsQuotedAmounts(generated.reply,[approvedContext,...facts,offer?.description]) ||
       /https?:\/\//i.test(generated.reply)
     )
-      return { reason: 'assistant_reply_requires_review', attention: false, ...(await recordHandoff(scope)) };
+      return passToTeam('assistant_reply_requires_review');
     const image = offer?.images.find((item) => item.id === generated.imageId);
     answer = { reply: generated.reply.trim(), imageId: image?.id || null };
     answer = await db.sequelize.transaction(async (transaction) => {
