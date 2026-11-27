@@ -2,7 +2,7 @@
 const K=require('./meta-marketing-credential-shape'),R=require('./meta-marketing-read-diagnostics');
 const https=require('node:https'),{createHmac,createHash}=require('node:crypto'),{BrokerError,fail}=require('./errors'),{tokenText}=require('./whatsapp-secrets');
 const L=require('./meta-marketing-leads-contract'),M=require('./meta-marketing-contract'),C=require('./meta-marketing-oauth-contract'),D=require('./meta-marketing-discovery-contract'),F=require('./meta-marketing-lead-form-response'),{usage}=require('./meta-marketing-ads-http');
-const {pageFields,ensureField}=require('./meta-page-subscription');
+const {pageFields,ensureField,subscriptionForm}=require('./meta-page-subscription');
 const AD_FIELDS='id,account_id,campaign_id,adset_id,effective_status,creative{id,call_to_action,object_story_spec}';
 // Only provider-defined standard contact question types authorize projection.
 // Localized keys are matched exactly, never inferred from labels or aliases.
@@ -165,7 +165,7 @@ function createMetaMarketingLeadsHttp({request=https.request,pacer,cursor,now=Da
               if(before.subscription.revision!==payload.expectedSubscriptionRevision)fail('idempotency_conflict');
             },
             write:fields=>fetchGraph(`/${metadata.graphVersion||M.GRAPH_VERSION}/${asset.id}/subscribed_apps`,pageToken,'POST',
-              new URLSearchParams({subscribed_fields:fields.join(','),appsecret_proof:proof(pageToken)}).toString()),
+              subscriptionForm(fields,proof(pageToken))),
           });
         }else if(name==='receiptRead'||name==='recoveryRead'){
           const readEvent=name==='recoveryRead'?{lead_id:recoveryProof.leadId,page_id:asset.id,form_id:recoveryProof.formId,ad_id:recoveryProof.adId}:receipt;

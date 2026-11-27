@@ -249,7 +249,11 @@ function subscriptionFixture({ tasks = ['MANAGE'], appReady = true, old = ['lead
     if (endpoint === '101/subscriptions') return ok({ data: [{object:'page',active:appReady,fields:[{name:'messages'}]}] });
     if (endpoint === '401/subscribed_apps') {
       if (options.method === 'POST') {
-        fields = JSON.parse(options.body).subscribed_fields.split(',');
+        assert.equal(options.headers['content-type'], 'application/x-www-form-urlencoded');
+        const form = new URLSearchParams(options.body);
+        assert.equal(url.searchParams.has('appsecret_proof'), false);
+        assert.match(form.get('appsecret_proof'), /^[a-f0-9]{64}$/);
+        fields = form.get('subscribed_fields').split(',');
         writes.push(fields);
         if (dropAck) throw Error('provider disconnected after commit');
         return ok({success:true});

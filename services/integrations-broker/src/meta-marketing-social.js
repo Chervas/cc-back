@@ -2,7 +2,7 @@
 
 const { createHmac } = require('node:crypto');
 const { fail } = require('./errors');
-const { pageFields, ensureField } = require('./meta-page-subscription');
+const { pageFields, ensureField, subscriptionForm } = require('./meta-page-subscription');
 const { usage } = require('./meta-marketing-ads-http');
 const { graphId, GRAPH_VERSION } = require('./meta-marketing-contract');
 const { schema } = require('./contracts');
@@ -113,9 +113,11 @@ async function execute({
     const url = new URL(
       'https://graph.facebook.com/' + (metadata.graphVersion || GRAPH_VERSION) + '/' + path,
     );
+    const pageForm = operation === subscribe && body;
+    const proof = createHmac('sha256', appSecret).update(bearer).digest('hex');
     url.search = new URLSearchParams({
       ...query,
-      appsecret_proof: createHmac('sha256', appSecret).update(bearer).digest('hex'),
+      ...(pageForm ? {} : { appsecret_proof: proof }),
     }).toString();
     const response = await transport(url, {
       redirect: 'error',
@@ -123,9 +125,9 @@ async function execute({
       method: body ? 'POST' : 'GET',
       headers: {
         authorization: 'Bearer ' + bearer,
-        ...(body ? { 'content-type': 'application/json' } : {}),
+        ...(body ? { 'content-type': pageForm ? 'application/x-www-form-urlencoded' : 'application/json' } : {}),
       },
-      ...(body ? { body: JSON.stringify(body) } : {}),
+      ...(body ? { body: pageForm ? subscriptionForm(body, proof) : JSON.stringify(body) } : {}),
     });
     if (operation === subscribe && response.headers)
       subscriptionPacer.observe('meta-ads-app:' + metadata.appId, usage(Object.fromEntries(response.headers)));
@@ -232,7 +234,7 @@ async function execute({
     }), metadata.appId) });
     await ensureField({
       appId: metadata.appId, pageId: asset.id, field: 'messages', read, authorize: check,
-      write: fields => graph(edge, page.access_token, {}, { subscribed_fields: fields.join(',') }),
+      write: fields => graph(edge, page.access_token, {}, fields),
     });
     return { available: true };
   }

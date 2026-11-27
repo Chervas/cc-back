@@ -37,4 +37,8 @@ async function ensureField({ appId, pageId, field, read, write, authorize }) {
   }
 }
 
-module.exports = { pageFields, ensureField };
+function subscriptionForm(fields, proof) {
+  return new URLSearchParams({ subscribed_fields: fields.join(','), appsecret_proof: proof }).toString();
+}
+
+module.exports = { pageFields, ensureField, subscriptionForm };
