@@ -345,14 +345,24 @@ function resolveMessagePageRequest(query = {}) {
 
 async function getConversationMessagePage(conversation, query = {}, transaction = null) {
   const { limit, beforeMessageId } = resolveMessagePageRequest(query);
+  const isSocial = ['instagram', 'messenger'].includes(conversation.channel);
   const where = { conversation_id: { [Op.in]: await contactIdentity.memberIds(conversation, { transaction }) } };
-  if (beforeMessageId) {
+  if (beforeMessageId && isSocial) {
+    // A late import can have a larger ID than an already displayed live message.
+    // Read the cursor's stored time in this query so the boundary uses MySQL's exact precision.
+    where[Op.and] = db.Sequelize.literal(`
+      (COALESCE(Message.sent_at, Message.createdAt), Message.id) < (
+        SELECT COALESCE(anchor.sent_at, anchor.createdAt), anchor.id FROM Messages AS anchor
+        WHERE anchor.id = :beforeMessageId AND anchor.conversation_id = :conversationId
+      )`);
+  } else if (beforeMessageId) {
     where.id = { [Op.lt]: beforeMessageId };
   }
 
   const rawMessages = await Message.findAll({
     where,
-    order: [['id', 'DESC']],
+    order: isSocial ? messageChronologicalOrder('DESC') : [['id', 'DESC']],
+    ...(beforeMessageId && isSocial ? { replacements: { beforeMessageId, conversationId: conversation.id } } : {}),
     limit: limit + 1,
     raw: true,
     transaction,
