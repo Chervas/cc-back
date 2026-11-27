@@ -3,6 +3,7 @@
 const { createHash } = require('node:crypto');
 const { promotionImageUrl } = require('../../services/integrations-broker/src/promotion-image-url');
 
+const { saleTerms, salesRestriction } = require('../lib/lead-assistant-promotion-validity');
 const promoCode = /^\s*(?:#{1,6}\s+|[-*]\s+)?(?:\*\*)?([a-z]{1,8}\d{1,5}-\d{1,5})\b/i;
 const namedHeading = /^\s*(?:#{1,6}\s+|(?:promoción|promocion|promoció|promo|promotion)\s*:\s*)(.+?)\s*$/i;
 const assetId = (key, url) =>
@@ -21,13 +22,14 @@ const slug = (name) =>
 function tableOffers(value) {
   const rows = require('../lib/lead-assistant-tables').tableRows(value, [
     /tratamiento|promocion|oferta/, /precio|importe/, /imagen|archivo visual|creatividad|foto/,
-  ]);
+  ], { includeHeading: true });
   const sections = new Map();
   const validity = value.match(/^#{1,6}\s+(?:vigencia|validez)[^\n]*\n([\s\S]*?)(?=^#{1,6}\s|$(?![\s\S]))/im);
-  for (const [title, description, media] of rows) {
+  for (const { heading, values: [title, description, media] } of rows) {
     const key = slug(title).slice(0, 96);
     if (!key || !description) continue;
     const section = sections.get(key) || { title, preamble: validity?.[1]?.trim() || '', lines: [] };
+    section.saleTerms = saleTerms(section.preamble, heading, title, description);
     section.lines.push(title, description);
     for (const link of media.matchAll(/\[([^\]\n]*)\]\((https:\/\/[^\s<>()]+)\)/g)) {
       if (promotionImageUrl(link[2])) section.lines.push('![' + link[1] + '](' + link[2] + ')');
@@ -74,7 +76,13 @@ function offerSections(value) {
   return sections;
 }
 
-function isOfferActive(section, { now = new Date(), timezone = 'Europe/Madrid' } = {}) {
+function clinicDate({ now = new Date(), timezone = 'Europe/Madrid' } = {}) {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: timezone, year:'numeric', month:'2-digit', day:'2-digit' }).format(now);
+}
+
+function isOfferActive(section, options) {
+  const today = options?.today || clinicDate(options);
+  if (salesRestriction(section.saleTerms,today)) return false;
   const text = [section.preamble || '', ...section.lines].join('\n');
   if (
     /\b(?:en revisi[oó]n|pendiente de aproba(?:ci[oó]n|r)|no aprobad[ao]|retirad[ao]|caducad[ao]|sin vigencia|under review|not approved)\b/i.test(
@@ -83,12 +91,6 @@ function isOfferActive(section, { now = new Date(), timezone = 'Europe/Madrid' }
   )
     return false;
   if (!/^\s*(?:vigencia|vigència|validity)\s*:/im.test(text)) return true;
-  const today = new Intl.DateTimeFormat('sv-SE', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(now);
   for (const line of text.split('\n')) {
     const validity = line.match(/^\s*(?:vigencia|vigència|validity)\s*:\s*(.+)$/i);
     if (!validity) continue;
@@ -110,6 +112,7 @@ function isOfferActive(section, { now = new Date(), timezone = 'Europe/Madrid' }
 }
 
 function catalog(text, options, sections = offerSections(text)) {
+  options = { ...options, today:options?.today || clinicDate(options) };
   const result = new Map();
   const add = (key, raw, label) => {
     const url = promotionImageUrl(raw);
@@ -194,4 +197,4 @@ async function resolveForTurn(db, thread, scope, transaction) {
   return images.find((image) => image.id === scope.id) || null;
 }
 
-module.exports = { offerSections, catalog, isOfferActive, resolveForTurn };
+module.exports = { offerSections, catalog, isOfferActive, resolveForTurn, clinicDate };

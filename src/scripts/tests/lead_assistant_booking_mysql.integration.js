@@ -382,7 +382,27 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       ),
       'La comprobación de identidad debe leer únicamente los identificadores administrativos permitidos.'
     );
+  const expiredCatalogue = [
+    '## Vigencia', 'Ficha revisada el **01/02/2001**.',
+    '- **Bono de ejemplo.** La compra promocional termina el **28/02/2001**. Los bonos comprados se pueden canjear hasta el **31/12/2099** con valoración previa.',
+    '### Bonos', '| Tratamiento | Precio | Imagen |','|---|---|---|',
+    '| Bono de ejemplo | 29 € | [Foto](https://media.example.com/vieja.jpg) |',
+  ].join('\n');
+  await db.LeadAssistantPublication.create({ clinic_id:100,version:5,approved_by:1,approved_at:new Date(),
+    fields:{...originalPub.fields,promotions:expiredCatalogue} });
+  const saleThread=await thread('whatsapp','+34600223993');
+  const beforeSale=await db.CitaPaciente.count();
+  const expiredReply=await enter(saleThread,'Quiero reservar el Bono de ejemplo',{version:5});
+  assert.equal(expiredReply.result.reason,'sale_ended');
+  assert.match(questions.at(-1),/28 de febrero de 2001/);
+  assert.doesNotMatch(questions.at(-1),/29 €|https:/);
+  assert.equal(await expiredReply.booking(),undefined);
+  const redeemReply=await enter(saleThread,'Ya lo compré, ¿puedo canjearlo?',{version:5});
+  assert.equal(redeemReply.result.reason,'sale_ended');
+  assert.match(questions.at(-1),/31\/12\/2099.*valoración previa/);
+  assert.equal(await db.CitaPaciente.count(),beforeSale);
   report.assertions = [
+    'Una compra fuera de promoción no ofrece la tarifa, la foto ni la cita. El canje de un bono ya adquirido conserva sus propias condiciones.',
     'Dos leads por hora solo con autorización publicada, incluidas citas manuales y confirmaciones concurrentes. Un paciente bloquea todo el intervalo.',
     'Oferta sin escritura y confirmación local con profesional, sala y recibo del plan real',
     'Mismo mensaje repetido y segundo mensaje de aceptación conservan la misma cita',
