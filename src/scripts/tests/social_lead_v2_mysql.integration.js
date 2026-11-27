@@ -120,6 +120,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     posts = [],
     executions = [],
     published = [];
+  const assistantContexts = [];
   const provider = {
     receive: async () => ({
       available: true,
@@ -128,7 +129,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     availability: async () => ({ available: true }),
     send: async (r, kind, recipient, text, attemptId, imageUrl) => {
       posts.push({ kind, recipient, text, attemptId, ...(imageUrl ? {imageUrl} : {}) });
-      return { available: true, messageId: 'sent-' + attemptId, recipientId: kind === 'dm' ? recipient : '771' };
+      return { available: true, messageId: 'sent-' + attemptId, recipientId: kind === 'dm' ? recipient : ['9951','9952','9953'].includes(recipient) ? '780' : '771' };
     },
   };
   const social = createInbox({
@@ -165,7 +166,10 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       assert.equal(request.useCase,'lead_assistant_reply');
       assert.equal(request.requireBroker,true);
       assert(!request.inputText.includes('https://'));
-      const choice = JSON.parse(request.inputText).promotion.images[0];
+      const context = JSON.parse(request.inputText);
+      assistantContexts.push(context);
+      const choice = context.promotion?.images?.[0];
+      if (!choice) return {reply:'¿Qué tratamiento viste?'};
       await request.beforeDispatch();
       return {reply:'La oferta incluye una visita informativa.',imageId:choice.id};
     },
@@ -361,7 +365,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(posts.length,3);
 
   const configured = await configService.saveConfig({clinicId:41,actorUserId:1,input:{active:true,sources:[],
-    schedule_scope:'all_days',social_entries:{instagram_dm:{action:'assistant',version:4,audience:'leads',origins:['social_inbox']},whatsapp_dm:{action:'assistant',version:4,audience:'leads',origins:['google_ads']}}}});
+    schedule_scope:'all_days',social_entries:{instagram_comment:{action:'assistant',version:4,audience:'leads',origins:['meta_ads']},instagram_dm:{action:'assistant',version:4,audience:'leads',origins:['social_inbox','meta_ads']},whatsapp_dm:{action:'assistant',version:4,audience:'leads',origins:['google_ads']}}}});
   const activeAssistant = await db.AutomationFlowTemplateV2.findByPk(configured.flow.id);
   assert.deepEqual(activeAssistant.trigger_config.social_entries.whatsapp_dm.origins, ['google_ads']);
   const sourceCheck = require('../../services/leadAssistantOrigin.service');
@@ -390,6 +394,44 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const sentCount = posts.length;
   await automation.run(assistantExecution,true);
   assert.equal(posts.length,sentCount);
+  // A person can react to different advertisements inside a single Instagram conversation.
+  const adComment = (id, postId, adId, title) => ({
+    object:'instagram', entry:[{id:'501',time:Math.ceil(Date.now()/1000),changes:[{field:'comments',value:{
+      id, from:{id:'780',username:'qa_dos_anuncios'}, media:{id:postId,ad_id:adId,...(title ? {ad_title:title} : {})}, text:'INFO',
+    }}]}],
+  });
+  async function answerAd(body) {
+    if (body.entry[0].messaging) body.entry[0].messaging[0].timestamp = Math.max(Date.now(),activeAssistant.published_at.getTime());
+    const claimIndex = claims.length;
+    const key = await receive(body);
+    const execution = await begin(claimIndex);
+    await automation.run(execution);
+    const result = await automation.run(execution,true);
+    assert.equal(result.outcome,'sent',JSON.stringify(result));
+    const event = await social.readEntry(key,41);
+    return { message:await db.Message.findByPk(event.messageId), execution, result };
+  }
+  const fromKnown = await answerAd(adComment('9951','980','88101','C02-03'));
+  assert.equal(fromKnown.message.metadata.leadAssistantTurn.promotionKey,'C02-03');
+  assert.equal(assistantContexts.at(-1).promotion.title,'Oferta ficticia');
+  const seenBefore = assistantContexts.length;
+  const unknown = await answerAd(adComment('9952','981','88102',null));
+  assert.equal(unknown.message.metadata.leadAssistantTurn.promotionKey,null,'An unidentified new ad must not inherit the old price or photo');
+  assert.equal(assistantContexts.length,seenBefore,'INFO on an unidentified ad asks for the treatment without calling the model');
+  const clarification = posts.at(-1);
+  assert.equal(clarification.recipient,'9952');
+  assert.match(clarification.text,/qu[ée] (?:promoci[oó]n|tratamiento)/i);
+  assert.doesNotMatch(clarification.text,/https:|C02-03/);
+  await answerAd(dm('instagram','501','topic-reply-980','¿Qué incluye?','780'));
+  assert.equal(assistantContexts.at(-1).promotion,null);
+  assert(!assistantContexts.at(-1).commercialHistory.some(turn=>turn.text.includes('visita informativa')));
+  const clarified = await answerAd(dm('instagram','501','topic-clarified-980','Es la C02-03','780'));
+  assert.equal(clarified.message.metadata.leadAssistantTurn.promotionKey,'C02-03');
+  const samePost = await answerAd(adComment('9953','981','88102',null));
+  assert.equal(samePost.message.metadata.leadAssistantTurn.promotionKey,'C02-03');
+  const deliveries = posts.length;
+  await automation.run(samePost.execution,true);
+  assert.equal(posts.length,deliveries);
   const whatsappApi = require('../../services/leadAssistantWhatsapp.service');
   const inboundWhatsapp = await db.Conversation.create({clinic_id:41,channel:'whatsapp',contact_id:'+34600000041'});
   const waMessage = await db.Message.create({conversation_id:inboundWhatsapp.id,direction:'inbound',message_type:'text',
@@ -435,6 +477,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal((await waAssistant.run(waExecution)).reason,'whatsapp_entry_unavailable');
   assert.equal(waPosts.length,1);
   report.assertions = [
+    'Un segundo anuncio sin tratamiento solicita aclaración, separa los datos de la oferta anterior y conserva la aclaración del DM en el mismo anuncio.',
     'Filtro de origen por canal aplicado antes de ejecutar y enviar, con atribución de Leads o de anuncio Meta y reglas anteriores sin filtro.',
     'WhatsApp atiende una entrada con una foto y pie sin plantilla. Misma ejecución, conversación, número, foto aprobada y plazo de 24 h.',
     'Entrada → selector V2 → asistente simulado → respuesta e imagen indicada por la clínica en el mismo DM',
