@@ -36,7 +36,6 @@
       },
       "tables": ["BusinessProfileMutations", "BusinessProfileMutationLocks", "BusinessProfileCacheStates"],
       "migrations": [
-    {"name":"20261127064000-create-lead-assistant-drafts.js","sha256":"ef1dad26514b3794433ccd18209528fb151d3bf2b74e811e31a683cf0e26bf09"},
         "20260919200000-create-business-profile-mutation-journal.js",
         "20260919210000-create-business-profile-cache-coordination.js"
       ]
@@ -7140,6 +7139,7 @@
     }
   },
   "migrations": [
+    {"name":"20261127064000-create-lead-assistant-drafts.js","sha256":"ef1dad26514b3794433ccd18209528fb151d3bf2b74e811e31a683cf0e26bf09"},
     {"name": "20261126180000-quickchat-social.js", "sha256": "865336339d6d79f85f563507c364f979a4231ea64bd7d8188955e8bfeb4b8a88"},
     {"name":"20261122223000-create-google-oauth-admission-attempts.js","sha256":"46cb281bb26de3f5506ac128f6da6d221ec6dfac8749a260f9d22d12afdad139"},
     {"name":"20261122224500-create-google-oauth-admission-returns.js","sha256":"02e624cc5f79861a37e2cc2bdf570b664cfe49993803dd6a309a7453af48b926"},
