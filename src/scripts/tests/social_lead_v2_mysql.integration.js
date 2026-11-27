@@ -109,10 +109,11 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(status.active, true);
   assert.equal(status.readiness.ready, true);
   const savedEntries = (await configService.getStatus(41)).config.social_entries;
-  for (const [channel, rule] of Object.entries(entries)) {
-    assert.deepEqual(savedEntries[channel], { ...rule, inbound_capture_separate: true });
-  }
+  assert.deepEqual(savedEntries, entries);
   const flow = await db.AutomationFlowTemplateV2.findByPk(status.flow.id);
+  assert.equal(flow.trigger_config.social_entries.instagram_comment.inbound_capture_separate, true);
+  assert.equal(flow.trigger_config.social_entries.instagram_dm.inbound_capture_separate, true);
+  assert.equal(flow.trigger_config.social_entries.messenger_dm.inbound_capture_separate, undefined);
   // An existing installation can have a reply publication from before independent capture.
   await flow.update({trigger_config:{...flow.trigger_config,social_entries:entries}});
   let expectedFlowId = flow.id;
