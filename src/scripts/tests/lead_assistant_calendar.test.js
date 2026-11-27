@@ -42,6 +42,8 @@ test('only explicit booking instructions allow two first visits for leads', () =
   for (const text of [
     'Se pueden citar dos leads a la misma hora',
     'Se permite montar dos leads si no hay cita de paciente',
+    'Si ambos son leads, se puede montar. No montar nunca sobre pacientes.',
+    'Se permite doblar leads. Nunca doblar a pacientes.',
     'Pueden montar dos leads. Si ya hay una cita agendada que no es lead, no montar.',
     'Se permite doblar leads, pero no montar si hay una cita de paciente.',
   ]) assert.equal(allowsLeadPair(text), true, text);
