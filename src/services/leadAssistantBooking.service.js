@@ -259,7 +259,12 @@ async function processTurn({
       return { reply: state.reply };
     });
   }
-  if (postponed) return materialize(async () => ({stage:'deferred', reply:'Claro, lo dejamos para otro día. No hemos reservado ninguna hora.'}));
+  if (postponed) {
+    const price = require('./leadAssistantOfferDiscovery.service').priceWhenDeferring(offer, raw);
+    return materialize(async () => ({stage:'deferred', reply:price
+      ? price + ' No hemos reservado ninguna hora.'
+      : 'Claro, lo dejamos para otro día. No hemos reservado ninguna hora.'}));
+  }
   if (statusRequest) {
     if (pending?.stage === 'booked' && pending.slots?.[pending.selected])
       return {reply:'La cita que confirmamos en esta conversación era para el '+cal.display(pending.slots[pending.selected],timezone)+'.'};

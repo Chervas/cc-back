@@ -273,3 +273,16 @@ test('a price quoted from another zone never affirms a different offer',()=>{
     fields:{promotions:''},history:[]});
   assert.match(reply,/230 €/);assert.doesNotMatch(reply,/^sí|170/iu);
 });
+
+test('an explicit callback before sharing contact details takes precedence and respects a refusal', () => {
+  assert.deepEqual(requestedHumanHandoff('Antes de darte mi móvil, prefiero que me llame una persona del equipo.'), {requestedCallback:true});
+  assert.equal(requestedHumanHandoff('No quiero que me llame el equipo.'), null);
+});
+
+test('a request for the offer price can be answered while deferring the booking', () => {
+  const {priceWhenDeferring} = require('../../services/leadAssistantOfferDiscovery.service');
+  const offer = {title:'Contorno', terms:['Precio promoción: 170 €']};
+  assert.match(priceWhenDeferring(offer,'Solo quería el precio, no reserves.'),/170/);
+  assert.equal(priceWhenDeferring(offer,'¿Cuál es el precio habitual? No reserves.'),'');
+  assert.equal(priceWhenDeferring(offer,'No reserves.'),'');
+});

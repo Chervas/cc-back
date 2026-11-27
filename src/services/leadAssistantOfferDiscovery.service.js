@@ -62,6 +62,15 @@ function fillerComparison(offer) {
   return answer && answer.length <= 550 ? answer.split(/(?<=[.!?])\s+/u).slice(0, 2).join(' ') : null;
 }
 
+function priceWhenDeferring(offer, message) {
+  const text = words(message);
+  const parts = String(message).split(/[,;.!?¿¡]/u).map(words).filter(Boolean);
+  const requestsPrice = parts.some(part => /^(?:(?:solo |solamente )?(?:quiero|queria|necesito)(?: saber)? (?:el |su )?(?:precio|tarifa)(?: de (?:esa|esta|la) (?:promocion|oferta))?|cuanto (?:cuesta|vale|sale)(?: (?:esa|esta|la) (?:promocion|oferta))?)$/.test(part));
+  if (!offer || !requestsPrice || /\b(?:habitual|normal|sin (?:oferta|descuento)|consulta|valoracion|financiacion|anestesia)\b/.test(text)) return '';
+  const price = currentPrice(offer.terms);
+  return price ? 'El precio de «' + offer.title + '» es ' + price + '.' : '';
+}
+
 function consultationFee(fields, userText) {
   const text = words(userText);
   if (!tariff.test(text) || !/\b(?:valoracion|consulta|primera visita)\b/.test(text)) return null;
@@ -136,4 +145,4 @@ function catalogueReply({ fields, offer, history, userText, timezone }) {
   return 'Para esa zona está la promoción «' + offer.title + '». ' + price + '.' + (asksOffer ? appointmentInvitation : '');
 }
 
-module.exports = { areaSelection, browsesWholeArea, catalogueReply, consultationFee, matchesArea };
+module.exports = { areaSelection, browsesWholeArea, catalogueReply, consultationFee, matchesArea, priceWhenDeferring };
