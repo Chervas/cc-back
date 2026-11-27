@@ -12,6 +12,18 @@ const marketingOptOut = require('../../services/marketingOptOut.service');
 const marketingBulkSends = require('../../services/marketingBulkSends.service');
 const migration = require('../../../migrations/20260809113000-version-review-response-classification');
 
+test('a copied campaign footer does not express an opt-out; a separate request still does', async () => {
+  const footer = 'Para dejar de recibir notificaciones responde *BAJA*.';
+  for (const text of [footer, 'Nueva promo. Responde INFO.\n' + footer]) {
+    const result = await classifier.classifyReviewResponse({ text });
+    assert.equal(result.intent, 'ambiguous');
+    assert.equal(result.source, 'campaign_footer');
+  }
+  for (const text of ['BAJA', footer + '\nBAJA', 'No quiero recibir más publicidad.\n' + footer]) {
+    assert.equal(classifier.classifyDeterministically(text).intent, 'marketing_opt_out');
+  }
+});
+
 test('clasifica respuestas inequívocas sin consumir IA', () => {
   assert.deepEqual(
     classifier.classifyDeterministically('Os doy un 5 😊'),

@@ -1304,7 +1304,7 @@ const NODE_TYPES_V2 = [
     output_keys: ['on_success', 'on_review', 'on_fail', 'on_assistant'], runtime_status: 'real', default_config: {}, config_schema: [],
   },
   {
-    type:'action/attend_with_lead_assistant', category:'action', label:'Atender con asistente de IA',
+    type:'action/attend_with_lead_assistant', category:'action', label:'Contestar con Cleo (IA)',
     description:'Atiende la entrada de la clínica con el contenido y las imágenes de la versión aprobada.',
     output_keys:['on_success'], runtime_status:'real', default_config:{}, config_schema:[],
   },

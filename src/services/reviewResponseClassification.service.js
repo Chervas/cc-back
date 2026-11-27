@@ -38,11 +38,16 @@ function parseRating(text) {
   return null;
 }
 
+// The campaign footer can be copied into an incoming WhatsApp image caption.
+const campaignFooter = /\bpara dejar de recibir (?:notificaciones|mensajes|comunicaciones)(?: promocionales| comerciales)?[,.:;\s]+(?:responde|responda|escribe|escriba)\s+[*_«“"']*(?:baja|stop)\b[*_»”"']*[.!]?/giu;
+
 function classifyDeterministically(text, explicitRating = null) {
-  const raw = clean(text);
+  const original = clean(text);
+  const raw = original.replace(campaignFooter, '').trim();
+  const containsFooter = raw !== original;
   const value = normalized(raw);
   const rating = Number(explicitRating || 0) || parseRating(raw);
-  if (!value) return { intent: 'ambiguous', rating: null, confidence: 1, source: 'rule_empty' };
+  if (!value) return { intent: 'ambiguous', rating: null, confidence: 1, source: containsFooter ? 'campaign_footer' : 'rule_empty' };
 
   const wrongRecipient = [
     /numero (?:equivocado|incorrecto|erroneo)/,
@@ -87,6 +92,7 @@ function classifyDeterministically(text, explicitRating = null) {
   if (reviewRefusal) {
     return { intent: 'review_refusal', rating: null, confidence: 0.98, source: 'rule' };
   }
+  if (containsFooter) return { intent: 'ambiguous', rating: null, confidence: 0, source: 'campaign_footer' };
   if (rating >= 1 && rating <= 5) {
     return { intent: 'rating', rating, confidence: 1, source: 'rule' };
   }
@@ -152,7 +158,7 @@ async function classifyWithAi(text, tenant = {}) {
 
 async function classifyReviewResponse({ text, explicitRating = null, allowAi = true, clinicId = null, groupId = null } = {}) {
   const deterministic = classifyDeterministically(text, explicitRating);
-  if (deterministic.intent !== 'ambiguous' || !allowAi || !clean(text)) return deterministic;
+  if (deterministic.intent !== 'ambiguous' || deterministic.source === 'campaign_footer' || !allowAi || !clean(text)) return deterministic;
   return classifyWithAi(text, { clinicId, groupId });
 }
 

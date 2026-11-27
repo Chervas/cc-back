@@ -22,7 +22,7 @@ const sensitive = value => SENSITIVE_CONTENT.some(pattern => pattern.test(value)
 const INSTRUCTIONS = /\b(?:ignore|disregard|ignora\w*|omite|olvida|instrucciones|instructions|prompt|jailbreak|system message|mensaje del sistema|classify|clasifica\w*|privaterequested|opt_out|actua como|devuelve json|role\s*[:=]|output schema|override|clasificador)\b/i;
 const EMBEDDED_COMMAND = /[{`<>]|["'](?:kind|privateRequested|system|role)["']\s*:/i;
 const NEGATION = /\b(?:no|nunca|not|never)\b/;
-const COMMERCIAL = /\b(?:info(?:rmacion)?|inform\w+|interes\w*|oferta\w*|promo\w*|precio\w*|cuanto (?:cuesta|vale|sale)|presupuest\w*|tarifa\w*|coste|cost[oa]|detalle\w*|disponibilidad|price|pricing|details|interested|quote)\b/;
+const COMMERCIAL = /\b(?:info(?:rmacion)?|inform\w+|interes\w*|oferta\w*|descuento\w*|promo\w*|precio\w*|cuanto (?:cuesta|vale|sale)|presupuest\w*|tarifa\w*|coste|cost[oa]|detalle\w*|disponibilidad|price|pricing|details|interested|quote)\b/;
 const EXPLICIT_INFO = /\b(?:(?:quiero|quisiera|querria|necesito|busco|me gustaria|queremos|podri\w*|pued\w*|pasa\w*|manda\w*|envia\w*|facilita\w*|compart\w*|solicit\w*)\b.{0,42}\b(?:info(?:rmacion)?|detalles|precio\w*|presupuesto\w*|tarifa\w*)|cuanto (?:cuesta|vale|sale)|(?:cual es|que tiene|que) (?:el )?precio|(?:please |send me |can i get ).{0,15}(?:info(?:rmation)?|details|price|quote))\b/;
 const EXPLICIT_PRIVATE = /\b(?:por (?:privado|mensaje (?:directo|privado))|al privado|(?:en|por) (?:dm|inbox)|send me a dm|dm me|privately)\b/;
 const ASKS_PRIVATELY = /\b(?:me (?:escrib\w*|envi\w*|mand\w*|contact\w*)|(?:escribe|envia|manda|contacta)(?:me|nos)|(?:quiero|prefiero|quisiera)\b.{0,35}(?:mensaje|privado|dm)|please|por favor|dm me|send me)\b/;
@@ -47,6 +47,22 @@ const SYSTEM_PROMPT = 'Clasifica únicamente la intención comercial del texto d
 
 function genericInfoRequest(raw) {
   return typeof raw === 'string' && INFO.test(normalize(raw).replace(/^[\s¡!¿?.,:;]+|[\s!?.,:;]+$/gu, ''));
+}
+
+// A request can identify commercial interest without authorizing an outbound message.
+function asksForCommercialInformation(raw) {
+  if (!assistantCommercialText(raw)) return false;
+  const body = normalize(raw);
+  if (/\b(?:baja|stop|unsubscribe|responde info|responder info|contesta info)\b/.test(body)) return false;
+  // A scheduling constraint after an affirmative statement is common in campaign replies.
+  const firstClause = body.split(/\s+pero\s+/u, 1)[0];
+  if (/\b(?:no me interesa|no (?:estoy|estamos) interesad|ya no|no (?:lo |la )?quiero|no me contact)/.test(body)) return false;
+  if (!NEGATION.test(firstClause) && AFFIRMS_INTEREST.test(firstClause) && /\b(?:promocion|oferta|bono|tratamiento)\b/.test(firstClause)) return true;
+  if (NEGATION.test(body)) return false;
+  if (genericInfoRequest(raw) || EXPLICIT_INFO.test(body)) return true;
+  const offer = /\b(?:descuentos?|ofertas?|promocion(?:es)?|promos?|precios?|tarifas?|presupuestos?|bonos?)\b/;
+  if (!offer.test(body)) return false;
+  return /[?¿]/.test(body) || /\b(?:teneis|tienen|hay|haceis|ofreceis|quisiera|quiero saber|me gustaria saber|me podeis decir)\b/.test(body);
 }
 
 async function classifyInterest(entry, { clinicId, groupId, beforeDispatch, analyze } = {}) {
@@ -113,4 +129,4 @@ function assistantCommercialText(raw) {
   if (explicitOptOut(raw) || sensitive(normalized) || INSTRUCTIONS.test(normalized) || EMBEDDED_COMMAND.test(normalized)) return null;
   return scrub(raw) || null;
 }
-module.exports = { classifyInterest, explicitOptOut, assistantCommercialText, genericInfoRequest };
+module.exports = { classifyInterest, explicitOptOut, assistantCommercialText, genericInfoRequest, asksForCommercialInformation };
