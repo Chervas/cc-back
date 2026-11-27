@@ -85,7 +85,17 @@ const permissions = (channel, kind, operation) =>
         ...(kind === 'comment' ? ['instagram_manage_comments', 'pages_read_engagement'] : []),
       ];
 
-async function execute({
+// Only genuine Graph quota responses may be described as a Meta API limit.
+class GraphReplyLimit extends Error {}
+async function execute(options) {
+  try {
+    return await executeSocial(options);
+  } catch (error) {
+    if (error instanceof GraphReplyLimit) return { available: false, reason: 'meta_api_rate_limited' };
+    throw error;
+  }
+}
+async function executeSocial({
   operation,
   payload: p,
   context,
@@ -134,6 +144,12 @@ async function execute({
     const raw = await response.json();
     if (operation === subscribe && (response.status === 429 || [4, 17, 32, 613].includes(raw.error?.code)))
       fail('rate_limited');
+    const quotaCode = [4, 17, 32, 613, 80006].includes(raw?.error?.code);
+    if ([status, send].includes(operation) && !response.ok && (response.status === 429 || quotaCode)) {
+      // An ambiguous write acknowledgement has to be reconciled before another send.
+      if (!body || (raw?.error && !raw.message_id && Number.isInteger(raw.error.code))) throw new GraphReplyLimit();
+      fail('outcome_unknown');
+    }
     if (raw.error || !response.ok) {
       if (
         p.channel === 'instagram' && response.status >= 400 && response.status < 500 && raw.error?.code === 200 &&
