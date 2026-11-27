@@ -82,7 +82,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     const command={requestId,operation:C.U.OPERATIONS[name],tenantRef:'clinic:'+row.clinicIds[0],connectionRef:row.connection_ref,assetRef:'meta-enroll:'+row.scope_key,payload};
     const response=await client.execute(command,{timeoutMs:['finish','activate'].includes(name)?30000:10000});
     if(!C.exact(response,'requestId,data,replayed')||response.requestId!==requestId||typeof response.replayed!=='boolean'||name==='status'&&response.replayed)C.fail('broker_response_invalid');
-    if(name!=='begin')return C.receipt(response.data,row,{allowAbortedVersionDrift:name==='abort'});
+    if(name!=='begin')return C.receipt(response.data,row,{allowAbortedVersionDrift:name==='abort'||name==='status'&&row.state==='cancel_pending'});
     const value=response.data;
     const continued=!payload.quickChat&&value?.continuedQuickChat===true;
     if(!C.exact(value,'renewalId,flowId,enrollmentId,authUrl,expiresAt'+(continued?',continuedQuickChat':''))||value.renewalId!==row.renewal_id||value.flowId!==row.renewal_id
@@ -149,14 +149,24 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     // abort it while the Owner is still preparing the authorization response.
     if(row.state==='begin_pending'&&+row.expires_at>+now())return row;
     // Status/abort never need an old login to resolve an already-authorized CAS.
-    let remote=await call(row,row.state==='cancel_pending'?'abort':'status',{renewalId:id});
-    if(remote.activationApplied)return requestTx(id,(row,transaction)=>apply(row,remote,transaction));
-    if(row.state==='cancel_pending'||row.state==='begin_pending'){
-      if(!['aborted','not_found','rejected','interrupted'].includes(remote.status))remote=await call(row,'abort',{renewalId:id});
-      if(remote.activationApplied)return requestTx(id,(row,transaction)=>apply(row,remote,transaction));
-      return requestTx(id,(row,transaction)=>finishCancelled(row,remote,transaction));
+    let remote=await call(row,'status',{renewalId:id});
+    const cancelling=row.state==='cancel_pending'||row.state==='begin_pending';
+    if(remote.status==='not_found'){
+      // An active begin may reach the owner after our status read. Only a
+      // definitive rejection before allocation, or expiry, closes that window.
+      if(!cancelling||row.owner_receipt!==null||row.candidate_metadata!==null||row.grant_digest!==null||row.activate_sent_at!==null)
+        C.fail('broker_response_invalid');
+      if(row.last_error!=='meta_renewal_busy'&&+row.expires_at>+now()){
+        return requestTx(id,(current,transaction)=>current.state==='cancel_pending'
+          ? update(current,{next_attempt_at:current.expires_at},transaction) : current);
+      }
+    }else if(remote.status==='interrupted'||cancelling&&!['active','aborted','rejected'].includes(remote.status)){
+      remote=await call(row,'abort',{renewalId:id});
+      if(!remote.activationApplied&&remote.status!=='aborted')C.fail('broker_response_invalid');
     }
-    if(['aborted','rejected','interrupted','not_found'].includes(remote.status)){
+    if(remote.activationApplied)return requestTx(id,(row,transaction)=>apply(row,remote,transaction));
+    if(cancelling)return requestTx(id,(row,transaction)=>finishCancelled(row,remote,transaction));
+    if(['aborted','rejected'].includes(remote.status)){
       return requestTx(id,async(currentRow,transaction)=>{if(C.TERMINAL.includes(currentRow.state))return currentRow;const next=await update(currentRow,{state:'rejected',last_error:'meta_renewal_candidate_rejected',owner_receipt:JSON.stringify(remote),completed_at:now(),lease_token:null,lease_until:null},transaction);await record(next,'meta_credential_renewal_rejected',transaction);return next;});
     }
     if(row.state==='activate_pending'){
@@ -223,7 +233,15 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
           ...(requestedQuickChat?{quickChat:true,quickChatTargetsDigest:SocialConsent.targetDigest(requestedTargets)}:{})});
         await requestTx(row.renewal_id,async(currentRow,transaction)=>{await assertRequest(currentRow,transaction,{input,requireOrigin:true});if(currentRow.state!=='begin_pending')C.fail('meta_renewal_scope_changed',409);await update(currentRow,{state:'awaiting',next_attempt_at:new Date(+now()+30000)},transaction);},input);
         return {enabled:true,requestId:row.renewal_id,status:'awaiting',authUrl:remote.authUrl,expiresAt:remote.expiresAt};
-      }catch(error){await queueCancel(row.renewal_id,C.safe(error));throw error;}
+      }catch(error){
+        // An authenticated busy refusal precedes owner allocation. Record it
+        // distinctly from a timeout, whose outcome remains uncertain.
+        if(error?.code==='oauth_flow_busy'){
+          await queueCancel(row.renewal_id,'meta_renewal_busy');
+          C.fail('meta_renewal_busy',409);
+        }
+        await queueCancel(row.renewal_id,C.safe(error));throw error;
+      }
     },
     async callback({state,code,denied=false}){
       if(!C.STATE.test(state)||!denied&&(typeof code!=='string'||!(/^[\x21-\x7e]{1,4096}$/).test(code)))C.fail('meta_renewal_invalid',400);
