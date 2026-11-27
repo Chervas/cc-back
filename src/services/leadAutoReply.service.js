@@ -362,6 +362,9 @@ async function getStatus(clinicId) {
   ]);
   const config = normalizeConfig(flow?.trigger_config || {});
   const readiness = await buildReadiness(config, clinicId);
+  // The public form round-trips only the clinic's choices, including older clients.
+  delete config.inbound_capture_separate;
+  for (const rule of Object.values(config.social_entries)) delete rule.inbound_capture_separate;
   return {
     whatsapp_prepared_supported: true,
     separate_capture_supported: true,
@@ -433,9 +436,9 @@ async function saveConfig({ clinicId, actorUserId, input }) {
   const priorRules = socialEntries(previous?.trigger_config?.social_entries);
   for (const [key, rule] of Object.entries(config.social_entries)) {
     const prior = priorRules[key];
-    const comparable = value => value && JSON.stringify({action: value.action, audience: value.audience,
+    const comparable = value => value && JSON.stringify({action: value.action, audience: value.audience ?? (value.action === 'message' ? 'all' : undefined),
       origins: value.origins?.slice().sort(), version: value.version, text: value.text});
-    if (prior?.inbound_capture_separate || comparable(prior) !== comparable(rule)) rule.inbound_capture_separate = true;
+    if (rule.action !== 'notify' && (prior?.inbound_capture_separate || comparable(prior) !== comparable(rule))) rule.inbound_capture_separate = true;
     else delete rule.inbound_capture_separate;
   }
   const empty = !config.sources.length && !Object.keys(config.social_entries).length;
