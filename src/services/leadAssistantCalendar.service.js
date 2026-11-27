@@ -15,13 +15,22 @@ const normalize = (value) =>
     .trim();
 const contains = (phrase, name) => !!name && (' ' + phrase + ' ').includes(' ' + name + ' ');
 
+function defersBooking(text) {
+  const words = normalize(text);
+  if (/^(?:que pasa |y )?si no confirmo/.test(words)) return false;
+  return /\b(?:no (?:confirmo|(?:me )?reserves|(?:me )?agendes)|no quiero (?:una )?cita|mejor no reservar|me lo (?:pienso|pensare)|prefiero pensarlo)\b/.test(words);
+}
+
 function bookingRequest(text) {
   const value = normalize(text);
+  if (defersBooking(text)) return false;
+  if (/\bhuecos? (?:muy |bastante )?(?:oscur|hundid|marcad|que hace sombra|debajo|en la ojera|bajo (?:el|los) ojo)/.test(value) &&
+      !/\b(?:cita|horarios?|agenda|hora disponible|valoracion|hueco (?:libre|para una valoracion))\b/.test(value)) return false;
   return (
     !/\b(?:no (?:quiero|necesito|puedo)|cancelar|anular|cambiar mi cita|ya tengo (?:una )?cita|no (?:me |nos )?(?:des|deis|desearia|agendes|reserv(?:es|eis))|no me reserves)\b/.test(
       value
     ) &&
-    /\b(?:(?:quiero|quisiera|prefiero|me gustaria) que me (?:vea|vean|valore|valoren) (?:alguien|(?:un|una|el|la) (?:doctor[a]?|medic[oa]|profesional))|(?:darme|dame|pedir|reservar|coger) (?:una )?hora|(?:quiero|necesito) hora|dame (?:una )?cita|dadme (?:una )?cita|(?:queria|quiero|necesito|deseo|quisiera) (?:pedir |coger |una )?cita|me ibas a dar (?:una )?cita|(?:las |los )?(?:opciones|horarios|huecos) (?:de|para) (?:la )?cita|reservar|agendar|concertar|pedir (?:una )?cita|darme (?:una )?cita|(?:puedes|pueden|podeis) (?:darme|dar) (?:una )?cita|me (?:puedes|pueden|podeis) dar (?:una )?cita|(?:teneis|hay) (?:citas?|sitio)|me gustaria (?:una )?(?:cita|primera visita)|quiero (?:una )?cita|quisiera (?:una )?cita|me (?:das|dais) (?:una )?cita|huecos?|disponibilidad|(?:que |consultar |ver )(?:horarios?|horas?)(?: hay| teneis| tienes| disponibles?)?|(?:quins horaris hi ha|what appointment times are available)|horas? (?:libres?|disponibles?)|cuando (?:puedo ir|pueden atenderme|teneis cita))\b/.test(
+    /\b(?:(?:quiero|quisiera|prefiero|me gustaria) que me (?:vea|vean|valore|valoren) (?:alguien|(?:un|una|el|la) (?:doctor[a]?|medic[oa]|profesional))|(?:darme|dame|pedir|reservar|coger) (?:una )?hora|(?:quiero|necesito) hora|dame (?:una )?cita|dadme (?:una )?cita|(?:queria|quiero|necesito|deseo|quisiera) (?:pedir |coger |una )?cita|me ibas a dar (?:una )?cita|(?:las |los )?(?:opciones|horarios|huecos) (?:de|para) (?:la )?cita|reservar|agendar|concertar|pedir (?:una )?cita|darme (?:una )?cita|(?:puedes|pueden|podeis) (?:darme|dar) (?:una )?cita|me (?:puedes|pueden|podeis) dar (?:una )?cita|(?:teneis|hay) (?:citas?|sitio)|me gustaria (?:una )?(?:cita|primera visita)|quiero (?:una )?cita|quisiera (?:una )?cita|me (?:das|dais) (?:una )?cita|huecos?|primeras (?:horas|citas) (?:libres|disponibles|de verdad)|disponibilidad|(?:que |consultar |ver )(?:horarios?|horas?)(?: hay| teneis| tienes| disponibles?)?|(?:quins horaris hi ha|what appointment times are available)|horas? (?:libres?|disponibles?)|cuando (?:puedo ir|pueden atenderme|teneis cita))\b/.test(
       value
     )
   );
@@ -29,6 +38,8 @@ function bookingRequest(text) {
 
 function asksSessionAppointment(text) {
   const words = normalize(text);
+  if (/\b(?:ya tengo (?:una )?cita|tengo (?:una )?cita confirmada|llegaste a (?:reservarla|confirmarla)|(?:quedo|esta) (?:mi |la )?cita confirmada|si (?:te )?escribo info (?:ya )?estoy reservando)\b/.test(words) &&
+      !/\b(?:cancelar|cambiar|otra cita|ayer|anterior)\b/.test(words)) return true;
   return /\b(?:mi (?:cita|reserva)|la cita que (?:me has|hemos)|hemos (?:reservado|confirmado))\b/.test(words) &&
     /\b(?:cuando|que (?:dia|hora)|confirmad[ao]|reservad[ao]|hemos (?:reservado|confirmado)|ya tengo)\b/.test(words) &&
     !/\b(?:cambiar|anular|cancelar|otra cita|ayer|anterior|llamar|me llamen)\b/.test(words);
@@ -322,6 +333,7 @@ async function available({
 }
 
 module.exports = {
+  defersBooking,
   normalize,
   bookingRequest,
   asksSessionAppointment,
