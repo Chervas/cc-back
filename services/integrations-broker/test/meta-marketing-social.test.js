@@ -538,3 +538,15 @@ test('history reports the timed-out Graph stage and preserves a real Page rate l
 
 
 });
+
+test('page subscriptions keep quota headers when the response body is incomplete', async () => {
+  const { f, enable } = subscriptionFixture();
+  const observations = [];
+  f.ctx.subscriptionPacer.observe = (scope, used) => observations.push({ scope, used });
+  f.ctx.transport = async () => ({
+    headers: new Headers({ 'x-app-usage': '{"call_count":95}' }),
+    json: async () => { throw new SyntaxError('invalid JSON'); },
+  });
+  await assert.rejects(enable(), SyntaxError);
+  assert.deepEqual(observations, [{ scope: 'meta-ads-app:101', used: 95 }]);
+});

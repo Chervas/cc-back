@@ -189,6 +189,8 @@ async function execute({
         },
         ...(body ? { body: pageForm ? subscriptionForm(body, proof) : JSON.stringify(body) } : {}),
       });
+      if (operation === subscribe && response.headers)
+        subscriptionPacer.observe('meta-ads-app:' + metadata.appId, usage(Object.fromEntries(response.headers)));
       raw = await response.json();
     } catch (error) {
       if (signal?.aborted) {
@@ -197,8 +199,6 @@ async function execute({
       }
       throw error;
     }
-    if (operation === subscribe && response.headers)
-      subscriptionPacer.observe('meta-ads-app:' + metadata.appId, usage(Object.fromEntries(response.headers)));
     if ([subscribe, history].includes(operation) && (response.status === 429 || [4, 17, 32, 613, 80006].includes(raw.error?.code))) {
       const delay = operation === history ? historyRetryAfterMs(response.headers) : 0;
       historyFailure(path, 'rate_limited', response.status, raw.error?.code, delay);
