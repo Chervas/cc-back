@@ -15,7 +15,27 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     { tableName: 'Clinicas', timestamps: false },
   );
   await db.Clinica.sync();
-  await sql.getQueryInterface().createTable('Pacientes', { id_paciente: { type: D.INTEGER, primaryKey: true } });
+  db.Paciente = sql.define(
+    'Paciente',
+    {
+      id_paciente: { type: D.INTEGER, primaryKey: true },
+      clinica_id: D.INTEGER,
+      nombre: D.STRING,
+      apellidos: D.STRING,
+      telefono_movil: D.STRING,
+      telefono_secundario: D.STRING,
+      email: D.STRING,
+    },
+    { tableName: 'Pacientes' },
+  );
+  db.PacienteClinica = sql.define(
+    'PacienteClinica',
+    { paciente_id: D.INTEGER, clinica_id: D.INTEGER },
+    { tableName: 'PacienteClinicas' },
+  );
+  db.Paciente.hasMany(db.PacienteClinica, { as: 'clinicasVinculadas', foreignKey: 'paciente_id' });
+  await db.Paciente.sync();
+  await db.PacienteClinica.sync();
   await db.Clinica.bulkCreate([{ id_clinica: 41 }, { id_clinica: 42 }]);
   for (const name of [
     'AutomationFlowTemplateV2',
@@ -96,7 +116,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const capture = create({
     db,
     readSocial: async (key) => socialEntries.get(key),
-    resolveRoute: async () => route,
+    resolveRoute: async (_, event) => ({ ...route, channel: event.channel }),
     createExecution: (row) => db.FlowExecutionV2.create(row),
     enqueueJob: async (input) => {
       jobs.add(input.dedupeScope);
@@ -163,7 +183,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       clinic_id: 41,
       channel,
       contact_id: contactId,
-      ...(channel === 'instagram' ? { social_account_id: '501' } : {}),
+      ...(channel !== 'whatsapp' ? { social_account_id: '501' } : {}),
     });
   }
   let n = 0;
@@ -178,7 +198,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       at: new Date(timestamp).toISOString(),
       senderId: thread.contact_id,
       accountId: '501',
-      channel: 'instagram',
+      channel: thread.channel,
       eventId: mid,
       text: content,
       ...(!wa ? extra : {}),
@@ -216,7 +236,13 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     if (!wa) {
       Object.assign(entry, { messageId: m.id, conversationId: thread.id, clinicId: 41 });
       socialEntries.set(pk, entry);
-      await db.SocialInboxReceipt.create({ key: pk, event: entry, route, message_id: m.id, state: 'persisted' });
+      await db.SocialInboxReceipt.create({
+        key: pk,
+        event: entry,
+        route: { ...route, channel: entry.channel },
+        message_id: m.id,
+        state: 'persisted',
+      });
       if (dispatchSocial) {
         const module = require('../../services/socialLeadAutomation.service');
         const dispatch = require('../../services/automationInboundMessage.service');
@@ -290,8 +316,8 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const completed = await jobRunner.runJob(next);
   assert.equal(completed.status, 'completed', completed.error?.stack || JSON.stringify(completed));
   assert.equal((await commercial.claim.reload()).status, 'completed');
-  assert.equal(commercial.claim.owner_type,'inbound_lead_capture');
-  assert.equal(commercial.claim.owner_reference_id,active.execution.id);
+  assert.equal(commercial.claim.owner_type, 'inbound_lead_capture');
+  assert.equal(commercial.claim.owner_reference_id, active.execution.id);
   const beforeClassification = classified;
   const ambiguous = await inbound(profile, 'Ficticio ambiguo');
   const ambiguousKey = await capture.enqueue(ambiguous);
@@ -302,7 +328,15 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(active.result.origin, 'instagram');
   assert.ok(active.result.leadId);
   assert.equal((await capture.run(active.execution)).leadId, active.result.leadId);
+  const messenger = await contact('messenger', '779');
+  const messengerDm = await engine(await inbound(messenger, 'Gracias'));
+  assert.equal(messengerDm.result.origin, 'messenger');
+  assert.equal(messengerDm.result.reason, 'ignore');
+  assert.equal(messengerDm.result.leadId, null);
+  const cancelled = await capture.enqueue(await inbound(profile, 'INFO'));
   const sgOff = await config.save(db, 41, 'social', 11, false);
+  const cancelledExecution = await db.FlowExecutionV2.findByPk(cancelled.execution_id);
+  assert.equal((await capture.run(cancelledExecution)).reason, 'capture_not_eligible');
   assert.equal(sgOff.version, 2);
   assert.equal((await capture.enqueue(await inbound(profile, 'INFO'))).pending, false);
   assert.equal((await config.current(db, 41, 'whatsapp')).is_active, true);
@@ -318,7 +352,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     clinica_id: 41,
     phone: target.contact_id,
   });
-  async function send(policy, at, mid) {
+  async function send(policy, at, mid, overrides = {}) {
     return db.Message.create({
       conversation_id: target.id,
       direction: 'outbound',
@@ -339,6 +373,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
         template_commercial: true,
         recipient: target.contact_id,
         ...(policy ? { whatsapp_lead_capture_policy: policy } : {}),
+        ...overrides,
       },
     });
   }
@@ -368,9 +403,55 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.ok(jobs.size > 2);
   assert.ok(originalStart > Date.parse(since));
   assert.equal(await db.Message.count({ where: { direction: 'outbound', message_type: 'text' } }), 0);
+  const paused = await config.save(db, 41, 'whatsapp', 11, false);
+  assert.equal(paused.active, false);
+  const legacy = await db.MarketingPatientList.create({
+    clinica_id: 41,
+    name: 'Campaña antigua',
+    objective_id: 'mass_sends',
+    criteria: { record_kind: 'campaign', capture_whatsapp_info_leads: true },
+  });
+  const legacyItem = await db.MarketingPatientListItem.create({
+    list_id: legacy.id,
+    clinica_id: 41,
+    phone: target.contact_id,
+  });
+  await send(null, timestamp - 20000, 'wamid.classic', {
+    list_id: legacy.id,
+    item_id: legacyItem.id,
+    capture_whatsapp_info_leads: true,
+  });
+  const { attributeCampaignInfoReply } = require('../../services/marketingWhatsappReplyLead.service');
+  async function attributeClassic(metadata, id) {
+    const input = await inbound(target, 'INFO', { ...metadata, context: { id } });
+    assert.equal((await capture.enqueue(input)).pending, false);
+    return sql.transaction((transaction) =>
+      attributeCampaignInfoReply({
+        db,
+        conversation: target,
+        message: input.message,
+        binding: { clinicId: 41, phoneId: '501', wabaId: '801' },
+        freshDispatch: true,
+        transaction,
+      }),
+    );
+  }
+  const classicNative = await attributeClassic({ phoneId: '501', wabaId: '801' }, 'wamid.classic');
+  const classicFresh = await attributeClassic(
+    { passive_recovery: true, fresh_inbound_authorization_id: 'fixture' },
+    'wamid.classic',
+  );
+  assert.equal(classicNative.lead.id, classicFresh.lead.id);
+  assert.equal(classicFresh.duplicate, true);
+  assert.equal(await attributeClassic({}, 'wamid.disabled'), null);
+  assert.equal(await attributeClassic({}, 'wamid.active'), null);
+  assert.equal(await db.LeadIntake.count(), 4);
   report.capture = {
     queueToEngineToExecutionListing: true,
-    distinctLeads: 3,
+    distinctLeads: 4,
+    historicalCampaignStillCapturesWhilePaused: true,
+    unconfiguredSocialReplySkipped: true,
+    messengerInbox: true,
     providerSends: 0,
     concurrentReplay: true,
     independentPublications: true,
