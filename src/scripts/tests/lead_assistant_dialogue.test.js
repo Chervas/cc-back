@@ -130,3 +130,18 @@ test('callback consent, greeting and acceptance of real scheduling work independ
   assert(acceptsOfferedTimes('vale dímelos','¿Quieres que mire horarios?'));
   assert(!acceptsOfferedTimes('sí','¿Lo que te preocupa es el volumen?'));
 });
+
+test('alternatives and prices require an active indication for the requested area and goal',()=>{
+  const {groundedFollowup}=require('../../services/leadAssistantConversationPolicy.service');
+  const fields={context:'Información general',booking:'Consulta médica.',promotions:[
+    'C01-01 · Valoración de contorno','Tratamiento para reducir volumen bajo el mentón.','Precio: 42 €.',
+    'C01-02 · Cuidado corporal','Tratamiento para reducir volumen en abdomen.','Precio: 129 €.',
+    'C01-03 · Opción retirada','Vigencia: 2001-01-01 a 2001-02-28','Tratamiento para reducir volumen bajo el mentón.','Precio: 1 €.',
+  ].join('\n')};
+  const history=[{role:'user',text:'Quiero reducir la papada'}];
+  const ask=userText=>groundedFollowup({fields,history,userText});
+  assert.match(ask('¿Tenéis otra cosa?'),/Valoración de contorno/);
+  assert.match(ask('¿Cuánto vale?'),/42 €/);assert.doesNotMatch(ask('¿Cuánto vale?'),/129 €|1 €|retirada/);
+  const modality=ask('¿La valoración es por teléfono?');assert.match(modality,/No tengo confirmado/);
+  assert.deepEqual(requestedHumanHandoff('Sí, por favor',modality),{requestedCallback:true});
+});

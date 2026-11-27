@@ -132,7 +132,7 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const facts = [fields.guardrails, fields.booking].filter(Boolean)
     .flatMap(value => value.replace(/https?:\/\/\S+/g, '').match(/[\s\S]{1,1000}/g) || []);
   const history = await readHistory();
-  const localAnswer = require('./leadAssistantConversationPolicy.service').groundedFollowup({userText,history,offer,fields});
+  const localAnswer = require('./leadAssistantConversationPolicy.service').groundedFollowup({userText,history,offer,fields,timezone});
   if (localAnswer) return {reply:localAnswer,imageId:null};
   const retryQuestion = /(?:no (?:me )?(?:est[aá]s |has )?(?:respond|contest)|no era (?:eso|mi pregunta)|eso no (?:es |responde)|te (?:he )?pregunt)/i;
   const repair = retryQuestion.test(userText);
@@ -210,8 +210,10 @@ function formatCommercialReply({ firstTurn, clinicName, tone, draft }) {
   return text(introduction(clinicName, tone) + content, 1000);
 }
 
-function requestedHumanHandoff(message) {
+function requestedHumanHandoff(message, previous) {
   const body = text(message, 1000).normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+  if (/^(?:si|vale|de acuerdo|por favor|si por favor)[,.! ]*$/.test(body.replace(/,/g,'').trim()) &&
+      /¿quieres que (?:pida al equipo que te llame|solicite una llamada|te llame el equipo)\b/i.test(previous || '')) return {requestedCallback:true};
   const asksForPerson = /\b(?:hablar con|pas(?:a|ame|as|arme) con|atienda|atenderme|contactar con) (?:una? |alguien de |el |la )?(?:persona|directora?(?: de pacientes)?|recepcion(?:ista)?|equipo|alguien|humano)\b/;
   const byPhone = /\b(?:quiero|prefiero|me gustaria|puedo|podemos|podriamos|quisiera) (?:que (?:me |nos )?)?(?:hablar|comentar|consultar|contactar)\b.{0,65}\b(?:por telefono|telefonic\w*)\b/.test(body);
   const asksForCall = byPhone || /\b(?:que me llamen|llamadme|llamame|pueden llamarme|me llamais|me llaman|(?:que )?me (?:expliquen|informen|atiendan|asesoren|contacten)(?: [a-z]+){0,4} por telefono|(?:prefiero|quiero|necesito) (?:una llamada|que me llamen)|(?:me )?(?:podriais|podeis|pueden) (?:llamarme|llamar))\b/.test(body);
