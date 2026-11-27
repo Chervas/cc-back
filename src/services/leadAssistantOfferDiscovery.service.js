@@ -36,7 +36,7 @@ function areaSelection(sections, entry, options) {
   const text = words(entry.text);
   const area = areaIn(text);
   if (!area || area.name === 'rostro' || /\b(?:reducir|papada|volumen|grasa|alerg\w*|dolor|despues|no quiero|no me interesa)\b/.test(text)) return null;
-  if (!(promotion.test(text) || text.split(' ').length <= 4 || /\b(?:algo para|me interesan?|opciones para)\b/.test(text))) return null;
+  if (!(promotion.test(text) || text.split(' ').length <= 4 || /\b(?:algo para|me interesan?|opciones para|sobre todo|para (?:la zona|debajo|el contorno))\b/.test(text))) return null;
   const matches = activeInArea(sections, area, options).filter(([, section]) =>
     !filler.test(text) || filler.test(words(section.title)));
   return matches.length === 1 ? matches[0][0] : null;
@@ -118,6 +118,12 @@ function catalogueReply({ fields, offer, history, userText, timezone }) {
     }
   }
   const price = currentPrice(offer.terms);
+  if (price && /\b(?:que incluye|que entra|en que consiste la (?:oferta|promocion))\b/.test(text) &&
+      !/\b(?:valoracion|consulta|anestesia|revision|financiacion)\b/.test(text)) {
+    const detail = price.split(/, (?=\d+ (?:sesi[oó]n(?:es)?|citas?|ml)\b)/i);
+    if (detail.length > 1 && /[€£$]|euros?/i.test(detail[0]))
+      return 'La oferta de «' + offer.title + '» incluye ' + detail.slice(1).join(', ') + ' por ' + detail[0] + '.';
+  }
   const selecting = area && (text.split(' ').length <= 4 || /\b(?:algo para|me interesa)\b/.test(text));
   if (!price || !(asksOffer || pricing || selecting || reference.test(text)) ||
       /\b(?:fotos?|imagen\w*|contraindic\w*|duele|embaraz\w*|caduc\w*|otra zona|cuanto dura|financi\w*)\b/.test(text)) return null;
