@@ -19,6 +19,28 @@ const slug = (name) =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
 
+// Tables supply the price and approved media. A separate Markdown section can
+// describe the same treatment. Only attach it when its heading identifies one offer.
+function attachOfferGuides(markdown, sections) {
+  const tokens = title => slug(title.split(' · ')[0]).split('-').filter(w => w.length > 2 &&
+    !['para','con','del','los','las','una','por','bajo','hasta','entre','black','friday','bono'].includes(w));
+  const names = [...sections.values()].map(section=>({section, words:tokens(section.title)}));
+  const blocks = [...markdown.matchAll(/^#{1,6}\s+(.+)$/gm)];
+  for (let i = 0; i < blocks.length; i++) {
+    const title = tokens(blocks[i][1]);
+    if (!title.length) continue;
+    const matches = names.filter(({words})=>words.length && (words.every(w=>title.includes(w)) ||
+      (title.length >= 2 && title.every(w=>words.includes(w)))));
+    if (matches.length !== 1) continue;
+    const from = blocks[i].index + blocks[i][0].length;
+    const content = markdown.slice(from,blocks[i+1]?.index ?? markdown.length).trim();
+    if (content && !content.startsWith('|')) {
+      const section = matches[0].section;
+      section.guide = [section.guide,content].filter(Boolean).join('\n');
+    }
+  }
+}
+
 function tableOffers(value) {
   const rows = require('../lib/lead-assistant-tables').tableRows(value, [
     /tratamiento|promocion|oferta/, /precio|importe/, /imagen|archivo visual|creatividad|foto/,
@@ -36,6 +58,7 @@ function tableOffers(value) {
     }
     sections.set(key, section);
   }
+  attachOfferGuides(value, sections);
   return sections;
 }
 

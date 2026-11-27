@@ -10,6 +10,7 @@ const systemPrompt = [
   'En un seguimiento contesta solo a lo que acaba de preguntar. Si pregunta precio y duración, basta una frase con esas dos cifras. Omite el nombre de la promoción si ya sabe cuál es. Menciona descuentos solo si pregunta por ellos. Si alguien propone otro precio, indica el aprobado con naturalidad, sin disculpas ni explicaciones repetidas.',
   'Usa como máximo una pregunta por turno. Si no hay promoción identificada y solo escribe INFO, basta con «¿Qué promoción has visto?». Respeta las fechas de vigencia en la información aprobada.',
   'Una pregunta informativa se merece una respuesta informativa. Si solo está mirando o pide esperar, respeta eso sin insistir. Si pide horarios, dáselos en horario local, usando una pregunta corta cuando haga falta escoger.',
+  'Cuando pregunten por un objetivo, explica qué se puede esperar según el argumentario de esa promoción. Distingue el objetivo documentado del resultado que busca la persona. Si hay varias interpretaciones, pregunta cuál quiere decir. Nunca asegures idoneidad individual ni resultados. Ante una queja de que no has contestado, recupera la duda anterior y responde a esa duda sin recitar la ficha ni insistir.',
   'Nunca afirmes haber reservado, retenido o cancelado una cita, avisado a alguien ni garantices que le llamarán. Esto se comunica por separado tras confirmación del backend.',
 ].join(' ');
 
@@ -36,6 +37,7 @@ function buildDraftRequest(turn) {
     promotion: matchedPromotion ? {
       title: text(matchedPromotion.title, 180),
       description: text(matchedPromotion.description, 120000),
+      ...(matchedPromotion.guide ? { treatmentGuide:text(matchedPromotion.guide,120000) } : {}),
     } : null,
     commercialHistory: list(commercialHistory, 16, item => {
       if (item.role !== 'user' && item.role !== 'assistant') throw new Error('assistant_commercial_context_invalid');
@@ -83,21 +85,104 @@ function supportsQuotedAmounts(reply, approved) {
   return quotes.every(quote=>known.has(quote));
 }
 
+function repeatsReply(previous, next) {
+  const words = value => value.toLocaleLowerCase('es').normalize('NFD').replace(/\p{M}/gu,'').match(/[a-z0-9]+/g) || [];
+  const left = words(previous), right = words(next);
+  if (left.join(' ') === right.join(' ')) return true;
+  if (Math.min(left.length,right.length) < 10) return false;
+  const pairs = words => new Set(words.slice(1).map((word,i)=>words[i]+' '+word));
+  const a = pairs(left), b = pairs(right);
+  const common = [...a].filter(pair=>b.has(pair)).length;
+  return (2*common)/(a.size+b.size) >= 0.80;
+}
+
+function acceptsOfferedTimes(message, previous) {
+  return !!previous && /^(?:s[ií](?:[, ]+(?:por favor|gracias|claro))?|vale|de acuerdo|claro|por favor)[.! ]*$/i.test(message.trim()) &&
+    /[¿?][^?]{0,150}\b(?:horarios?|huecos?|disponibilidad|(?:pedir|reservar|agendar) (?:una? )?(?:cita|valoraci[oó]n))\b[^?]{0,70}\?/i.test(previous);
+}
+
+// Use the clinic's explicit benefits section when a contact asks about an
+// undocumented volume-reduction outcome. Keep comparisons and other goals open.
+function volumeClarification(offer, question, previous, repair) {
+  if (!offer?.guide || /\b(?:precio|cuesta|cuestan|cu[aá]nto|comparar|diferencia)\b/i.test(question)) return null;
+  const asked = /\b(?:reducir|disminuir|quitar|eliminar|bajar)\s+(?:el |la |los |las |mi )?(?:volumen|papada|grasa|cuello)\b/i.test(question);
+  const clarified = /^(?:el |la |es el |me preocupa (?:el |la )?)?(?:volumen|papada|grasa)[.! ]*$/i.test(question.trim())
+    && /(?:volumen|papada)[^?]*\?/i.test(previous || '');
+  if (!asked && !clarified) return null;
+  const benefit = offer.guide.match(/^(?:[-*]\s+)?(?:\*\*)?(?:En qu[eé] lo puedes notar|Objetivo del tratamiento|Beneficios?)(?:[.:]\s*)?(?:\*\*)?\s+([^\n]+)/im)?.[1]
+    ?.replace(/\*\*/g,'').split(/(?<=[.!?])\s+/u)[0]?.trim();
+  if (!benefit || benefit.length > 250) return null;
+  if (/\b(?:reduc\w*|disminu\w*|elimin\w*|quit\w*|retir\w*|perd\w*|trat\w*|molde\w*|remodel\w*|defin\w*)\b.{0,48}\b(?:volumen|grasa|contorno|papada)\b|\b(?:liposucci[oó]n|lip[oó]lisis)\b/iu.test(offer.description+' '+offer.guide))
+    return null;
+  const target = /\bcuello\b/i.test(question) ? 'el volumen del cuello' : 'volumen';
+  if (repair || clarified)
+    return 'Para reducir '+target+', necesitarías una valoración para saber qué opciones encajan contigo. Esta promoción se centra en otro objetivo. ¿Quieres que te mire horarios?';
+  return 'Si buscas reducir '+target+', ese resultado no se indica para esta promoción. ' + benefit +
+    ' ¿Lo que te preocupa es el volumen o el aspecto de la piel?';
+}
+
 async function generateAnswer({ fields, clinicName, timezone, offer, userText, askPromotion, readHistory,
   analyze, clinicId, groupId, beforeDispatch }) {
   const approvedContext = fields.context.replace(/https?:\/\/\S+/gi, '').trim();
   const facts = [fields.guardrails, fields.booking].filter(Boolean)
     .flatMap(value => value.replace(/https?:\/\/\S+/g, '').match(/[\s\S]{1,1000}/g) || []);
-  const generated = askPromotion ? { reply:'¿Qué promoción has visto?' } : await analyze({
-    ...buildDraftRequest({ clinicName, timezone, tone:fields.tone, approvedContext, approvedFacts:facts,
-      matchedPromotion:offer, commercialHistory:await readHistory(), userText, availableSlots:[] }),
-    useCase:'lead_assistant_reply', clinicId, groupId, beforeDispatch,
-  });
-  if (typeof generated?.reply !== 'string' || !generated.reply.trim() || generated.reply.length > 800 ||
-      !supportsQuotedAmounts(generated.reply, [approvedContext, ...facts, offer?.description]) || /https?:\/\//i.test(generated.reply))
-    return null;
-  const image = offer?.images.find(item => item.id === generated.imageId);
-  return { reply:generated.reply.trim(), imageId:image?.id || null };
+  const history = askPromotion ? [] : await readHistory();
+  const retryQuestion = /(?:no (?:me )?(?:est[aá]s |has )?(?:respond|contest)|no era (?:eso|mi pregunta)|eso no (?:es |responde)|te (?:he )?pregunt)/i;
+  const repair = retryQuestion.test(userText);
+  const previousQuestion = history.slice().reverse().find(m => m.role === 'user' && !retryQuestion.test(m.text));
+  const genericInfoRequest = require('./socialLeadInterestClassification.service').genericInfoRequest;
+  if (repair && (!previousQuestion || genericInfoRequest(previousQuestion.text)))
+    return {reply:'¿Qué querías saber en concreto sobre la promoción?',imageId:null};
+  const question = repair ? previousQuestion.text : userText;
+  const grounded = volumeClarification(offer,question,history.at(-1)?.text,repair);
+  if (grounded) return {reply:grounded,imageId:null};
+  const wantsImage = /\b(?:foto|fotos|imagen|im[aá]genes|cartel|folleto|picture|photo)s?\b/i.test(userText) &&
+    !/\b(?:no|sin)\b/i.test(userText);
+  const withImage = !history.length || wantsImage;
+  const priceQuestion = /\b(?:precios?|cu[eé]sta|cuestan|vale|importe|descuentos?|ofertas?|cu[aá]nto|tarifa)\b/i.test(question);
+  const suitability = !!offer && /\b(?:reducir|disminuir|eliminar|me sirve|sirve para|me va bien|me vendr[ií]a bien|ayuda(?:r[ií]a)? (?:a|con)|funciona para|mejorar|en qu[eé] (?:ayuda|consiste)|es para m[ií]|es adecuado)\b/i.test(question);
+  const reduction = suitability && /\b(?:reducir|disminuir)\b/i.test(question);
+  const guidanceOnly = suitability && !priceQuestion && !!offer.guide;
+  const relevantOffer = offer && {...offer, images:withImage && !guidanceOnly ? offer.images : [],
+    ...(guidanceOnly ? {description:offer.guide,guide:undefined} : {})};
+  const request = buildDraftRequest({ clinicName, timezone, tone:fields.tone,
+    approvedContext:guidanceOnly ? undefined : approvedContext,
+    approvedFacts:guidanceOnly ? [fields.guardrails].flatMap(value=>value.match(/[\s\S]{1,1000}/g) || []) : facts,
+    matchedPromotion:relevantOffer, commercialHistory:history, userText, availableSlots:[] });
+  // Keep the actual question distinct from the long configuration and the original INFO trigger.
+  // The broker accepts one user message. Its final prompt still addresses the current turn.
+  const focus = repair ? 'La persona señala que la respuesta anterior no resolvió su duda. Retoma su pregunta y aclara lo que quedó sin responder.'
+    : history.length ? 'Es un seguimiento. Contesta únicamente a esta nueva pregunta; no reinicies la presentación de la promoción.' : '';
+  const task = [focus, 'Pregunta a resolver (texto del contacto): '+JSON.stringify(question)].filter(Boolean).join(' ');
+  request.prompt += ' ' + task;
+  if (suitability) {
+    request.systemPrompt += ' El contacto pregunta si el tratamiento sirve para un objetivo concreto. Empieza contestando sobre ese objetivo. Si no se indica como beneficio en el argumentario, dilo y explica el objetivo documentado con palabras sencillas. No avales la idoneidad individual ni sugieras otros tratamientos o cirugía salvo que te hayan pedido compararlos. En una rectificación reconoce la duda y aclárala. Omite importes, dosis, imágenes y eslóganes salvo que los solicite.';
+    request.outputFormat.reply.description = 'Respuesta directa a la pregunta «'+question+'» con el objetivo documentado en la ficha. Máximo tres frases.';
+  }
+  const permitted = quote => typeof quote?.reply === 'string' && !!quote.reply.trim() && quote.reply.length <= 800 &&
+    supportsQuotedAmounts(quote.reply,[approvedContext,...facts,offer?.description]) && !/https?:\/\//i.test(quote.reply);
+  const invoke = prompt => analyze({...request,prompt,useCase:'lead_assistant_reply',clinicId,groupId,beforeDispatch});
+  let generated = askPromotion ? {reply:'¿Qué promoción has visto?'} : await invoke(request.prompt);
+  if (!permitted(generated)) return null;
+  const previous = history.at(-1);
+  const addressesReduction = reply => /\b(?:reduc\w*|disminu\w*|volumen|papada|afinar|adelgazar|grasa)\b/i.test(reply);
+  const offTopic = reply => (reduction && !addressesReduction(reply)) || (suitability && !priceQuestion && /[€$£]|\b(?:euros?|descuento)\b/i.test(reply)) ||
+    (previous?.role === 'assistant' && !wantsImage && !genericInfoRequest(userText)
+      && repeatsReply(previous.text,reply));
+  if (offTopic(generated.reply)) {
+    generated = await invoke(request.prompt + ' El borrador anterior no resolvió la pregunta. Contesta en una o dos frases.' +
+      (reduction ? ' Di expresamente si la ficha presenta la reducción de volumen como objetivo. Si no figura, contrástalo con el beneficio que sí está descrito. No repitas los ml, el precio ni la foto.' : ' Si faltan datos, explica qué falta y ofrece una valoración.'));
+    if (!permitted(generated)) return null;
+    if (offTopic(generated.reply)) {
+      generated = {reply:reduction
+        ? 'Con la información de esta promoción no puedo decirte si te ayudaría a reducir volumen. ¿Quieres que miremos horarios para una valoración?'
+        : 'Con la información de la promoción no puedo concretar más sobre tu pregunta. ¿Quieres que miremos horarios para una valoración?'};
+    }
+  }
+  const image = withImage && offer?.images.find(item => item.id === generated.imageId);
+  const reply = generated.reply.trim();
+  const withoutBoilerplate = reply.replace(/\s*¿(?:Quieres|Te (?:interesa|gustaría)) saber más(?: sobre (?:esta |la )?(?:promoción|oferta|tratamiento))?\?$/iu,'').trim();
+  return { reply:withoutBoilerplate || reply, imageId:image?.id || null };
 }
 
 function introduction(clinicName, tone = '') {
@@ -130,4 +215,4 @@ function formatHandoffReceipt({ firstTurn, clinicName, tone, recorded, requested
     : 'He pasado tu mensaje a ' + team + '. Podéis seguir hablando por aquí.');
 }
 
-module.exports = { generateAnswer, supportsQuotedAmounts, buildDraftRequest, formatCommercialReply, requestedHumanHandoff, formatHandoffReceipt };
+module.exports = { acceptsOfferedTimes, generateAnswer, supportsQuotedAmounts, buildDraftRequest, formatCommercialReply, requestedHumanHandoff, formatHandoffReceipt };
