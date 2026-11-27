@@ -243,3 +243,16 @@ test('only an active standalone service can contribute its regular tariff, a pro
   for(const name of ['Oculto','Sin revisar','Revisión']) assert.equal(await read('price','precio de '+name,[],fields,null),null);
   assert.doesNotMatch(await read('services','qué servicios tenéis',[],fields,null),/uso interno|oculto|revisión/i);
 });
+
+test('a named service does not inherit the price or the booking context of another promotion',()=>{
+  const {commercialOffer,exchangeContext}=require('../../services/leadAssistantConversation.service');
+  const fields={promotions:'## Contorno de ojos\n170 € · 1 sesión'};
+  const previous=commercialOffer(fields,{type:'dm',text:'algo para los ojos'},null,{});
+  assert(previous);
+  for (const question of ['¿Y cuánto cuesta el drenaje linfático médico?','Precio habitual del drenaje linfático médico']) {
+    const next=exchangeContext(fields,{type:'dm',text:question},{promotionKey:previous.key},'Europe/Madrid');
+    assert.equal(next.offer,null);assert.equal(next.changed,true);
+  }
+  for(const question of ['¿Cuánto vale la sesión?','¿Y el precio?','¿Cuánto cuesta el contorno de ojos?'])
+    assert.equal(commercialOffer(fields,{type:'dm',text:question},previous.key,{}).key,previous.key);
+});

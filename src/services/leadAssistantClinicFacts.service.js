@@ -1,7 +1,6 @@
 'use strict';
 
 const { normalize } = require('./leadAssistantCalendar.service');
-const { readOpeningHours } = require('./leadAssistantHours.service');
 const { catalogPrice, catalogState } = require('../lib/treatment-catalog-contract');
 const { saleMode } = require('../lib/treatment-commercial-policy');
 const { bookingVisibility } = require('../lib/treatment-booking-visibility');
@@ -23,6 +22,26 @@ function intent(text) {
   if (services.test(q)) return 'services';
   if (price.test(q) && (!promotion.test(q) || regular.test(q))) return 'price';
   return null;
+}
+
+// A named tariff starts a new subject. References to the current session, location
+// or consultation continue through the ordinary offer and booking rules.
+function namedTariff(text) {
+  const q = normalize(text);
+  const match = q.match(/\b(?:cuanto (?:cuesta|vale|sale)n?|que precio tiene[n]?|(?:precio|tarifa)(?: (?:habitual|normal))? (?:de|del|para)) (.+)$/);
+  if (!match) return null;
+  const name = match[1].replace(/^(?:para |de |del )?(?:la |el |las |los |un |una )?/, '')
+    .replace(/ (?:sin (?:la )?(?:promo\w*|oferta)|normalmente|por favor|en total).*$/, '').trim();
+  if (!name || /^(?:esto|eso|esta|este|esa|ese|cada|ambos|todo|en |por |para |aproximadamente|normalmente|total|gratis|dinero)\b/.test(name) ||
+      /^(?:(?:primera|otra|misma) )?(?:valoracion|consulta|visita|cita|sesion(?:es)?|promo(?:cion)?|tratamiento|oferta|zona|relleno)(?: (?:de |para )?(?:ojeras|ojos))?$/.test(name)) return null;
+  return name;
+}
+
+function switchesPricedService(question, previousTitle) {
+  const requested = namedTariff(question);
+  if (!requested) return false;
+  const significant = requested.split(' ').filter(word=>word.length>2 && !['del','los','las','una','para','por'].includes(word));
+  return significant.length > 0 && !significant.some(word=>mentions(previousTitle,word));
 }
 
 const mentions = (text, term) => (' ' + normalize(text) + ' ').includes(' ' + normalize(term) + ' ');
@@ -114,7 +133,7 @@ async function read(db, clinicId, kind, question, history, fields, offer) {
   if (kind === 'hours') {
     const clinic = await db.Clinica.findByPk(clinicId,{attributes:['id_clinica','grupoClinicaId'],raw:true});
     if (!clinic) return null;
-    const {hours} = await readOpeningHours(db,clinic);
+    const {hours} = await require('./leadAssistantHours.service').readOpeningHours(db,clinic);
     return formatHours(hours,q);
   }
   if (kind === 'address') {
@@ -150,4 +169,4 @@ async function read(db, clinicId, kind, question, history, fields, offer) {
   return null;
 }
 
-module.exports = {intent, regular, regularPriceLines, writtenAnswer, relevantManual, read};
+module.exports = {intent, regular, namedTariff, switchesPricedService, regularPriceLines, writtenAnswer, relevantManual, read};
