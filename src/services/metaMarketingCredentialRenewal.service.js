@@ -132,6 +132,7 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     if(pointer){const [changed]=await P.update(value,{where:{enrollment_id:row.enrollment_id,epoch:Number(row.expected_epoch),version_id:row.expected_version_id,candidate_digest:row.expected_candidate_digest},transaction,logging:false});if(changed!==1)C.fail('meta_renewal_version_changed',409);}
     else{if(context.effective.epoch!==0)C.fail('meta_renewal_version_changed',409);await P.create(value,{transaction,logging:false});}
     const next=await update(row,{state:'active',owner_receipt:ownerReceipt,completed_at:now(),lease_token:null,lease_until:null,last_error:null},transaction);
+    await require('./socialInboxSubscriptions.service').enqueuePages(models,context.enrollment,checked.versionId,transaction);
     await record(next,'meta_credential_renewal_activated',transaction);return next;
   }
   async function queueCancel(id,code=null,input=null){return requestTx(id,async(row,transaction)=>{if(C.TERMINAL.includes(row.state))return row;
