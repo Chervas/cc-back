@@ -80,7 +80,11 @@ function createMetaMarketingCredentialRenewal({ store, epochs, enrollment, oauth
         if (record.enrollment !== grant.row.id || accounts.some(a => !allowed.some(b => SocialConsent.sameTarget(a, b)))) fail('scope_denied');
         quickChat = {
           scopes: SocialConsent.scopesFor(base.scopes, accounts),
-          inspect: raw => SocialConsent.inspect(raw, binding, check().credential.metadata, accounts, now()),
+          inspect: raw => {
+            const current = check();
+            const activeConsent = social.active(current.row.id, current.credential, current.row.flow);
+            return SocialConsent.inspect(raw, binding, current.credential.metadata, accounts, now(), activeConsent);
+          },
           capture(digest, proof) {
             if (!proof || proof.subjectId !== check().credential.metadata.subjectId) fail('oauth_credentials_incomplete');
             social.capture(id, digest, proof);

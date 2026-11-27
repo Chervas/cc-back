@@ -84,18 +84,26 @@ function journal(store) {
   };
 }
 
-function inspect(raw, binding, original, accounts, now) {
-  const base = C.bindingFor(binding);
-  const scopes = scopesFor(base.scopes, accounts);
-  const checked = C.inspected(raw, { ...binding, metaMarketingOAuth: { ...base, scopes } }, now);
+function hasPermission(metadata, scope, account) {
+  if (!metadata.scopes.includes(scope)) return false;
+  const granular = metadata.granularScopes.find(entry => entry.scope === scope);
+  return !granular || granular.targetIds.includes(account.pageId) || granular.targetIds.includes(account.accountId);
+}
+
+function inspect(raw, binding, original, accounts, now, activeConsent) {
+  const checked = inspectInitial(raw, binding, accounts, now);
   if (checked.subjectId !== original.subjectId || checked.appId !== original.appId || checked.tokenType !== 'USER') fail('oauth_identity_mismatch');
+
+  const previousAccounts = activeConsent ? JSON.parse(activeConsent.accounts) : [];
+  const previousProof = activeConsent && JSON.parse(activeConsent.metadata);
   for (const account of accounts) {
-    const required = scopesFor([], [account]);
-    if (checked.granularScopes.some(g => required.includes(g.scope) && !g.targetIds.some(id => id === account.pageId || id === account.accountId)))
-      fail('oauth_credentials_incomplete');
+    const previous = previousAccounts.some(a => sameTarget(a, account)) ? previousProof : original;
+    for (const scope of scopesFor([], [account])) {
+      if (hasPermission(previous, scope, account) && !hasPermission(checked, scope, account))
+        fail('oauth_credentials_incomplete');
+    }
   }
-  const targets = new Set(accounts.flatMap(a => [a.accountId, a.pageId]));
-  return { ...checked, granularScopes: checked.granularScopes.map(g => ({ ...g, targetIds: g.targetIds.filter(id => targets.has(id)) })) };
+  return checked;
 }
 
 // Marketing keeps the scopes pinned to its binding. For the normal Meta login,

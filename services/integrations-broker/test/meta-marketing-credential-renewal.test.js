@@ -73,18 +73,20 @@ test('QuickChat consent is bound to the active USER candidate, the enrolled Page
   assert.equal((await query()).data.available,false);
   const first = r.next(explicit);
   assert.deepEqual(new URL((await first.begin()).data.authUrl).searchParams.get('scope').split(','), wanted);
-  await assert.rejects(first.finish(), { code: 'oauth_credentials_incomplete' });
+  const marketingOnly = (await first.finish()).data.candidate;
   assert.equal(j.active(r.id, active()), null);
-  await first.abort();
+  await first.activate(marketingOnly);
+  assert.equal((await query()).data.available,false);
+  assert.deepEqual(JSON.parse(j.active(r.id, active()).metadata).scopes, [...base].sort());
   const valid = r.next(explicit);
   await valid.begin();
   f.state.afterGraph = (kind, value) => kind === 'inspect' ? {data:{...value.data,scopes:wanted}} : value;
   const candidate = (await valid.finish()).data.candidate;
-  assert.equal(j.active(r.id, active()), null);
+  assert.deepEqual(JSON.parse(j.active(r.id, active()).metadata).scopes, [...base].sort());
   await valid.activate(candidate);
   assert.equal((await query()).data.available,true);
   await assert.rejects(f.execute(provider.status,{...payload,clinicId:72},{assetRef:'meta-facebook_page:401'},'reader'),{code:'scope_denied'});
-  assert.equal(reads.length,2);
+  assert.equal(reads.length,3);
   const current = active(), proof=j.active(r.id,current);
   assert.deepEqual(JSON.parse(proof.accounts), social.targetsFor(accounts,[{kind:'facebook_page',id:'401'}],[71]));
   assert.deepEqual(JSON.parse(proof.metadata).scopes, wanted);
@@ -93,8 +95,40 @@ test('QuickChat consent is bound to the active USER candidate, the enrolled Page
   assert.equal(j.active(randomUUID(),current),null);
   const next=r.next();
   assert.deepEqual(new URL((await next.begin()).data.authUrl).searchParams.get('scope').split(','),wanted);
+  f.state.afterGraph = (kind, value) => kind === 'inspect' ? {data:{...value.data,
+    scopes:wanted.filter(scope => scope !== 'instagram_manage_messages')}} : value;
+  await assert.rejects(next.finish(), {code:'oauth_credentials_incomplete'});
   await next.abort();
+  const narrowed = r.next();
+  await narrowed.begin();
+  f.state.afterGraph = (kind, value) => kind === 'inspect' ? {data:{...value.data,scopes:wanted,
+    granular_scopes:[...(value.data.granular_scopes || []),{scope:'instagram_manage_messages',target_ids:['999']}]}} : value;
+  await assert.rejects(narrowed.finish(), {code:'oauth_credentials_incomplete'});
+  await narrowed.abort();
   assert.equal(j.active(r.id,active()).candidate_digest,current.digest);
+});
+
+test('ordinary renewal can enable Messenger on one Page while Instagram remains ungranted', async t => {
+  const social = require('../src/meta-marketing-social-consent');
+  const accounts = [
+    { channel: 'instagram', accountId: '501', pageId: '401', clinicId: 71 },
+    { channel: 'messenger', accountId: '401', pageId: '401', clinicId: 71 },
+  ];
+  const r = await ready(t, { leads: true, socialInbox: accounts, socialConsentOnly: true });
+  const f = r.f, chosen = social.targetsFor(accounts, r.grant.assets, [71]);
+  const next = r.next({ quickChat: true, quickChatTargetsDigest: social.targetDigest(chosen) });
+  await next.begin();
+  f.state.afterGraph = (kind, value) => kind === 'inspect' ? {data:{...value.data,
+    scopes:[...value.data.scopes,'pages_messaging'], granular_scopes:[...(value.data.granular_scopes || []),
+      {scope:'pages_messaging',target_ids:['401','999']}]}} : value;
+  await next.activate((await next.finish()).data.candidate);
+  const row = f.current.store.db.prepare('SELECT * FROM meta_marketing_enrollments WHERE id=?').get(r.id);
+  const current = f.current.epochs.current(row, f.binding);
+  const proof = JSON.parse(social.journal(f.current.store).active(r.id, current).metadata);
+  assert.ok(proof.scopes.includes('pages_messaging'));
+  assert.ok(!proof.scopes.includes('instagram_manage_messages'));
+  assert.deepEqual(proof.granularScopes.find(g => g.scope === 'pages_messaging').targetIds, ['401']);
+  assert.equal((await r.read()).data.id, 'act_301');
 });
 
 test('abort/rejected fresh grant preserves the prior current credential and never revokes its authorization', async t => {
