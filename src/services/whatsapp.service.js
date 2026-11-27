@@ -754,7 +754,8 @@ class WhatsAppService {
             }
             try {
                 return await whatsappAuthorizedBroker.send({ messageId, clinicId: Number(clinicConfig.clinicId || clinicConfig.clinicaId),
-                    assetId: Number(clinicConfig.originId), expectedBinding: binding, message: payload }, healthContext.visitDispatchAuthorization);
+                    assetId: Number(clinicConfig.originId), expectedBinding: binding, message: payload,
+                    ...(healthContext.replyWindowEndsAt ? {replyWindowEndsAt:healthContext.replyWindowEndsAt} : {}) }, healthContext.visitDispatchAuthorization);
             } catch (error) {
                 if (payload.type === 'image') throw Object.assign(new Error(error.code || 'whatsapp_delivery_unknown'), {
                     code: error.code || 'whatsapp_delivery_unknown', retryable: false,

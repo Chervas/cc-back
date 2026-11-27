@@ -277,7 +277,7 @@ function create({
     if (dm.available) dm = await accessFor('dm');
     return { dm: { available: dm.available, reason: dm.reason || null }, comments };
   }
-  async function reserveAndSend(c, { attemptId, text, commentMessageId = null, actorId }, automation) {
+  async function reserveAndSend(c, { attemptId, text, commentMessageId = null, actorId }, automation, image = null) {
     if (
       !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(attemptId) ||
       !Number.isSafeInteger(Number(actorId)) ||
@@ -290,10 +290,10 @@ function create({
       return blocked('invalid_reply');
     const key = attemptKey(attemptId),
       kind = commentMessageId ? 'comment' : 'dm';
-    const command = { conversationId: c.id, actorId, text, commentMessageId, attemptId };
+    const command = { conversationId: c.id, actorId, text, commentMessageId, attemptId, ...(image ? { imageUrl: image.url } : {}) };
     async function replay(row) {
       if (
-        !['conversationId', 'actorId', 'text', 'commentMessageId'].every(
+        !['conversationId', 'actorId', 'text', 'commentMessageId', 'imageUrl'].every(
           (k) => row.event[k] === command[k],
         )
       )
@@ -342,9 +342,10 @@ function create({
           direction: 'outbound',
           sender_id: actorId,
           content: text,
-          message_type: 'text',
+          message_type: image ? 'image' : 'text',
           status: 'sending',
           metadata: {
+            ...(image ? { promotionImage: { url: image.url, label: image.label, key: image.key } } : {}),
             socialAttempt: attemptId,
               ...(automation ? {source: 'automations_v2', execution_id: automation.executionId} : {}),
             outcome: 'sending',
@@ -383,7 +384,7 @@ function create({
       if (blockedByAutomation) {
         return settle(c, key, attemptId, commentMessageId, 'failed', blockedByAutomation);
       }
-      sent = await provider.send(reservation.route, kind, reservation.recipient, text, attemptId);
+      sent = await provider.send(reservation.route, kind, reservation.recipient, text, attemptId, image?.url);
       if (!sent.available) {
         state = 'failed';
         reason = sent.reason;
@@ -465,6 +466,7 @@ function create({
         row.event.recipient,
         row.event.text,
         id,
+        row.event.imageUrl,
       );
     } catch {
       return;
@@ -486,6 +488,22 @@ function create({
       ? { ...result, outcome: 'blocked', attemptId: command.attemptId }
       : result;
   }
+  async function replyWithPromotionImage(c, command, automation) {
+    if (c.channel !== 'instagram' || command.commentMessageId || typeof automation?.blockReason !== 'function'
+        || !Number.isSafeInteger(automation.executionId) || command.selection?.executionId !== automation.executionId) return blocked('invalid_reply');
+    const { resolveForTurn } = require('./leadAssistantPromotionImages.service');
+    const image = await resolveForTurn(db, c, command.selection);
+    if (!image) return blocked('promotion_image_unavailable');
+    const result = await reserveAndSend(c, { ...command, text: image.label }, { ...automation,
+      blockReason: async transaction => {
+        const reason = await automation.blockReason(transaction);
+        if (reason) return reason;
+        const current = await resolveForTurn(db, c, command.selection, transaction);
+        return current?.url === image.url ? null : 'promotion_image_unavailable';
+      },
+    }, { ...image, key: command.selection.key });
+    return result.available === false ? { ...result, outcome: 'blocked', attemptId: command.attemptId } : result;
+  }
   async function readEntry(key, clinicId, transaction) {
     if (!/^[a-f0-9]{64}$/.test(key) || !Number.isSafeInteger(clinicId) || clinicId < 1) return null;
     const receipt = await R.findByPk(key, {
@@ -501,7 +519,7 @@ function create({
     if (await withdrawal.markerFor(db, receipt.event, receipt.route, { transaction })) return null;
     return { ...receipt.event, receiptKey: receipt.key, messageId: receipt.message_id };
   }
-  return { accept, importReceipt, availability, reply, readEntry };
+  return { accept, importReceipt, availability, reply, replyWithPromotionImage, readEntry };
 }
 let singleton;
 function service() {

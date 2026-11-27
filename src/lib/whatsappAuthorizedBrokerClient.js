@@ -123,6 +123,7 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
       'whatsappAuthorizationId', [models().sequelize.literal("JSON_EXTRACT(`additionalData`, '$.whatsappManualDisconnect')"), 'manualDisconnect']], raw: true }),
   loadClinic = clinicId => models().Clinica.findByPk(clinicId, { attributes: ['id_clinica','grupoClinicaId'], raw: true }),
   loadMessage = messageId => models().Message.findByPk(messageId, { attributes: ['id','conversation_id','sender_id','automation_delivery_key','direction','status','createdAt','metadata','content','message_type'], raw: true }),
+  authorizeAssistantReply = input => require('../services/leadAssistantWhatsapp.service').authorizeDelivery(models(), input),
   authorizeManualNotice = input => require('../services/appointmentManualNotice.service').current().assertReady(input),
   // Never bootstrap models merely for an injected pure client. In the actual
   // application the model index is already loaded by the common sender. A
@@ -227,7 +228,10 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         authorizeProgramBatch: args => require('../services/patientProgramBookingNotice.service').current().authorizeEligibility(args),
         getReceptionState: execution => loadReceptionState(conversation, config.bindings, execution) });
       const metadata = message.metadata || {};
-      if (intent.message.type === 'image' && (message.message_type !== 'image'
+      if (metadata.leadAssistantReply || intent.message.image?.link || intent.replyWindowEndsAt) {
+        if (!intent.replyWindowEndsAt || !await authorizeAssistantReply({message, conversation, intent, selectedBinding}))
+          fail('whatsapp_authorized_message_ineligible');
+      } else if (intent.message.type === 'image' && (message.message_type !== 'image'
         || metadata.outbound_attachment?.sha256 !== intent.message.image.sha256
         || metadata.outbound_attachment?.mime_type !== intent.message.image.mime_type
         || String(message.content || '') !== String(intent.message.image.caption || ''))) fail('whatsapp_authorized_message_ineligible');
@@ -383,13 +387,13 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
     },
     async send(input, visitDispatchAuthorization) {
       runtime.namespace(environment());
-      if (!exact(input, ['messageId','clinicId','assetId','expectedBinding','message']) || !id(input.clinicId) || !id(input.assetId)) fail('whatsapp_authorized_request_invalid');
+      if (!exact(input, ['messageId','clinicId','assetId','expectedBinding','message', ...(Object.hasOwn(input || {}, 'replyWindowEndsAt') ? ['replyWindowEndsAt'] : [])]) || !id(input.clinicId) || !id(input.assetId)) fail('whatsapp_authorized_request_invalid');
       let intent;
       try { intent = structuredClone(input); } catch { fail('whatsapp_authorized_request_invalid'); }
       const requestId = runtime.requestId(intent.messageId, environment());
       const expected = checkedBinding(intent.expectedBinding);
       if (expected.clinicId !== intent.clinicId || expected.assetId !== intent.assetId) fail('whatsapp_authorized_binding_invalid');
-      const payload = { authorizationId: expected.authorizationId, phoneId: expected.phoneId, message: intent.message };
+      const payload = { authorizationId: expected.authorizationId, phoneId: expected.phoneId, message: intent.message, ...(Object.hasOwn(intent, 'replyWindowEndsAt') ? {replyWindowEndsAt:intent.replyWindowEndsAt} : {}) };
       try { C.validateSend(payload); } catch { fail('whatsapp_authorized_request_invalid'); }
       const captured = await binding(intent.clinicId, intent.assetId);
       if (!captured || !sameBinding(captured, expected)) fail('whatsapp_authorized_binding_changed');
@@ -436,11 +440,11 @@ function createWhatsappAuthorizedBrokerClient({ environment = () => process.env,
         runtime.namespace(environment());
         const latest = await binding(intent.clinicId, intent.assetId);
         if (!latest || !sameBinding(captured, latest) || !exact(result, ['requestId','data','replayed']) || result.requestId !== requestId
-          || typeof result.replayed !== 'boolean' || !exact(result.data, ['messages', ...(intent.message.type === 'image' ? ['media'] : [])]) || !Array.isArray(result.data.messages)
+          || typeof result.replayed !== 'boolean' || !exact(result.data, ['messages', ...(intent.message.type === 'image' && !intent.message.image.link ? ['media'] : [])]) || !Array.isArray(result.data.messages)
           || result.data.messages.length !== 1 || !exact(result.data.messages[0], ['id', ...(Object.hasOwn(result.data.messages[0] || {}, 'message_status') ? ['message_status'] : [])])) {
           fail('whatsapp_delivery_unknown', true);
         }
-        if (intent.message.type === 'image' && (result.data.media?.sha256 !== intent.message.image.sha256
+        if (intent.message.type === 'image' && !intent.message.image.link && (result.data.media?.sha256 !== intent.message.image.sha256
           || result.data.media?.mime_type !== intent.message.image.mime_type)) fail('whatsapp_delivery_unknown', true);
         return C.projectResult(result.data);
       } catch { fail('whatsapp_delivery_unknown', true); }

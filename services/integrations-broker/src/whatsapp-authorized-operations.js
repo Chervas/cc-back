@@ -20,7 +20,7 @@ function createWhatsappAuthorizedOperations({ http, secrets, registry, store }) 
         // template allowlist, content fingerprint or provider GET before POST.
         if (signal?.aborted) fail('provider_timeout'); assertActive(); registry.assert(binding);
         let media;
-        if (message.type === 'image') {
+        if (message.type === 'image' && !message.image.link) {
           media = { mime_type: message.image.mime_type, sha256: message.image.sha256 };
           const uploaded = await http({ action: 'media_upload', id: value.definition.phoneId, token: secret,
             proof: secrets.proof(secret, binding.connectionRef), json: message.image, signal });
@@ -31,6 +31,7 @@ function createWhatsappAuthorizedOperations({ http, secrets, registry, store }) 
           message.image = { id: uploaded.id, ...(caption ? { caption } : {}) };
           if (signal?.aborted) fail('provider_timeout'); assertActive(); registry.assert(binding);
         }
+        if (payload.replyWindowEndsAt && Date.now() >= Date.parse(payload.replyWindowEndsAt)) fail('operation_denied');
         const result = await http({ action: 'send', id: value.definition.phoneId, token: secret,
           proof: secrets.proof(secret, binding.connectionRef), json: message, signal });
         assertActive(); registry.assert(binding); return C.projectResult({ ...result, ...(media ? { media } : {}) });

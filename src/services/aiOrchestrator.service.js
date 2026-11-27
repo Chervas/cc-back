@@ -29,6 +29,9 @@ function normalizeMode(value) {
 }
 
 function routeFor({ useCase, analysisMode, prompt, inputText, outputFormat } = {}) {
+  if (useCase === 'lead_assistant_reply') return {
+    use_case: useCase, mode: 'assistant', tier: 'assistant', primary: DEFAULT_MODELS.assistant, fallback: null,
+  };
   const configured = models();
   const mode = normalizeMode(analysisMode);
   let tier = 'fast';

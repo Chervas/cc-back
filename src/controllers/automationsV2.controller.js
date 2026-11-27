@@ -1301,7 +1301,12 @@ const NODE_TYPES_V2 = [
   {
     type: 'action/social_lead_interest', category: 'action', label: 'Detectar interés en redes',
     description: 'Procesa la entrada de QuickChat de la automatización de leads de la clínica.',
-    output_keys: ['on_success', 'on_review', 'on_fail'], runtime_status: 'real', default_config: {}, config_schema: [],
+    output_keys: ['on_success', 'on_review', 'on_fail', 'on_assistant'], runtime_status: 'real', default_config: {}, config_schema: [],
+  },
+  {
+    type:'action/attend_with_lead_assistant', category:'action', label:'Atender con asistente de IA',
+    description:'Atiende la entrada de la clínica con el contenido y las imágenes de la versión aprobada.',
+    output_keys:['on_success'], runtime_status:'real', default_config:{}, config_schema:[],
   },
   {
     type: 'action/send_system_notification',

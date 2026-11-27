@@ -171,3 +171,23 @@ test('signed DEV calls cannot access another clinic and do not reuse public rece
   assert.equal(a.f.state.awsCalls.length, reads); assert.equal(a.sends().length, 2);
   a.blockScope(); await assert.rejects(execute(a.request()), { code: 'asset_revoked' });
 });
+
+test('An assistant photo uses one free-form WhatsApp send, within the signed reply window', async t => {
+  const a = await fixture(t);
+  const message = {messaging_product:'whatsapp',to:'34600000001',type:'image',
+    image:{link:'https://media.example.com/novedad.png',caption:'Esta es la promoción.'}};
+  const request = a.request(message);
+  await assert.rejects(a.execute(request));
+  request.requestId = randomUUID();
+  request.payload.replyWindowEndsAt = new Date(Date.now()+60000).toISOString();
+  await a.execute(request);
+  assert.deepEqual(a.state.calls.map(call=>call.action), ['send']);
+  assert.deepEqual(a.sends()[0].json, message);
+  const expired = a.request(message);
+  expired.payload.replyWindowEndsAt = new Date(Date.now()-1).toISOString();
+  await assert.rejects(a.execute(expired));
+  const template = a.request(templateMessage());
+  template.payload.replyWindowEndsAt = request.payload.replyWindowEndsAt;
+  await assert.rejects(a.execute(template));
+  assert.equal(a.sends().length, 1);
+});

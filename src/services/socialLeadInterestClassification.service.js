@@ -97,4 +97,12 @@ async function classifyInterest(entry, { clinicId, groupId, beforeDispatch, anal
   }
 }
 
-module.exports = { classifyInterest, explicitOptOut };
+// The assistant uses this before inference and again when building its short
+// commercial history. Clinical text and instructions never enter that history.
+function assistantCommercialText(raw) {
+  if (typeof raw !== 'string' || !raw.trim() || raw.length > 1000) return null;
+  const normalized = normalize(raw);
+  if (explicitOptOut(raw) || sensitive(normalized) || INSTRUCTIONS.test(normalized) || EMBEDDED_COMMAND.test(normalized)) return null;
+  return scrub(raw) || null;
+}
+module.exports = { classifyInterest, explicitOptOut, assistantCommercialText };

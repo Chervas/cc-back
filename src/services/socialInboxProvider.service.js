@@ -40,11 +40,11 @@ function provider(env = process.env) {
         postId: e.postId || null,
         commentId: e.commentId || null,
       }),
-    reconcile: (r, kind, recipient, text, attemptId) =>
-      call(S.outcome, r, { kind, recipient, text, attemptId }),
+    reconcile: (r, kind, recipient, text, attemptId, imageUrl) =>
+      call(S.outcome, r, { kind, recipient, ...(imageUrl ? { imageUrl } : { text }), attemptId }),
     availability: (r, kind, { prepareReply = false } = {}) => call(S.status, r, { kind, ...(prepareReply ? { prepareReply: true } : {}) }),
-    send: (r, kind, recipient, text, attemptId) =>
-      call(S.send, r, { kind, recipient, text, attemptId }, attemptId),
+    send: (r, kind, recipient, text, attemptId, imageUrl) =>
+      call(S.send, r, { kind, recipient, ...(imageUrl ? { imageUrl } : { text }), attemptId }, attemptId),
   };
 }
 module.exports = { provider, verify: require('./socialInboxWebhookVerifier.service').verify };

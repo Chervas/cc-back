@@ -372,3 +372,16 @@ test('signed subscription accepts only the current consent, destination and cred
   assert.deepEqual((await subscribe()).data, { available: true });
   assert.deepEqual(provider.writes, [['feed', 'leadgen', 'messages']]);
 });
+
+test('an Instagram DM can deliver a single linked image using the same permissions and attempt marker', async () => {
+  const { call, commands } = fixture();
+  const args = { recipient:'771', imageUrl:'https://media.example.com/offers/c01.png?v=2', attemptId:'5d364186-5860-4e3a-bb52-cb89153c65de' };
+  assert.equal((await call(social.send, 'instagram', 'dm', args)).available, true);
+  const writes = commands.filter(request => request.method === 'POST');
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].body.message, { attachment:{type:'image',payload:{url:args.imageUrl}}, metadata:'cc-social:'+args.attemptId });
+  await assert.rejects(call(social.send,'instagram','comment',args), {code:'invalid_request'});
+  await assert.rejects(call(social.send,'messenger','dm',args), {code:'invalid_request'});
+  await assert.rejects(call(social.send,'instagram','dm',{...args,text:'mixed'}), {code:'invalid_request'});
+  await assert.rejects(call(social.send,'instagram','dm',{...args,imageUrl:'https://127.0.0.1/file.jpg'}), {code:'invalid_request'});
+});

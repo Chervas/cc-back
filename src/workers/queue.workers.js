@@ -1827,6 +1827,7 @@ createWorker('webhook_whatsapp', async (job) => {
                 metadata: {
                     wamid,
                     phoneId,
+                    provider_sent_at: parseWhatsappTimestamp(msg.timestamp, null)?.toISOString() || null,
                     ...(whatsappOriginAssetId ? { whatsapp_origin_asset_id: whatsappOriginAssetId } : {}),
                     ...(whatsappChannelRole === 'secondary' || whatsappChannelRole === 'primary'
                         ? { whatsapp_channel_role: whatsappChannelRole }

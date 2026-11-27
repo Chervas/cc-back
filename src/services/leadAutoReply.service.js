@@ -57,7 +57,7 @@ function normalizeSources(value) {
   return Array.from(new Set(source.map(cleanString).filter((item) => SOURCE_VALUES.has(item))));
 }
 
-const SOCIAL_ENTRIES = new Set(['instagram_dm', 'instagram_comment', 'messenger_dm']);
+const SOCIAL_ENTRIES = new Set(['instagram_dm', 'instagram_comment', 'messenger_dm', 'whatsapp_dm']);
 
 function socialEntries(raw, strict = false) {
   if (raw === undefined) return {};
@@ -72,7 +72,12 @@ function socialEntries(raw, strict = false) {
   for (const [key, rule] of Object.entries(raw)) {
     if (!SOCIAL_ENTRIES.has(key) || !rule || Object.getPrototypeOf(rule) !== Object.prototype) return invalid();
     const fields = Object.keys(rule).sort().join(',');
+    if (key === 'whatsapp_dm' && rule.action !== 'assistant') return invalid();
     if (fields === 'action' && rule.action === 'notify') entries[key] = { action: 'notify' };
+    else if (fields === 'action,audience,version' && rule.action === 'assistant' && key !== 'messenger_dm' &&
+        ['leads', 'all'].includes(rule.audience) && Number.isSafeInteger(rule.version) && rule.version >= 1) {
+      entries[key] = { action:'assistant', audience:rule.audience, version:rule.version };
+    }
     else if (fields === 'action,text' && rule.action === 'message' && key !== 'messenger_dm' && typeof rule.text === 'string'
       && rule.text.trim().length > 0 && rule.text.trim().length <= 1000) entries[key] = { action: 'message', text: rule.text.trim() };
     else return invalid();
@@ -337,15 +342,18 @@ async function buildReadiness(config, clinicId) {
 }
 
 async function getStatus(clinicId) {
-  const [flow, clinic] = await Promise.all([
+  const [flow, clinic, publication] = await Promise.all([
     findLatestClinicFlow(clinicId),
     db.Clinica.findByPk(clinicId, { attributes: ['nombre_clinica'], raw: true }),
+    db.LeadAssistantPublication?.findOne({where:{clinic_id:clinicId},attributes:['version'],order:[['version','DESC']],raw:true}),
   ]);
   const config = normalizeConfig(flow?.trigger_config || {});
   const readiness = await buildReadiness(config, clinicId);
   return {
     feature: FEATURE_KEY,
     clinic_id: clinicId,
+    whatsapp_assistant_supported: true,
+    assistant_approved_version: publication?.version || null,
     clinic_name: cleanString(clinic?.nombre_clinica) || `Clínica ${clinicId}`,
     configured: config.configured,
     active: flow?.is_active === true,
@@ -442,6 +450,11 @@ async function saveConfig({ clinicId, actorUserId, input }) {
       attributes: ['id_clinica', 'grupoClinicaId'], raw: true, transaction, lock: transaction.LOCK.UPDATE,
     });
     if (!clinic) throw Object.assign(new Error('Clínica no encontrada.'), { status: 404, code: 'clinic_not_found' });
+    for (const version of new Set(Object.values(config.social_entries).filter(rule => rule.action === 'assistant').map(rule => rule.version))) {
+      if (!await db.LeadAssistantPublication.findOne({where:{clinic_id:clinicId,version},attributes:['version'],transaction})) {
+        throw Object.assign(new Error('Aprueba la configuración del asistente para esta clínica.'), {status:409,code:'assistant_version_unavailable'});
+      }
+    }
     const latest = await findLatestClinicFlow(clinicId, { transaction });
     if (latest?.id !== previous?.id || latest?.is_active !== previous?.is_active)
       throw Object.assign(new Error('La configuración ha cambiado. Vuelve a abrirla para guardar tus cambios.'), { status: 409, code: 'lead_auto_reply_configuration_changed' });

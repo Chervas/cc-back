@@ -4,6 +4,7 @@ const D = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 const { create: createInbox } = require('../../services/socialInbox.service');
 const { create: createAutomation } = require('../../services/socialLeadAutomation.service');
+const { classifyInterest } = require('../../services/socialLeadInterestClassification.service');
 const { events, eventKey } = require('../../services/socialInboxEvents');
 
 withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
@@ -35,6 +36,8 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     'Conversation',
     'Message',
     'SocialInboxReceipt',
+    'LeadAssistantPublication',
+    'LeadAssistantSession',
     'AutomationFlowTemplateV2',
     'FlowExecutionV2',
     'AutomationInboundMessageClaim',
@@ -107,6 +110,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(status.readiness.ready, true);
   assert.deepEqual((await configService.getStatus(41)).config.social_entries, entries);
   const flow = await db.AutomationFlowTemplateV2.findByPk(status.flow.id);
+  let expectedFlowId = flow.id;
   const at = Math.max(Date.now(), flow.published_at.getTime());
   const dispatch = require('../../services/automationInboundMessage.service');
   const queue = require('../../services/jobRequests.service');
@@ -122,9 +126,9 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       post: { caption: 'Comenta INFO para que te escribamos por privado' },
     }),
     availability: async () => ({ available: true }),
-    send: async (r, kind, recipient, text, attemptId) => {
-      posts.push({ kind, recipient, text, attemptId });
-      return { available: true, messageId: 'sent-' + attemptId, recipientId: '771' };
+    send: async (r, kind, recipient, text, attemptId, imageUrl) => {
+      posts.push({ kind, recipient, text, attemptId, ...(imageUrl ? {imageUrl} : {}) });
+      return { available: true, messageId: 'sent-' + attemptId, recipientId: kind === 'dm' ? recipient : '771' };
     },
   };
   const social = createInbox({
@@ -141,7 +145,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     resolve,
     dispatch: async (p, { transaction }) => {
       const result = await dispatch.enqueueInboundDispatch(p, { transaction });
-      assert.equal(result.claim.metadata.social_template_id, flow.id);
+      assert.equal(result.claim.metadata.social_template_id, expectedFlowId);
       transaction.afterCommit(() =>
         claims.push({
           id: result.claim.id,
@@ -156,13 +160,14 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       await queue.enqueueUniqueJobRequest(job);
       executions.push(job.payload.execution_id);
     },
-    classify: async (e, { beforeDispatch }) => {
-      await beforeDispatch();
-      assert.equal(e.source, 'new');
-      return {
-        kind: e.text === 'STOP' ? 'opt_out' : e.text === 'Duda' ? 'review' : 'interest',
-        privateRequested: true,
-      };
+    classify: classifyInterest,
+    analyzeAssistant:async request => {
+      assert.equal(request.useCase,'lead_assistant_reply');
+      assert.equal(request.requireBroker,true);
+      assert(!request.inputText.includes('https://'));
+      const choice = JSON.parse(request.inputText).promotion.images[0];
+      await request.beforeDispatch();
+      return {reply:'La oferta incluye una visita informativa.',imageId:choice.id};
     },
     checkPatientRestrictions: async () => ({ marketing_opt_out: false }),
     publishLead: ({ lead }) => published.push(lead.id),
@@ -325,7 +330,95 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal((await automation.run(queuedExecution)).reason, 'social_entry_unavailable');
   assert.equal(await db.LeadIntake.count(), 2);
   assert.equal(posts.length, 2);
+  const promo = 'C02-03 · Oferta ficticia\nImagen: https://media.example.com/november.png';
+  const imageId = require('../../services/leadAssistantPromotionImages.service').catalog(promo).get('C02-03')[0].id;
+  const pictureThread = await db.Conversation.create({ clinic_id:41, channel:'instagram', social_account_id:'501',
+    contact_id:'778', last_inbound_at:new Date(), last_message_at:new Date() });
+  const incoming = await db.Message.create({conversation_id:pictureThread.id, direction:'inbound', content:'¿Puedo ver la foto?',
+    metadata:{leadAssistantTurn:{templateId:flow.id,publicationVersion:4,executionId:73,promotionKey:'C02-03'}}});
+  await db.LeadAssistantPublication.create({clinic_id:41,version:4,approved_at:new Date(),approved_by:7,fields:{tone:'Cercano',context:'Información comercial',guardrails:'Derivar cuestiones clínicas',booking:'Solicitar confirmación',promotions:promo}});
+  await db.LeadAssistantSession.create({clinic_id:41,conversation_id:pictureThread.id,template_id:flow.id,publication_version:4,
+    origin_message_id:incoming.id,origin_input:'instagram_dm',state:'active',updated_at:new Date()});
+  const selection = {templateId:flow.id,version:4,executionId:73,messageId:incoming.id,key:'C02-03',id:imageId};
+  const command = {selection,actorId:7,attemptId:require('node:crypto').randomUUID()};
+  const args = {executionId:73,blockReason:async()=>null};
+  const delivered = await social.replyWithPromotionImage(pictureThread,command,args);
+  assert.equal(delivered.outcome,'sent'); assert.equal(delivered.message.message_type,'image');
+  assert.equal(delivered.message.metadata.promotionImage.url,'https://media.example.com/november.png');
+  assert.equal(posts.at(-1).recipient,'778'); assert.equal(posts.at(-1).imageUrl,delivered.message.metadata.promotionImage.url);
+  assert.equal((await social.replyWithPromotionImage(pictureThread,command,args)).outcome,'sent');
+  assert.equal(posts.length,3);
+  const closed = { ...command, attemptId:require('node:crypto').randomUUID() };
+  await pictureThread.update({last_inbound_at:new Date(Date.now()-25*3600000)});
+  assert.equal((await social.replyWithPromotionImage(pictureThread,closed,args)).reason,'dm_window_closed');
+  assert.equal(posts.length,3);
+
+  const configured = await configService.saveConfig({clinicId:41,actorUserId:1,input:{active:true,sources:[],
+    schedule_scope:'all_days',social_entries:{instagram_dm:{action:'assistant',version:4,audience:'leads'},whatsapp_dm:{action:'assistant',version:4,audience:'leads'}}}});
+  const activeAssistant = await db.AutomationFlowTemplateV2.findByPk(configured.flow.id);
+  expectedFlowId = activeAssistant.id;
+  assert(activeAssistant.nodes.some(node=>node.type === 'action/attend_with_lead_assistant'));
+  const message = dm('instagram','501','assistant-asks-photo','¿Me pasas la foto de la promoción C02-03?','779');
+  message.entry[0].messaging[0].timestamp = Math.max(Date.now(),activeAssistant.published_at.getTime());
+  const nextClaim = claims.length;
+  await receive(message);
+  const assistantExecution = await begin(nextClaim);
+  const invoke = await automation.run(assistantExecution);
+  assert.equal(invoke.invoke_assistant,true);
+  const response = await automation.run(assistantExecution,true);
+  assert.equal(response.outcome,'sent', JSON.stringify(response));
+  assert.equal(response.image,'sent', JSON.stringify(response));
+  assert.match(posts.at(-2).text,/asistente de IA de Demo A/);
+  assert.equal(posts.at(-1).imageUrl,'https://media.example.com/november.png');
+  assert.equal(posts.at(-1).recipient,'779');
+  const sentCount = posts.length;
+  await automation.run(assistantExecution,true);
+  assert.equal(posts.length,sentCount);
+  const whatsappApi = require('../../services/leadAssistantWhatsapp.service');
+  const inboundWhatsapp = await db.Conversation.create({clinic_id:41,channel:'whatsapp',contact_id:'+34600000041'});
+  const waMessage = await db.Message.create({conversation_id:inboundWhatsapp.id,direction:'inbound',message_type:'text',
+    content:'¿Me pasas la foto de la promoción C02-03?',status:'sent',sent_at:new Date(),metadata:{wamid:'wamid.FICTICIO',phoneId:'10041',provider_sent_at:new Date().toISOString()}});
+  const waClaim = await db.AutomationInboundMessageClaim.create({clinic_id:41,conversation_id:inboundWhatsapp.id,message_id:waMessage.id,
+    channel:'whatsapp',claim_key:'whatsapp:wamid.FICTICIO',provider_message_id:'wamid.FICTICIO'});
+  const waConfig = {phoneNumberId:'10041',authorizedBroker:{sendEnabled:true}};
+  const waPosts = [];
+  const waAssistant = whatsappApi.create({db,createExecution:runtime.createExecution,enqueueJob:async()=>{},refresh:()=>{},
+    resolveRoute:async(c,number)=>c.id===inboundWhatsapp.id && number===waConfig.phoneNumberId ? waConfig : null,
+    restrictions:async()=>({}),analyze:async request=>{
+      await request.beforeDispatch();
+      assert(!request.inputText.includes('https://'));
+      return {reply:'Aquí tienes la foto de la promoción.',imageId:JSON.parse(request.inputText).promotion.images[0].id};
+    },send:async payload=>{
+      assert.equal(payload.useTemplate,false);
+      assert.equal(payload.to,inboundWhatsapp.contact_id);
+      assert.equal(payload.image.link,'https://media.example.com/november.png');
+      assert.match(payload.body,/asistente de IA de Demo A/);
+      const message = await db.Message.findByPk(payload.healthContext.messageId);
+      const intent = {replyWindowEndsAt:payload.healthContext.replyWindowEndsAt,message:{to:payload.to,type:'image',image:{...payload.image,caption:payload.body}}};
+      const authorize = (copy,binding={phoneId:'10041'})=>whatsappApi.authorizeDelivery(db,{message,conversation:inboundWhatsapp,intent:copy,selectedBinding:binding});
+      assert(await authorize(intent));
+      assert.equal(await authorize({...intent,message:{...intent.message,to:'+34600000099'}}),false);
+      assert.equal(await authorize({...intent,message:{...intent.message,image:{...intent.message.image,link:'https://media.example.com/otro.png'}}}),false);
+      assert.equal(await authorize(intent,{phoneId:'1234'}),false);
+      waPosts.push(payload);return {messages:[{id:'wamid.FICTICIO.foto'}]};
+    }});
+  const input = {claim:waClaim,message:waMessage,conversation:inboundWhatsapp};
+  const initiated = await waAssistant.start(input);
+  assert(initiated?.execution_id);
+  assert.equal((await waAssistant.start(input)).execution_id,initiated.execution_id);
+  const waExecution = await db.FlowExecutionV2.findByPk(initiated.execution_id);
+  const deliveredPhoto = await waAssistant.run(waExecution);
+  assert.equal(deliveredPhoto.outcome,'sent',JSON.stringify(deliveredPhoto));
+  assert.equal((await waAssistant.run(waExecution)).outcome,'sent');
+  assert.equal(waPosts.length,1);
+  await waMessage.update({metadata:{...waMessage.metadata,provider_sent_at:new Date(Date.now()-24*3600000).toISOString()}});
+  assert.equal(await waAssistant.start(input),null);
+  assert.equal((await waAssistant.run(waExecution)).reason,'whatsapp_entry_unavailable');
+  assert.equal(waPosts.length,1);
   report.assertions = [
+    'WhatsApp atiende una entrada con una foto y pie sin plantilla. Misma ejecución, conversación, número, foto aprobada y plazo de 24 h.',
+    'Entrada → selector V2 → asistente simulado → respuesta e imagen indicada por la clínica en el mismo DM',
+    'Foto de la promoción aprobada en el DM, control de ventana y deduplicación del envío',
     'Saved social-only clinic configuration → persisted V2 graph',
     'Live comment → scoped lead and one private reply',
     'duplicate webhook and worker',
