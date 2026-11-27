@@ -7,6 +7,16 @@ const quiet = { analyze() { assert.fail('A local decision must not dispatch'); }
 const interest = privateRequested => ({ kind: 'interest', privateRequested });
 const closed = kind => ({ kind, privateRequested: false });
 
+test('explicit marketing opt-out recognises requests without treating delivery questions as withdrawals', () => {
+  const { explicitOptOut } = require('../../services/socialLeadInterestClassification.service');
+  for (const text of ['STOP', 'Baja, por favor', 'Do not contact me', 'No m’escriviu més', 'No me enviéis publicidad']) {
+    assert.equal(explicitOptOut(text), true, text);
+  }
+  for (const text of ['No me enviaron el presupuesto', '¡Me encanta este stop motion!', 'No me han escrito.', 'INFO']) {
+    assert.equal(explicitOptOut(text), false, text);
+  }
+});
+
 test('INFO in a DM and INFO on a solicited post have different private-reply permissions', async () => {
   assert.deepEqual(await classifyInterest({ type: 'dm', text: ' ¡INFO! ' }, quiet), interest(true));
   assert.deepEqual(await classifyInterest({ type: 'comment', text: 'INFO' }, quiet), interest(false));

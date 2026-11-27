@@ -311,11 +311,12 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await receive(dm('instagram', '501', 'echo', 'INFO', '771', true));
   assert.equal(claims.length, 3);
   await receive(dm('instagram', '501', 'stop', 'STOP'));
-  assert.equal((await automation.run(await begin(3))).reason, 'opt_out');
   await receive(dm('instagram', '501', 'after-stop', 'INFO'));
+  // Dispatch the INFO before the worker assigned to the already persisted opt-out.
   const stopped = await automation.run(await begin(4));
   assert.equal(stopped.attention, true);
   assert.equal(stopped.reason, 'marketing_opt_out');
+  assert.equal((await automation.run(await begin(3))).reason, 'opt_out');
   assert.equal(posts.length, 2);
   await receive(dm('instagram', '501', 'medical', 'Duda', '773'));
   const review = await automation.run(await begin(5));
@@ -325,6 +326,16 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const suspended = await begin(6);
   await flow.update({ is_active: false });
   assert.equal((await automation.run(suspended)).reason, 'social_entry_disabled');
+  await receive(dm('instagram', '501', 'paused-stop', 'No me escribas más', '775'));
+  const pausedStop = await db.Message.findOne({ where: { 'metadata.providerId': 'paused-stop' } });
+  assert.equal(pausedStop.metadata.socialContactOptOut, true);
+  assert.equal(claims.length, 7);
+  await flow.update({ is_active: true });
+  const withdrawnKey = await receive(dm('instagram', '501', 'withdrawn-before-dispatch', 'INFO', '777'));
+  const queuedExecution = await begin(7);
+  const withdrawn = await db.SocialInboxReceipt.findByPk(withdrawnKey);
+  await withdrawn.update({ state: 'withdrawn', event: { ...withdrawn.event, source: 'withdrawal', text: '' } });
+  assert.equal((await automation.run(queuedExecution)).reason, 'social_entry_unavailable');
   assert.equal(await db.LeadIntake.count(), 2);
   assert.equal(posts.length, 2);
   report.assertions = [
@@ -334,7 +345,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     'Messenger team notification',
     'history and echoes excluded',
     'clinic isolation',
-    'opt-out and clinical review',
+    'opt-out before classification and while paused, withdrawn DM, and clinical review',
     'pause before execution',
   ];
 }).catch((error) => {

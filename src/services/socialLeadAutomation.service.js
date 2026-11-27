@@ -3,6 +3,7 @@
 const { randomUUID } = require('node:crypto');
 const { digest, eventKey } = require('./socialInboxEvents');
 const routes = require('./socialInboxRoute.service');
+const { explicitOptOut } = require('./socialLeadInterestClassification.service');
 
 const source = 'quickchat_social';
 const allowed = new Set(['instagram_dm', 'instagram_comment', 'messenger_dm']);
@@ -68,6 +69,9 @@ function create({
 
   async function enqueue({ entry, receiptKey, conversation, message, transaction }) {
     if (!owned(entry, conversation) || receiptKey !== eventKey(entry)) return;
+    if (explicitOptOut(entry.text)) {
+      await message.update({ metadata: { ...message.metadata, socialContactOptOut: true } }, { transaction });
+    }
     const eligible = await plan(conversation.clinic_id, entry, transaction);
     if (!eligible) return;
     return dispatch(
@@ -163,8 +167,8 @@ function create({
       throw Error('social_lead_execution_scope');
     const clinicId = execution.clinic_id;
     const entry = await social.readEntry(key, clinicId);
+    if (!entry) return { reason: 'social_entry_unavailable' };
     if (
-      !entry ||
       entry.messageId !== data.message_id ||
       entry.conversationId !== data.conversation_id ||
       eventKey(entry) !== key
@@ -188,6 +192,10 @@ function create({
         transaction,
       });
       if (!running) return null;
+      const present = await social.readEntry(key, clinicId, transaction);
+      if (!present || !owned(present, thread) || present.messageId !== entry.messageId || present.conversationId !== thread.id) {
+        return null;
+      }
       const receipt = await db.SocialInboxReceipt.findByPk(key, { attributes: ['route'], transaction });
       const route = await resolve(db, entry, transaction);
       return route?.clinicId === clinicId && routes.sameRoute(receipt?.route, route) ? eligible : null;
@@ -304,6 +312,7 @@ function create({
         where: {
           conversation_id: c.id,
           [db.Sequelize.Op.or]: [
+            { 'metadata.socialContactOptOut': true },
             { 'metadata.socialLead.decision.kind': 'opt_out' },
             { direction: 'inbound', id: { [db.Sequelize.Op.gt]: entry.messageId } },
           ],
@@ -312,7 +321,7 @@ function create({
         transaction,
       });
       if (superseded)
-        return superseded.metadata?.socialLead?.decision?.kind === 'opt_out'
+        return superseded.metadata?.socialContactOptOut || superseded.metadata?.socialLead?.decision?.kind === 'opt_out'
           ? 'marketing_opt_out'
           : 'newer_inbound';
       const prior = await db.Message.findOne({
