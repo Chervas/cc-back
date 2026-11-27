@@ -23,7 +23,25 @@ async function recipients(db, clinicId, transaction) {
     attributes: ['id_usuario'], include: [activeAccount('Usuario')], transaction, raw: true,
     order: [['id_usuario', 'ASC']],
   });
-  return { destination: members.length ? 'reception' : 'unassigned', ids: members.map(member => member.id_usuario) };
+  if (members.length) return { destination: 'reception', ids: members.map(member => member.id_usuario) };
+  const clinic = await db.Clinica.findByPk(clinicId, { attributes: ['configuracion'], transaction, raw: true });
+  const fallbackId = clinic?.configuracion?.leadAssistantHandoffUserId;
+  if (Number.isSafeInteger(fallbackId) && fallbackId > 0) {
+    const account = await db.Usuario.findOne({
+      where: { id_usuario: fallbackId, estado_cuenta: 'activo' }, attributes: ['id_usuario'], transaction, raw: true,
+    });
+    if (account) return { destination: 'designated_staff', ids: [account.id_usuario] };
+  }
+  return { destination: 'unassigned', ids: [] };
+}
+
+// Open QuickChat threads reload their authorized state after a committed transition.
+function refreshAfterCommit(transaction, clinicId, conversationId, messageId) {
+  transaction.afterCommit(() => {
+    require('./socket.service').getIO()?.to('clinic:' + clinicId).emit('message:updated', {
+      id: Number(messageId), conversation_id: Number(conversationId),
+    });
+  });
 }
 
 // Only invoked from the service that holds the assistant's verified turn.
@@ -68,6 +86,7 @@ async function handoff(db, { clinicId, conversationId, messageId, templateId, ve
     const result = { recorded: delivered > 0, destination: delivered ? route.destination : 'unassigned' };
     await message.update({ metadata: { ...message.metadata, assistantHandoff: result } }, { transaction });
     await session.update({ state: result.recorded ? 'human' : 'unassigned', updated_at: new Date() }, { transaction });
+    refreshAfterCommit(transaction, clinicId, conversationId, messageId);
     return result;
   });
 }
@@ -89,8 +108,9 @@ async function takeConversation(db, conversation, actorId) {
     if (!origin) throw Error('assistant_session_origin_missing');
     await origin.update({ metadata: { ...origin.metadata, assistantOperator: { actorId, at: new Date().toISOString() } } }, { transaction });
     await session.update({ state: 'operator', updated_at: new Date() }, { transaction });
+    refreshAfterCommit(transaction, conversation.clinic_id, local.id, origin.id);
     return session.state;
   });
 }
 
-module.exports = { recipients, handoff, takeConversation };
+module.exports = { recipients, handoff, takeConversation, refreshAfterCommit };

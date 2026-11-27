@@ -28,6 +28,7 @@ test('the channel introduces the assistant once and handoff needs a recorded res
   assert.equal(formatCommercialReply({ ...params, firstTurn:false }), params.draft);
   assert.throws(() => formatHandoffReceipt({recorded:false}), /not_recorded/);
   assert.match(formatHandoffReceipt({recorded:true,requestedCallback:true,destination:'reception'}), /plazo confirmado/);
+  assert.match(formatHandoffReceipt({recorded:true,destination:'designated_staff'}), /persona responsable del equipo/);
   assert(!formatHandoffReceipt({recorded:true,requestedCallback:false,destination:'patient_director'}).includes('llamada'));
 });
 

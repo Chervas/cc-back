@@ -2239,9 +2239,6 @@ exports.takeLeadAssistantConversation = async (req, res) => {
     }
     const state = await require('../services/leadAssistantHandoff.service').takeConversation(db, conversation, actorId);
     if (!state) return res.status(409).json({ error: 'La conversación no tiene una sesión del asistente' });
-    getIO()?.to('clinic:' + conversation.clinic_id).emit('conversation:updated', {
-      id: String(conversation.id), conversation_id: conversation.id, realtime_refresh: true,
-    });
     return res.json({ state });
   } catch (error) {
     console.error('takeLeadAssistantConversation', error.code || error.name);

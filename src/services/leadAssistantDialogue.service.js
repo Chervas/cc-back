@@ -108,7 +108,7 @@ function requestedHumanHandoff(message) {
 function formatHandoffReceipt({ firstTurn, clinicName, tone, recorded, requestedCallback, destination }) {
   if (recorded !== true) throw new Error('assistant_handoff_not_recorded');
   const intro = firstTurn ? introduction(clinicName, tone) : '';
-  const team = { patient_director: 'la directora de pacientes', reception: 'recepción' }[destination];
+  const team = { patient_director: 'la directora de pacientes', reception: 'recepción', designated_staff: 'la persona responsable del equipo' }[destination];
   if (!team) throw new Error('assistant_handoff_destination_missing');
   return intro + (requestedCallback
     ? 'He pasado tu solicitud de llamada a ' + team + '. No tengo un plazo confirmado.'
