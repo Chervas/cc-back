@@ -25,5 +25,14 @@ withIsolatedCampaignMysql(async ({ sql, report }) => {
   await assert.rejects(service.save(1, 81, { ...next, active: true }), {status: 400});
   await assert.rejects(service.save(1, 81, { version: 1, fields: {} }), {status: 400});
   await assert.rejects(service.read(99), {status: 404});
+  const draft = await service.read(1);
+  assert.equal(draft.promotionCharacterLimit, 120000);
+  const suffix = '\nImagen: https://media.example.com/foto.png';
+  const promotions = 'á'.repeat(119999 - suffix.length) + '📷' + suffix;
+  const large = await service.save(1, 81, { version: draft.version, fields: { ...draft.fields, promotions } });
+  assert.equal((await service.read(1)).fields.promotions, promotions);
+  await assert.rejects(service.save(1, 81, {version:large.version, fields:{...large.fields, promotions:promotions+'X'}}), {status:400});
+  assert.equal((await service.read(1)).version, large.version);
+  report.checks.push('120.000 caracteres Unicode y enlace final guardados íntegros. Un carácter de más conserva la versión anterior.');
   report.checks.push('Borrador UTF-8, aislamiento por clínica, conflicto concurrente, validación y persistencia.');
 });
