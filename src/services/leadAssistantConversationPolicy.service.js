@@ -6,6 +6,7 @@ const { offerSections, isOfferActive } = require('./leadAssistantPromotionImages
 // These labels retain the subject of an administrative or commercial enquiry.
 // They are never diagnoses or authorisation to recommend a treatment.
 const areas = [
+  {name:'ojos',words:/\b(?:ojeras?|ojos?|periocular(?:es)?|parpados?)\b/,label:'el contorno de ojos'},
   {name:'cuello', words:/\b(?:cuello|papada|submenton\w*|doble menton|(?:bajo |debajo (?:de |del )?)(?:(?:el|la) )?(?:menton|barbilla))\b/, label:'el cuello'},
   {name:'abdomen',words:/\b(?:abdomen|barriga|abdominal)\b/,label:'el abdomen'},
   {name:'brazos',words:/\bbrazos?\b/,label:'los brazos'},

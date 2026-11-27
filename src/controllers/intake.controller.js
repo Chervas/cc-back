@@ -6791,6 +6791,7 @@ exports.leadAssistantDraft = asyncHandler(async (req, res) => {
     if (req.method === 'GET') {
       const { destination } = await require('../services/leadAssistantHandoff.service').recipients(db, clinicId);
       draft.handoffDestination = destination;
+      draft.platform = require('../services/leadAssistantDialogue.service').platformPolicy();
     }
     return res.json({ ...draft, approvedVersion: await leadAssistantDrafts.approvedVersion(clinicId) });
   } catch (error) {

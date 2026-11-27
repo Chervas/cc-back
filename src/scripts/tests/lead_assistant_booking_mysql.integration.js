@@ -463,7 +463,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const sample = await simulator.start(100,1);
   assert.equal(sample.approved,true);
   const promotion = sample.promotions[0].key;
-  const steps = ['INFO','me va bien para reducir cuello?','no me estás contestando','Sí, por favor','La segunda',
+  const steps = ['INFO','me va bien para reducir cuello?','no me estás contestando','ok','ok','La segunda',
     'Ana Prueba, +34600223996, ana@example.invalid','Confirmo'];
   const inspect = () => Promise.all([db.CitaPaciente,db.Paciente,db.LeadIntake,db.Conversation,db.Message,
     db.JobRequest,db.LeadAssistantSession].map(m=>m.count()));
@@ -473,6 +473,11 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     id:randomUUID(),channel:'instagram',calendar:'clinic',message,promotion,
   }));
   assert.equal(trial.at(-1).event,'booked');
+  assert.equal(trial[0].trace.source,'model');
+  assert.equal(trial[0].trace.calls[0].prompt,trialInputs[0].prompt);
+  assert.equal(trial[3].trace.source,'calendar');
+  assert.match(trial[4].reply,/primera hora/);
+  assert.match(trial[5].reply,/recordatorio/);
   assert.deepEqual(await inspect(),beforeTrial,'simulation wrote to business data');
   const liveThread = await thread('instagram','qa-parity-instagram');
   await db.LeadIntake.update({external_source:'quickchat_social',nombre:'qa-parity-instagram'},{where:{id:liveThread.lead_id}});

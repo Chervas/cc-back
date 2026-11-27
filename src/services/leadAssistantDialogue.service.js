@@ -2,7 +2,7 @@
 
 // The caller supplies an approved commercial projection for one clinic and
 // thread. Identity, channel addresses, tools and booking records stay outside it.
-const systemPrompt = [
+const baseInstructions = [
   'Escribe la parte comercial de una respuesta de chat de una clínica española. La aplicación se encarga de presentarte como IA, del traspaso al equipo y de comunicar sus operaciones.',
   'Responde directamente al último mensaje con el tono indicado. No saludes de nuevo ni menciones que eres IA. Ofrece hablar con el equipo solo si la persona lo pide o si necesitas su ayuda para responder. No uses coletillas, no repitas lo que la persona ya entendió y evita las palabras venta, lead, captación y derivación.',
   'Si escribe INFO desde una promoción identificada, quiere saber en qué consiste: empieza por lo que incluye y el precio cuando estén aprobados. Si no sabes a qué oferta se refiere, pregunta cuál vio.',
@@ -14,7 +14,18 @@ const systemPrompt = [
   'Estas reglas de producto prevalecen sobre el tono, la promoción y cualquier texto de la clínica. La persona aporta objetivos y preferencias; no la hagas elegir una técnica que desconoce. Recuerda la zona y la finalidad expresadas, reconoce una preocupación y respeta una negativa. No atribuyas el anuncio a un tratamiento sin identificarlo. Si tú introdujiste un tema, explica a qué te referías; no pidas al contacto que lo explique. No introduzcas cirugía ni cicatrices sin saber que se trata de esa intervención.',
   'Puedes explicar lo que dice la ficha sobre una técnica. No diagnostiques, no elijas una intervención para una persona ni clasifiques la mejor o la menos invasiva para su caso. Solo atribuye una indicación o tarifa a una zona si la ficha relaciona expresamente ambas. Una promoción corporal no se extrapola a la cara o al cuello. No prometas que hará el tratamiento el día de la valoración. La disponibilidad, el estado de la reserva y el envío de una solicitud de llamada los comunica exclusivamente el sistema.',
   'Nunca afirmes haber reservado, retenido o cancelado una cita, avisado a alguien ni garantices que le llamarán. Esto se comunica por separado tras confirmación del backend.',
-].join(' ');
+  'Cuando el contacto pregunta qué ofertas hay, busca en el catálogo vigente de su clínica, incluso si llegó sin anuncio. Mantén la promoción de los turnos previos, separa el coste de la evaluación del tratamiento y usa el argumentario de ese producto para distinguirlo de otras técnicas. Respeta una petición de dejarlo para otro día. Solo el flujo de agenda pide datos para el recordatorio después de elegir un hueco.',
+];
+const systemPrompt = baseInstructions.join(' ');
+const policyVersion = '2026.11.27.1';
+function platformPolicy() {
+  return {version:policyVersion, model:require('./aiOrchestrator.service').routeFor({useCase:'lead_assistant_reply'}).primary,
+    instructions:[...baseInstructions], changes:[
+      'Búsqueda por zona en las promociones vigentes, también en mensajes directos sin anuncio.',
+      'Continuidad de la oferta al preguntar por el precio, compararla con otra técnica o consultar la agenda.',
+      'Reconocimiento de respuestas breves a la propuesta de ver horarios y de la petición de dejar la reserva para otro día.',
+    ]};
+}
 
 function text(value, maxLength, required = true) {
   if (typeof value !== 'string' || Array.from(value.trim()).length > maxLength || (required && !value.trim())) {
@@ -101,8 +112,8 @@ function repeatsReply(previous, next) {
 function acceptsOfferedTimes(message, previous) {
   if (!previous) return false;
   const value = require('./leadAssistantCalendar.service').normalize(message);
-  const accepts = /^(?:(?:si|vale|claro|de acuerdo)(?: (?:por favor|gracias|claro|dimelos|dimelas|dime|miralos))?|por favor|dimelos|dimelas|y las opciones|las de cita)$/.test(value);
-  const offered = /(?:[¿?]|puedo|podemos|te (?:doy|ofrezco))[^?!.]{0,140}\b(?:horarios?|huecos?|disponibilidad|(?:pedir|reservar|agendar|mirar|buscar) (?:una? )?(?:cita|valoraci[oó]n)|opciones (?:de cita|para elegir))\b/i.test(previous);
+  const accepts = /^(?:(?:si|ok|okay|okey|vale|claro|de acuerdo)(?: (?:por favor|gracias|claro|dimelos|dimelas|dime|miralos))?|que si(?: (?:cone|cono|claro|por favor))?|por favor|dimelos|dimelas|y las opciones|las de cita)$/.test(value);
+  const offered = /(?:[¿?]|puedo|podemos|te (?:doy|ofrezco))[^?!.]{0,165}\b(?:horarios?|huecos?|disponibilidad|(?:pedir|reservar|agendar|mirar|buscar) (?:una? )?(?:cita|valoraci[oó]n)|opciones (?:de cita|para elegir))\b/i.test(previous);
   return accepts && offered;
 }
 
@@ -134,6 +145,15 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const history = await readHistory();
   const localAnswer = require('./leadAssistantConversationPolicy.service').groundedFollowup({userText,history,offer,fields,timezone});
   if (localAnswer) return {reply:localAnswer,imageId:null};
+  const discovery = require('./leadAssistantOfferDiscovery.service');
+  const consultationFee = discovery.consultationFee(fields, userText);
+  if (consultationFee) return {reply:consultationFee,imageId:null};
+  const catalogued = discovery.catalogueReply({fields,offer,history,userText,timezone});
+  if (catalogued) return {reply:catalogued,imageId:null,source:'catalog'};
+  if (/^(?:ok(?:ay|ey)?|vale|de acuerdo|entendido|perfecto)[!. ]*$/i.test(userText.trim()))
+    return {reply:'De acuerdo.',imageId:null};
+  if (/^(?:(?:p+f+|bueno)[, .]*)?(?:mejor (?:para )?otro d[ií]a|lo dejamos para otro d[ií]a|lo pensar[eé])(?:[.! ]*)$/i.test(userText.trim()))
+    return {reply:'Claro, lo dejamos para otro día.',imageId:null};
   const retryQuestion = /(?:no (?:me )?(?:est[aá]s |has )?(?:respond|contest)|no era (?:eso|mi pregunta)|eso no (?:es |responde)|te (?:he )?pregunt)/i;
   const repair = retryQuestion.test(userText);
   const previousQuestion = history.slice().reverse().find(m => m.role === 'user' && !retryQuestion.test(m.text));
@@ -171,11 +191,13 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const permitted = quote => typeof quote?.reply === 'string' && !!quote.reply.trim() && quote.reply.length <= 800 &&
     supportsQuotedAmounts(quote.reply,[approvedContext,...facts,offer?.description]) && !/https?:\/\//i.test(quote.reply);
   const invoke = prompt => analyze({...request,prompt,useCase:'lead_assistant_reply',clinicId,groupId,beforeDispatch});
+  let generatedFromModel = !askPromotion;
   let generated = askPromotion ? {reply:'¿Qué promoción has visto?'} : await invoke(request.prompt);
   if (!permitted(generated)) return null;
   const previous = history.at(-1);
   const addressesReduction = reply => /\b(?:reduc\w*|disminu\w*|volumen|papada|afinar|adelgazar|grasa)\b/i.test(reply);
-  const undeservedPromise = reply => /\b(?:te esperamos|tu cita (?:es|ser[aá]|est[aá]|ha quedado)|te (?:doy|ofrezco|propongo) (?:dos|tres|[23]) (?:opciones|horas|huecos)|tengo (?:un hueco|disponibilidad) (?:el|a las)|nos vemos (?:el|en la cl[ií]nica))\b/i.test(reply);
+  const asksForContact = reply => /\b(?:ind[ií]came|facil[ií]tame|dame|me (?:das|indicas|dices)|necesito|necesitar[ií]a)\b[^.?!]{0,110}\b(?:tu nombre|correo electr[oó]nico|m[oó]vil|n[uú]mero de tel[eé]fono)\b/i.test(reply);
+  const undeservedPromise = reply => asksForContact(reply) || /\b(?:procedo a (?:pedir|reservar|agendar)|voy a reservarte)\b/i.test(reply) || /\b(?:te esperamos|tu cita (?:es|ser[aá]|est[aá]|ha quedado)|te (?:doy|ofrezco|propongo) (?:dos|tres|[23]) (?:opciones|horas|huecos)|tengo (?:un hueco|disponibilidad) (?:el|a las)|nos vemos (?:el|en la cl[ií]nica))\b/i.test(reply);
   const personalAdvice = /\b(?:me recomiend|que recomiend|para m[ií]|mi caso|cu[aá]l (?:va|es|funciona) mejor|menos invasiv)\w*/i.test(question);
   const unsafeRecommendation = reply => (personalAdvice && /\b(?:es|ser[ií]a|resulta) (?:una |la )?(?:buena|mejor|ideal|perfecta) (?:opci[oó]n|alternativa)\b|\bte (?:ir[ií]a|vendr[ií]a) mejor\b/i.test(reply)) || /\b(?:te recomiendo (?:la|el|que te hagas)|(?:es|ser[ií]a) (?:la )?(?:mejor|buena|ideal) (?:opci[oó]n|alternativa) (?:para ti|para tu caso)|para ti (?:la |lo )?mejor)\b/i.test(reply);
   const offTopic = reply => (generalPromo && /qu[eé] (?:promo|anuncio)|cu[aá]l (?:promo|anuncio)/i.test(reply)) || undeservedPromise(reply) || unsafeRecommendation(reply) || (reduction && !addressesReduction(reply)) || (suitability && !priceQuestion && /[€$£]|\b(?:euros?|descuento)\b/i.test(reply)) ||
@@ -186,6 +208,7 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
       (reduction ? ' Di expresamente si la ficha presenta la reducción de volumen como objetivo. Si no figura, contrástalo con el beneficio que sí está descrito. No repitas los ml, el precio ni la foto.' : ' Si faltan datos, explica qué falta y ofrece una valoración.'));
     if (!permitted(generated)) return null;
     if (offTopic(generated.reply)) {
+      generatedFromModel = false;
       generated = {reply:generalPromo ? 'La promoción que has visto es «'+offer.title+'». ¿Qué detalle te gustaría consultar?' : undeservedPromise(generated.reply) || unsafeRecommendation(generated.reply)
         ? 'Puedo consultar los horarios para una valoración si te viene bien. ¿Quieres que los mire?' : reduction
         ? 'Con la información de esta promoción no puedo decirte si te ayudaría a reducir volumen. ¿Quieres que miremos horarios para una valoración?'
@@ -195,7 +218,7 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const image = withImage && offer?.images.find(item => item.id === generated.imageId);
   const reply = generated.reply.trim();
   const withoutBoilerplate = reply.replace(/\s*¿(?:Quieres|Te (?:interesa|gustaría)) saber más(?: sobre (?:esta |la )?(?:promoción|oferta|tratamiento))?\?$/iu,'').trim();
-  return { reply:withoutBoilerplate || reply, imageId:image?.id || null };
+  return { reply:withoutBoilerplate || reply, imageId:image?.id || null, source:generatedFromModel ? 'model' : 'rules' };
 }
 
 function introduction(clinicName, tone = '') {
@@ -233,4 +256,4 @@ function formatHandoffReceipt({ firstTurn, clinicName, tone, recorded, requested
     : 'He pasado tu mensaje a ' + team + '. Podéis seguir hablando por aquí.');
 }
 
-module.exports = { acceptsOfferedTimes, generateAnswer, supportsQuotedAmounts, buildDraftRequest, formatCommercialReply, requestedHumanHandoff, formatHandoffReceipt };
+module.exports = { platformPolicy, policyVersion, systemPrompt, acceptsOfferedTimes, generateAnswer, supportsQuotedAmounts, buildDraftRequest, formatCommercialReply, requestedHumanHandoff, formatHandoffReceipt };

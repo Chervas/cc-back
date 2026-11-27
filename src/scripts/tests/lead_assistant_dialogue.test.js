@@ -153,3 +153,40 @@ test('when the contact explicitly asks about the double chin, the answer does no
    userText:'¿Esto sirve para reducir la papada?',readHistory:async()=>[],analyze:()=>assert.fail('the documented goal is sufficient')});
  assert.match(answer.reply,/papada/);assert.doesNotMatch(answer.reply,/qué te preocupa|lo que te preocupa/i);
 });
+
+test('catalogue discovery follows the zone and keeps promotion, alternative and consultation prices separate', () => {
+  const { catalogueReply, consultationFee } = require('../../services/leadAssistantOfferDiscovery.service');
+  const { commercialOffer } = require('../../services/leadAssistantConversation.service');
+  const fields = { booking:'La valoración es gratuita.', promotions:[
+    '## Higiene facial', '65 €', '', '## Tratamiento de contorno de ojos', 'Desde 155 € · 1 sesión. Antes 240 €.', '',
+    '## Oferta de cejas','45 €','Retirada', '', '## Programa capilar','90 €'
+  ].join('\n') };
+  const offerFor = (text,prior) => commercialOffer(fields,{type:'dm',text},prior,{timezone:'Europe/Madrid'});
+  const reply = (text,offer,history=[]) => catalogueReply({fields,userText:text,offer,history});
+  const face = 'qué promso tienes para la cara';
+  assert.equal(offerFor(face),null);
+  assert.match(reply(face,null),/Higiene facial.*contorno de ojos/);
+  assert.doesNotMatch(reply(face,null),/cejas|capilar/);
+  const eye = offerFor('algo para las ojeras');
+  assert(eye);
+  assert.match(reply('¿Cuánto cuesta?',eye),/Desde 155 €, 1 sesión/);
+  assert.doesNotMatch(reply('¿Cuánto cuesta?',eye),/240/);
+  assert.doesNotMatch(reply('¿Y el precio del relleno de ojeras?',eye),/155|240/);
+  assert.equal(offerFor(face,eye.key),null);
+  assert.match(offerFor('y para el pelo?',eye.key).title,/capilar/);
+  assert.match(consultationFee(fields,'¿vale dinero la valoración?'),/gratuita/);
+  for(const booking of ['La valoración no es gratuita.','La valoración es gratuita solo si contratas el tratamiento.'])
+    assert.equal(consultationFee({booking},'la valoración es gratis?'),null);
+  assert.equal(reply('¿Cuánto cuesta la consulta?',eye),null);
+});
+
+test('the published platform instructions and model request use the same base and booking assent requires an invitation',()=>{
+  const { platformPolicy, systemPrompt, acceptsOfferedTimes } = require('../../services/leadAssistantDialogue.service');
+  const policy = platformPolicy();
+  assert.equal(policy.instructions.join(' '),systemPrompt);
+  assert.equal(buildDraftRequest(fixture()).systemPrompt,systemPrompt);
+  assert.equal(policy.model,require('../../services/aiOrchestrator.service').routeFor({useCase:'lead_assistant_reply'}).primary);
+  for(const text of ['ok','okey','que sí coñe','sí, por favor']) assert(acceptsOfferedTimes(text,'¿Quieres que mire horarios para una valoración?'));
+  for(const text of ['no','so','ok, pero no ahora']) assert(!acceptsOfferedTimes(text,'¿Quieres que mire horarios para una valoración?'));
+  assert(!acceptsOfferedTimes('ok','La valoración es gratuita.'));
+});
