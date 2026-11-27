@@ -27,7 +27,7 @@ async function assertAppointmentLeadPatientConsistency({ models, lead, appointme
   if (!lead) return;
   if (!transaction || !positive(appointment?.paciente_id)) throw Error('appointment_lead_transaction_required');
   const patientId = positive(appointment.paciente_id), clinicId = positive(appointment.clinica_id);
-  const patient = await models.Paciente.findByPk(patientId, { transaction, lock: transaction.LOCK.UPDATE });
+  const patient = await models.Paciente.findByPk(patientId, { attributes:['id_paciente'], transaction, lock: transaction.LOCK.UPDATE });
   if (!patient) conflict();
   const conversations = await models.Conversation.findAll({ where: { clinic_id: clinicId, lead_id: positive(lead.id) },
     attributes: ['id', 'patient_id'], order: [['id', 'ASC']], limit: 21, transaction, lock: transaction.LOCK.UPDATE });

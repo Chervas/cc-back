@@ -97,3 +97,50 @@ test('an article link, unmarked references and a promotion still under review ne
     '[Referencia](https://example.com/referencia.png)\nC02-03 · Oferta en revisión\nImagen: https://example.com/creative.png';
   assert.equal(catalog(inputs).size, 0);
 });
+
+test('passes the complete matched offer, including its last price, while isolating other offers', () => {
+  const { commercialOffer } = require('../../services/leadAssistantTurn.service');
+  const source = [
+    '# Promoción de invierno',
+    'C02-03 · Contorno de ojos',
+    '### Argumentario',
+    'Texto aprobado sobre la sesión. '.repeat(1600),
+    'Precio 127 € si se adquiere en la sede de prueba. Fuente: https://media.example.com/condicion',
+    'C02-04 · Otra oferta',
+    'Precio 999 € en otra sede.',
+  ].join('\n');
+  const matched = commercialOffer({ promotions: source }, { text: 'INFO C02-03' });
+  const request = buildDraftRequest({
+    clinicName: 'Centro ficticio',
+    tone: 'Breve',
+    approvedFacts: [],
+    commercialHistory: [],
+    userText: '¿Cuánto cuesta?',
+    availableSlots: [],
+    matchedPromotion: matched,
+  });
+  assert.match(request.inputText, /127 € si se adquiere en la sede de prueba/);
+  assert.doesNotMatch(request.inputText, /https:|999 €|Otra oferta/);
+});
+
+test('expiry applies to the price and photo using the local clinic date', () => {
+  const { commercialOffer } = require('../../services/leadAssistantTurn.service');
+  const promotions =
+    'C02-03 · Contorno\nVigencia: 2026-11-01 a 2026-11-30\nImagen: https://media.example.com/imagen.jpg';
+  const context = { text: 'INFO C02-03' };
+  for (const date of ['2026-10-30T15:00:00Z', '2026-11-30T23:22:00Z']) {
+    const options = { now: new Date(date), timezone: 'Europe/Madrid' };
+    assert.equal(commercialOffer({ promotions }, context, null, options), null);
+    assert.equal(catalog(promotions, options).size, 0);
+  }
+  assert(
+    commercialOffer({ promotions }, context, null, {
+      now: new Date('2026-11-30T15:22:00Z'),
+      timezone: 'Europe/Madrid',
+    })
+  );
+  assert.equal(
+    commercialOffer({ promotions: 'Borrador pendiente de aprobación\n' + promotions }, context),
+    null
+  );
+});

@@ -104,7 +104,8 @@ async function plan(db, thread, entry, transaction) {
     +new Date(flow.published_at) > entry.at ||
     rule?.action !== 'assistant' ||
     !Number.isSafeInteger(rule.version) ||
-    !(rule.audience === 'all' || (rule.audience === 'leads' && !thread.patient_id)) ||
+    !['all','leads'].includes(rule.audience) ||
+    await require('./leadAssistantBooking.service').excludedPatient(db,rule,thread,entry.messageId,transaction) ||
     explicitOptOut(entry.text)
   )
     return null;

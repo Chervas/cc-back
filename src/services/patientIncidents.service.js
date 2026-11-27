@@ -79,17 +79,18 @@ async function attendance({ db, clinicIds, patientId, leadId, transaction }) {
   return attendanceIncident(rows);
 }
 
-async function latestEvent({ db, patientId, transaction }) {
+async function latestEvent({ db, patientId, transaction, activeOnly = false }) {
   if (!positive(patientId) || !db.PatientOperationalEvent) return null;
   return db.PatientOperationalEvent.findOne({
     where: { patient_id: patientId, event_type: EVENT },
+    ...(activeOnly ? { attributes: ['id', [db.sequelize.literal("JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.active'))"), 'activeFlag']] } : {}),
     order: [['id', 'DESC']], raw: true, transaction,
   });
 }
 
 async function bookingIncident(options) {
   const event = await latestEvent(options);
-  if (liveEvent(event)) return { kind: 'unwanted', label: 'No deseado', revision: `unwanted:${event.id}` };
+  if (event?.activeFlag === 'true' || liveEvent(event)) return { kind: 'unwanted', label: 'No deseado', revision: `unwanted:${event.id}` };
   const warning = await attendance(options);
   return warning ? { ...warning, kind: 'attendance' } : null;
 }

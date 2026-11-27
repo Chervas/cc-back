@@ -12,7 +12,7 @@ const systemPrompt = [
 ].join(' ');
 
 function text(value, maxLength, required = true) {
-  if (typeof value !== 'string' || value.trim().length > maxLength || (required && !value.trim())) {
+  if (typeof value !== 'string' || Array.from(value.trim()).length > maxLength || (required && !value.trim())) {
     throw new Error('assistant_commercial_context_invalid');
   }
   return value.trim();
@@ -31,7 +31,7 @@ function buildDraftRequest(turn) {
     approvedFacts: list(approvedFacts, 40, fact => text(fact, 1000)),
     promotion: matchedPromotion ? {
       title: text(matchedPromotion.title, 180),
-      description: text(matchedPromotion.description, 1200),
+      description: text(matchedPromotion.description, 120000),
     } : null,
     commercialHistory: list(commercialHistory, 16, item => {
       if (item.role !== 'user' && item.role !== 'assistant') throw new Error('assistant_commercial_context_invalid');
