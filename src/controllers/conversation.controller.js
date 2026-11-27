@@ -1758,6 +1758,12 @@ exports.getMessages = async (req, res) => {
     const [withRouting] = await attachRoutingReviews([conversationPayload], userId);
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([withRouting], req.userData, CitaPaciente);
     const [identified]=await contactIdentity.enrich([focusedPayload]);
+    if (['instagram', 'whatsapp', 'messenger'].includes(conversation.channel)) {
+      const session = await db.LeadAssistantSession.findOne({
+        where: { conversation_id: conversation.id, clinic_id: conversation.clinic_id }, attributes: ['state'], raw: true,
+      });
+      identified.lead_assistant_state = session?.state || null;
+    }
     if (['instagram','messenger'].includes(conversation.channel)) {
       identified.social_replies=await require('../services/socialInbox.service').service().availability(conversation, messages, { historyView: true });
     }
@@ -2219,6 +2225,27 @@ exports.resolveRoutingReview = async (req, res) => {
     return res.status(forbidden ? 403 : conflict ? 409 : 503).json({
       error: forbidden ? 'No tienes acceso a las dos conversaciones' : 'El caso ha cambiado. Actualiza la conversaci\u00f3n antes de continuar',
     });
+  }
+};
+
+exports.takeLeadAssistantConversation = async (req, res) => {
+  try {
+    const actorId = Number(req.userData?.userId);
+    const conversation = await Conversation.findByPk(req.params.id);
+    if (!conversation) return res.status(404).json({ error: 'Conversación no encontrada' });
+    const access = await getUserClinics(actorId);
+    if (!ensureAccess(access, conversation.clinic_id) || !await canReadQuickChatConversation(actorId, conversation)) {
+      return res.status(403).json({ error: 'Acceso denegado a la conversación' });
+    }
+    const state = await require('../services/leadAssistantHandoff.service').takeConversation(db, conversation, actorId);
+    if (!state) return res.status(409).json({ error: 'La conversación no tiene una sesión del asistente' });
+    getIO()?.to('clinic:' + conversation.clinic_id).emit('conversation:updated', {
+      id: String(conversation.id), conversation_id: conversation.id, realtime_refresh: true,
+    });
+    return res.json({ state });
+  } catch (error) {
+    console.error('takeLeadAssistantConversation', error.code || error.name);
+    return res.status(500).json({ error: 'No se pudo tomar la conversación' });
   }
 };
 

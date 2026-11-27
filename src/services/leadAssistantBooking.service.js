@@ -9,14 +9,19 @@ const { reserve } = require('./leadAssistantReservation.service');
 
 function readContact(text) {
   const value = String(text || '').trim();
-  if (!value || value.length > 140 || /[<>@\n]/.test(value)) return null;
-  const phoneText = value.match(/(?:\+\d{1,3}[ -]?)?(?:\d[ -]?){8,14}\d/);
+  if (!value || value.length > 300 || /[<>\n]/.test(value)) return null;
+  const emailText = value.match(/(?:^|[\s,;])([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63})(?=$|[\s,;])/i);
+  const email = emailText?.[1] || null;
+  const withoutEmail = email ? value.replace(email, '') : value;
+  if (withoutEmail.includes('@')) return null;
+  const phoneText = withoutEmail.match(/(?:\+\d{1,3}[ -]?)?(?:\d[ -]?){8,14}\d/);
   const phone = phoneText ? normalizePhoneE164(phoneText[0].trim()) : null;
-  const raw = value
+  const raw = withoutEmail
     .replace(phoneText?.[0] || '\u0000', '')
     .replace(/\b(?:tel[eé]fono|m[oó]vil)(?: es)?\b\s*:?/gi, '')
     .replace(/^(?:me llamo|mi nombre es|a nombre de|soy)\s+/i, '')
-    .replace(/[,.\s;-]+$/, '')
+    .replace(/\b(?:mi )?(?:correo(?: electr[oó]nico)?|e-?mail)(?: es)?\b\s*:?/gi, '')
+    .replace(/^[,;\s-]+|[,.\s;-]+$/g, '')
     .trim();
   const name =
     raw &&
@@ -27,7 +32,7 @@ function readContact(text) {
     assistantCommercialText('Nombre de reserva ' + raw)
       ? normalizeHumanName(raw)
       : null;
-  return name || phone ? { name, phone } : null;
+  return name || phone || email ? { name, phone, ...(email ? { email } : {}) } : null;
 }
 
 function wantsHumanInput(raw) {
@@ -157,7 +162,14 @@ async function processTurn({
     ],
     raw: true,
   });
-  const choices = await cal.services(db, clinic, fields, offer);
+  const mapped = offer && require('../lib/lead-assistant-tables').tableRows(fields.booking, [
+    /promocion|oferta/, /tratamiento|servicio/, /persona|profesional/,
+  ]).filter(([title]) => cal.normalize(title) === cal.normalize(offer.title));
+  if (mapped?.length > 1) return { review: true };
+  const mapping = mapped?.[0];
+  const catalog = await cal.services(db, clinic, fields, offer);
+  const choices = mapping ? catalog.filter(item => [item.name, item.code].some(name => cal.normalize(name) === cal.normalize(mapping[1]))) : catalog;
+  if (mapping && choices.length !== 1) return { review: true };
   if (!choices.length) return { review: true };
   const timezone = cal.resolveClinicTimezone(clinic);
   const treatment = cal.pickTreatment(choices, raw, offer, pending?.treatment?.id);
@@ -248,7 +260,9 @@ async function processTurn({
     pending?.treatment?.id === treatment.id && pending.stage !== 'booked' && pending.slots?.length;
   const professional = await localProfessional(db, thread.clinic_id, raw);
   if (professional.unclear) return { review: true };
-  const professionalId = professional.id || (currentOffer ? pending.professionalId : null);
+  const assigned = mapping ? await localProfessional(db, thread.clinic_id, 'Profesional de agenda: ' + mapping[2]) : null;
+  if (mapping && (!assigned?.id || (professional.id && professional.id !== assigned.id))) return { review: true };
+  const professionalId = assigned?.id || professional.id || (currentOffer ? pending.professionalId : null);
   const calendar = cal.requestedCalendar(raw, timezone, now);
   if (!calendar)
     return materialize(async () => ({
@@ -257,7 +271,7 @@ async function processTurn({
       reply: '¿Qué día futuro te vendría bien para la cita?',
     }));
   async function propose(prefix = '', range = calendar) {
-    const slots = await findSlots({
+    const available = await findSlots({
       db,
       clinic,
       treatment,
@@ -267,6 +281,7 @@ async function processTurn({
       now,
       capabilities,
     });
+    const slots = /\b(?:dos|2) (?:alternativas|opciones|huecos)\b/i.test(fields.booking) ? available.slice(0, 2) : available;
     return materialize(async () =>
       slots.length
         ? {
@@ -336,13 +351,17 @@ async function processTurn({
     name: entered?.name || pending.contact?.name || name || null,
     phone: knownPhone || entered?.phone || pending.contact?.phone || lead?.telefono || null,
   };
-  if (!thread.patient_id && (!contact.name || !contact.phone)) {
-    const need =
-      !contact.name && !contact.phone
-        ? 'tu nombre y un teléfono de contacto'
-        : !contact.name
-          ? 'tu nombre'
-          : 'un teléfono de contacto';
+  const needsEmail = fields.booking.split(/\r?\n/).some(line =>
+    /\b(?:pregunta|pide|solicita|recoge)\w*\b.{0,190}\b(?:correo electr[oó]nico|email|e-mail)\b/i.test(line) &&
+    !/\bno\s+(?:(?:hace falta|debes?)\s+)?(?:pregunt|pid|solicit|recog)/i.test(line));
+  if (needsEmail) contact.email = entered?.email || pending.contact?.email || null;
+  const needsSurname = /\bnombre y (?:un )?apellido/i.test(fields.booking);
+  const missing = [];
+  if (!thread.patient_id && (!contact.name || (needsSurname && !contact.name.trim().includes(' ')))) missing.push(needsSurname ? 'tu nombre y un apellido' : 'tu nombre');
+  if (!thread.patient_id && !contact.phone) missing.push('un teléfono de contacto');
+  if (needsEmail && !contact.email) missing.push('tu correo electrónico');
+  if (missing.length) {
+    const need = new Intl.ListFormat('es').format(missing);
     return materialize(async () => ({
       ...common,
       stage: 'contact',
@@ -472,7 +491,7 @@ async function processTurn({
           clinic.nombre_clinica +
           ' para el ' +
           cal.display(selected, timezone) +
-          '.',
+          '. Gracias.',
       };
     });
   } catch (error) {

@@ -72,6 +72,7 @@ async function resolveIdentity({ db, thread, lead, contact, transaction, audienc
       nombre: name,
       apellidos: '',
       telefono_movil: phone,
+      ...(contact?.email ? { email: contact.email } : {}),
       clinica_id: cid,
       idioma_preferido: 'es',
     },
