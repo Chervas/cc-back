@@ -2,6 +2,8 @@
 
 const { createHmac } = require('node:crypto');
 const { fail } = require('./errors');
+const { pageFields, ensureField } = require('./meta-page-subscription');
+const { usage } = require('./meta-marketing-ads-http');
 const { graphId, GRAPH_VERSION } = require('./meta-marketing-contract');
 const { schema } = require('./contracts');
 const { operation: verify, verifyBody } = require('./meta-marketing-social-signature');
@@ -11,7 +13,8 @@ const outcome = 'meta.marketing.social.outcome.v1';
 const receive = 'meta.marketing.social.receive.v1';
 const History = require('./meta-marketing-social-history');
 const history = History.operation;
-const ops = [status, receive, send, verify, outcome, history];
+const subscribe = 'meta.marketing.social.subscribe.v1';
+const ops = [status, receive, send, verify, outcome, history, subscribe];
 const id = { type: 'string', pattern: '^[1-9][0-9]{0,29}$' };
 const scope = {
   accountId: id,
@@ -25,6 +28,10 @@ const checks = {
     signature: { type: 'string', pattern: '^sha256=[a-f0-9]{64}$' },
   }),
   [status]: schema(scope),
+  [subscribe]: schema({
+    clinicId: scope.clinicId, channel: { const: 'messenger' }, kind: { const: 'dm' }, accountId: id,
+    enrollmentId: { type: 'string', pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$' }, versionId: { type: 'string', pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$' },
+  }),
   [history]: schema({ ...scope, start: { type: 'integer', minimum: 1 }, end: { type: 'integer', minimum: 1 },
     cursor: { anyOf: [{ type: 'null' }, { type: 'string', pattern: '^[A-Za-z0-9_-]{40,4096}$' }] } }),
   [send]: schema({
@@ -89,9 +96,19 @@ async function execute({
   signal,
   authorize: check,
   transport = fetch,
+  subscriptionPacer,
 }) {
   const appToken = metadata.appId + '|' + appSecret.toString();
   async function graph(path, bearer, query = {}, body) {
+    if (operation === subscribe) {
+      if (!subscriptionPacer) fail('connection_blocked');
+      return subscriptionPacer.run('meta-ads-app:' + metadata.appId, { signal, deadline },
+        () => graphRequest(path, bearer, query, body));
+    }
+    return graphRequest(path, bearer, query, body);
+  }
+  const deadline = Date.now() + 24000;
+  async function graphRequest(path, bearer, query = {}, body) {
     check();
     const url = new URL(
       'https://graph.facebook.com/' + (metadata.graphVersion || GRAPH_VERSION) + '/' + path,
@@ -110,7 +127,11 @@ async function execute({
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
+    if (operation === subscribe && response.headers)
+      subscriptionPacer.observe('meta-ads-app:' + metadata.appId, usage(Object.fromEntries(response.headers)));
     const raw = await response.json();
+    if (operation === subscribe && (response.status === 429 || [4, 17, 32, 613].includes(raw.error?.code)))
+      fail('rate_limited');
     if (raw.error || !response.ok) {
       if (
         p.channel === 'instagram' && response.status >= 400 && response.status < 500 && raw.error?.code === 200 &&
@@ -178,7 +199,8 @@ async function execute({
     )
   )
     fail('provider_unauthorized');
-  const missing = permissions(p.channel, p.kind, operation).filter(
+  const pagePermissions = operation === subscribe ? ['pages_show_list', ...expected] : expected;
+  const missing = pagePermissions.filter(
     (s) =>
       !debug.scopes?.includes(s) ||
       (debug.granular_scopes || []).some(
@@ -199,6 +221,21 @@ async function execute({
       ? ['MODERATE', 'MANAGE', 'MESSAGING']
       : ['MESSAGING', 'MANAGE'];
   if (!allowedTasks.some((task) => page.tasks?.includes(task))) return blocked('page_messaging_task');
+  if (operation === subscribe) {
+    if (!page.tasks.some(task => ['CREATE_CONTENT', 'MANAGE', 'MODERATE'].includes(task))) return blocked('page_subscription_task');
+    const app = await graph(metadata.appId + '/subscriptions', appToken, { fields: 'object,active,fields' });
+    if (!app.data?.some(row => row.object === 'page' && row.active === true && row.fields?.some(f => f.name === 'messages')))
+      return blocked('subscription:messages');
+    const edge = asset.id + '/subscribed_apps';
+    const read = async () => ({ subscription: pageFields(await graph(edge, page.access_token, {
+      fields: 'id,subscribed_fields', limit: '100',
+    }), metadata.appId) });
+    await ensureField({
+      appId: metadata.appId, pageId: asset.id, field: 'messages', read, authorize: check,
+      write: fields => graph(edge, page.access_token, {}, { subscribed_fields: fields.join(',') }),
+    });
+    return { available: true };
+  }
   if (operation === history) return History.read({ payload: p, asset, context, appSecret, graph, pageToken: page.access_token });
   if (!(operation === receive && p.history === true)) {
     const subs = await graph(asset.id + '/subscribed_apps', page.access_token, {
@@ -297,6 +334,7 @@ async function execute({
   return { available: true, messageId: sent.message_id, recipientId: sent.recipient_id };
 }
 module.exports = {
+  subscribe,
   status,
   history,
   receive,

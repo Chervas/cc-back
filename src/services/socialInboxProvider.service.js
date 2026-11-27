@@ -28,6 +28,7 @@ function provider(env = process.env) {
     return response.data;
   }
   return {
+    subscribePage: (r, versionId) => call(S.subscribe, r, { kind: 'dm', enrollmentId: r.enrollmentId, versionId }),
     history: (r, kind, start, end, cursor) => call(S.history, r, { kind, start, end, cursor }),
     receive: (r, e) =>
       call(S.receive, r, {

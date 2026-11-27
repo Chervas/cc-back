@@ -99,7 +99,10 @@ test('signed broker persists a scoped Send receipt and reconciles it without a s
   const owner = require('./meta-marketing-oauth-fixture.cjs').fixture(t, {
     enrollment: true,
     leads: true,
-    socialInbox: [{ clinicId: 71, channel: 'instagram', pageId: '401', accountId: '501' }],
+    socialInbox: [
+      { clinicId: 71, channel: 'instagram', pageId: '401', accountId: '501' },
+      { clinicId: 71, channel: 'messenger', pageId: '401', accountId: '401' },
+    ],
   });
   const flow = await owner.begin(),
     staged = await owner.finish(flow),
@@ -129,6 +132,11 @@ test('signed broker persists a scoped Send receipt and reconciles it without a s
     attemptId: randomUUID(),
   };
   const options = { assetRef: 'meta-facebook_page:401' };
+  const setup = await owner.execute(social.subscribe, {
+    enrollmentId, versionId: flow.flowId, clinicId: 71, channel: 'messenger', kind: 'dm', accountId: '401',
+  }, options, 'reader');
+  assert.deepEqual(setup.data, { available: false, reason: 'social_consent_absent' });
+  assert.equal(f.commands.length, 0);
   const sent = await owner.execute(
     social.send,
     payload,
@@ -225,4 +233,102 @@ test('Messenger requires its own grants and subscription, accepts DM and denies 
       : original(u, o);
   assert.equal((await f.call(social.status, 'messenger', 'dm')).reason, 'subscription:messages');
   assert(f.commands.every((c) => c.method === 'GET'));
+});
+
+const subscriptionConsent = { enrollmentId: '86eefb4d-3d64-4d4a-8e12-28ee8beceecf', versionId: 'caf92b28-db5b-4caa-8c4b-e1fd63b71dba' };
+function subscriptionFixture({ tasks = ['MANAGE'], appReady = true, old = ['leadgen', 'feed'], dropAck = false, incomplete = false } = {}) {
+  const f = fixture(), writes = [], before = f.ctx.transport, paced = [];
+  let fields = old;
+  f.ctx.subscriptionPacer = { run: async (key, _opts, work) => { paced.push(key);return work(); }, observe() {} };
+  f.ctx.transport = async (url, options) => {
+    const endpoint = url.pathname.split('/').slice(2).join('/');
+    const ok = data => ({ ok: true, json: async () => data });
+    if (endpoint === 'me/accounts') {
+      const result = await (await before(url, options)).json();result.data[0].tasks = tasks;return ok(result);
+    }
+    if (endpoint === '101/subscriptions') return ok({ data: [{object:'page',active:appReady,fields:[{name:'messages'}]}] });
+    if (endpoint === '401/subscribed_apps') {
+      if (options.method === 'POST') {
+        fields = JSON.parse(options.body).subscribed_fields.split(',');
+        writes.push(fields);
+        if (dropAck) throw Error('provider disconnected after commit');
+        return ok({success:true});
+      }
+      return ok({ data: fields.length ? [{id:'101',subscribed_fields:[...fields]}] : [], ...(incomplete?{paging:{next:'more'}}:{}) });
+    }
+    return before(url, options);
+  };
+  return { f, writes, paced, enable: () => f.call(social.subscribe, 'messenger', 'dm', subscriptionConsent) };
+}
+
+test('explicit setup adds messages once, preserving leadgen and every other field; reading status never subscribes', async () => {
+  const { f, writes, paced, enable } = subscriptionFixture();
+  assert.equal((await f.call(social.status, 'messenger', 'dm')).reason, 'subscription:messages');
+  assert.equal(writes.length, 0);
+  assert.deepEqual(await enable(), {available:true});
+  assert.deepEqual(await enable(), {available:true});
+  assert.deepEqual(writes,[['feed','leadgen','messages']]);
+  assert(paced.length > 1 && paced.every(key => key === 'meta-ads-app:101'));
+  const first = subscriptionFixture({old:[]});await first.enable();
+  assert.deepEqual(first.writes, [['messages']]);
+});
+
+test('a lost subscription acknowledgement rechecks Meta before the next POST; partial reads and lost permissions never write', async () => {
+  const lost = subscriptionFixture({dropAck:true});await assert.rejects(lost.enable(),/disconnected/);
+  assert.deepEqual(await lost.enable(),{available:true});assert.equal(lost.writes.length,1);
+  for (const [options,reason] of [[{tasks:['MESSAGING']},'page_subscription_task'],[{appReady:false},'subscription:messages']]){
+    const t = subscriptionFixture(options);assert.equal((await t.enable()).reason,reason);assert.equal(t.writes.length,0);
+  }
+  const bad = subscriptionFixture({incomplete:true});await assert.rejects(bad.enable(),{code:'provider_failed'});assert.equal(bad.writes.length,0);
+  const missing=subscriptionFixture();missing.f.ctx.metadata.scopes=missing.f.ctx.metadata.scopes.filter(s=>s!=='pages_messaging');
+  assert.equal((await missing.enable()).reason,'permission:pages_messaging');assert.equal(missing.paced.length,0);
+});
+
+test('Lead Ads and Messenger writers share an app/Page lock and reconcile the complete field set',async()=>{
+  const {ensureField,pageFields}=require('../src/meta-page-subscription');
+  let fields=[],unlock,started;
+  const ready=new Promise(resolve=>{started=resolve;}),paused=new Promise(resolve=>{unlock=resolve;});
+  const read=async()=>({subscription:pageFields({data:fields.length?[{id:'101',subscribed_fields:fields}]:[]},'101')});
+  const writer=(field,delay=false)=>ensureField({appId:'101',pageId:'401',field,read,authorize(){},
+    write:async desired=>{if(delay){started();await paused;}fields=desired;return {success:true};}});
+  const first=writer('leadgen',true);await ready;
+  await assert.rejects(writer('messages'),{code:'oauth_flow_busy'});unlock();await first;await writer('messages');
+  assert.deepEqual(fields,['leadgen','messages']);
+  for (const rows of [[{ id:'101' }, { id:'101' }], [{}], [null]])
+    assert.throws(() => pageFields({ data:rows }, '101'), {code:'provider_failed'});
+});
+
+test('signed subscription accepts only the current consent, destination and credential version', async (t) => {
+  const { randomUUID } = require('node:crypto');
+  const enrollment = require('../src/meta-marketing-enrollment-contract');
+  const provider = subscriptionFixture();
+  const owner = require('./meta-marketing-oauth-fixture.cjs').fixture(t, {
+    renewal: true, leads: true, socialConsentOnly: true,
+    socialInbox: [{ clinicId: 71, channel: 'messenger', pageId: '401', accountId: '401' }],
+    subscriptionPacer: provider.f.ctx.subscriptionPacer,
+  });
+  const flow = await owner.begin();
+  const granted = new URL(flow.result.data.authUrl).searchParams.get('scope').split(',');
+  assert(granted.includes('pages_messaging'));
+  owner.state.afterGraph = (kind, value) => {
+    if (kind === 'inspect') value.data.scopes = granted;
+    return value;
+  };
+  const staged = await owner.finish(flow);
+  const enrollmentId = randomUUID();
+  const scopeDigest = flow.payload.scopeDigest;
+  const prepared = await owner.execute(enrollment.OPERATIONS.prepare, {
+    enrollmentId, flowId: flow.flowId, scopeDigest, candidateDigest: staged.data.candidate.digest,
+    assetRefs: ['meta-facebook_page:401'],
+  });
+  await owner.execute(enrollment.OPERATIONS.activate, { enrollmentId, scopeDigest, selectionDigest: prepared.data.selectionDigest });
+  t.mock.method(globalThis, 'fetch', provider.f.ctx.transport);
+  const payload = { enrollmentId, versionId: flow.flowId, clinicId: 71, channel: 'messenger', kind: 'dm', accountId: '401' };
+  const subscribe = (overrides) => owner.execute(social.subscribe, { ...payload, ...overrides }, { assetRef: 'meta-facebook_page:401' }, 'reader');
+  await assert.rejects(subscribe({ clinicId: 72 }), { code: 'scope_denied' });
+  await assert.rejects(subscribe({ versionId: randomUUID() }), { code: 'secret_version_changed' });
+  assert.equal(provider.paced.length, 0);
+  assert.deepEqual((await subscribe()).data, { available: true });
+  assert.deepEqual((await subscribe()).data, { available: true });
+  assert.deepEqual(provider.writes, [['feed', 'leadgen', 'messages']]);
 });
