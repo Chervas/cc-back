@@ -17,20 +17,21 @@ function allowsLeadPair(booking) {
   const patientBooking = '(?:una? )?cita(?: (?:ya )?(?:agendada|reservada|programada))?'
     + '(?: a esa hora)? (?:de (?:un )?paciente|(?:que )?no (?:sea|es) (?:un )?lead|no lead)';
   const negativeAction = '(?:no|nunca) (?:se (?:puede |debe )?)?(?:mont|dobl|solap)\\w*';
+  const protectPatients = new RegExp(negativeAction + ' (?:nunca )?(?:(?:a |dos )?pacientes|(?:sobre|con) (?:una? )?(?:cita de (?:un )?)?pacientes?)\\b', 'g');
   const patientClause = new RegExp('(?:' + negativeAction + ' )?(?:si|cuando) (?:ya )?hay (?:ya )?' + patientBooking
     + '(?:,? ' + negativeAction + ')?', 'g');
   const patientException = /\b(?:siempre y cuando|siempre que|salvo que|excepto si|si) no (?:hay|haya) (?:una? )?cita.{0,60}(?:no sea (?:un )?lead|de (?:un )?paciente)\b/;
   let enabled = false;
   for (const line of sentences) {
     if (!operation.test(line) || /[¿?]/.test(line)) continue;
-    const rule = line.replace(patientClause, ' ').split(patientException)[0].trim();
+    const rule = line.replace(patientClause, ' ').replace(protectPatients, ' ').split(patientException)[0].trim();
     if (!operation.test(rule)) continue;
     if (/\b(?:no|nunca|prohibid[oa]|evit\w*|sin)\b.{0,55}(?:dobl|mont|solap|superpon|dos leads|2 leads)/.test(rule)
       || /(?:dobl|mont|solap|superpon)\w*.{0,45}\b(?:prohibid[oa]|no permitid[oa])\b/.test(rule)) return false;
     if (!/\bleads?\b/.test(rule)) continue;
     // Qualifiers outside the supported rule cannot widen the permission.
     if (/\b(?:podria|quizas|consultar|preguntar|previa|siempre que|siempre y cuando|salvo|excepto|unicamente si|solo si|lunes|martes|miercoles|jueves|viernes|sabado|domingo|manana|tarde)\b|\d{1,2}:\d{2}/.test(rule)) continue;
-    if (/\bsi\b/.test(rule) && !/\bsi (?:ambos son leads|(?:ya )?hay (?:otro|un) lead)\b/.test(rule)) continue;
+    if (/\bsi\b/.test(rule) && !/\bsi (?:(?:ambos |los dos )?son leads|(?:ya )?hay (?:otro|un) lead)\b/.test(rule)) continue;
     if (/\b(?:pued[eo]n?|permite\w*|permitid[oa]s?|permitimos|autoriz\w+|citamos|agenda(?:mos|r)?|cita(?:r)?|debe[ns]?|podemos|admit\w*)\b.{0,95}(?:\b(?:dobl|mont|solap|superpon)\w*|\b(?:dos|2) leads? (?:a la (?:vez|misma hora)|por (?:hora|hueco))\b)/.test(rule)
       || /(?:^|[:,]\s*)\s*(?:doblar|montar|solapar|doblamos|montamos|solapamos)\b.{0,60}\bleads?\b/.test(rule)) enabled = true;
   }
