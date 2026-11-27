@@ -74,27 +74,6 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await q.addIndex('Conversations', ['clinic_id', 'channel', 'social_account_id', 'contact_id'], {
     unique: true,
   });
-  const at = Date.now(),
-    rule = { action: 'message', text: 'Gracias por solicitar información.' };
-  const flow = await db.AutomationFlowTemplateV2.create({
-    public_id: 'test_flow',
-    template_key: 'lead_auto_reply_system__clinic_41',
-    version: 1,
-    name: 'Prueba',
-    clinic_id: 41,
-    created_by: 23,
-    published_by: 23,
-    published_at: new Date(at - 60000),
-    entry_node_id: 'N1',
-    nodes: [],
-    trigger_type: 'lead_nuevo',
-    is_active: true,
-    trigger_config: {
-      managed_feature: 'lead_auto_reply',
-      configured: true,
-      social_entries: { instagram_comment: rule, instagram_dm: rule, messenger_dm: { action: 'notify' } },
-    },
-  });
   const accounts = { 501: 41, 502: 42, 401: 41 };
   const resolve = async (_, { channel, accountId }) =>
     !accounts[accountId]
@@ -118,6 +97,17 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     loaded: true,
     exports: { triggerImmediate: async () => {} },
   };
+  const configService = require('../../services/leadAutoReply.service');
+  const rule = { action: 'message', text: 'Gracias por solicitar información.' };
+  const entries = { instagram_comment: rule, instagram_dm: rule, messenger_dm: { action: 'notify' } };
+  const status = await configService.saveConfig({
+    actorUserId: 23, clinicId: 41, input: { sources: [], social_entries: entries, active: true },
+  });
+  assert.equal(status.active, true);
+  assert.equal(status.readiness.ready, true);
+  assert.deepEqual((await configService.getStatus(41)).config.social_entries, entries);
+  const flow = await db.AutomationFlowTemplateV2.findByPk(status.flow.id);
+  const at = Math.max(Date.now(), flow.published_at.getTime());
   const dispatch = require('../../services/automationInboundMessage.service');
   const queue = require('../../services/jobRequests.service');
   const runtime = require('../../lib/automation-runtime-stop');
@@ -279,10 +269,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(notice.attention, true);
   assert.notEqual(notice.lead_id, lead.id);
   assert.equal(posts.length, 2);
-  const graph = require('../../services/leadAutoReply.service').buildManagedNodes({
-    ...flow.trigger_config,
-    sources: [],
-  });
+  const graph = flow.nodes;
   const engine = require('../../services/flowEngineV2.service');
   const step = (id, context) =>
     engine._processNode(
@@ -339,6 +326,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(await db.LeadIntake.count(), 2);
   assert.equal(posts.length, 2);
   report.assertions = [
+    'Saved social-only clinic configuration → persisted V2 graph',
     'Live comment → scoped lead and one private reply',
     'duplicate webhook and worker',
     'DM continuation reuses lead',
