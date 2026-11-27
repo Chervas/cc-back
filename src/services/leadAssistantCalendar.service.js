@@ -242,6 +242,7 @@ async function available({
   calendar,
   patientId,
   professionalId,
+  pairLead = null,
   now = new Date(),
   capabilities,
 }) {
@@ -255,6 +256,9 @@ async function available({
     treatmentId: treatment.id,
     patientId: patientId || null,
     startingDoctorId: professionalId || null,
+    extraSlots: pairLead ? (params, solve) => require('./leadAssistantOverlap.service').pairedSlots({
+      ...params, doctorId: professionalId, leadId: pairLead.id, patientId,
+    }, solve) : null,
     date: calendar.date,
     days: calendar.days,
     stepMinutes: 15,
