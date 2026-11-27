@@ -29,6 +29,7 @@ function buildDraftRequest(turn) {
   const context = {
     clinic: text(clinicName, 120),
     tone: text(tone, 12000),
+    ...(turn.approvedContext ? { approvedContext: text(turn.approvedContext, 120000) } : {}),
     approvedFacts: list(approvedFacts, 40, fact => text(fact, 1000)),
     promotion: matchedPromotion ? {
       title: text(matchedPromotion.title, 180),

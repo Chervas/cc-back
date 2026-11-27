@@ -47,3 +47,12 @@ test('exige una fuente aprobada para cada cantidad y descuento de una respuesta 
   assert(!supportsQuotedAmounts('Puedo ofrecerte un 15 por ciento.',approved));
   assert(!supportsQuotedAmounts('Cuesta $85,50.',approved));
 });
+
+test('conserva el último tratamiento de un contexto aprobado de 120.000 caracteres Unicode', () => {
+  const ending = '📘 La consulta de orientación dura 25 minutos.';
+  const approvedContext = 'x'.repeat(120000-Array.from(ending).length)+ending;
+  const request = require('../../services/leadAssistantDialogue.service').buildDraftRequest({
+    clinicName:'Clínica ficticia',tone:'Breve',approvedContext,approvedFacts:['Recepción atiende por la mañana.'],
+    commercialHistory:[],userText:'¿Cuánto dura esa consulta?',availableSlots:[]});
+  assert.equal(JSON.parse(request.inputText).approvedContext,approvedContext);
+});

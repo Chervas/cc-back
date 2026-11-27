@@ -324,7 +324,8 @@ async function attend({
   }
   let answer = turn.answer;
   if (!answer) {
-    const facts = [publication.fields.context, publication.fields.guardrails, publication.fields.booking]
+    const approvedContext = publication.fields.context.replace(/https?:\/\/\S+/gi, '').trim();
+    const facts = [publication.fields.guardrails, publication.fields.booking]
       .filter(Boolean)
       .flatMap((value) => value.replace(/https?:\/\/\S+/g, '').match(/[\s\S]{1,1000}/g) || []);
     const historyRows = await db.Message.findAll({
@@ -351,6 +352,7 @@ async function attend({
     const request = dialogue.buildDraftRequest({
       clinicName: clinic.nombre_clinica,
       tone: publication.fields.tone,
+      approvedContext,
       approvedFacts: facts,
       matchedPromotion: offer,
       commercialHistory: history,
@@ -370,7 +372,7 @@ async function attend({
       typeof generated?.reply !== 'string' ||
       !generated.reply.trim() ||
       generated.reply.length > 800 ||
-      !dialogue.supportsQuotedAmounts(generated.reply,[...facts,offer?.description]) ||
+      !dialogue.supportsQuotedAmounts(generated.reply,[approvedContext,...facts,offer?.description]) ||
       /https?:\/\//i.test(generated.reply)
     )
       return { reason: 'assistant_reply_requires_review', attention: false, ...(await recordHandoff(scope)) };
