@@ -3,7 +3,15 @@
 const verdict = (kind, privateRequested = false) => ({ kind, privateRequested });
 const normalize = value => value.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
 
-const OPT_OUT = /\b(?:unsubscribe|stop|(?:dame|darme|darnos|deseo|quiero) (?:de |la )?baja|no (?:me |nos )?(?:contact\w*|escrib\w*|mand\w*|envi\w*)|no quiero (?:mas )?(?:mensajes|informacion|publicidad)|deja de (?:escribir|enviar|mandar)|remove me|do not contact)\b/;
+const OPT_OUT = /\b(?:(?:dame|darme|darnos|deseo|quiero) (?:de |la )?baja|no (?:me |nos )?(?:contactes|contacte|contacten|contacteis|escribas|escriba|escriban|escribais|mandes|mande|manden|mandeis|envies|envie|envien|envieis)|no quiero (?:mas )?(?:mensajes|informacion|publicidad)|dej(?:a|ad|en) de (?:escribir|enviar|mandar)|remove me|unsubscribe me|do not contact me|stop (?:contacting|messaging|texting|emailing) me)\b/;
+function explicitOptOut(text) {
+  if (typeof text !== 'string') return false;
+  const normalized = normalize(text);
+  const command = normalized.replace(/^[¡!.,\s]+|[!.,\s]+$/g, '');
+  return /^(?:(?:please|por favor)[, ]+)?(?:baja|stop|unsubscribe)(?:[, ]+(?:please|por favor))?$/.test(command)
+    || OPT_OUT.test(normalized)
+    || /\b(?:don['’]t (?:contact|message|text) me|no m['’](?:escriguis|escriviu|envieu|enviis)|no (?:em|ens) contact(?:is|eu)|don(?:a|eu)['’-]me de baixa)\b/.test(normalized);
+}
 const SENSITIVE_CONTENT = [
   /\b(?:urgencia\w*|urgente\w*|emergenc\w*|ayuda inmediata|112|911|dolor\w*|duele\w*|sangr\w*|sintoma\w*|fiebre|inflama\w*|infeccion\w*|herida\w*|alerg\w*|embaraz\w*|vomit\w*|mare\w*|picor)\b/,
   /\b(?:diagnos\w*|medica(?:mento|cion)\w*|historia clinica|receta|enferm\w*|biopsia|tumor\w*|cirugia|pos(?:t)?operatorio|depresion|ansiedad|suicid\w*|diabet\w*|epilep\w*|cardiac\w*|menstru\w*|lesion\w*|asma|hemorrag\w*|herpes|quimioterap\w*|cancer|trauma\w*)\b/,
@@ -44,7 +52,7 @@ async function classifyInterest(entry, { clinicId, groupId, beforeDispatch, anal
   const privateMessage = entry.type === 'dm';
   const text = scrub(entry.text);
   const original = normalize(entry.text);
-  if (original.replace(/[!. ]/g, '') === 'baja' || OPT_OUT.test(original)) return verdict('opt_out');
+  if (explicitOptOut(entry.text)) return verdict('opt_out');
   if (INSTRUCTIONS.test(original) || EMBEDDED_COMMAND.test(original) || NEGATION.test(original) || sensitive(original)) return verdict('review');
   if (!text) return verdict('review');
 
@@ -89,4 +97,4 @@ async function classifyInterest(entry, { clinicId, groupId, beforeDispatch, anal
   }
 }
 
-module.exports = { classifyInterest };
+module.exports = { classifyInterest, explicitOptOut };
