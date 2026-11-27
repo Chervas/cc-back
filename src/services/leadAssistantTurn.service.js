@@ -119,7 +119,8 @@ async function attend({
   });
   const invalid = await blockReason();
   if (invalid) return stopped(invalid);
-  const lockTurn = await db.sequelize.transaction(async (transaction) => {
+  // The conversation row serializes this session. Distinct new threads must not lock the same missing-key range.
+  const lockTurn = await db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
     const locked = { transaction, lock: transaction.LOCK.UPDATE };
     const c = await db.Conversation.findByPk(thread.id, locked);
     if (

@@ -227,6 +227,42 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(receipts[0].selected, receipts[1].selected);
   assert.equal(await db.CitaPaciente.count(), 3);
   assert.equal(await db.JobRequest.count({ where: { type: 'lead_assistant_appointment_created' } }), 3);
+  // Both contacts see the exact same slot before either confirms.
+  const contenders = await Promise.all(
+    ['+34600123457', '+34600123458'].map(phone => thread('whatsapp', phone))
+  );
+  const proposals = await Promise.all(
+    contenders.map(contact => enter(contact, 'Quiero reservar el 2030-01-10 a las 09:00'))
+  );
+  const [left, right] = await Promise.all(proposals.map(proposal => proposal.booking()));
+  assert.equal(left.slots.length, 1);
+  const chosen = left.slots[0];
+  assert.equal(chosen.start, right.slots[0].start);
+  let readyCount = 0;
+  let bothReady;
+  const confirming = new Promise(resolve => { bothReady = resolve; });
+  const meet = async () => {
+    if (++readyCount === 2) bothReady();
+    await confirming;
+  };
+  const contest = await Promise.all(
+    contenders.map(contact => enter(contact, 'Confirmo la primera', { beforeCheck: meet }))
+  );
+  const outcomes = await Promise.all(contest.map(item => item.booking()));
+  assert.deepEqual(outcomes.map(item => item.stage).sort(), ['booked', 'offered']);
+  const replacement = outcomes.find(item => item.stage === 'offered');
+  assert.match(replacement.reply, /otro día|otros días/);
+  assert(replacement.slots.length > 0);
+  for (const slot of replacement.slots) {
+    assert(slot.local.slice(0, 10) > '2030-01-10');
+    assert.equal(slot.local.slice(11, 16), '09:00');
+    assert.equal(slot.doctorId, chosen.doctorId);
+  }
+  assert.equal(await db.CitaPaciente.count(), 4);
+  assert.equal(await db.CitaPaciente.count({
+    where: { inicio: new Date(chosen.start), doctor_id: chosen.doctorId },
+  }), 1);
+  assert.equal(await db.JobRequest.count({ where: { type: 'lead_assistant_appointment_created' } }), 4);
   const hooks = [];
   const worker = require('../../services/leadAssistantAppointmentEvents.service');
   const event = (
@@ -261,7 +297,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const review = await enter(impostor, 'Sí');
   assert.match(review.result.reason, /handoff/);
   assert.equal((await impostor.reload()).patient_id, null);
-  assert.equal(await db.CitaPaciente.count(), 3);
+  assert.equal(await db.CitaPaciente.count(), 4);
   assert(
     !reads.some((s) =>
       /\b(?:HistoriasClinicas|DocumentsPaciente|DocumentosPaciente|ClinicalDocuments|ClinicalHistoryEntries)\b/i.test(
@@ -282,6 +318,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     'Oferta sin escritura y confirmación local con profesional, sala y recibo del plan real',
     'Mismo mensaje repetido y segundo mensaje de aceptación conservan la misma cita',
     'Hueco ocupado por otro lead devuelve alternativas vigentes sin otra cita',
+    'Dos leads que confirman a la vez el último hueco de una hora concreta reciben una reserva y alternativas a la misma hora en otros días.',
     'Instagram solicita el contacto necesario en el DM, espera confirmación y respeta el cierre de ventana',
     'Dos confirmaciones simultáneas que eligen horarios distintos consumen una sola oferta y generan un único evento de agenda.',
     'Un número de teléfono escrito en Instagram no permite enlazar a otro paciente. Permisos y plazos inválidos bloquean la reserva.',
