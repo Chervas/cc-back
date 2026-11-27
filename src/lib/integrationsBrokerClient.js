@@ -90,7 +90,8 @@ function createIntegrationsBrokerClient({ origin, keyId, privateKey, audience, c
                 const cooldown = metaLeadCooldownError(value, res.statusCode, res.headers);
                 if (cooldown) return finish(cooldown);
               }
-              if(command.operation?.startsWith('meta.marketing.credential.maintenance.')&&res.statusCode!==200){
+              if ((command.operation?.startsWith('meta.marketing.credential.maintenance.') ||
+                  command.operation === 'meta.marketing.social.subscribe.v1') && res.statusCode !== 200) {
                 const cooldown=metaMaintenanceCooldownError(value,res.statusCode,res.headers);if(cooldown)return finish(cooldown);
               }
               if(command.operation==='meta.marketing.enrollment.assets.v1'&&res.statusCode!==200){
