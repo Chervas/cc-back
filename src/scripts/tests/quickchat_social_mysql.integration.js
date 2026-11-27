@@ -226,6 +226,9 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const prior = await reply({ commentMessageId: m.id, attemptId: calls[0].id });
   assert.equal(prior.outcome, 'sent');
   assert.equal(calls.length, 1);
+  assert.deepEqual((await svc.availability(thread, [await m.reload()])).comments[m.id], {
+    available: false, reason: 'private_reply_reserved', outcome: 'sent',
+  });
   await webhook(dm('501', 'mid-1'));
   await webhook(dm('501', 'mid-1'));
   const inputKey = eventKey(events(dm('501', 'mid-1'))[0]);
@@ -267,6 +270,9 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   unknown = true;
   const uncertain = await reply();
   assert.equal(uncertain.outcome, 'unknown');
+  const blockedComments = (await svc.availability(thread, [m, old])).comments;
+  assert.equal(blockedComments[m.id].outcome, 'sent');
+  assert.deepEqual(blockedComments[old.id], { available: false, reason: 'reconciliation_required' });
   const n = calls.length;
   assert.equal((await reply()).reason, 'reconciliation_required');
   assert.equal(calls.length, n);
@@ -353,6 +359,19 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal((await svc.accept(heldComment, historyOptions)).duplicate, 1);
   assert.equal(await retry(41), false);
   assert.equal(await db.Message.count({ where: { 'metadata.providerId': stored.eventId } }), 1);
+  await webhook(comment('994'));
+  const pendingComment = await db.Message.findOne({ where: { 'metadata.providerId': '994' } });
+  proof = null;
+  unknown = true;
+  assert.equal((await reply({ commentMessageId: pendingComment.id })).outcome, 'unknown');
+  await pendingComment.reload();
+  assert.deepEqual((await svc.availability(thread, [pendingComment])).comments[pendingComment.id], {
+    available: false, reason: 'reconciliation_required',
+  });
+  proof = { available: false, reason: 'provider_rejected' };
+  assert.deepEqual((await svc.availability(thread, [pendingComment])).comments[pendingComment.id], {
+    available: true, reason: null,
+  });
   assert(packets.length >= 8);
   report.checks.push(
     'Firma, migración repetible, duplicados, privado concurrente, DM y continuidad, dos sedes, Messenger, revisión, ventanas, revocación, conciliación sin reenvío, eco, histórico y recuperación concurrente de un webhook retenido por permisos.',
