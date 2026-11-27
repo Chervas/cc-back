@@ -11,11 +11,12 @@ const threadId = (value) => typeof value === 'string' && /^[A-Za-z0-9:_=+/\-]{1,
 const mid = (value) => typeof value === 'string' && /^[\x21-\x7e]{1,512}$/.test(value);
 
 async function read({ payload, asset, context, appSecret, graph, pageToken }) {
-  const { channel, kind, accountId, clinicId, start, end, cursor } = payload;
+  const { channel, kind, accountId, clinicId, start, end, cursor, participantId } = payload;
   if (
     end - start !== HOURS_72 ||
     end > Date.now() ||
-    (channel !== 'instagram' && kind === 'comment')
+    (channel !== 'instagram' && kind === 'comment') ||
+    (participantId !== undefined && (channel !== 'instagram' || kind !== 'dm' || !graphId(participantId) || participantId === accountId))
   )
     fail('invalid_request');
   const scope = {
@@ -31,6 +32,7 @@ async function read({ payload, asset, context, appSecret, graph, pageToken }) {
       clinicId,
       start,
       end,
+      ...(participantId ? [participantId] : []),
     ]),
   };
   const key = createHmac('sha256', appSecret)
@@ -46,16 +48,18 @@ async function read({ payload, asset, context, appSecret, graph, pageToken }) {
     const fields = {
       conversations: 'id,updated_time',
       messages: 'id,created_time,from,to,message,attachments.limit(1){id}',
-      media: 'id',
+      media: 'id,comments.limit(1){id}',
       comments: 'id,from,text,timestamp,replies.limit(1){id}',
       replies: 'id,from,text,timestamp',
     };
     const instagramMessages = edge === 'messages' && channel === 'instagram';
     const seen = node.seen || 0;
+    // Large Instagram inboxes can time out while Graph resolves updated_time for several threads.
+    const pageLimit = edge === 'conversations' && channel === 'instagram' ? 1 : 10;
     const result = await graph(encodeURIComponent(id) + '/' + edge, pageToken, {
       fields: fields[edge],
-      limit: instagramMessages ? String(20 - seen) : '10',
-      ...(edge === 'conversations' ? { platform: channel } : {}),
+      limit: String(instagramMessages ? 20 - seen : pageLimit),
+      ...(edge === 'conversations' ? { platform: channel, ...(participantId ? { user_id: participantId } : {}) } : {}),
       ...(node.after ? { after: node.after } : {}),
     });
     if (result.rejected === 'instagram_inbox_access_disabled')
@@ -75,7 +79,10 @@ async function read({ payload, asset, context, appSecret, graph, pageToken }) {
       }
       if (edge === 'media') {
         if (!graphId(row.id)) fail('provider_failed');
-        children.push(seal({ edge: 'comments', id: row.id, postId: row.id }));
+        // An explicit empty first page rules out comments and their nested replies.
+        const comments = row.comments;
+        if (!Array.isArray(comments?.data) || comments.data.length || comments.paging?.next)
+          children.push(seal({ edge: 'comments', id: row.id, postId: row.id }));
         continue;
       }
       const at = Date.parse(edge === 'messages' ? row.created_time : row.timestamp);
@@ -106,6 +113,7 @@ async function read({ payload, asset, context, appSecret, graph, pageToken }) {
           omitted++;
           continue;
         }
+        if (participantId && (row.from.id === accountId ? to[0].id : row.from.id) !== participantId) fail('scope_denied');
         const attached = Boolean(row.attachments?.data?.length);
         if (!row.message && !attached) {
           omitted++;

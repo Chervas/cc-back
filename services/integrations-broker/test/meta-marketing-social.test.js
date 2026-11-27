@@ -489,3 +489,23 @@ test('ordinary renewal losing a previously granted permission on the selected Pa
   await assert.rejects(f.execute(R.OPERATIONS.finish,{renewalId:id,flowId:id,state:p.state,code:'FICTITIOUS_RENEWAL_'+id}),{code:'oauth_credentials_incomplete'});
   assert.equal(f.current.epochs.current(row,f.binding).versionId,current.versionId);
 });
+
+test('history reports the timed-out Graph stage and preserves a real Page rate limit', async () => {
+  const { ctx, call } = fixture();
+  const original = ctx.transport, controller = new AbortController();
+  const end = Date.now() - 1000, args = { start: end - 72 * 3600000, end, cursor: null, participantId: '771' };
+  ctx.context = { principalId: 'reader', tenantRef: 'test', binding: { connectionRef: 'connection' }, policyVersion: 'p1', generation: 'g1' };
+  ctx.signal = controller.signal;
+  ctx.transport = async (url, options) => {
+    if (!url.pathname.endsWith('/conversations')) return original(url, options);
+    return { ok: false, status: 403, json: async () => ({ error: { code: 80006 } }) };
+  };
+  await assert.rejects(call(social.history, 'instagram', 'dm', args), { code: 'rate_limited' });
+  ctx.transport = async (url, options) => {
+    if (!url.pathname.endsWith('/conversations')) return original(url, options);
+    controller.abort();
+    throw Object.assign(Error('time'), { name: 'AbortError' });
+  };
+  await assert.rejects(call(social.history, 'instagram', 'dm', args), { code: 'provider_timeout' });
+  assert.throws(() => social.checks[social.history]({ clinicId: 41, accountId: '401', channel: 'messenger', kind: 'dm', ...args }), /invalid_request/);
+});

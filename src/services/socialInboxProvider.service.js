@@ -29,7 +29,8 @@ function provider(env = process.env) {
   }
   return {
     subscribePage: (r, versionId) => call(S.subscribe, r, { kind: 'dm', enrollmentId: r.enrollmentId, versionId }),
-    history: (r, kind, start, end, cursor) => call(S.history, r, { kind, start, end, cursor }),
+    history: (r, kind, start, end, cursor, participantId) =>
+      call(S.history, r, { kind, start, end, cursor, ...(participantId ? { participantId } : {}) }),
     receive: (r, e) =>
       call(S.receive, r, {
         kind: e.type,

@@ -32,8 +32,6 @@ const checks = {
     clinicId: scope.clinicId, channel: { const: 'messenger' }, kind: { const: 'dm' }, accountId: id,
     enrollmentId: { type: 'string', pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$' }, versionId: { type: 'string', pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$' },
   }),
-  [history]: schema({ ...scope, start: { type: 'integer', minimum: 1 }, end: { type: 'integer', minimum: 1 },
-    cursor: { anyOf: [{ type: 'null' }, { type: 'string', pattern: '^[A-Za-z0-9_-]{40,4096}$' }] } }),
   [send]: schema({
     ...scope,
     recipient: id,
@@ -41,6 +39,21 @@ const checks = {
     attemptId: { type: 'string', pattern: '^[a-f0-9-]{36}$' },
   }),
 };
+const historyFields = {
+  ...scope,
+  start: { type: 'integer', minimum: 1 },
+  end: { type: 'integer', minimum: 1 },
+  cursor: { anyOf: [{ type: 'null' }, { type: 'string', pattern: '^[A-Za-z0-9_-]{40,4096}$' }] },
+};
+const checkAccountHistory = schema(historyFields);
+const checkParticipantHistory = schema({
+  ...historyFields,
+  kind: { const: 'dm' },
+  channel: { const: 'instagram' },
+  participantId: id,
+});
+checks[history] = payload =>
+  payload?.participantId === undefined ? checkAccountHistory(payload) : checkParticipantHistory(payload);
 const receiptFields = { ...scope, senderId: id,
   postId: { anyOf: [id, { type: 'null' }] }, commentId: { anyOf: [id, { type: 'null' }] } };
 const checkLiveReceipt = schema(receiptFields);
@@ -108,6 +121,12 @@ async function execute({
     return graphRequest(path, bearer, query, body);
   }
   const deadline = Date.now() + 24000;
+  function historyFailure(path, reason, status, code) {
+    if (operation !== history) return;
+    const edge = path.split('/').at(-1);
+    if (['accounts', 'debug_token', 'conversations', 'messages', 'media', 'comments', 'replies'].includes(edge))
+      process.stderr.write(JSON.stringify({ event: 'meta_social_history_failed', channel: p.channel, kind: p.kind, edge, reason, status, code }) + '\n');
+  }
   async function graphRequest(path, bearer, query = {}, body) {
     check();
     const url = new URL(
@@ -119,22 +138,34 @@ async function execute({
       ...query,
       ...(pageForm ? {} : { appsecret_proof: proof }),
     }).toString();
-    const response = await transport(url, {
-      redirect: 'error',
-      signal,
-      method: body ? 'POST' : 'GET',
-      headers: {
-        authorization: 'Bearer ' + bearer,
-        ...(body ? { 'content-type': pageForm ? 'application/x-www-form-urlencoded' : 'application/json' } : {}),
-      },
-      ...(body ? { body: pageForm ? subscriptionForm(body, proof) : JSON.stringify(body) } : {}),
-    });
+    let response, raw;
+    try {
+      response = await transport(url, {
+        redirect: 'error',
+        signal,
+        method: body ? 'POST' : 'GET',
+        headers: {
+          authorization: 'Bearer ' + bearer,
+          ...(body ? { 'content-type': pageForm ? 'application/x-www-form-urlencoded' : 'application/json' } : {}),
+        },
+        ...(body ? { body: pageForm ? subscriptionForm(body, proof) : JSON.stringify(body) } : {}),
+      });
+      raw = await response.json();
+    } catch (error) {
+      if (signal?.aborted) {
+        historyFailure(path, 'provider_timeout');
+        fail('provider_timeout');
+      }
+      throw error;
+    }
     if (operation === subscribe && response.headers)
       subscriptionPacer.observe('meta-ads-app:' + metadata.appId, usage(Object.fromEntries(response.headers)));
-    const raw = await response.json();
-    if (operation === subscribe && (response.status === 429 || [4, 17, 32, 613].includes(raw.error?.code)))
+    if ([subscribe, history].includes(operation) && (response.status === 429 || [4, 17, 32, 613, 80006].includes(raw.error?.code))) {
+      historyFailure(path, 'rate_limited', response.status, raw.error?.code);
       fail('rate_limited');
+    }
     if (raw.error || !response.ok) {
+      historyFailure(path, 'graph_error', response.status, Number.isInteger(raw.error?.code) ? raw.error.code : undefined);
       if (
         p.channel === 'instagram' && response.status >= 400 && response.status < 500 && raw.error?.code === 200 &&
         /^(?:\(#200\)\s*)?the account owner has disabled access to instagram direct messages\.?$/i.test(raw.error.message) &&
