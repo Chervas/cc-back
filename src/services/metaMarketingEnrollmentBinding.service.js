@@ -211,7 +211,7 @@ function createBindings({models,authority,sessions,now=()=>new Date(),recoveryGu
     if(changed!==1)fail('meta_enrollment_lease_lost');
     if(proof)await recovery.activate({flow,enrollment:current},transaction);
     await committed(row.enrollment_id,transaction);
-    await require('./socialInboxSubscriptions.service').enqueuePages(models,current,current.flow_id,transaction);
+    await require('./socialInboxSubscriptions.service').enqueuePages(models,current,current.flow_id,transaction,{confirmedPages:receipt.quickChatSubscriptionPages});
     await record(current,'meta_enrollment_activated',transaction);return current;
   }
   return {activate,committed,committedForLeadIngress,record,scopeOf};

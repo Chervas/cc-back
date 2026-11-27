@@ -34,7 +34,10 @@ function request(row){
 function receipt(value,row,{states,allowUnknown=false}={}){
   const r=request(row);
   if(allowUnknown&&C.exact(value,'enrollmentId,status,accessBlocked')&&value.enrollmentId===r.enrollment_id&&value.status==='not_found'&&value.accessBlocked===true)return value;
-  if(!C.exact(value,'enrollmentId,flowId,scopeKey,scopeDigest,candidateDigest,selectionDigest,clinicSetDigest,assets,status,accessBlocked,preparedAt,activatedAt')
+  const announced=value && Object.hasOwn(value,'quickChatSubscriptionPages');
+  if(announced && (value.status!=='active'||value.accessBlocked!==false||!require('../../services/integrations-broker/src/meta-marketing-social-consent')
+    .validSubscriptionPages(value.quickChatSubscriptionPages,r.scope_key,r.clinicIds,r.selected)))fail('broker_response_invalid');
+  if(!C.exact(value,'enrollmentId,flowId,scopeKey,scopeDigest,candidateDigest,selectionDigest,clinicSetDigest,assets,status,accessBlocked,preparedAt,activatedAt'+(announced?',quickChatSubscriptionPages':''))
     ||value.enrollmentId!==r.enrollment_id||!Array.isArray(states)||!states.includes(value.status)||value.scopeKey!==r.scope_key||typeof value.accessBlocked!=='boolean'||!Array.isArray(value.assets))fail('broker_response_invalid');
   // A control tombstone can be written before prepare and has no flow/selection.
   if(value.status==='revoked'&&value.flowId===null){

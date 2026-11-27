@@ -25,6 +25,25 @@ function config(rows) {
   return rows;
 }
 
+function advancedChannels(value) {
+  if (!Array.isArray(value) || value.length > 2 || new Set(value).size !== value.length ||
+      value.some(channel => !['instagram', 'messenger'].includes(channel))) fail('invalid_request');
+  return [...value].sort();
+}
+
+function singleChannels(channels, scopeKey, clinicIds) {
+  if (!Array.isArray(clinicIds) || clinicIds.length !== 1 || !Number.isSafeInteger(clinicIds[0]) ||
+      clinicIds[0] < 1 || scopeKey !== 'clinic:' + clinicIds[0]) return [];
+  return advancedChannels(channels || []);
+}
+
+function validSubscriptionPages(pages, scopeKey, clinicIds, assets) {
+  return singleChannels(['messenger'], scopeKey, clinicIds).length === 1 &&
+    Array.isArray(pages) && pages.length > 0 && pages.length <= 100 &&
+    pages.every((id, i) => graphId(id) && (!i || id > pages[i-1]) &&
+      (!assets || assets.some(a => a.kind === 'facebook_page' && a.id === id)));
+}
+
 function targetsFor(accounts, assets, clinicIds) {
   const pages = new Set(assets.filter(asset => asset.kind === 'facebook_page').map(asset => asset.id));
   return (accounts || []).filter(row => pages.has(row.pageId) && clinicIds.includes(row.clinicId))
@@ -40,9 +59,9 @@ function targetDigest(accounts) {
   return C.hash(JSON.stringify(accounts.map(a => [a.clinicId, a.channel, a.pageId, a.accountId])));
 }
 
-function scopesFor(scopes, accounts) {
+function scopesFor(scopes, accounts, channels = []) {
   const requested = new Set(scopes);
-  for (const { channel } of accounts) {
+  for (const channel of new Set([...accounts.map(row => row.channel), ...channels])) {
     if (!['instagram', 'messenger'].includes(channel)) fail('invalid_request');
     for (const name of ['pages_show_list', 'pages_read_engagement', 'pages_manage_metadata', 'pages_messaging']) requested.add(name);
     if (channel === 'instagram')
@@ -111,4 +130,4 @@ function inspectInitial(raw, binding, accounts, now) {
   })) };
 }
 
-module.exports = { config, targetsFor, targetDigest, sameTarget, scopesFor, journal, inspect, inspectInitial };
+module.exports = { config, advancedChannels, singleChannels, validSubscriptionPages, targetsFor, targetDigest, sameTarget, scopesFor, journal, inspect, inspectInitial };

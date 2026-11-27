@@ -56,8 +56,9 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
       let url;try{url=new URL(v.authUrl);}catch{C.fail('broker_response_invalid');}
       const baseScopes=JSON.parse(row.scopes);
       const requested=url.searchParams.get('scope');
-      const permitted=require('./metaMarketingMessagingScopes').normalConsentScopes(baseScopes,JSON.parse(row.clinic_ids));
-      if(requested!==baseScopes.join(',') && requested!==permitted.join(','))C.fail('broker_response_invalid');
+      const social=require('./metaMarketingMessagingScopes'), clinics=JSON.parse(row.clinic_ids);
+      const permitted=social.permittedConsentScopes(baseScopes,social.configuredQuickChat().filter(a=>clinics.includes(a.clinicId)),row.scope_key,clinics);
+      if(requested!==baseScopes.join(',') && !permitted.some(scopes=>scopes.join(',')===requested))C.fail('broker_response_invalid');
       const expected={client_id:row.app_id,redirect_uri:row.redirect_uri,response_type:'code',scope:requested,state:payload.state};
       if(url.origin!=='https://www.facebook.com'||url.pathname!=='/v24.0/dialog/oauth'||url.username||url.password||url.hash
         ||[...url.searchParams.keys()].sort().join(',')!==Object.keys(expected).sort().join(',')||Object.entries(expected).some(([k,x])=>url.searchParams.get(k)!==x))C.fail('broker_response_invalid');
