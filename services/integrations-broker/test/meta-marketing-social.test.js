@@ -93,6 +93,23 @@ function fixture() {
   }
   return { ctx, commands, call };
 }
+test('reports an explicit Graph quota independently of local broker capacity and uncertain writes', async () => {
+  const {ctx, call} = fixture();
+  const args = { recipient: '771', text: 'Prueba', attemptId: '5d364186-5860-4e3a-bb52-cb89153c65de' };
+  const real = ctx.transport;
+  let limitWriteOnly = false, error = { error: { code: 4 } };
+  ctx.transport = async (url, options) => !limitWriteOnly || options.method === 'POST'
+    ? { ok: false, status: 429, json: async () => error }
+    : real(url, options);
+  const blocked = { available: false, reason: 'meta_api_rate_limited' };
+  assert.deepEqual(await call(social.status, 'instagram', 'dm'), blocked);
+  limitWriteOnly = true;
+  assert.deepEqual(await call(social.send, 'instagram', 'dm', args), blocked);
+  error = {};
+  await assert.rejects(call(social.send, 'instagram', 'dm', args), { code: 'outcome_unknown' });
+  ctx.transport = () => { throw Object.assign(Error(), {code:'rate_limited'}); };
+  await assert.rejects(call(social.status, 'instagram', 'dm'), {code:'rate_limited'});
+});
 test('signed broker persists a scoped Send receipt and reconciles it without a second POST', async (t) => {
   const { randomUUID } = require('node:crypto');
   const enrollment = require('../src/meta-marketing-enrollment-contract');

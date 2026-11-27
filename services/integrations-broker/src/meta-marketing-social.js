@@ -133,7 +133,17 @@ function historyRetryAfterMs(headers) {
   }
   return delay;
 }
-async function execute({
+// Only genuine Graph quota responses may be described as a Meta API limit.
+class GraphReplyLimit extends Error {}
+async function execute(options) {
+  try {
+    return await executeSocial(options);
+  } catch (error) {
+    if (error instanceof GraphReplyLimit) return { available: false, reason: 'meta_api_rate_limited' };
+    throw error;
+  }
+}
+async function executeSocial({
   operation,
   payload: p,
   context,
@@ -199,7 +209,13 @@ async function execute({
       }
       throw error;
     }
-    if ([subscribe, history].includes(operation) && (response.status === 429 || [4, 17, 32, 613, 80006].includes(raw.error?.code))) {
+    const quotaCode = [4, 17, 32, 613, 80006].includes(raw?.error?.code);
+    if ([status, send].includes(operation) && !response.ok && (response.status === 429 || quotaCode)) {
+      // An ambiguous write acknowledgement has to be reconciled before another send.
+      if (!body || (raw?.error && !raw.message_id && Number.isInteger(raw.error.code))) throw new GraphReplyLimit();
+      fail('outcome_unknown');
+    }
+    if ([subscribe, history].includes(operation) && (response.status === 429 || quotaCode)) {
       const delay = operation === history ? historyRetryAfterMs(response.headers) : 0;
       historyFailure(path, 'rate_limited', response.status, raw.error?.code, delay);
       const limited = new BrokerError('rate_limited');
