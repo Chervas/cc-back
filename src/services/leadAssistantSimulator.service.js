@@ -1,12 +1,10 @@
 'use strict';
 
 const { randomUUID, createHash } = require('node:crypto');
-const dialogue = require('./leadAssistantDialogue.service');
-const { commercialOffer } = require('./leadAssistantTurn.service');
+const { exchangeContext, respondToLead } = require('./leadAssistantConversation.service');
+const { display } = require('./leadAssistantCalendar.service');
 const { offerSections } = require('./leadAssistantPromotionImages.service');
-const { assistantCommercialText, explicitOptOut } = require('./socialLeadInterestClassification.service');
 const { processTurn } = require('./leadAssistantBooking.service');
-const { restrictionReply } = require('../lib/lead-assistant-promotion-validity');
 const { resolveClinicTimezone } = require('../lib/availability-calendar');
 
 const ttl = 30 * 60 * 1000;
@@ -41,73 +39,68 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
     const id = randomUUID();
     sessions.set(id, { clinicId, actorId, version:draft.version, clinicName:clinic.nombre_clinica,
       groupId:clinic.grupoClinicaId, timezone:resolveClinicTimezone(clinic), until:now()+ttl,
-      calendar:null, count:0, receipts:new Map(), history:[], booking:null, promotionKey:null, origin:null, closed:false, busy:false });
+      calendar:null, channel:null, count:0, receipts:new Map(), history:[], booking:null, context:null, contextStartId:1, origin:null, closed:false, busy:false });
     const promotions = [...offerSections(draft.fields.promotions)].map(([key,p])=>({key,title:p.title.split('\n')[0].slice(0,180)}));
     return { id, clinicName:clinic.nombre_clinica, version:draft.version, approved:published?.version === draft.version, promotions };
   }
 
   async function respond(s, fields, message, promotion, index) {
     const firstTurn = index === 1;
-    const format = draft => dialogue.formatCommercialReply({ firstTurn, clinicName:s.clinicName,tone:fields.tone,draft });
-    if (explicitOptOut(message)) return { reply:format('De acuerdo, dejamos aquí la conversación.'), event:'opt_out' };
-    const human = dialogue.requestedHumanHandoff(message);
-    async function passToTeam(preface) {
-      const { destination } = await recipients(db, s.clinicId);
-      const text = destination === 'unassigned' ? 'Esta consulta necesita atención del equipo. Puedes contactar con la recepción de la clínica.'
-        : dialogue.formatHandoffReceipt({firstTurn:false, recorded:true, destination, requestedCallback:!!human?.requestedCallback});
-      return {reply:format([preface,text].filter(Boolean).join(' ')), event:'handoff'};
-    }
-    if (human) return passToTeam();
-    const entry = {channel:'instagram',type:'dm',text:message,messageId:index,
+    const entry = {channel:s.channel,type:'dm',text:message,messageId:index,
       ...(firstTurn && promotion ? {ad:{title:promotion}} : {})};
-    const offer = commercialOffer(fields, entry, s.promotionKey, { timezone:s.timezone, includeUnavailable:true });
-    if (offer && s.promotionKey && s.promotionKey !== offer.key) { s.history = []; s.booking = null; }
-    s.promotionKey = offer?.key || null;
-    const userText = assistantCommercialText(message);
-    if (!offer?.restriction) {
-      let appointment;
-      try {
-        appointment = await booking({db, thread:{clinic_id:s.clinicId,channel:'instagram',patient_id:null},
-          entry:!s.booking && dialogue.acceptsOfferedTimes(message,s.history.at(-1)?.text) ? {...entry,text:'Quiero consultar horarios'} : entry, scope:{originMessageId:1,messageId:index,version:s.version}, execution:{created_by:s.actorId},
-          fields,offer, preview:s, blockReason:async()=>null, availability:async()=>true});
-      } catch (error) {
-        if (![400,404,409,422].includes(error.status || error.statusCode) ||
-            !/^(?:booking_|treatment_|appointment_)/.test(error.code || '')) throw error;
-        appointment = {review:true};
-      }
-      if (appointment?.reply) {
-        const options = s.booking?.stage === 'offered' ? s.booking.slots.map((slot,i)=>({
-          label:require('./leadAssistantCalendar.service').display(slot,s.timezone),
-          message:['La primera','La segunda','La tercera'][i],
-        })) : [];
-        return {reply:format(appointment.reply),event:s.booking?.stage==='booked' ? 'booked' : 'reply', ...(options.length ? {slots:options} : {})};
-      }
-      if (appointment?.review || appointment?.stop) return passToTeam();
+    const { offer, changed, post } = exchangeContext(fields, entry, s.context, s.timezone);
+    if (changed) {
+      s.history = [];
+      s.booking = null;
+      s.contextStartId = index;
     }
-    if (!userText) return passToTeam();
-    if (offer?.restriction) {
-      const result = restrictionReply(offer.restriction, message);
-      return result.handoff ? passToTeam(result.text) : {reply:format(result.text),event:'reply'};
+    s.context = { promotionKey:offer?.key || null, postReference:post };
+    let exchange = [];
+    const plan = await respondToLead({
+      entry, fields, clinicName:s.clinicName, timezone:s.timezone, offer, firstTurn, post,
+      previousAnswer:s.history.at(-1)?.at(-1)?.text, analyze, clinicId:s.clinicId, groupId:s.groupId,
+      beforeDispatch:async () => { if (s.until <= now()) throw fail(410,'assistant_simulator_expired'); },
+      checkWindow:async () => null,
+      readHistory:async () => s.history.flat(),
+      saveAnswer:async (answer,userText) => {
+        exchange = [{role:'user',text:userText}, {role:'assistant',text:answer.reply}];
+        return answer;
+      },
+      book:bookingEntry => booking({
+        db, thread:{clinic_id:s.clinicId,channel:s.channel,patient_id:null,
+          contact_id:s.channel === 'whatsapp' ? '+447700900123' : null}, entry:bookingEntry,
+        scope:{originMessageId:s.contextStartId,messageId:index,version:s.version,promotionKey:offer?.key},
+        execution:{created_by:s.actorId}, fields, offer, preview:s,
+        blockReason:async () => null, availability:async () => true,
+      }),
+    });
+    s.history = [...s.history,exchange].slice(-6);
+    if (plan.kind === 'silent') {
+      if (plan.reason === 'opt_out') return { reply:'', event:'opt_out' };
+      throw fail(409,'assistant_simulator_unavailable');
     }
-    const answer = await dialogue.generateAnswer({fields,clinicName:s.clinicName,timezone:s.timezone,offer,userText,
-      readHistory:async()=>s.history, analyze,clinicId:s.clinicId,groupId:s.groupId,
-      beforeDispatch:async()=>{
-        if (s.until <= now()) throw fail(410,'assistant_simulator_expired');
-      }});
-    if (!answer) return passToTeam();
-    s.history = [...s.history,{role:'user',text:userText},{role:'assistant',text:answer.reply}].slice(-12);
-    const image = offer?.images.find(img=>img.id === answer.imageId);
-    return {reply:format(answer.reply),event:'reply',...(image ? {image:{label:image.label,url:image.url}} : {})};
+    if (plan.kind === 'handoff') {
+      const { destination } = await recipients(db, s.clinicId);
+      return {reply:plan.prepare({destination,recorded:destination !== 'unassigned'}).text,event:'handoff'};
+    }
+    if (plan.kind === 'booking') {
+      const options = s.booking?.stage === 'offered' ? s.booking.slots.map((slot,i)=>({
+        label:display(slot,s.timezone), message:['La primera','La segunda','La tercera'][i],
+      })) : [];
+      return {reply:plan.text,event:s.booking?.stage==='booked' ? 'booked' : 'reply', ...(options.length ? {slots:options} : {})};
+    }
+    return {reply:plan.text,event:'reply', ...(plan.image ? {image:{label:plan.image.label,url:plan.image.url}} : {})};
   }
 
   async function turn(clinicId, actorId, sessionId, input) {
-    const { id, message, promotion, calendar = 'clinic' } = input || {};
+    const { id, message, promotion, calendar = 'clinic', channel = 'instagram' } = input || {};
     if (typeof id !== 'string' || !uuid.test(id) || typeof message !== 'string' || !message.trim() || message.length > 1000 ||
-        typeof promotion !== 'string' || promotion.length > 96 || !['demo','clinic'].includes(calendar))
+        typeof promotion !== 'string' || promotion.length > 96 || !['demo','clinic'].includes(calendar) ||
+        !['instagram','messenger','whatsapp'].includes(channel))
       throw fail(400,'assistant_simulator_invalid');
     const s = sessions.get(sessionId);
     if (!s || s.clinicId !== clinicId || s.actorId !== actorId || s.until <= now()) throw fail(410,'assistant_simulator_expired');
-    const fingerprint = createHash('sha256').update(JSON.stringify([message,promotion,calendar])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify([message,promotion,calendar,channel])).digest('hex');
     const previous = s.receipts.get(id);
     if (previous) {
       if (previous.fingerprint !== fingerprint) throw fail(409,'assistant_simulator_invalid');
@@ -119,12 +112,12 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
     try {
       const draft = await db.LeadAssistantDraft.findByPk(clinicId,{attributes:['version','fields'],raw:true});
       if (draft?.version !== s.version) throw fail(409,'assistant_simulator_changed');
-      if ((s.count && (promotion !== s.origin || calendar !== s.calendar)) || (!s.count && promotion && !offerSections(draft.fields.promotions).has(promotion)))
+      if ((s.count && (promotion !== s.origin || calendar !== s.calendar || channel !== s.channel)) || (!s.count && promotion && !offerSections(draft.fields.promotions).has(promotion)))
         throw fail(400,'assistant_simulator_invalid');
       // Commit only completed turns, so a failed model/availability call leaves the conversation retryable.
-      const next = {...s,calendar};
+      const next = {...s,calendar,channel};
       const result = await respond(next, draft.fields, message.trim(), promotion, s.count+1);
-      Object.assign(s, {history:next.history,booking:next.booking,promotionKey:next.promotionKey,origin:promotion,calendar,
+      Object.assign(s, {history:next.history,booking:next.booking,context:next.context,contextStartId:next.contextStartId,origin:promotion,calendar,channel,
         count:s.count+1,closed:result.event!=='reply',until:now()+ttl});
       s.receipts.set(id,{fingerprint,result});
       return result;

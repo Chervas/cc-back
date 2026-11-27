@@ -36,7 +36,9 @@ test('handoff, clinical follow-up and opt-out finish the test locally',async()=>
   const {simulator,calls}=fixture();
   for (const [message,event] of [['Quiero hablar con una persona','handoff'],['No he notado ningún cambio después de mi sesión','handoff'],['BAJA','opt_out']]) {
     const {id}=await simulator.start(41,3);
-    assert.equal((await simulator.turn(41,3,id,{id:randomUUID(),message,promotion:''})).event,event);
+    const result=await simulator.turn(41,3,id,{id:randomUUID(),message,promotion:''});
+    assert.equal(result.event,event);
+    if (event === 'opt_out') assert.equal(result.reply,'');
     await assert.rejects(simulator.turn(41,3,id,{id:randomUUID(),message:'INFO',promotion:''}),{code:'assistant_simulator_limit'});
   }
   assert.equal(calls.length,0);
@@ -56,4 +58,20 @@ test('the sample calendar completes a booking without staff, patient, appointmen
   assert.match((await ask(offered.slots[1].message)).reply,/recordatorio/);
   assert.match((await ask('Ana Prueba, +34600000001, ana@example.invalid')).reply,/17:30/);
   assert.equal((await ask('Confirmo')).event,'booked');
+});
+
+test('the simulated WhatsApp sender already supplies the phone number and cannot change channel mid-thread', async () => {
+  const fields={tone:'Breve',context:'Valoración',guardrails:'Usa la ficha',booking:'Pide correo electrónico para el recordatorio.'};
+  const db={LeadAssistantDraft:{findByPk:async()=>({version:1,fields})},Clinica:{findByPk:async()=>({nombre_clinica:'Prueba'})},
+    LeadAssistantPublication:{findOne:async()=>null}};
+  const sim=create({db});
+  for (const channel of ['whatsapp','instagram','messenger']) {
+    const {id}=await sim.start(1,42);
+    const ask=(text,via=channel)=>sim.turn(1,42,id,{id:randomUUID(),message:text,promotion:'',calendar:'demo',channel:via});
+    await ask('¿Qué horarios hay para el 2030-01-07?');
+    await assert.rejects(ask('La primera',channel==='whatsapp'?'instagram':'whatsapp'),{code:'assistant_simulator_invalid'});
+    const prompt=(await ask('La primera')).reply;
+    if (channel==='whatsapp') assert.match(prompt,/ya tengo el móvil/);
+    else assert.match(prompt,/tu número de móvil/);
+  }
 });

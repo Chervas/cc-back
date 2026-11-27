@@ -23,6 +23,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     'Message',
     'LeadAssistantSession',
     'LeadAssistantPublication',
+    'LeadAssistantDraft',
   ]) {
     db[name] = require('../../../models/' + name.toLowerCase())(sql, DataTypes);
     await db[name].sync();
@@ -78,7 +79,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   async function enter(
     c,
     text,
-    { open = true, send = true, canManage = true, audience = 'leads', version = 3, beforeCheck, expiresAt } = {}
+    { open = true, send = true, canManage = true, audience = 'leads', version = 3, beforeCheck, expiresAt, ad, analyze, imageDelivery } = {}
   ) {
     const execution = { id: ++sequence, template_version_id: 51, group_id: 50, created_by: 1 };
     const initial = await db.Message.create({
@@ -98,6 +99,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       thread: c,
       entry: {
         messageId: initial.id,
+        ...(ad ? {ad} : {}),
         senderId: c.contact_id,
         accountId: c.social_account_id,
         type: 'dm',
@@ -108,7 +110,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       initial,
       saved,
       rule: { version, audience },
-      analyze: () => assert.fail('A booking turn must not send identities or calendar records to a model.'),
+      analyze: analyze || (() => assert.fail('A booking turn must not send identities or calendar records to a model.')),
       recordHandoff: async (scope, prepareReply) => {
         const destination = { recorded: false, destination: 'unassigned' };
         const reply = prepareReply?.(destination);
@@ -132,6 +134,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
           }),
       },
       social: {
+        replyWithPromotionImage:imageDelivery,
         availability: async () => ({ dm: { available: open } }),
         reply: async (current, cmd) => {
           if (
@@ -173,7 +176,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await previewBooking('Quiero reservar para el 2030-01-07',1);assert.equal(previewState.booking.stage,'offered');
   await previewBooking('La primera',2);assert.equal(previewState.booking.stage,'contact');
   await previewBooking('Ana Prueba, +34600000001, ana@example.invalid',3);assert.equal(previewState.booking.stage,'confirm');
-  const simulated=await previewBooking('Confirmo',4);assert.match(simulated.reply,/prueba.*confirmada/);
+  const simulated=await previewBooking('Confirmo',4);assert.match(simulated.reply,/Tu cita ha quedado reservada/);
   assert.equal(previewState.booking.stage,'booked');assert.deepEqual(await balances(),beforePreview);
   const a = await thread('whatsapp', '+34600123451'),
     b = await thread('whatsapp', '+34600123452');
@@ -436,7 +439,64 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(redeemReply.result.reason,'sale_ended');
   assert.match(questions.at(-1),/31\/12\/2099.*valoración previa/);
   assert.equal(await db.CitaPaciente.count(),beforeSale);
+  // Exercise the public simulation service and the actual QuickChat worker entry point.
+  // They see the same configuration, appointment catalogue, free slots and contact facts.
+  const fields = {...originalPub.fields, booking:'Servicio de agenda: VAL\nOfrece dos alternativas. Pide correo electrónico para el recordatorio.',
+    promotions:'C01-01 · Cuidado de rostro y cuello\nPrecio: 35 €.\nImagen: https://media.example.com/rostro.jpg'};
+  await db.LeadAssistantPublication.create({clinic_id:100,version:7,approved_by:1,approved_at:new Date(),fields});
+  await db.LeadAssistantDraft.create({clinic_id:100,version:7,updated_by:1,updated_at:new Date(),fields});
+  const liveInputs = [], trialInputs = [];
+  function model(inputs) {
+    return async request => {
+      const data = JSON.parse(request.inputText);
+      inputs.push({data,prompt:request.prompt,systemPrompt:request.systemPrompt,group:request.groupId,clinic:request.clinicId});
+      if (data.userText === 'INFO') return {reply:'La promoción cuesta 35 €.',imageId:data.promotion.images[0].id};
+      if (/contestando/i.test(data.userText)) return {reply:'La promoción no describe una reducción del cuello. ¿Quieres que te mire horarios?'};
+      return {reply:'La información de la promoción no indica que reduzca el volumen del cuello.'};
+    };
+  }
+  const simulator = require('../../services/leadAssistantSimulator.service').create({
+    db,analyze:model(trialInputs),recipients:async () => ({destination:'unassigned'}),
+    booking:args => require('../../services/leadAssistantBooking.service').processTurn({...args,mayBook:async () => true,
+      now:new Date('2030-01-06T12:00:00Z'),capabilities:f.capabilities,book:() => assert.fail('simulation attempted a write')}),
+  });
+  const sample = await simulator.start(100,1);
+  assert.equal(sample.approved,true);
+  const promotion = sample.promotions[0].key;
+  const steps = ['INFO','me va bien para reducir cuello?','no me estás contestando','Sí, por favor','La segunda',
+    'Ana Prueba, +34600223996, ana@example.invalid','Confirmo'];
+  const inspect = () => Promise.all([db.CitaPaciente,db.Paciente,db.LeadIntake,db.Conversation,db.Message,
+    db.JobRequest,db.LeadAssistantSession].map(m=>m.count()));
+  const beforeTrial = await inspect();
+  const trial = [];
+  for (const message of steps) trial.push(await simulator.turn(100,1,sample.id,{
+    id:randomUUID(),channel:'instagram',calendar:'clinic',message,promotion,
+  }));
+  assert.equal(trial.at(-1).event,'booked');
+  assert.deepEqual(await inspect(),beforeTrial,'simulation wrote to business data');
+  const liveThread = await thread('instagram','qa-parity-instagram');
+  await db.LeadIntake.update({external_source:'quickchat_social',nombre:'qa-parity-instagram'},{where:{id:liveThread.lead_id}});
+  await liveThread.update({social_alias:'qa-parity-instagram'});
+  const photos = [];
+  const parityModel = model(liveInputs);
+  for (const [index, message] of steps.entries()) {
+    const delivered = await enter(liveThread,message,{version:7,analyze:parityModel,ad:index === 0 ? {title:promotion} : null,
+      imageDelivery:async (_,command) => {photos.push(command.selection);return {outcome:'sent'};}});
+    assert.equal(delivered.result.outcome,'sent',message);
+    assert.equal(questions.at(-1),trial[index].reply,'QuickChat differs from the simulator at: ' + message);
+    if (index === 3) assert.equal(trial[index].slots.length,(await delivered.booking()).slots.length);
+  }
+  assert.deepEqual(liveInputs,trialInputs,'model instructions, offer and conversational memory must be identical');
+  assert.equal(photos.length,1);assert.equal(trial[0].image.url,'https://media.example.com/rostro.jpg');
+  assert(trial.slice(1).every(r=>!r.image));
+  assert.equal(await db.CitaPaciente.count(),beforeTrial[0]+1);
+  const handoffTrial = await simulator.start(100,1);
+  const handoffText = 'Quiero hablar con una persona';
+  const route = await simulator.turn(100,1,handoffTrial.id,{id:randomUUID(),message:handoffText,promotion:''});
+  await enter(await thread('instagram','qa-parity-handoff'),handoffText,{version:7});
+  assert.equal(route.event,'handoff');assert.equal(route.reply,questions.at(-1));
   report.assertions = [
+    'El simulador y el worker de QuickChat ofrecen los mismos mensajes, imagen, huecos, recogida de contacto, confirmación y traspaso para el mismo lead ficticio.',
     'Una compra fuera de promoción no ofrece la tarifa, la foto ni la cita. El canje de un bono ya adquirido conserva sus propias condiciones.',
     'Dos leads por hora solo con autorización publicada, incluidas citas manuales y confirmaciones concurrentes. Un paciente bloquea todo el intervalo.',
     'Oferta sin escritura y confirmación local con profesional, sala y recibo del plan real',
