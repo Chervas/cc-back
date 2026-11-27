@@ -203,6 +203,10 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await webhook(outside);
   assert.equal(await db.SocialInboxReceipt.count(), 0);
   const selected = comment('991');
+  const media = selected.entry[0].changes[0].value.media;
+  assert.equal(events(selected)[0].ad, undefined);
+  const ad = {id:'881001', title:'Jornada de prueba', originalMediaId:'881002'};
+  Object.assign(media, {ad_id:ad.id, ad_title:ad.title, original_media_id:ad.originalMediaId});
   await webhook({ ...selected, entry: [...outside.entry, ...selected.entry] });
   assert.equal(await db.SocialInboxReceipt.count(), 1);
   await webhook(comment('991'));
@@ -213,6 +217,8 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const m = await db.Message.findOne();
   assert.equal(m.metadata.social.permalink, 'https://www.instagram.com/clinica.demo/p/FICTICIO/');
   assert.deepEqual(m.metadata.social.post, post);
+  assert.deepEqual(m.metadata.social.ad, ad);
+  assert.deepEqual((await svc.readEntry(eventKey(events(selected)[0]), 41)).ad, ad);
   assert.deepEqual((await svc.readEntry(eventKey(events(comment('991'))[0]), 41)).post, post);
   assert.equal(await db.Message.count(), 1);
   const reply = (args = {}) =>
