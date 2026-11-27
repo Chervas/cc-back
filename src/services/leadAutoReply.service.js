@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const db = require('../../models');
 const jobRequestsService = require('./jobRequests.service');
 const jobScheduler = require('./jobScheduler.service');
+const { attachSocialNodes } = require('../lib/lead-social-flow');
 const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact, isEffectiveContactAttempt } = require('./leadContactState.service');
 const { canUserSelectWhatsappTemplate } = require('../lib/whatsapp-template-ownership');
@@ -56,11 +57,35 @@ function normalizeSources(value) {
   return Array.from(new Set(source.map(cleanString).filter((item) => SOURCE_VALUES.has(item))));
 }
 
+const SOCIAL_ENTRIES = new Set(['instagram_dm', 'instagram_comment', 'messenger_dm']);
+
+function socialEntries(raw, strict = false) {
+  if (raw === undefined) return {};
+  const invalid = () => {
+    if (!strict) return {};
+    throw Object.assign(new Error('Selecciona una acción válida para cada entrada. Los mensajes de Instagram deben tener entre 1 y 1000 caracteres.'), {
+      status: 400, code: 'lead_auto_reply_social_entry_invalid',
+    });
+  };
+  if (!raw || Object.getPrototypeOf(raw) !== Object.prototype) return invalid();
+  const entries = {};
+  for (const [key, rule] of Object.entries(raw)) {
+    if (!SOCIAL_ENTRIES.has(key) || !rule || Object.getPrototypeOf(rule) !== Object.prototype) return invalid();
+    const fields = Object.keys(rule).sort().join(',');
+    if (fields === 'action' && rule.action === 'notify') entries[key] = { action: 'notify' };
+    else if (fields === 'action,text' && rule.action === 'message' && key !== 'messenger_dm' && typeof rule.text === 'string'
+      && rule.text.trim().length > 0 && rule.text.trim().length <= 1000) entries[key] = { action: 'message', text: rule.text.trim() };
+    else return invalid();
+  }
+  return entries;
+}
+
 function normalizeConfig(raw = {}) {
   return {
     managed_feature: FEATURE_KEY,
     configured: raw.configured === true,
     sources: normalizeSources(raw.sources || raw.contact_sources),
+    social_entries: socialEntries(raw.social_entries),
     timing: TIMING_VALUES.has(cleanString(raw.timing)) ? cleanString(raw.timing) : 'immediate',
     schedule_scope: SCHEDULE_VALUES.has(cleanString(raw.schedule_scope)) ? cleanString(raw.schedule_scope) : 'clinic_hours',
     whatsapp_template_id: toIntOrNull(raw.whatsapp_template_id || raw.template_id),
@@ -135,6 +160,10 @@ function isLeadAutoReplyTemplate(template) {
 }
 
 function buildManagedNodes(config) {
+  if (!config.sources.length) return attachSocialNodes([
+    { id: 'N1', type: 'trigger/lead_nuevo', config: cloneJson(config), outputs: { on_success: 'N10' }, position: { x: 320, y: 120 } },
+    { id: 'N10', type: 'control/end', config: {}, outputs: {}, position: { x: 320, y: 320 } },
+  ], config);
   const callDelay = config.timing === 'immediate'
     ? { duration: 1, unit: 'hours' }
     : { duration: 0, unit: 'minutes' };
@@ -236,7 +265,7 @@ function buildManagedNodes(config) {
       outputs: { on_complete: 'N3' }, position: { x: 620, y: 420 },
     });
   }
-  return nodes;
+  return attachSocialNodes(nodes, config);
 }
 
 async function findLatestClinicFlow(clinicId, options = {}) {
@@ -247,6 +276,7 @@ async function findLatestClinicFlow(clinicId, options = {}) {
       ...(options.activeOnly ? { is_active: true } : {}),
     },
     order: [['version', 'DESC']],
+    ...(options.transaction ? { transaction: options.transaction, lock: options.transaction.LOCK.UPDATE } : {}),
   });
 }
 
@@ -278,6 +308,9 @@ async function loadSelectedTemplate(config, clinicId) {
 }
 
 async function buildReadiness(config, clinicId) {
+  if (!config.sources.length && Object.keys(config.social_entries).length) {
+    return { ready: config.configured, reasons: config.configured ? [] : ['configuration_incomplete'], has_clinic_hours: null, template: null };
+  }
   const reasons = [];
   if (!config.configured || !config.sources.length) reasons.push('configuration_incomplete');
   if (!config.sender_display_name) reasons.push('sender_display_name_required');
@@ -328,21 +361,7 @@ async function getStatus(clinicId) {
   };
 }
 
-async function saveConfig({ clinicId, actorUserId, input }) {
-  const previous = await findLatestClinicFlow(clinicId);
-  const config = normalizeConfig({
-    ...(previous?.trigger_config || {}),
-    ...input,
-    configured: true,
-    updated_at: new Date().toISOString(),
-    updated_by: actorUserId,
-  });
-  if (!config.sources.length || !config.whatsapp_template_id || !config.sender_display_name) {
-    const error = new Error('Selecciona el origen, una plantilla y el nombre de la persona que contactará con los leads.');
-    error.status = 400;
-    error.code = 'lead_auto_reply_configuration_incomplete';
-    throw error;
-  }
+async function selectWhatsappTemplate(config, clinicId, actorUserId) {
   const selectedTemplate = await loadSelectedTemplate(config, clinicId);
   if (!selectedTemplate) {
     const error = new Error('La plantilla de WhatsApp no pertenece a esta clínica o ya no está disponible.');
@@ -375,8 +394,38 @@ async function saveConfig({ clinicId, actorUserId, input }) {
   config.whatsapp_template_name = selectedTemplate.name;
   config.whatsapp_catalog_template_id = toIntOrNull(selectedTemplate.catalog_template_id);
   config.whatsapp_template_language = cleanString(selectedTemplate.language) || 'es';
+}
+
+async function saveConfig({ clinicId, actorUserId, input }) {
+  if (Object.hasOwn(input, 'social_entries')) socialEntries(input.social_entries, true);
+  const previous = await findLatestClinicFlow(clinicId);
+  const config = normalizeConfig({
+    ...(previous?.trigger_config || {}),
+    ...input,
+    configured: true,
+    updated_at: new Date().toISOString(),
+    updated_by: actorUserId,
+  });
+  const empty = !config.sources.length && !Object.keys(config.social_entries).length;
+  const clearing = empty && input.active !== true && Object.hasOwn(input, 'social_entries') &&
+    Object.keys(socialEntries(previous?.trigger_config?.social_entries)).length > 0;
+  if ((empty && !clearing) || (config.sources.length && (!config.whatsapp_template_id || !config.sender_display_name))) {
+    const error = new Error(config.sources.length ? 'Selecciona el origen, una plantilla y el nombre de la persona que contactará con los leads.' : 'Selecciona al menos una entrada de WhatsApp o redes.');
+    error.status = 400;
+    error.code = 'lead_auto_reply_configuration_incomplete';
+    throw error;
+  }
+  if (clearing) config.configured = false;
+  if (config.sources.length) await selectWhatsappTemplate(config, clinicId, actorUserId);
+  else {
+    // Preserve the last authorized template for re-enabling WhatsApp.
+    const previousConfig = normalizeConfig(previous?.trigger_config || {});
+    for (const field of ['whatsapp_template_id', 'whatsapp_template_name', 'whatsapp_catalog_template_id', 'whatsapp_template_language', 'sender_display_name']) {
+      config[field] = previousConfig[field];
+    }
+  }
   const readiness = await buildReadiness(config, clinicId);
-  const requestedActive = input.active === true || (input.active === undefined && previous?.is_active === true);
+  const requestedActive = !clearing && (input.active === true || (input.active === undefined && previous?.is_active === true));
   if (requestedActive && !readiness.ready) {
     const error = new Error(readiness.reasons.includes('clinic_hours_not_configured')
       ? 'No hay un horario de clínica configurado.'
@@ -388,15 +437,14 @@ async function saveConfig({ clinicId, actorUserId, input }) {
   }
 
   const templateKey = clinicTemplateKey(clinicId);
-  const clinic = await db.Clinica.findByPk(clinicId, { attributes: ['id_clinica', 'grupoClinicaId'], raw: true });
-  if (!clinic) {
-    const error = new Error('Clínica no encontrada.');
-    error.status = 404;
-    error.code = 'clinic_not_found';
-    throw error;
-  }
-
   await db.sequelize.transaction(async (transaction) => {
+    const clinic = await db.Clinica.findByPk(clinicId, {
+      attributes: ['id_clinica', 'grupoClinicaId'], raw: true, transaction, lock: transaction.LOCK.UPDATE,
+    });
+    if (!clinic) throw Object.assign(new Error('Clínica no encontrada.'), { status: 404, code: 'clinic_not_found' });
+    const latest = await findLatestClinicFlow(clinicId, { transaction });
+    if (latest?.id !== previous?.id || latest?.is_active !== previous?.is_active)
+      throw Object.assign(new Error('La configuración ha cambiado. Vuelve a abrirla para guardar tus cambios.'), { status: 409, code: 'lead_auto_reply_configuration_changed' });
     if (previous) {
       await db.AutomationFlowTemplateV2.update(
         { is_active: false },
@@ -409,7 +457,7 @@ async function saveConfig({ clinicId, actorUserId, input }) {
       version: Number(previous?.version || 0) + 1,
       engine_version: 'v2',
       name: FLOW_NAME,
-      description: 'Responde por WhatsApp a nuevos leads según el canal, el plazo y el horario configurados.',
+      description: Object.keys(config.social_entries).length ? 'Gestiona las entradas de leads según las acciones configuradas por la clínica.' : 'Responde por WhatsApp a nuevos leads según el canal, el plazo y el horario configurados.',
       trigger_type: 'lead_nuevo',
       trigger_config: config,
       is_active: requestedActive,
@@ -504,7 +552,7 @@ async function enqueueForLead({
   const flow = await findLatestClinicFlow(clinicId, { activeOnly: true });
   if (!flow) return { skipped: true, reason: 'no_active_flow' };
   const config = normalizeConfig(flow.trigger_config || {});
-  if (!config.configured || (!bypassSourceFilter && !config.sources.includes(normalizedKind))) {
+  if (!config.configured || !config.sources.length || (!bypassSourceFilter && !config.sources.includes(normalizedKind))) {
     return { skipped: true, reason: 'event_source_disabled' };
   }
 
@@ -570,7 +618,7 @@ function addSkipReason(summary, reason) {
 
 function resolvePendingBatchSources(config, includeCallPending = false) {
   const sources = normalizeSources(config?.sources);
-  if (includeCallPending && !sources.includes('call')) sources.push('call');
+  if (sources.length && includeCallPending && !sources.includes('call')) sources.push('call');
   return sources;
 }
 
@@ -641,6 +689,7 @@ async function startPendingBatch({ clinicId, actorUserId, includeCallPending = f
     throw error;
   }
   const config = normalizeConfig(flow.trigger_config || {});
+  if (!config.configured || !config.sources.length) return { job_id: null, total: 0, status: 'completed' };
   const batchSources = resolvePendingBatchSources(config, includeCallPending);
   const configuredLeadIds = await listPendingLeadIds(clinicId, config);
   const optionalCallIds = !config.sources.includes('call')
@@ -710,6 +759,12 @@ async function runPendingBatchJob(payload = {}, jobRequest = null) {
     skipped_reasons: {},
     execution_ids: [],
   };
+  const currentFlow = await findLatestClinicFlow(clinicId, { activeOnly: true });
+  if (!currentFlow || !normalizeConfig(currentFlow.trigger_config || {}).sources.length) {
+    summary.processed = summary.skipped = leadIds.length;
+    summary.skipped_reasons[currentFlow ? 'event_source_disabled' : 'no_active_flow'] = leadIds.length;
+    return summary;
+  }
   for (const leadId of leadIds) {
     const lead = await db.LeadIntake.findOne({ where: { id: leadId, clinica_id: clinicId } });
     if (!lead) {
