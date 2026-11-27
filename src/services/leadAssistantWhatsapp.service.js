@@ -188,6 +188,11 @@ async function authorizeDelivery(db, { message, conversation, intent, selectedBi
     return false;
   if (await supersedingReply(db, conversation.id, entry.messageId, message.metadata.execution_id))
     return false;
+  const session = await db.LeadAssistantSession.findOne({
+    where: { conversation_id: conversation.id, clinic_id: conversation.clinic_id, template_id: marker.templateId, publication_version: marker.version },
+    attributes: ['state'], raw: true,
+  });
+  if (!session || session.state === 'operator') return false;
   if (payload.type === 'text') return !marker.selection && !message.metadata.promotionImage;
   const image = await resolveForTurn(db, conversation, marker.selection);
   return (

@@ -144,3 +144,20 @@ test('expiry applies to the price and photo using the local clinic date', () => 
     null
   );
 });
+
+test('published Markdown table keeps each offer, price and image separate from the glossary', () => {
+  const text = [
+    '# Promociones activas · Centro de pruebas', '## Vigencia', 'Durante el mes anunciado.', '## Catálogo',
+    '| Tratamiento | Precio y condiciones | Archivo visual |', '| --- | --- | --- |',
+    '| **Curso 20** | 20 € | [Portada](https://media.example.com/curso.jpg) |',
+    '| **Curso 30** | 30 € | [Portada](https://media.example.com/otro.jpg) |',
+    '## Glosario', '| Concepto | Descripción |', '| --- | --- |', '| Curso | No es una oferta |',
+  ].join('\n');
+  const { commercialOffer } = require('../../services/leadAssistantTurn.service');
+  const offer = commercialOffer({promotions:text},{text:'INFO',post:{caption:'Curso 20'}});
+  assert.equal(offer.images.length,1);
+  assert.equal(offer.images[0].url,'https://media.example.com/curso.jpg');
+  assert.match(offer.description,/20 €/);
+  assert.doesNotMatch(offer.description,/30 €|otro.jpg|Glosario/);
+  assert.equal(commercialOffer({promotions:text},{text:'INFO'}),null);
+});

@@ -16,6 +16,15 @@ function commercialOffer(fields, entry, priorKey, options) {
   let matches = matched(explicit);
   if (!matches.length) matches = matched(origin);
   if (!matches.length) {
+    const normalize = require('../lib/lead-assistant-tables').normalize;
+    const titlesIn = (value) => [...sections].filter(([, item]) => {
+      const title = normalize(item.title.split(' · ')[0]);
+      return title && (' ' + normalize(value).replace(/[^a-z0-9]+/g, ' ') + ' ').includes(' ' + title.replace(/[^a-z0-9]+/g, ' ') + ' ');
+    }).map(([key]) => key);
+    matches = titlesIn(explicit);
+    if (!matches.length) matches = titlesIn(origin);
+  }
+  if (!matches.length) {
     const words = (value) =>
       value
         .normalize('NFKD')
@@ -25,7 +34,7 @@ function commercialOffer(fields, entry, priorKey, options) {
     const meaningful = (value) =>
       words(value).filter(
         (word) =>
-          word.length > 2 &&
+          (word.length > 2 || /^\d+$/.test(word)) &&
           ![
             'una',
             'del',
@@ -262,7 +271,7 @@ async function attend({
     if (appointment?.stop) return stopped(appointment.stop);
     if (appointment?.reply) {
       const text = dialogue.formatCommercialReply({
-        firstTurn: turn.firstTurn,
+        firstTurn: turn.firstTurn, tone: publication.fields.tone,
         clinicName: clinic.nombre_clinica,
         draft: appointment.reply,
       });
@@ -282,7 +291,7 @@ async function attend({
     const destination = await recordHandoff(scope);
     if (destination.recorded && (human || appointment?.review)) {
       const text = dialogue.formatHandoffReceipt({
-        firstTurn: turn.firstTurn,
+        firstTurn: turn.firstTurn, tone: publication.fields.tone,
         clinicName: clinic.nombre_clinica,
         recorded: true,
         destination: destination.destination,
@@ -400,7 +409,7 @@ async function attend({
   }
   const image = offer?.images.find((item) => item.id === answer.imageId);
   let text = dialogue.formatCommercialReply({
-    firstTurn: turn.firstTurn,
+    firstTurn: turn.firstTurn, tone: publication.fields.tone,
     clinicName: clinic.nombre_clinica,
     draft: answer.reply,
   });

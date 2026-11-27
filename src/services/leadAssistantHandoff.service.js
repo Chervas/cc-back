@@ -72,4 +72,25 @@ async function handoff(db, { clinicId, conversationId, messageId, templateId, ve
   });
 }
 
-module.exports = { recipients, handoff };
+async function takeConversation(db, conversation, actorId) {
+  return db.sequelize.transaction(async transaction => {
+    const locked = { transaction, lock: transaction.LOCK.UPDATE };
+    const local = await db.Conversation.findOne({
+      where: { id: conversation.id, clinic_id: conversation.clinic_id }, attributes: ['id'], ...locked,
+    });
+    const session = local && await db.LeadAssistantSession.findOne({
+      where: { conversation_id: local.id, clinic_id: conversation.clinic_id }, ...locked,
+    });
+    if (!session) return null;
+    if (session.state === 'operator') return 'operator';
+    const origin = await db.Message.findOne({
+      where: { id: session.origin_message_id, conversation_id: local.id }, ...locked,
+    });
+    if (!origin) throw Error('assistant_session_origin_missing');
+    await origin.update({ metadata: { ...origin.metadata, assistantOperator: { actorId, at: new Date().toISOString() } } }, { transaction });
+    await session.update({ state: 'operator', updated_at: new Date() }, { transaction });
+    return session.state;
+  });
+}
+
+module.exports = { recipients, handoff, takeConversation };

@@ -84,3 +84,10 @@ test('an invalid result, missing authority or failed provider produces review wi
   assert.deepEqual(await classifyInterest(entry,{beforeDispatch:()=>false,analyze:quiet.analyze}),closed('review'));
   assert.deepEqual(await classifyInterest(entry,quiet),closed('review'));
 });
+
+test('INFO admits the clinic invitation in its own sentence when the post describes a surgical promotion', async () => {
+  const entry = { source:'new',type:'comment',echo:false,text:'INFO',post:{caption:'Cirugía de brazos. Comenta INFO y te enviamos los detalles por privado.'} };
+  assert.deepEqual(await classifyInterest(entry, {}), {kind:'interest', privateRequested:true});
+  entry.post.caption = 'Cirugía de brazos. No comentes INFO.';
+  assert.deepEqual(await classifyInterest(entry, {}), {kind:'interest', privateRequested:false});
+});

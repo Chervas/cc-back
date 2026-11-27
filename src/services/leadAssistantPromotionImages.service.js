@@ -18,7 +18,28 @@ const slug = (name) =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
 
+function tableOffers(value) {
+  const rows = require('../lib/lead-assistant-tables').tableRows(value, [
+    /tratamiento|promocion|oferta/, /precio|importe/, /imagen|archivo visual|creatividad|foto/,
+  ]);
+  const sections = new Map();
+  const validity = value.match(/^#{1,6}\s+(?:vigencia|validez)[^\n]*\n([\s\S]*?)(?=^#{1,6}\s|$(?![\s\S]))/im);
+  for (const [title, description, media] of rows) {
+    const key = slug(title).slice(0, 96);
+    if (!key || !description) continue;
+    const section = sections.get(key) || { title, preamble: validity?.[1]?.trim() || '', lines: [] };
+    section.lines.push(title, description);
+    for (const link of media.matchAll(/\[([^\]\n]*)\]\((https:\/\/[^\s<>()]+)\)/g)) {
+      if (promotionImageUrl(link[2])) section.lines.push('![' + link[1] + '](' + link[2] + ')');
+    }
+    sections.set(key, section);
+  }
+  return sections;
+}
+
 function offerSections(value) {
+  const table = tableOffers(String(value || ''));
+  if (table.size) return table;
   const sections = new Map();
   const lines = String(value || '').split(/\r?\n/);
   let key;

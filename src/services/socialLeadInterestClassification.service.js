@@ -61,8 +61,13 @@ async function classifyInterest(entry, { clinicId, groupId, beforeDispatch, anal
   if (INSTRUCTIONS.test(normalizedCaption) || EMBEDDED_COMMAND.test(normalizedCaption)) return verdict('review');
   const caption = rawCaption.length <= 1600 && !sensitive(normalizedCaption) ? scrub(rawCaption)
     .split(/(?<=[.!?])\s+/u).filter(part => COMMENT_CTA.test(normalize(part)) || COMMERCIAL.test(normalize(part))).join(' ').slice(0, 500) : '';
-  const cta = normalize(caption);
-  const promo = COMMENT_CTA.test(cta) && !NEGATION.test(cta);
+  // Only the clinic's affirmative invitation authorizes an INFO comment to receive a private reply.
+  // Clinical language elsewhere in a post is never passed through as a commercial lead message.
+  const callsToAction = rawCaption.length <= 3000
+    ? normalizedCaption.split(/(?<=[.!?])\s+|\r?\n/).filter(sentence => COMMENT_CTA.test(sentence))
+    : [];
+  const promo = callsToAction.some(sentence => !NEGATION.test(sentence) && !sensitive(sentence)) &&
+    !callsToAction.some(sentence => NEGATION.test(sentence));
   const body = normalize(text);
   const exact = body.replace(/^[\s¡!¿?.,:;]+|[\s!?.,:;]+$/gu, '');
   if (INFO.test(exact)) return verdict('interest', privateMessage || promo);

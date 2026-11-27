@@ -78,6 +78,16 @@ withIsolatedCampaignMysql(async ({ sql, report }) => {
   } }), unassigned);
   assert.deepEqual(checked, [[2,'quickchat.read_patients'], [3,'quickchat.read_patients']]);
   assert.equal(await db.Notification.count(), 4);
+  const manualTurn = await turn(7);
+  const take = require('../../services/leadAssistantHandoff.service').takeConversation;
+  const thread = await db.Conversation.findByPk(manualTurn.conversationId);
+  const claimed = await Promise.all([take(db, thread, 2), take(db, thread, 3)]);
+  assert.deepEqual(claimed, ['operator','operator']);
+  assert([2,3].includes((await db.Message.findByPk(manualTurn.messageId)).metadata.assistantOperator.actorId));
+  assert.equal((await db.LeadAssistantSession.findByPk(thread.id)).state, 'operator');
+  assert.deepEqual(await record(manualTurn), { recorded:false, destination:null });
+  assert.equal(await take(db,{id:thread.id,clinic_id:999},3),null);
+  report.checks.push('Intervención manual en el mismo hilo, idempotente y aislada por clínica.');
   report.checks.push('Dirección asignada y activa, recepción de la clínica, ausencia de destinatario y recuperación del pendiente.');
   report.checks.push('Turno aislado por clínica y versión, bloqueo concurrente, avisos únicos y conservación del mensaje.');
 });
