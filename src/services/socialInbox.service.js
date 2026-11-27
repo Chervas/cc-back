@@ -195,9 +195,8 @@ function create({
       return { ...(await provider.availability(route, kind)), route };
     } catch (err) {
       return blocked(
-        ['provider_unauthorized', 'credential_revoked', 'scope_denied', 'operation_denied'].includes(
-          err.code,
-        )
+        ['provider_unauthorized', 'credential_revoked', 'scope_denied', 'operation_denied',
+          'oauth_flow_busy', 'rate_limited'].includes(err.code)
           ? err.code
           : 'provider_unavailable',
       );
