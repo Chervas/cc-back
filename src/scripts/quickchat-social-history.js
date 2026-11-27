@@ -66,11 +66,20 @@ async function run(input, { routeFor, provider, accept, participantFor }) {
       limitedThreads: 0,
     });
     const stack = [null];
+    let smallPages = false;
     try {
       while (stack.length) {
         if (!sameRoute(route, await routeFor(account))) throw Error('social_history_route_changed');
         const cursor = stack.pop();
-        const page = await provider.history(route, kind, start, end, cursor, participantId);
+        let page;
+        try {
+          page = await provider.history(route, kind, start, end, cursor, participantId, smallPages);
+        } catch (error) {
+          if (error.code !== 'provider_timeout' || channel !== 'instagram' || kind !== 'dm' || participantId || smallPages) throw error;
+          if (!sameRoute(route, await routeFor(account))) throw Error('social_history_route_changed');
+          smallPages = true;
+          page = await provider.history(route, kind, start, end, cursor, undefined, true);
+        }
         if (!page.available) {
           result.reason = page.reason;
           break;

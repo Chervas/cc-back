@@ -490,7 +490,7 @@ test('ordinary renewal losing a previously granted permission on the selected Pa
   assert.equal(f.current.epochs.current(row,f.binding).versionId,current.versionId);
 });
 
-test('history reports the timed-out Graph stage and preserves a real Page rate limit', async () => {
+test('history reports the timed-out Graph stage and preserves a real Page rate limit', async (t) => {
   const { ctx, call } = fixture();
   const original = ctx.transport, controller = new AbortController();
   const end = Date.now() - 1000, args = { start: end - 72 * 3600000, end, cursor: null, participantId: '771' };
@@ -508,4 +508,21 @@ test('history reports the timed-out Graph stage and preserves a real Page rate l
   };
   await assert.rejects(call(social.history, 'instagram', 'dm', args), { code: 'provider_timeout' });
   assert.throws(() => social.checks[social.history]({ clinicId: 41, accountId: '401', channel: 'messenger', kind: 'dm', ...args }), /invalid_request/);
+  const diagnostics = [];
+  const write = process.stderr.write.bind(process.stderr);
+  t.mock.method(process.stderr, 'write', (line, ...rest) => {
+    if (typeof line === 'string' && line.startsWith('{"event":"meta_social_history_failed"')) {
+      diagnostics.push(JSON.parse(line));
+      return true;
+    }
+    return write(line, ...rest);
+  });
+  ctx.signal = new AbortController().signal;
+  ctx.transport = async (url, options) => {
+    if (!url.pathname.endsWith('/conversations')) return original(url, options);
+    return { ok: false, status: 429, json: async () => ({ error: { code: 'sensitive-provider-text' } }) };
+  };
+  await assert.rejects(call(social.history, 'instagram', 'dm', args), { code: 'rate_limited' });
+  assert.deepEqual(diagnostics, [{ event: 'meta_social_history_failed', channel: 'instagram', kind: 'dm', edge: 'conversations', reason: 'rate_limited', status: 429 }]);
+
 });

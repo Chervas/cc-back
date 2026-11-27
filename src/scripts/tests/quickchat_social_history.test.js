@@ -100,3 +100,19 @@ test('single thread history takes its participant from the exact clinic, channel
   const refused = await run(input, { ...deps, provider: { history: async () => ({ ...result, entries: [unrelated] }) }, accept: () => assert.fail() });
   assert.equal(refused.kinds.dm.reason, 'social_history_response_invalid');
 });
+
+test('only a timed-out ordinary Instagram DM read switches its subsequent pages to smaller discovery', async () => {
+  const input = options([...args, '--scan']);
+  const sizes = [], next = 'A'.repeat(64);
+  const report = await run(input, { routeFor: async () => route, provider: {
+    history: async (_, kind, start, end, cursor, participant, smallPages) => {
+      if (kind === 'comment') return result;
+      sizes.push(smallPages);
+      if (!smallPages) throw Object.assign(Error('timeout'), { code: 'provider_timeout' });
+      return { ...result, next: cursor ? null : next };
+    },
+  } });
+  assert.deepEqual(sizes, [false, true, true]);
+  assert.equal(report.kinds.dm.complete, true);
+  assert.equal(report.kinds.dm.pages, 2);
+});

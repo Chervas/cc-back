@@ -55,7 +55,9 @@ async function read({ payload, asset, context, appSecret, graph, pageToken }) {
     const instagramMessages = edge === 'messages' && channel === 'instagram';
     const seen = node.seen || 0;
     // Large Instagram inboxes can time out while Graph resolves updated_time for several threads.
-    const pageLimit = edge === 'conversations' && channel === 'instagram' ? 1 : 10;
+    const smallPages = edge === 'conversations' && channel === 'instagram' &&
+      Boolean(participantId || payload.smallPages || node.smallPages);
+    const pageLimit = smallPages ? 1 : 10;
     const result = await graph(encodeURIComponent(id) + '/' + edge, pageToken, {
       fields: fields[edge],
       limit: String(instagramMessages ? 20 - seen : pageLimit),
@@ -173,6 +175,7 @@ async function read({ payload, asset, context, appSecret, graph, pageToken }) {
         next = seal({
           ...node,
           after,
+          ...(smallPages ? { smallPages: true } : {}),
           ...(instagramMessages ? { seen: seen + result.data.length } : {}),
         });
       }

@@ -52,8 +52,17 @@ const checkParticipantHistory = schema({
   channel: { const: 'instagram' },
   participantId: id,
 });
-checks[history] = payload =>
-  payload?.participantId === undefined ? checkAccountHistory(payload) : checkParticipantHistory(payload);
+const checkSmallPageHistory = schema({
+  ...historyFields,
+  kind: { const: 'dm' },
+  channel: { const: 'instagram' },
+  smallPages: { const: true },
+});
+checks[history] = payload => {
+  if (payload?.participantId !== undefined) return checkParticipantHistory(payload);
+  if (payload?.smallPages !== undefined) return checkSmallPageHistory(payload);
+  return checkAccountHistory(payload);
+};
 const receiptFields = { ...scope, senderId: id,
   postId: { anyOf: [id, { type: 'null' }] }, commentId: { anyOf: [id, { type: 'null' }] } };
 const checkLiveReceipt = schema(receiptFields);
@@ -124,8 +133,11 @@ async function execute({
   function historyFailure(path, reason, status, code) {
     if (operation !== history) return;
     const edge = path.split('/').at(-1);
-    if (['accounts', 'debug_token', 'conversations', 'messages', 'media', 'comments', 'replies'].includes(edge))
-      process.stderr.write(JSON.stringify({ event: 'meta_social_history_failed', channel: p.channel, kind: p.kind, edge, reason, status, code }) + '\n');
+    if (!['accounts', 'debug_token', 'conversations', 'messages', 'media', 'comments', 'replies'].includes(edge)) return;
+    const event = { event: 'meta_social_history_failed', channel: p.channel, kind: p.kind, edge, reason };
+    if (Number.isInteger(status) && status >= 100 && status <= 599) event.status = status;
+    if (Number.isSafeInteger(code) && code >= 0 && code <= 9999999) event.code = code;
+    process.stderr.write(JSON.stringify(event) + '\n');
   }
   async function graphRequest(path, bearer, query = {}, body) {
     check();

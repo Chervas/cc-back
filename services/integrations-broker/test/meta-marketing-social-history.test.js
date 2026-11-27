@@ -135,7 +135,7 @@ test('large Instagram inboxes list one conversation per page and keep the same s
     '401/conversations': rootPage(undefined, [{ id: 't_new', updated_time: new Date(end).toISOString() }], true),
     '401/conversations#older': rootPage('older', [{ id: 't_old', updated_time: new Date(start - 1).toISOString() }]),
   });
-  const first = await read(null);
+  const first = await read(null, { smallPages: true });
   assert.equal(first.children.length, 1);
   const second = await read(first.next);
   assert.equal(second.children.length, 0);
@@ -178,4 +178,13 @@ test('scoped Instagram history pins the participant across pagination and reject
   await assert.rejects(read(one.children[0], { participantId: undefined }), { code: 'invalid_request' });
   await assert.rejects(read(one.children[0]), { code: 'scope_denied' });
   await assert.rejects(read(null, { channel: 'messenger' }), { code: 'invalid_request' });
+});
+
+test('regular Instagram conversation discovery keeps ten per page', async () => {
+  const read = fixture('dm', { '401/conversations': query => {
+    assert.equal(query.limit, '10');
+    return page([]);
+  } });
+  const root = await read(null);
+  assert.equal(root.next, null);
 });
