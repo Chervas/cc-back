@@ -78,7 +78,7 @@ function catalogueReply({ fields, offer, history, userText, timezone }) {
   const text = words(userText);
   const area = areaIn(text);
   const contextArea = area || history.filter(m => m.role === 'user').map(m => areaIn(m.text)).filter(Boolean).at(-1);
-  const quotedDeal = /[€$£]|\beuros?\b/i.test(userText) && /\b(?:me lo dejas|me lo dejais|me lo igualas|me cobrais|pag[oó] mi|mi amiga pago)\b/.test(text);
+  const quotedDeal = /[€$£]|\beuros?\b/i.test(userText) && /\b(?:me lo dejas|me lo dejais|me lo igualas|me cobrais|me valen? (?:tambien|para)|(?:vale|valen|sirve|sirven|se aplica|se aplican) tambien para|tambien (?:vale|valen|sirve|sirven) para|pag[oó] mi|mi amiga pago)\b/.test(text);
   const pricing = tariff.test(text) || quotedDeal;
   if (pricing && /\b(?:valoracion|consulta|primera visita)\b/.test(text)) return null;
   const asksOffer = promotion.test(text);

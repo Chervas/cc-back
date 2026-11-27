@@ -266,3 +266,10 @@ test('an explicitly configured ordinary price beats the general context and the 
     });assert.match(answer.reply,/42 €/);assert.doesNotMatch(answer.reply,/95/);
   }
 });
+
+test('a price quoted from another zone never affirms a different offer',()=>{
+  const {catalogueReply}=require('../../services/leadAssistantOfferDiscovery.service');
+  const reply=catalogueReply({userText:'¿Esos 170 € me valen también para los labios?',offer:{title:'Perfilado de labios',terms:['230 € por sesión.']},
+    fields:{promotions:''},history:[]});
+  assert.match(reply,/230 €/);assert.doesNotMatch(reply,/^sí|170/iu);
+});
