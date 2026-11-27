@@ -22,6 +22,13 @@ function postLink(url) {
   return null;
 }
 
+function commentAd(media) {
+  const ad = {};
+  if (graphId(media.ad_id)) ad.id = media.ad_id;
+  if (typeof media.ad_title === 'string' && media.ad_title.trim()) ad.title = media.ad_title.trim().slice(0, 512);
+  if (graphId(media.original_media_id)) ad.originalMediaId = media.original_media_id;
+  return Object.keys(ad).length || media.media_product_type === 'AD' ? ad : null;
+}
 function events(body, { history = false } = {}) {
   const channel = { instagram: 'instagram', page: 'messenger' }[body?.object];
   if (!channel || !Array.isArray(body.entry) || !body.entry.length) invalid();
@@ -78,10 +85,12 @@ function events(body, { history = false } = {}) {
       if (channel !== 'instagram' || change.field !== 'comments') invalid();
       const v = change.value;
       if (!graphId(v?.media?.id) || !graphId(v.id)) invalid();
+      const ad = commentAd(v.media);
       add('comment', v.id, v.from?.id, e.time, v.text ?? '', {
         echo: v.from?.id === e.id,
         alias: v.from?.username?.slice(0, 100) || null,
         postId: v.media.id,
+        ...(ad ? { ad } : {}),
         commentId: v.id,
         permalink: postLink(v.media.permalink),
         replyTo: v.parent_id || null,
