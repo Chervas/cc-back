@@ -194,9 +194,11 @@ function create({
     const unresolved =
       pagePending ||
       (await M.findOne({ where: { conversation_id: c.id, status: 'sending', direction: 'outbound' } }));
+    let releasedAttempt;
     if (unresolved) {
       const result = await reconcile(c, unresolved);
       if (result?.message && pagePending) Object.assign(pagePending, result.message.toJSON());
+      if (result?.outcome === 'failed') releasedAttempt = result.attemptId;
     }
     const waiting = await M.findOne({
       where: { conversation_id: c.id, status: 'sending', direction: 'outbound' },
@@ -204,10 +206,29 @@ function create({
       raw: true,
     });
     const commentRows = messages.filter((m) => m.metadata?.social?.type === 'comment');
+    const reserved = commentRows.filter((m) => m.metadata.privateAttempt);
+    const confirmed = reserved.length ? await R.findAll({
+      where: {
+        key: reserved.map((m) => attemptKey(m.metadata.privateAttempt)),
+        state: 'sent',
+        'event.conversationId': c.id,
+      },
+      attributes: ['key', [db.sequelize.json('event.commentMessageId'), 'commentId']],
+      raw: true,
+    }) : [];
+    const sentComments = new Map(confirmed.map((r) => [Number(r.commentId), r.key]));
     const comments = {};
     let commentAccess;
     for (const m of commentRows) {
-      let a = waiting ? blocked('reconciliation_required') : windowCheck(c, m, now());
+      const comment = releasedAttempt && releasedAttempt === m.metadata.privateAttempt
+        ? { conversation_id: m.conversation_id, metadata: { ...m.metadata, privateAttempt: null } }
+        : m;
+      let a = windowCheck(c, comment, now());
+      if (a.reason === 'private_reply_reserved' && sentComments.get(m.id) === attemptKey(m.metadata.privateAttempt)) {
+        comments[m.id] = { ...a, outcome: 'sent' };
+        continue;
+      }
+      if (waiting) a = blocked('reconciliation_required');
       if (a.available) {
         commentAccess ??= await context(c, 'comment');
         a = commentAccess;
