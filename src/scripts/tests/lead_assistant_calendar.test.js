@@ -74,3 +74,12 @@ test('appointment requests in ordinary Spanish, scoped status and informational 
  assert(asksSessionAppointment('cuando has idcho que era mi cita?'));
  assert(!asksSessionAppointment('Quiero cancelar mi cita'));
 });
+
+test('commercial results, ambiguous acceptances and opening hours are distinct from appointment consent',()=>{
+  const calendar=require('../../services/leadAssistantCalendar.service');
+  assert(!calendar.bookingRequest('Tengo un hueco oscuro. ¿Me garantizas que desaparecerá en una sesión si pago hoy?'));
+  assert(calendar.bookingRequest('Quiero ver qué huecos quedan para una valoración de ojeras.'));
+  assert(calendar.bookingRequest('¿Y si mejor me dices las primeras horas de verdad?'));
+  for(const q of ['No quiero cita hasta saberlo','No confirmo. Me lo pienso.','La segunda, no, espera: mejor no reserves todavía']) assert(calendar.defersBooking(q));
+  for(const q of ['Si abrís a las nueve, ¿ya tengo cita a las nueve?','¿Entonces ya tengo una cita confirmada?','¿Llegaste a reservarla?']) assert(calendar.asksSessionAppointment(q));
+});

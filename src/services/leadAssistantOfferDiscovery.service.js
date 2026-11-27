@@ -36,7 +36,7 @@ function areaSelection(sections, entry, options) {
   const text = words(entry.text);
   const area = areaIn(text);
   if (!area || area.name === 'rostro' || /\b(?:reducir|papada|volumen|grasa|alerg\w*|dolor|despues|no quiero|no me interesa)\b/.test(text)) return null;
-  if (!(promotion.test(text) || text.split(' ').length <= 4 || /\b(?:algo para|me interesan?|opciones para|sobre todo|para (?:la zona|debajo|el contorno))\b/.test(text))) return null;
+  if (!(promotion.test(text) || text.split(' ').length <= 4 || /\b(?:algo para|me interesan?|opciones para|sobre todo|(?:info|informacion) (?:de|sobre|para)|para (?:la zona|debajo|el contorno))\b/.test(text))) return null;
   const matches = activeInArea(sections, area, options).filter(([, section]) =>
     !filler.test(text) || filler.test(words(section.title)));
   return matches.length === 1 ? matches[0][0] : null;
@@ -78,7 +78,8 @@ function catalogueReply({ fields, offer, history, userText, timezone }) {
   const text = words(userText);
   const area = areaIn(text);
   const contextArea = area || history.filter(m => m.role === 'user').map(m => areaIn(m.text)).filter(Boolean).at(-1);
-  const pricing = tariff.test(text);
+  const quotedDeal = /[€$£]|\beuros?\b/i.test(userText) && /\b(?:me lo dejas|me lo dejais|me lo igualas|me cobrais|pag[oó] mi|mi amiga pago)\b/.test(text);
+  const pricing = tariff.test(text) || quotedDeal;
   if (pricing && /\b(?:valoracion|consulta|primera visita)\b/.test(text)) return null;
   const asksOffer = promotion.test(text);
   const asksFiller = filler.test(text);

@@ -147,7 +147,14 @@ async function respondToLead({
 
   let recent;
   const history = () => recent ||= readHistory();
-  if (entry.type === 'dm' && !human && !offer?.restriction && clinicFacts.intent(raw) !== 'hours') {
+  const question = require('./leadAssistantCalendar.service').normalize(raw);
+  if (!human && /^(?:con |solo )?(?:sus |las )?iniciales (?:me vale[n]?|son suficientes|me bastan)$/.test(question))
+    return {kind:'reply',text:format('Las iniciales también pueden identificar a otra persona, así que tampoco las comparto.'),source:'rules',reason:'assistant_reply'};
+  if (!human && /\b(?:nombre|telefono|datos|iniciales|quien)\b/.test(question) &&
+      /\b(?:quien tiene la cita|paciente anterior|paciente siguiente|cita anterior a la mia|otra persona (?:de|en) la agenda)\b/.test(question))
+    return {kind:'reply',text:format('Los datos de otras personas son privados. Puedo consultar las horas disponibles para tu propia cita.'),source:'rules',reason:'assistant_reply'};
+  if (entry.type === 'dm' && !human && !offer?.restriction &&
+      (require('./leadAssistantCalendar.service').asksSessionAppointment(raw) || clinicFacts.intent(raw) !== 'hours')) {
     let appointment;
     try {
       const bookingEntry = dialogue.acceptsOfferedTimes(raw, previousAnswer)

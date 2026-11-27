@@ -138,7 +138,7 @@ async function processTurn({
   const pending = preview ? preview.booking : await previous(db, scope);
   const replyWords = cal.normalize(raw);
   const postponed = pending && !['booked','deferred'].includes(pending.stage) &&
-    /^(?:(?:p+f+|bueno|gracias) )?(?:mejor (?:para )?otro dia|lo dejamos para otro dia|ahora no|lo pensare|me lo (?:pienso|pensare)|prefiero pensarlo)(?: gracias)?$/.test(replyWords);
+    (cal.defersBooking(raw) || /^(?:(?:p+f+|bueno|gracias) )?(?:mejor (?:para )?otro dia|lo dejamos para otro dia|ahora no|lo pensare|me lo (?:pienso|pensare)|prefiero pensarlo)(?: gracias)?$/.test(replyWords));
   const affirmative = /^(?:si|ok(?:ay|ey)?|vale|de acuerdo|me viene bien|que si(?: cone)?)$/.test(replyWords);
   const unclear = affirmative || /^(?:so|la que hemos dicho)$/.test(replyWords) ||
     (replyWords.split(' ').length === 1 && offer && require('./leadAssistantConversationPolicy.service').areaIn(raw)?.words.test(cal.normalize(offer.title)));
