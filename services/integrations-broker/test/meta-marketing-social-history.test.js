@@ -211,3 +211,24 @@ test('only new scoped history cursors survive a quota pause, old cursors keep th
   clock = 1000 + 24 * 3600000;
   assert.throws(() => history.open(resumed, scope), { code: 'invalid_request' });
 });
+
+test('a reduced retry checks one ID-only conversation and restores timestamp filtering on subsequent pages', async () => {
+  const read = fixture('dm', {
+    '401/conversations': () => ({ data: [], paging: { next: 'mock', cursors: { after: 'stalled' } } }),
+    '401/conversations#stalled': q => {
+      assert.equal(q.fields, 'id'); assert.equal(q.limit, '1');
+      return { data: [{ id: 'thread_1' }], paging: { next: 'mock', cursors: { after: 'following' } } };
+    },
+    'thread_1/messages': () => ({ data: [] }),
+    '401/conversations#following': q => {
+      assert.equal(q.fields, 'id,updated_time');
+      return { data: [{ id: 'thread_old', updated_time: new Date(start - 1000).toISOString() }] };
+    },
+  });
+  const first = await read(null);
+  const retry = await read(first.next, { smallPages: true });
+  assert.equal(retry.children.length, 1);
+  assert.deepEqual((await read(retry.children[0])).entries, []);
+  const last = await read(retry.next, { smallPages: true });
+  assert.equal(last.next, null); assert.equal(last.children.length, 0);
+});

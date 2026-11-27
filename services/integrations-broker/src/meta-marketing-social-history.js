@@ -57,9 +57,14 @@ async function read({ payload, asset, context, appSecret, graph, pageToken }) {
     // Large Instagram inboxes can time out while Graph resolves updated_time for several threads.
     const smallPages = edge === 'conversations' && channel === 'instagram' &&
       Boolean(participantId || payload.smallPages || node.smallPages);
+    // An explicitly reduced retry of a stalled account cursor can omit the
+    // computed timestamp for one row. Its child checks real message dates.
+    // Carry the decision in the signed continuation so later pages go back to
+    // their normal timestamp filter without fetching unrelated messages.
+    const idsOnly = smallPages && payload.smallPages === true && !participantId && !!node.after && !node.idsOnlyUsed;
     const pageLimit = smallPages ? 1 : 10;
     const result = await graph(encodeURIComponent(id) + '/' + edge, pageToken, {
-      fields: fields[edge],
+      fields: idsOnly ? 'id' : fields[edge],
       limit: String(instagramMessages ? 20 - seen : pageLimit),
       ...(edge === 'conversations' ? { platform: channel, ...(participantId ? { user_id: participantId } : {}) } : {}),
       ...(node.after ? { after: node.after } : {}),
@@ -176,6 +181,7 @@ async function read({ payload, asset, context, appSecret, graph, pageToken }) {
           ...node,
           after,
           ...(smallPages ? { smallPages: true } : {}),
+          ...(idsOnly ? { idsOnlyUsed: true } : {}),
           ...(instagramMessages ? { seen: seen + result.data.length } : {}),
         });
       }
