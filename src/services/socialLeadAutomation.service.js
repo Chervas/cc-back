@@ -5,6 +5,8 @@ const { digest, eventKey } = require('./socialInboxEvents');
 const routes = require('./socialInboxRoute.service');
 const { explicitOptOut, assistantCommercialText } = require('./socialLeadInterestClassification.service');
 
+const { acceptsOrigin } = require('./leadAssistantOrigin.service');
+
 const source = 'quickchat_social';
 const allowed = new Set(['instagram_dm', 'instagram_comment', 'messenger_dm']);
 const inputKey = (entry) => [entry.channel, entry.type].join('_');
@@ -29,7 +31,8 @@ function create({
   analyzeAssistant = args => require('./aiOrchestrator.service').analyzeStructured(args),
   resolve = routes.resolveRoute,
 }) {
-  async function plan(clinicId, entry, transaction) {
+  async function plan(conversation, entry, transaction) {
+    const clinicId = conversation.clinic_id;
     const flow = await db.AutomationFlowTemplateV2.findOne({
       where: {
         clinic_id: clinicId,
@@ -67,6 +70,7 @@ function create({
       )
     )
       return null;
+    if (rule.action === 'assistant' && !await acceptsOrigin(db, rule, conversation, entry, transaction)) return null;
     return { flow, rule };
   }
 
@@ -75,7 +79,7 @@ function create({
     if (explicitOptOut(entry.text)) {
       await message.update({ metadata: { ...message.metadata, socialContactOptOut: true } }, { transaction });
     }
-    const eligible = await plan(conversation.clinic_id, entry, transaction);
+    const eligible = await plan(conversation, entry, transaction);
     if (!eligible) return;
     return dispatch(
       {
@@ -101,7 +105,7 @@ function create({
       key !== eventKey(entry)
     )
       return { reason: 'unverified_social_entry' };
-    const eligible = await plan(conversation.clinic_id, entry);
+    const eligible = await plan(conversation, entry);
     if (!eligible || eligible.flow.id !== claim.metadata?.social_template_id)
       return { reason: 'social_entry_disabled' };
     const { flow } = eligible;
@@ -148,7 +152,7 @@ function create({
     if (!thread || thread.clinic_id !== clinicId || !owned(entry, thread))
       throw Error('social_lead_thread_scope');
     const current = async (transaction) => {
-      const eligible = await plan(clinicId, entry, transaction);
+      const eligible = await plan(thread, entry, transaction);
       if (!eligible || eligible.flow.id !== execution.template_version_id) return null;
       const running = await db.FlowExecutionV2.findOne({
         where: {
@@ -231,7 +235,8 @@ function create({
             defaults: {
               clinica_id: clinicId,
               grupo_clinica_id: eligible.flow.group_id || null,
-              channel: 'unknown',
+              channel: entry.ad ? 'paid' : 'unknown',
+              ...(entry.ad ? { source: 'meta_ads' } : {}),
               source_detail: inputKey(entry),
               status_lead: 'nuevo',
               nombre: (entry.alias || c.social_alias)?.slice(0, 128) || null,
