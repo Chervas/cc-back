@@ -4,8 +4,40 @@ const E = require('./metaMarketingEnrollment.contract');
 const bindings = require('./metaMarketingEnrollmentBinding.service');
 const { assetSetDigest } = require('./metaMarketingEffectiveCredential.service');
 const { destinationsFor } = require('./metaMarketingInstagramExtension.service');
+const { graphId } = require('../../services/integrations-broker/src/meta-marketing-contract');
 
-async function resolveRoute(db, { channel, accountId }, transaction) {
+async function currentEnrollment(db, enrollmentId, transaction, expectedConnection) {
+  const raw = await db.MetaMarketingEnrollmentRequest.findByPk(enrollmentId, {
+    transaction, raw: true, logging: false,
+  });
+  if (!raw || raw.state !== 'active' || (expectedConnection && raw.connection_ref !== expectedConnection)) return null;
+  const row = E.request(raw);
+  try {
+    const committed = await bindings.createBindings({ models: db }).committed(row.enrollment_id, transaction);
+    return { row, committed };
+  } catch (err) {
+    if (
+      [
+        'meta_enrollment_assignment_review',
+        'meta_enrollment_asset_revoked',
+        'meta_enrollment_asset_in_use',
+        'meta_enrollment_not_active',
+        'meta_enrollment_scope_changed',
+        'meta_enrollment_scope_blocked',
+        'meta_credential_renewal_required',
+      ].includes(err.code)
+    )
+      return null;
+    throw err;
+  }
+}
+
+async function resolveRoute(db, recipient, transaction) {
+  return resolveRecipient(db, recipient, transaction);
+}
+
+async function resolveRecipient(db, { channel, accountId }, transaction, knownEnrollment) {
+  if (!['instagram', 'messenger'].includes(channel) || !graphId(accountId)) return null;
   const o = { transaction, raw: true, logging: false };
   const kind = channel === 'instagram' ? 'instagram_business' : 'facebook_page';
   const assetRef = 'meta-' + kind + ':' + accountId;
@@ -24,27 +56,12 @@ async function resolveRoute(db, { channel, accountId }, transaction) {
       : [];
   if (direct.length + ext.length !== 1) return null;
   const source = direct[0] || ext[0];
-  const raw = await db.MetaMarketingEnrollmentRequest.findByPk(source.enrollment_id, o);
-  if (!raw || raw.state !== 'active' || raw.connection_ref !== source.connection_ref) return null;
-  const row = E.request(raw);
-  let committed;
-  try {
-    committed = await bindings.createBindings({ models: db }).committed(row.enrollment_id, transaction);
-  } catch (err) {
-    if (
-      [
-        'meta_enrollment_assignment_review',
-        'meta_enrollment_asset_revoked',
-        'meta_enrollment_asset_in_use',
-        'meta_enrollment_not_active',
-        'meta_enrollment_scope_changed',
-        'meta_enrollment_scope_blocked',
-        'meta_credential_renewal_required',
-      ].includes(err.code)
-    )
-      return null;
-    throw err;
-  }
+  const snapshot = knownEnrollment || await currentEnrollment(
+    db, source.enrollment_id, transaction, source.connection_ref,
+  );
+  if (!snapshot || source.enrollment_id !== snapshot.row.enrollment_id
+    || source.connection_ref !== snapshot.row.connection_ref) return null;
+  const { row, committed } = snapshot;
   async function assignedClinic(mapping, assetKind) {
     if (mapping?.assignmentScope === 'clinic') return mapping.clinicaId;
     if (mapping?.assignmentScope !== 'group') return null;
@@ -77,7 +94,7 @@ async function resolveRoute(db, { channel, accountId }, transaction) {
   if (ext.length) {
     if (
       !source.confirmed_at ||
-      +source.confirmed_at > Date.now() ||
+      !Number.isFinite(+source.confirmed_at) || +source.confirmed_at <= 0 || +source.confirmed_at > Date.now() ||
       source.scope_key !== row.scope_key ||
       !/^[a-f0-9]{64}$/.test(source.selected_candidate_digest) ||
       (await db.ClinicMetaAsset.findOne({
@@ -87,14 +104,13 @@ async function resolveRoute(db, { channel, accountId }, transaction) {
       (await db.MetaMarketingBrokerRevocation.findOne({ ...o, where: { asset_ref: assetRef } }))
     )
       return null;
-    const targets = await destinationsFor({
-      models: db,
-      row,
-      committed,
-      transaction,
-      settings: () => [],
-      selfService: () => true,
-    });
+    if (!snapshot.instagramDestinations) {
+      snapshot.instagramDestinations = await destinationsFor({
+        models: db, row, committed, transaction,
+        settings: () => [], selfService: () => true,
+      });
+    }
+    const targets = snapshot.instagramDestinations;
     const match = targets.filter(
       (t) =>
         source.reserved_scope === 'clinic:' + t.clinicId &&
@@ -114,21 +130,6 @@ async function resolveRoute(db, { channel, accountId }, transaction) {
       return null;
     clinicId = match[0].clinicId;
     pageId = match[0].parentPageId;
-    if (row.scope_key.startsWith('group:')) {
-      const groupId = Number(row.scope_key.slice(6));
-      const mapping = await db.ClinicMetaAsset.findOne({
-        ...o,
-        where: {
-          grupoClinicaId: groupId,
-          assignmentScope: 'group',
-          assetType: 'facebook_page',
-          metaAssetId: pageId,
-          isActive: true,
-        },
-      });
-      if (!mapping) return null;
-      if ((await assignedClinic(mapping, 'facebook_page')) !== clinicId) return null;
-    }
   } else {
     const mapping = await db.ClinicMetaAsset.findByPk(source.mapping_id, {
       ...o,
@@ -136,12 +137,20 @@ async function resolveRoute(db, { channel, accountId }, transaction) {
     });
     pageId = channel === 'instagram' ? source.parent_page_id : accountId;
     clinicId = await assignedClinic(mapping, kind);
+    if (channel === 'instagram' && !row.selected.some(a =>
+      a.kind === 'instagram_business' && a.id === accountId && a.parentPageId === pageId)) return null;
   }
   if (
     !row.clinicIds.includes(clinicId) ||
     !row.selected.some((a) => a.kind === 'facebook_page' && a.id === pageId)
   )
     return null;
+  if (channel === 'instagram') {
+    // A group can assign the Instagram account and its parent Page to different clinics.
+    // Use the same recipient checks for the parent, including its physical uniqueness.
+    const pageRoute = await resolveRecipient(db, { channel: 'messenger', accountId: pageId }, transaction, snapshot);
+    if (!pageRoute || pageRoute.clinicId !== clinicId) return null;
+  }
   return {
     clinicId,
     channel,
@@ -153,6 +162,36 @@ async function resolveRoute(db, { channel, accountId }, transaction) {
     tenantRef: 'clinic:' + row.clinicIds[0],
   };
 }
+// These are CRM routing facts. Reading them never grants a Meta permission or activates an inbox.
+async function routesForEnrollment(db, enrollmentId, transaction) {
+  const snapshot = await currentEnrollment(db, enrollmentId, transaction);
+  if (!snapshot) return { status: 'enrollment_unavailable', routes: [], review: [] };
+  const { row } = snapshot;
+  const recipients = new Map();
+  function add(channel, accountId) {
+    recipients.set(channel + ':' + accountId, { channel, accountId });
+  }
+  for (const asset of row.selected) {
+    if (asset.kind === 'facebook_page') add('messenger', asset.id);
+    if (asset.kind === 'instagram_business') add('instagram', asset.id);
+  }
+  const extensions = await db.MetaMarketingInstagramExtension.findAll({
+    transaction, raw: true, logging: false,
+    attributes: ['selected_instagram_id'],
+    where: { enrollment_id: enrollmentId, status: 'active' },
+    order: [['selected_instagram_id', 'ASC']],
+  });
+  for (const extension of extensions) add('instagram', extension.selected_instagram_id);
+  const routes = [];
+  const review = [];
+  for (const recipient of recipients.values()) {
+    const route = await resolveRecipient(db, recipient, transaction, snapshot);
+    if (route) routes.push(route);
+    else review.push(recipient);
+  }
+  return { status: review.length ? 'assignment_review' : 'resolved', routes, review };
+}
+
 function sameRoute(a, b) {
   return (
     !!a &&
@@ -169,4 +208,4 @@ function sameRoute(a, b) {
     ].every((k) => a[k] === b[k])
   );
 }
-module.exports = { resolveRoute, sameRoute };
+module.exports = { resolveRoute, sameRoute, routesForEnrollment };
