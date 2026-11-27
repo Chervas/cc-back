@@ -1759,7 +1759,7 @@ exports.getMessages = async (req, res) => {
     const [focusedPayload] = await attachTemporaryQuickChatEligibility([withRouting], req.userData, CitaPaciente);
     const [identified]=await contactIdentity.enrich([focusedPayload]);
     if (['instagram','messenger'].includes(conversation.channel)) {
-      identified.social_replies=await require('../services/socialInbox.service').service().availability(conversation,messages);
+      identified.social_replies=await require('../services/socialInbox.service').service().availability(conversation, messages, { historyView: true });
     }
     return res.json({ conversation: identified, messages, messages_page: messagesPage });
   } catch (err) {

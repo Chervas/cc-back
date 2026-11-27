@@ -28,6 +28,7 @@ function provider(env = process.env) {
     return response.data;
   }
   return {
+    isEnabled: () => env.META_SOCIAL_INBOX_ENABLED === 'true',
     subscribePage: (r, versionId) => call(S.subscribe, r, { kind: 'dm', enrollmentId: r.enrollmentId, versionId }),
     history: (r, kind, start, end, cursor, participantId, smallPages) =>
       call(S.history, r, { kind, start, end, cursor, ...(participantId ? { participantId } : {}), ...(smallPages ? { smallPages: true } : {}) }),
