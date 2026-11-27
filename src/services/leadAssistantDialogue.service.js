@@ -152,7 +152,7 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   if (catalogued) return {reply:catalogued,imageId:null,source:'catalog'};
   if (/^(?:ok(?:ay|ey)?|vale|de acuerdo|entendido|perfecto)[!. ]*$/i.test(userText.trim()))
     return {reply:'De acuerdo.',imageId:null};
-  if (/^(?:(?:p+f+|bueno)[, .]*)?(?:mejor (?:para )?otro d[ií]a|lo dejamos para otro d[ií]a|lo pensar[eé])(?:[.! ]*)$/i.test(userText.trim()))
+  if (/^(?:(?:p+f+|bueno)[, .]*)?(?:mejor (?:para )?otro d[ií]a|lo dejamos para otro d[ií]a|lo pensar[eé]|me lo (?:pienso|pensar[eé])|prefiero pensarlo)(?:,? gracias)?(?:[.! ]*)$/i.test(userText.trim()))
     return {reply:'Claro, lo dejamos para otro día.',imageId:null};
   const retryQuestion = /(?:no (?:me )?(?:est[aá]s |has )?(?:respond|contest)|no era (?:eso|mi pregunta)|eso no (?:es |responde)|te (?:he )?pregunt)/i;
   const repair = retryQuestion.test(userText);
@@ -197,7 +197,7 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const previous = history.at(-1);
   const addressesReduction = reply => /\b(?:reduc\w*|disminu\w*|volumen|papada|afinar|adelgazar|grasa)\b/i.test(reply);
   const asksForContact = reply => /\b(?:ind[ií]came|facil[ií]tame|dame|me (?:das|indicas|dices)|necesito|necesitar[ií]a)\b[^.?!]{0,110}\b(?:tu nombre|correo electr[oó]nico|m[oó]vil|n[uú]mero de tel[eé]fono)\b/i.test(reply);
-  const undeservedPromise = reply => asksForContact(reply) || /\b(?:procedo a (?:pedir|reservar|agendar)|voy a reservarte)\b/i.test(reply) || /\b(?:te esperamos|tu cita (?:es|ser[aá]|est[aá]|ha quedado)|te (?:doy|ofrezco|propongo) (?:dos|tres|[23]) (?:opciones|horas|huecos)|tengo (?:un hueco|disponibilidad) (?:el|a las)|nos vemos (?:el|en la cl[ií]nica))\b/i.test(reply);
+  const undeservedPromise = reply => asksForContact(reply) || /\b(?:(?:procedo|proceder[eé]|voy) a (?:pedir|reservar|agendar|tramitar)|(?:te |nos )?(?:llamaremos|contactaremos)|para que te llamemos|(?:ind[ií]came|dime|facil[ií]tame) (?:dos|tres|varias) (?:fechas|horas))\w*/i.test(reply) || /\b(?:te esperamos|tu cita (?:es|ser[aá]|est[aá]|ha quedado)|te (?:doy|ofrezco|propongo) (?:dos|tres|[23]) (?:opciones|horas|huecos)|tengo (?:un hueco|disponibilidad) (?:el|a las)|nos vemos (?:el|en la cl[ií]nica))\b/i.test(reply);
   const personalAdvice = /\b(?:me recomiend|que recomiend|para m[ií]|mi caso|cu[aá]l (?:va|es|funciona) mejor|menos invasiv)\w*/i.test(question);
   const unsafeRecommendation = reply => (personalAdvice && /\b(?:es|ser[ií]a|resulta) (?:una |la )?(?:buena|mejor|ideal|perfecta) (?:opci[oó]n|alternativa)\b|\bte (?:ir[ií]a|vendr[ií]a) mejor\b/i.test(reply)) || /\b(?:te recomiendo (?:la|el|que te hagas)|(?:es|ser[ií]a) (?:la )?(?:mejor|buena|ideal) (?:opci[oó]n|alternativa) (?:para ti|para tu caso)|para ti (?:la |lo )?mejor)\b/i.test(reply);
   const offTopic = reply => (generalPromo && /qu[eé] (?:promo|anuncio)|cu[aá]l (?:promo|anuncio)/i.test(reply)) || undeservedPromise(reply) || unsafeRecommendation(reply) || (reduction && !addressesReduction(reply)) || (suitability && !priceQuestion && /[€$£]|\b(?:euros?|descuento)\b/i.test(reply)) ||

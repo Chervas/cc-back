@@ -190,3 +190,15 @@ test('the published platform instructions and model request use the same base an
   for(const text of ['no','so','ok, pero no ahora']) assert(!acceptsOfferedTimes(text,'¿Quieres que mire horarios para una valoración?'));
   assert(!acceptsOfferedTimes('ok','La valoración es gratuita.'));
 });
+
+test('indirect requests for an in-person assessment go to the calendar and section details stay with the selected offer',()=>{
+  const { bookingRequest } = require('../../services/leadAssistantCalendar.service');
+  assert(bookingRequest('prefiero que me vea alguien'));
+  assert(bookingRequest('Quisiera que me valore la doctora'));
+  assert(!bookingRequest('¿Tengo que dar mi teléfono?'));
+  const { catalogueReply } = require('../../services/leadAssistantOfferDiscovery.service');
+  const offer={title:'Oferta de contorno de ojos',terms:['170 € · 1 sesión, 1 ml total. Antes 220 €.']};
+  const reply=catalogueReply({userText:'¿Qué incluye exactamente esa sesión?',offer,history:[],fields:{}});
+  assert.match(reply,/1 sesión, 1 ml total por 170 €/);
+  assert.doesNotMatch(reply,/valoración|220/);
+});
