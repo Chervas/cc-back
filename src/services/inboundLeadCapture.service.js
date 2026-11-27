@@ -6,13 +6,12 @@ const { isRevokedMessage } = require('../lib/automation-conversation-context');
 const routes = require('./socialInboxRoute.service');
 const config = require('./inboundLeadCaptureConfig.service');
 const campaigns = require('./marketingWhatsappReplyLead.service');
-const { campaignCopy, postTreatmentFollowUp, appointmentIntent } = require('../lib/inbound-commercial-language');
+const decisions = require('./inboundLeadCaptureDecision.service');
 const classifierErrors = new Set(['inbound_capture_classifier_invalid', 'inbound_capture_classifier_unavailable']);
 const { phone, parseContact, inboundProfileLabel } = require('../lib/whatsapp-contact-identity');
 const {
   classifyInterest,
   explicitOptOut,
-  asksForCommercialInformation,
 } = require('./socialLeadInterestClassification.service');
 const { enqueueInboundExecution } = require('./leadAssistantExecution.service');
 
@@ -269,20 +268,10 @@ function create({
     if (reserved.waiting) return { pending: true, waitUntil: reserved.waiting };
     let decision = reserved.decision;
     if (!decision) {
-      const appointment = appointmentIntent(entry.text);
-      if (explicitOptOut(entry.text) || (await optedOut(input)))
-        decision = { kind: 'opt_out', privateRequested: false };
-      else if (campaignCopy(entry.text).quoted)
-        decision = { kind: 'ignore', privateRequested: false, reason: 'quoted_campaign' };
-      else if (postTreatmentFollowUp(entry.text))
-        decision = { kind: 'ignore', privateRequested: false, reason: 'post_treatment_follow_up' };
-      else if (appointment)
-        decision = { kind: appointment === 'appointment_management' ? 'ignore' : 'review', privateRequested: false, reason: appointment };
-      else if (entry.channel === 'whatsapp' && asksForCommercialInformation(entry.text))
-        decision = { kind: 'interest', privateRequested: false };
-      else {
+      decision = decisions.simpleDecision(entry, explicitOptOut(entry.text) || await optedOut(input));
+      if (!decision) {
         try {
-          decision = await classify(entry, {
+          decision = await decisions.classifyDecision(entry, {
             clinicId: execution.clinic_id,
             groupId: execution.group_id,
             reportFailure: true,
@@ -290,11 +279,7 @@ function create({
               const active = await identify(execution);
               return !!active && !(await optedOut(active));
             },
-          });
-          if (!decision || !['interest', 'ignore', 'review', 'opt_out'].includes(decision.kind)
-            || typeof decision.privateRequested !== 'boolean')
-            throw Object.assign(Error('inbound_capture_classifier_invalid'), {code: 'inbound_capture_classifier_invalid'});
-          decision = {kind: decision.kind, privateRequested: decision.privateRequested};
+          }, classify);
         } catch (error) {
           const failureCode = classifierErrors.has(error?.code) ? error.code : 'inbound_capture_classifier_unavailable';
           await db.sequelize.transaction(async transaction => {
@@ -332,6 +317,9 @@ function create({
       const campaign = whatsapp
         ? await campaigns.resolveCampaignReply({ db, message, conversation: thread, binding, transaction })
         : null;
+      if (campaign?.commercial && !campaign.excluded && decisions.eligibleChoice(decision, entry.text, campaign.offerText)
+          && await campaigns.hasSelectionContext({ db, message, campaign, transaction }))
+        decision = decisions.selectedDecision();
       const record = {
         key,
         executionId: execution.id,
