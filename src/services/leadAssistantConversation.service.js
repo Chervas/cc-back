@@ -83,7 +83,8 @@ function commercialOffer(fields, entry, priorKey, options) {
   const area = areaIn(entry.text);
   if (!postReference(entry) && discovery.browsesWholeArea(entry.text, area)) return null;
   const priorSection = sections.get(priorKey);
-  const carry = priorSection && (!area || discovery.matchesArea(priorSection,area));
+  const carry = priorSection && (!area || discovery.matchesArea(priorSection,area)) &&
+    !clinicFacts.switchesPricedService(entry.text,priorSection.title);
   if (!matches.length && (!postReference(entry) || options?.samePublication)) {
     const picked = discovery.areaSelection(sections,entry,options);
     if (picked) matches = [picked];

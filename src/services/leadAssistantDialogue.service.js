@@ -176,6 +176,9 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
     if (fact) return {reply:fact,imageId:null,source:'clinic_data'};
   }
   if (catalogued) return {reply:catalogued,imageId:null,source:'catalog'};
+  const namedService = !offer && kind === 'price' && clinicFacts.namedTariff(userText);
+  if (namedService && !regularLines.length && !clinicFacts.relevantManual('price',fields,offer,userText,namedService))
+    return {reply:'No tengo una tarifa confirmada para ese servicio.',imageId:null,source:'rules'};
   if (ordinaryPrice && !regularLines.length) return {reply:'No tengo un precio habitual confirmado para ese servicio.',imageId:null,source:'rules'};
   if (/^(?:ok(?:ay|ey)?|vale|de acuerdo|entendido|perfecto)[!. ]*$/i.test(userText.trim()))
     return {reply:'De acuerdo.',imageId:null};
