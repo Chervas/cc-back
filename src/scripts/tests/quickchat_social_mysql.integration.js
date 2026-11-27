@@ -310,9 +310,52 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     await db.Message.count({ where: { 'metadata.providerId': 'mid-delayed-notification' } }),
     1,
   );
+  // A real webhook can arrive while the account is assigned and its permissions
+  // are being renewed. Reprocessing keeps the signed event and uses the ordinary worker.
+  const heldComment = comment('8912345');
+  denied = true;
+  await svc.accept(heldComment, { appId: '123', namespace: 'dev' });
+  const heldKey = jobs.pop().payload.receiptKey;
+  await svc.importReceipt(heldKey);
+  const held = await db.SocialInboxReceipt.findByPk(heldKey);
+  assert.equal(held.state, 'review');
+  const stored = structuredClone(held.event);
+  const { retryReviewedReceipt } = require('../../services/socialInboxIntake.service');
+  const retry = (clinicId, enqueue = async (job) => jobs.push(job)) => retryReviewedReceipt(db, heldKey, {
+    clinicId, channel: stored.channel, accountId: stored.accountId, namespace: 'dev',
+  }, { resolve, enqueue });
+  assert.equal(await retry(42), false);
+  const denial = held.reason;
+  await held.update({ reason: 'post_owner_unverified' });
+  assert.equal(await retry(41), false);
+  await held.update({ reason: denial });
+  accounts[stored.accountId] = 42;
+  assert.equal(await retry(42), false);
+  accounts[stored.accountId] = 41;
+  await assert.rejects(retry(41, async () => { throw Error('queue_unavailable'); }), /queue_unavailable/);
+  assert.equal((await held.reload()).state, 'review');
+  const historyOptions = { appId: '123', namespace: 'dev', history: true, expectedRoute: held.route };
+  const replacement = structuredClone(heldComment);
+  replacement.entry[0].changes[0].value.from.id = '993';
+  assert.equal((await svc.accept(replacement, historyOptions)).duplicate, 1);
+  assert.equal((await svc.accept(heldComment, historyOptions)).queued, 1);
+  await svc.importReceipt(jobs.pop().payload.receiptKey);
+  assert.equal((await held.reload()).state, 'review'); // The provider still denies access.
+  assert.deepEqual(held.event, stored);
+  denied = false;
+  const before = jobs.length;
+  const attempts = await Promise.all([retry(41), retry(41)]);
+  assert.deepEqual(attempts.sort(), [false, true]);
+  assert.equal(jobs.length, before + 1);
+  await svc.importReceipt(jobs.pop().payload.receiptKey);
+  assert.equal((await held.reload()).state, 'persisted');
+  assert.equal(held.event.source, 'new');
+  assert.equal((await svc.accept(heldComment, historyOptions)).duplicate, 1);
+  assert.equal(await retry(41), false);
+  assert.equal(await db.Message.count({ where: { 'metadata.providerId': stored.eventId } }), 1);
   assert(packets.length >= 8);
   report.checks.push(
-    'Firma, migración repetible, duplicados, privado concurrente, DM y continuidad, dos sedes, Messenger, revisión, ventanas, revocación, conciliación sin reenvío, eco e histórico.',
+    'Firma, migración repetible, duplicados, privado concurrente, DM y continuidad, dos sedes, Messenger, revisión, ventanas, revocación, conciliación sin reenvío, eco, histórico y recuperación concurrente de un webhook retenido por permisos.',
   );
 }).catch((e) => {
   console.error(e);
