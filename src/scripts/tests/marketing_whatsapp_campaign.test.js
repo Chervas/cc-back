@@ -11,9 +11,19 @@ const { imageHeader, withCampaignImage, resolveCampaignImage } = require('../../
 const { buildLeadAttributionView, buildMarketingOriginWhere } = require('../../lib/lead-attribution-view');
 const { fillExistingPatientNames } = require('../../services/leadPatientNameProjection.service');
 
-test('only the INFO keyword triggers lead capture', () => {
+test('the literal INFO keyword remains identifiable', () => {
   for (const value of ['INFO', ' info ', '¡Info!', '¿INFO?']) assert.equal(isInfoReply(value), true);
   for (const value of ['', 'BAJA', 'información', 'Gracias, info', 'INFO BAJA']) assert.equal(isInfoReply(value), false);
+});
+
+test('commercial questions qualify for capture, copied campaign instructions and refusals do not', () => {
+  const { asksForCommercialInformation } = require('../../services/socialLeadInterestClassification.service');
+  for (const text of ['¿Tenéis algún descuento para el tratamiento de cara?', '¿Cuánto cuesta?', 'Quiero más información', 'Estoy interesada en esta promoción pero hasta el lunes no puedo ir.', 'INFO']) {
+    assert.equal(asksForCommercialInformation(text), true, text);
+  }
+  for (const text of ['Gracias', 'BAJA', 'No me interesa la oferta', 'Estaba interesada en la promoción pero ya no.', '¿Hay descuento? Responde INFO. Responde BAJA.', '¿Qué descuento? Tengo una urgencia.']) {
+    assert.equal(asksForCommercialInformation(text), false, text);
+  }
 });
 
 test('a nameless campaign lead shows the patient name only with confirmed clinic, phone, and permissions', async () => {
@@ -185,7 +195,7 @@ test('one lead per verified campaign and contact, with quote matching and ambigu
     assert.equal(await apply({ metadata: quote }, { phoneId: '555' }), null);
     assert.equal(await apply({ content: 'BAJA', metadata: quote }), null);
     assert.equal(await apply({ metadata: { provider_type: 'text', context: { id: 'wamid.UNKNOWN' } } }), null);
-    const first = await apply({ metadata: quote });
+    const first = await apply({ metadata: quote, content: 'Hola, ¿tenéis algún descuento de Black Friday para otros tratamientos?' });
     assert.equal(first.duplicate, false);
     assert.equal(first.lead.es_paciente, true);
     await other.destroy();

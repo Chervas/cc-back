@@ -4,6 +4,8 @@ const { createHash } = require('node:crypto');
 const { Op, json, where } = require('sequelize');
 const { normalizePhoneDigits } = require('../lib/phone');
 
+const { asksForCommercialInformation } = require('./socialLeadInterestClassification.service');
+
 const SOURCE = 'bulk_whatsapp_reply';
 const UNQUOTED_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -14,7 +16,7 @@ function isInfoReply(content) {
 }
 
 async function attributeCampaignInfoReply({ db, message, conversation, binding, transaction }) {
-  if (message.direction !== 'inbound' || message.metadata?.provider_type !== 'text' || !isInfoReply(message.content)
+  if (message.direction !== 'inbound' || message.metadata?.provider_type !== 'text' || !asksForCommercialInformation(message.content)
     || conversation.channel !== 'whatsapp' || Number(message.conversation_id) !== Number(conversation.id)
     || Number(conversation.clinic_id) !== Number(binding.clinicId)) return null;
   const clinicId = Number(conversation.clinic_id);
