@@ -102,4 +102,4 @@ function effective(flow, at) {
     at >= since
   );
 }
-module.exports = { CHANNELS, current, status, save, effective };
+module.exports = { CHANNELS, key, current, status, save, effective };

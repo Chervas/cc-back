@@ -34,10 +34,12 @@ test('QuickChat and lead threads paginate social history by provider time, inclu
       findByPk: id => ({ id, clinica_id: threads.find(t => t.lead_id === id).clinic_id }),
       findAll: async () => [],
     };
+    db.LeadAssistantSession = { findOne: async () => null };
     db.UsuarioClinica = { findAll: async () => [{ id_clinica: 10, rol_clinica: 'equipo' }] };
     const passthrough = { enrich: async rows => rows };
     const controller = loadSource('../controllers/conversation.controller', {
       '../../models': db,
+      '../services/inboundLeadCapturePresentation.service': require('../../services/inboundLeadCapturePresentation.service'),
       '../services/patientDirection.service': { getAssignedClinicIds: async () => [] },
       '../services/marketingOptOut.service': { getActiveContactRestrictionsForConversations: async () => new Map() },
       '../services/whatsappContactIdentity.service': {
@@ -86,6 +88,12 @@ test('QuickChat and lead threads paginate social history by provider time, inclu
           ...Array.from({ length: 17 }, (_, i) => base + 11 + i), base + 2, base + 1,
         ]);
         assert.deepEqual(first.messages_page, { limit: 20, has_more_before: true, next_before_message_id: base + 10 });
+        const refreshed = await page({ message_id: base + 27, before_message_id: 9999, limit: 2 });
+        assert.deepEqual(refreshed.messages.map(m => m.id), [base + 27]);
+        assert.deepEqual(refreshed.messages_page, { limit: 1, has_more_before: false, next_before_message_id: null });
+        for (const exact of [base + 9, base + 10, 401, (3 - thread.id) * 100 + 1, 9999, 'bad']) {
+          assert.deepEqual((await page({ message_id: exact })).messages, []);
+        }
         const second = await page({ before_message_id: first.messages_page.next_before_message_id });
         assert.deepEqual(second.messages.map(m => m.id), Array.from({ length: 6 }, (_, i) => base + 3 + i));
         assert.equal(second.messages_page.has_more_before, false);

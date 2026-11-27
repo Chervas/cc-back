@@ -42,6 +42,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     '../lib/jobExecutionTimeoutPolicy': require('../../lib/jobExecutionTimeoutPolicy'),
     '../lib/metaAdsSyncContinuation': require('../../lib/metaAdsSyncContinuation'),
     './jobClaim.service': require('../../services/jobClaim.service'),
+    './platformAudit.delegation': { runJob: (payload, _job, handler) => handler(payload) },
   };
   for (const name of [
     './flowEngineV2.service', '../lib/automation-conversation-context', './conversationPendingReply.service',
@@ -55,6 +56,7 @@ withIsolatedCampaignMysql(async ({ sql, models, report }) => {
     '../../models': models, './jobRequests.service': requests, './jobExecutor.service': executor,
     './aiRuntimeMonitoring.service': blocked,
     '../config/scheduledJobCatalog': require('../../config/scheduledJobCatalog'),
+    '../lib/metaLeadBrokerCooldown': require('../../lib/metaLeadBrokerCooldown'),
     '../lib/gatewayJobOwnership': require('../../lib/gatewayJobOwnership'),
   });
   try {

@@ -6,6 +6,8 @@ const { isRevokedMessage } = require('../lib/automation-conversation-context');
 const routes = require('./socialInboxRoute.service');
 const config = require('./inboundLeadCaptureConfig.service');
 const campaigns = require('./marketingWhatsappReplyLead.service');
+const { campaignCopy, appointmentIntent } = require('../lib/inbound-commercial-language');
+const classifierErrors = new Set(['inbound_capture_classifier_invalid', 'inbound_capture_classifier_unavailable']);
 const { phone, parseContact } = require('../lib/whatsapp-contact-identity');
 const {
   classifyInterest,
@@ -241,7 +243,8 @@ function create({
         if (Date.parse(reservation.until) > Date.now()) return { waiting: reservation.until };
         // The original caller may already have dispatched inference before it crashed.
         // Do not infer again when its result is unknowable.
-        return { decision: { kind: 'review', privateRequested: false } };
+        if (!classifierErrors.has(reservation.failureCode))
+          return { decision: { kind: 'review', privateRequested: false, reason: 'classifier_result_unknown' } };
       }
       const until = new Date(Date.now() + 120000).toISOString();
       await message.update(
@@ -251,6 +254,7 @@ function create({
             inboundLeadCaptureClassification: {
               key,
               templateId: execution.template_version_id,
+              executionId: execution.id,
               token,
               until,
             },
@@ -264,19 +268,42 @@ function create({
     if (reserved.waiting) return { pending: true, waitUntil: reserved.waiting };
     let decision = reserved.decision;
     if (!decision) {
+      const appointment = appointmentIntent(entry.text);
       if (explicitOptOut(entry.text) || (await optedOut(input)))
         decision = { kind: 'opt_out', privateRequested: false };
+      else if (campaignCopy(entry.text).quoted)
+        decision = { kind: 'ignore', privateRequested: false, reason: 'quoted_campaign' };
+      else if (appointment)
+        decision = { kind: appointment === 'appointment_management' ? 'ignore' : 'review', privateRequested: false, reason: appointment };
       else if (entry.channel === 'whatsapp' && asksForCommercialInformation(entry.text))
         decision = { kind: 'interest', privateRequested: false };
-      else
-        decision = await classify(entry, {
-          clinicId: execution.clinic_id,
-          groupId: execution.group_id,
-          beforeDispatch: async () => {
-            const active = await identify(execution);
-            return !!active && !(await optedOut(active));
-          },
-        });
+      else {
+        try {
+          decision = await classify(entry, {
+            clinicId: execution.clinic_id,
+            groupId: execution.group_id,
+            reportFailure: true,
+            beforeDispatch: async () => {
+              const active = await identify(execution);
+              return !!active && !(await optedOut(active));
+            },
+          });
+          if (!decision || !['interest', 'ignore', 'review', 'opt_out'].includes(decision.kind)
+            || typeof decision.privateRequested !== 'boolean')
+            throw Object.assign(Error('inbound_capture_classifier_invalid'), {code: 'inbound_capture_classifier_invalid'});
+          decision = {kind: decision.kind, privateRequested: decision.privateRequested};
+        } catch (error) {
+          const failureCode = classifierErrors.has(error?.code) ? error.code : 'inbound_capture_classifier_unavailable';
+          await db.sequelize.transaction(async transaction => {
+            const message = await db.Message.findByPk(input.message.id, {transaction, lock: transaction.LOCK.UPDATE});
+            const current = message.metadata?.inboundLeadCaptureClassification;
+            if (current?.token === token && !current.decision)
+              await message.update({metadata: {...message.metadata, inboundLeadCaptureClassification:
+                {key, templateId: execution.template_version_id, executionId: execution.id, failureCode}}}, {transaction});
+          });
+          throw Object.assign(Error(failureCode), {code: failureCode});
+        }
+      }
       await db.sequelize.transaction(async (transaction) => {
         const message = await db.Message.findByPk(input.message.id, {
           transaction,
@@ -311,15 +338,15 @@ function create({
         leadId: null,
       };
       const directPhone = whatsapp ? phone(thread.contact_id) : null;
-      let reason = decision.kind;
+      let reason = decision.reason || (decision.kind === 'review' ? 'intent_ambiguous' : decision.kind);
       if (
-        campaign &&
+        ['interest', 'intent_ambiguous'].includes(reason) && campaign &&
         (campaign.excluded ||
           (!campaign.legacyEnabled &&
             campaign.policy !== 'enabled' &&
             campaign.sentAt < Date.parse(flow.trigger_config.effective_from)))
       )
-        reason = 'campaign_excluded';
+        reason = campaign.reason || 'campaign_excluded';
       if (reason === 'interest' && (await optedOut(checked, transaction))) reason = 'marketing_opt_out';
       if (reason === 'interest') {
         let lead,
@@ -384,16 +411,17 @@ function create({
         }
         record.leadId = lead?.id || null;
         if (!lead) reason = 'lead_link_requires_review';
-        if (lead && !input.thread.lead_id && notifyConversation)
-          transaction.afterCommit(() =>
-            notifyConversation(clinicId, { id: message.id, conversation_id: thread.id }),
-          );
+        else record.outcome = created ? 'created' : 'linked';
         if (created && publishLead) transaction.afterCommit(() => publishLead({ lead }));
       }
       record.reason = reason;
+      if (!record.outcome) record.outcome = ['intent_ambiguous', 'mixed_appointment_interest', 'lead_link_requires_review',
+        'attribution_ambiguous', 'classifier_result_unknown'].includes(reason) ? 'review' : 'discarded';
       const metadata = { ...message.metadata, inboundLeadCapture: record };
       delete metadata.inboundLeadCaptureClassification;
       await message.update({ metadata }, { transaction });
+      if (notifyConversation) transaction.afterCommit(() =>
+        notifyConversation(clinicId, {id: message.id, conversation_id: thread.id}));
       return record;
     });
   }

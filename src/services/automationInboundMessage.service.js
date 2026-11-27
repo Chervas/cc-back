@@ -134,55 +134,42 @@ async function updateClaim(claim, patch = {}, metadataPatch = {}, options = {}) 
   );
 }
 
-async function findClaimAfterConflict({ claimKey, messageId }, transaction = null) {
-  return db.AutomationInboundMessageClaim.findOne({
-    where: {
-      [Op.or]: [
-        { claim_key: claimKey },
-        ...(positiveInt(messageId) ? [{ message_id: positiveInt(messageId) }] : []),
-      ],
-    },
-    ...(transaction ? { transaction } : {}),
-  });
-}
-
 async function acquireInboundClaim({ message, conversation, clinicId, channel, providerMessageId }, transaction) {
   const messageId = positiveInt(message?.id);
-  const conversationId = positiveInt(conversation?.id || message?.conversation_id);
+  const conversationId = positiveInt(conversation?.id);
   const normalizedClinicId = positiveInt(clinicId || conversation?.clinic_id);
   const normalizedChannel = normalizeChannel(channel || conversation?.channel);
-  if (!messageId || !conversationId || !normalizedClinicId || !normalizedChannel) {
+  if (!messageId || !conversationId || !normalizedClinicId || !normalizedChannel ||
+      Number(conversation.clinic_id) !== normalizedClinicId || conversation.channel !== normalizedChannel) {
     throw new Error('inbound_message_claim_context_invalid');
   }
-  const claimKey = buildClaimKey({
-    channel: normalizedChannel,
-    providerMessageId,
-    messageId,
+  // Serialize redelivery on the existing message. A locking read also sees a claim
+  // that committed after an enclosing ingestion transaction opened its snapshot.
+  const stored = await db.Message.findByPk(messageId, {
+    attributes: ['conversation_id', 'direction'], raw: true, transaction, lock: transaction.LOCK.UPDATE,
   });
-
+  if (Number(stored?.conversation_id) !== conversationId || stored.direction !== 'inbound')
+    throw new Error('inbound_message_claim_context_invalid');
+  const claimKey = buildClaimKey({channel:normalizedChannel, providerMessageId, messageId});
+  const values = {
+    claim_key: claimKey, message_id: messageId, conversation_id: conversationId,
+    clinic_id: normalizedClinicId, channel: normalizedChannel, provider_message_id: cleanString(providerMessageId),
+    owner_type: 'dispatching', status: 'claimed', claimed_at: new Date(), metadata: {},
+  };
   try {
-    const [claim, created] = await db.AutomationInboundMessageClaim.findOrCreate({
-      where: { claim_key: claimKey },
-      defaults: {
-        claim_key: claimKey,
-        message_id: messageId,
-        conversation_id: conversationId,
-        clinic_id: normalizedClinicId,
-        channel: normalizedChannel,
-        provider_message_id: cleanString(providerMessageId),
-        owner_type: 'dispatching',
-        status: 'claimed',
-        claimed_at: new Date(),
-        metadata: {},
-      },
-      transaction,
-    });
-    return { claim, created, claimKey };
+    const claim = await db.AutomationInboundMessageClaim.create(values, {transaction});
+    return {claim, created:true, claimKey};
   } catch (error) {
     if (error?.name !== 'SequelizeUniqueConstraintError') throw error;
-    const claim = await findClaimAfterConflict({ claimKey, messageId }, transaction);
-    if (!claim) throw error;
-    return { claim, created: false, claimKey };
+    const claim = await db.AutomationInboundMessageClaim.findOne({
+      where: {message_id:messageId}, transaction, lock:transaction.LOCK.UPDATE,
+    });
+    if (!claim || claim.claim_key !== claimKey || Number(claim.conversation_id) !== conversationId ||
+        Number(claim.clinic_id) !== normalizedClinicId || claim.channel !== normalizedChannel ||
+        cleanString(claim.provider_message_id) !== cleanString(providerMessageId)) {
+      throw new Error('inbound_message_claim_identity_conflict');
+    }
+    return {claim, created:false, claimKey};
   }
 }
 
@@ -272,7 +259,17 @@ async function enqueueInboundDispatch(
     return outcome;
   }
 
-  await db.sequelize.transaction(enqueueWithinTransaction);
+  // Only the owner can retry the entire transaction after InnoDB rolls it back.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await db.sequelize.transaction(enqueueWithinTransaction);
+      break;
+    } catch (error) {
+      const code = error?.original?.code || error?.parent?.code || error?.code;
+      if (attempt >= 3 || !['ER_LOCK_DEADLOCK', 'ER_LOCK_WAIT_TIMEOUT'].includes(code)) throw error;
+      await new Promise(resolve => setTimeout(resolve, 15 * attempt));
+    }
+  }
   triggerDispatchJobAfterCommit(outcome?.job?.id);
   return outcome;
 }
@@ -623,9 +620,6 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
       return { status:'completed', result };
     }
     if (channel === 'whatsapp') {
-      const capture = await require('./inboundLeadCapture.service').enqueueWhatsapp({ claim, message, conversation });
-      if (capture.pending) return waitForInboundLeadCapture(claim, attempt, jobRequest, capture);
-      if (capture.lead_id) await conversation.reload();
       const bulkOptOut = await marketingOptOutService.applyBulkWhatsappOptOut({ clinicId, conversation, inboundMessage: message });
       if (bulkOptOut?.handled) {
         await message.update({ metadata: { ...(message.metadata || {}), bulk_whatsapp_opt_out: bulkOptOut } });
@@ -756,6 +750,11 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
       };
     }
 
+    if (channel === 'whatsapp') {
+      const capture = await require('./inboundLeadCapture.service').enqueueWhatsapp({ claim, message, conversation });
+      if (capture.pending) return waitForInboundLeadCapture(claim, attempt, jobRequest, capture);
+      if (capture.lead_id) await conversation.reload();
+    }
     const originalAt = message.metadata?.passive_recovery ? message.sent_at : message.metadata?.provider_sent_at;
     const receivedAt = parseDate(originalAt) || parseDate(message.sent_at) || parseDate(message.createdAt);
     const selected = await findEffectiveMessageReceivedTemplate({clinicId, channel, receivedAt});

@@ -30,7 +30,10 @@ withIsolatedCampaignMysql(async ({sql, models:db, report}) => {
   services('marketingOptOut').applyInboundOptOutIfNeeded = async () => ({applied:optedOut});
   services('marketingOptOut').getActiveContactRestrictionsForPatient = async () => ({});
   services('automationsV2Resume').enqueueInboundResponseResume = async () => ({matched:waiting?1:0,execution_ids:[18]});
-  services('patientProgramBookingNotice').current = services('patientMobileVerification').current = () => ({inbound:async()=>({handled:false})});
+  let careOwner = null;
+  for (const service of ['patientProgramBookingNotice','patientMobileVerification']) {
+    services(service).current = () => ({inbound:async()=>({handled:careOwner === service})});
+  }
   services('whatsappDispatchWait').inboundTransition = async () => null;
   services('automationAttentionReconciliation').reconcilePendingAutomationAttentionForInboundMessage = async () => ({handled:false});
   const receiptTimes = [];
@@ -126,9 +129,17 @@ withIsolatedCampaignMysql(async ({sql, models:db, report}) => {
   await db.Message.create({conversation_id:superseded.c.id,direction:'outbound',content:'Recepción responde',status:'sent',message_type:'text'});
   assert.equal((await api.run(supersededExecution)).reason,'already_replied');
   assert.equal((await (await incoming({age:86400001})).run()).result.owner,'unclaimed');
+  const capturesBeforeCare = captures;
+  for (const [service, owner] of [['patientProgramBookingNotice','patient_program_booking_notice'],
+      ['patientMobileVerification','patient_mobile_verification']]) {
+    careOwner = service;
+    assert.equal((await (await incoming({text:'Quiero información'})).run()).result.owner,owner);
+  }
+  careOwner = null;
   waiting=true; optedOut=true;
   assert.equal((await (await incoming({text:'BAJA'})).run()).result.owner,'marketing_opt_out');
   optedOut=false; assert.equal((await (await incoming()).run()).result.owner,'wait_response'); waiting=false;
+  assert.equal(captures,capturesBeforeCare,'care, opt-out and active response waits must resolve before capture');
   await template.update({is_active:false});
   // Receipt precedes the clinic opening, although the delayed worker and broker already run during opening hours.
   reopenedAt=Date.now()-30000;
