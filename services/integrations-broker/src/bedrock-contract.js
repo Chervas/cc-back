@@ -34,6 +34,7 @@ function validate(value) {
 }
 function authorize({request,binding}) {
   if(request.operation!==OPERATION||binding.provider!=='aws_bedrock'||binding.bedrock?.region!==REGION
+    ||(request.payload.useCase==='lead_assistant_reply' && request.payload.body.modelId!=='eu.amazon.nova-pro-v1:0')
     ||request.assetRef!=='ai:'+request.payload.useCase||!binding.bedrock.models.includes(request.payload.body.modelId))fail('scope_denied');
 }
 function credentials(value) {

@@ -370,6 +370,7 @@ async function attend({
       typeof generated?.reply !== 'string' ||
       !generated.reply.trim() ||
       generated.reply.length > 800 ||
+      !dialogue.supportsQuotedAmounts(generated.reply,[...facts,offer?.description]) ||
       /https?:\/\//i.test(generated.reply)
     )
       return { reason: 'assistant_reply_requires_review', attention: false, ...(await recordHandoff(scope)) };

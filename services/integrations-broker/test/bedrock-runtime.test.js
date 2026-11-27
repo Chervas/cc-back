@@ -146,3 +146,16 @@ test('four occupied audio/OCR slots cannot starve a separate Bedrock runtime', {
   for (const done of pending) done({ data: {}, replayed: false, requestId: 'fictitious' });
   assert.deepEqual(await Promise.all(requests), [200, 200, 200, 200]);
 });
+
+test('the commercial assistant grant authorizes only its European Nova Pro profile', () => {
+  const {authorize}=require('../src/bedrock-contract');
+  const input=payload();
+  input.useCase='lead_assistant_reply';
+  const request={operation:OPERATION,assetRef:'ai:lead_assistant_reply',payload:input};
+  const binding={provider:'aws_bedrock',bedrock:{region:'eu-south-2',models:MODELS}};
+  for(const modelId of MODELS) {
+    input.body.modelId=modelId;
+    if(modelId==='eu.amazon.nova-pro-v1:0')assert.doesNotThrow(()=>authorize({request,binding}));
+    else assert.throws(()=>authorize({request,binding}),e=>e.code==='scope_denied');
+  }
+});

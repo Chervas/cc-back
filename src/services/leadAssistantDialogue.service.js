@@ -57,6 +57,28 @@ function buildDraftRequest(turn) {
   };
 }
 
+// Compare commercial amounts only with the clinic's approved projection for this turn.
+// A number quoted by the contact or a previous answer cannot establish a new tariff.
+function supportsQuotedAmounts(reply, approved) {
+  function amounts(text) {
+    const result = [];
+    const expression = /(?:[€$£]\s*\d[\d.,]*|\d[\d.,]*\s*(?:€|\$|£|%|euros?\b|eur\b|d[oó]lares?\b|libras?\b|por ciento\b))/gi;
+    for (const match of String(text || '').matchAll(expression)) {
+      const token=match[0];
+      const digits=token.match(/\d[\d.,]*/)[0].replace(/[.,]+$/,'');
+      const normalized=digits.replace(/\.(?=\d{3}(?:[.,]|$))/g,'').replace(',','.');
+      const value=Number(normalized);
+      const unit=/€|eur/i.test(token)?'EUR':/\$|d[oó]lar/i.test(token)?'USD':/£|libra/i.test(token)?'GBP':'%';
+      result.push(unit+':'+(Number.isFinite(value)?value:digits));
+    }
+    return result;
+  }
+  const quotes=amounts(reply);
+  if(!quotes.length)return true;
+  const known=new Set(approved.flatMap(amounts));
+  return quotes.every(quote=>known.has(quote));
+}
+
 function formatCommercialReply({ firstTurn, clinicName, draft }) {
   const content = text(draft, 1000);
   if (!firstTurn) return content;
@@ -84,4 +106,4 @@ function formatHandoffReceipt({ firstTurn, clinicName, recorded, requestedCallba
     : 'He pasado tu mensaje a ' + team + '. Podéis seguir hablando por aquí.');
 }
 
-module.exports = { buildDraftRequest, formatCommercialReply, requestedHumanHandoff, formatHandoffReceipt };
+module.exports = { supportsQuotedAmounts, buildDraftRequest, formatCommercialReply, requestedHumanHandoff, formatHandoffReceipt };

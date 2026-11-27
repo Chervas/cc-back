@@ -38,3 +38,12 @@ test('a request for reception or a call hands over before generation, while an e
   assert.deepEqual(requestedHumanHandoff('¿Puedo hablar con la directora de pacientes?'), { requestedCallback:false });
   assert.equal(requestedHumanHandoff('¿Hay algo el viernes por la tarde?'), null);
 });
+
+test('exige una fuente aprobada para cada cantidad y descuento de una respuesta comercial',()=>{
+  const {supportsQuotedAmounts}=require('../../services/leadAssistantDialogue.service');
+  const approved=['La valoración cuesta 85,50 € y el tratamiento 1.250 € en total.'];
+  assert(supportsQuotedAmounts('Son 85,50 euros. El tratamiento cuesta 1250 €.',approved));
+  assert(!supportsQuotedAmounts('El precio es 125 €. ¿Te interesa?',approved));
+  assert(!supportsQuotedAmounts('Puedo ofrecerte un 15 por ciento.',approved));
+  assert(!supportsQuotedAmounts('Cuesta $85,50.',approved));
+});
