@@ -59,7 +59,9 @@ const resolveLeadMarketingOrigin = (lead = {}) => {
   const source = clean(lead.source);
   const utmMedium = clean(lead.utm_medium);
   const utmSource = clean(lead.utm_source);
-  if (lead.external_source === 'quickchat_social') return 'social_inbox';
+  if (lead.external_source === 'quickchat_social') {
+    return source === 'meta_ads' && clean(lead.channel) === 'paid' ? 'meta_ads' : 'social_inbox';
+  }
   if (source === 'whatsapp' && lead.external_source === 'bulk_whatsapp_reply') return 'bulk_whatsapp';
   if (EMAIL_CONTACT_SOURCES.includes(source) && utmMedium === 'email') {
     return utmSource === BULK_EMAIL_UTM_SOURCE ? 'bulk_email' : 'email';
@@ -224,6 +226,7 @@ const buildLeadAttributionView = (lead = {}, inventory = null) => {
 };
 
 module.exports = {
+  marketingOrigins: Object.freeze(Object.keys(MARKETING_ORIGIN_LABELS)),
   resolveLeadMarketingOrigin,
   resolveLeadContactMethod,
   buildMarketingOriginWhere,

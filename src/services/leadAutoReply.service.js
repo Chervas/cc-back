@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const db = require('../../models');
 const jobRequestsService = require('./jobRequests.service');
 const jobScheduler = require('./jobScheduler.service');
+const { validOrigins } = require('./leadAssistantOrigin.service');
 const { attachSocialNodes } = require('../lib/lead-social-flow');
 const { resolveLeadAutoReplyWait } = require('./clinicOpeningHours.service');
 const { evaluatePendingLeadContact, isEffectiveContactAttempt } = require('./leadContactState.service');
@@ -74,9 +75,11 @@ function socialEntries(raw, strict = false) {
     const fields = Object.keys(rule).sort().join(',');
     if (key === 'whatsapp_dm' && rule.action !== 'assistant') return invalid();
     if (fields === 'action' && rule.action === 'notify') entries[key] = { action: 'notify' };
-    else if (fields === 'action,audience,version' && rule.action === 'assistant' && key !== 'messenger_dm' &&
+    else if ((fields === 'action,audience,version' || (fields === 'action,audience,origins,version' && validOrigins(rule.origins))) &&
+        rule.action === 'assistant' && key !== 'messenger_dm' &&
         ['leads', 'all'].includes(rule.audience) && Number.isSafeInteger(rule.version) && rule.version >= 1) {
-      entries[key] = { action:'assistant', audience:rule.audience, version:rule.version };
+      entries[key] = { action: 'assistant', audience: rule.audience, version: rule.version };
+      if (rule.origins) entries[key].origins = [...rule.origins];
     }
     else if (fields === 'action,text' && rule.action === 'message' && key !== 'messenger_dm' && typeof rule.text === 'string'
       && rule.text.trim().length > 0 && rule.text.trim().length <= 1000) entries[key] = { action: 'message', text: rule.text.trim() };

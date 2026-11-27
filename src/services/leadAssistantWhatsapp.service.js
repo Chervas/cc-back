@@ -9,6 +9,7 @@ const {
 } = require('./whatsappServiceWindow.service');
 const { resolveForTurn } = require('./leadAssistantPromotionImages.service');
 const { assistantCommercialText, explicitOptOut } = require('./socialLeadInterestClassification.service');
+const { acceptsOrigin } = require('./leadAssistantOrigin.service');
 const { enqueueInboundExecution } = require('./leadAssistantExecution.service');
 
 function inbound(claim, message, conversation) {
@@ -106,7 +107,8 @@ async function plan(db, thread, entry, transaction) {
     !Number.isSafeInteger(rule.version) ||
     !['all','leads'].includes(rule.audience) ||
     await require('./leadAssistantBooking.service').excludedPatient(db,rule,thread,entry.messageId,transaction) ||
-    explicitOptOut(entry.text)
+    explicitOptOut(entry.text) ||
+    !await acceptsOrigin(db, rule, thread, entry, transaction)
   )
     return null;
   return { flow, rule };

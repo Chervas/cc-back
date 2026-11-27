@@ -361,8 +361,17 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(posts.length,3);
 
   const configured = await configService.saveConfig({clinicId:41,actorUserId:1,input:{active:true,sources:[],
-    schedule_scope:'all_days',social_entries:{instagram_dm:{action:'assistant',version:4,audience:'leads'},whatsapp_dm:{action:'assistant',version:4,audience:'leads'}}}});
+    schedule_scope:'all_days',social_entries:{instagram_dm:{action:'assistant',version:4,audience:'leads',origins:['social_inbox']},whatsapp_dm:{action:'assistant',version:4,audience:'leads',origins:['google_ads']}}}});
   const activeAssistant = await db.AutomationFlowTemplateV2.findByPk(configured.flow.id);
+  assert.deepEqual(activeAssistant.trigger_config.social_entries.whatsapp_dm.origins, ['google_ads']);
+  const sourceCheck = require('../../services/leadAssistantOrigin.service');
+  assert.equal(sourceCheck.validOrigins(['unrecognised']), false);
+  assert.equal(sourceCheck.validOrigins([]), false);
+  const filter = { origins: ['meta_ads'] };
+  assert.equal(await sourceCheck.acceptsOrigin(db, filter, pictureThread, { channel: 'instagram', ad: {} }), true);
+  assert.equal(await sourceCheck.acceptsOrigin(db, filter, pictureThread, { channel: 'instagram' }), false);
+  assert.equal(await sourceCheck.acceptsOrigin(db, {}, pictureThread, { channel: 'instagram' }), true);
+
   expectedFlowId = activeAssistant.id;
   assert(activeAssistant.nodes.some(node=>node.type === 'action/attend_with_lead_assistant'));
   const message = dm('instagram','501','assistant-asks-photo','¿Me pasas la foto de la promoción C02-03?','779');
@@ -410,6 +419,9 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       waPosts.push(payload);return {messages:[{id:'wamid.FICTICIO.foto'}]};
     }});
   const input = {claim:waClaim,message:waMessage,conversation:inboundWhatsapp};
+  assert.equal(await waAssistant.start(input), null);
+  const webLead = await db.LeadIntake.create({ clinica_id:41, source:'web', gclid:'ficticio', status_lead:'nuevo' });
+  await inboundWhatsapp.update({ lead_id: webLead.id });
   const initiated = await waAssistant.start(input);
   assert(initiated?.execution_id);
   assert.equal((await waAssistant.start(input)).execution_id,initiated.execution_id);
@@ -423,6 +435,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal((await waAssistant.run(waExecution)).reason,'whatsapp_entry_unavailable');
   assert.equal(waPosts.length,1);
   report.assertions = [
+    'Filtro de origen por canal aplicado antes de ejecutar y enviar, con atribución de Leads o de anuncio Meta y reglas anteriores sin filtro.',
     'WhatsApp atiende una entrada con una foto y pie sin plantilla. Misma ejecución, conversación, número, foto aprobada y plazo de 24 h.',
     'Entrada → selector V2 → asistente simulado → respuesta e imagen indicada por la clínica en el mismo DM',
     'Foto de la promoción aprobada en el DM, control de ventana y deduplicación del envío',
