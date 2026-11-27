@@ -396,66 +396,36 @@ async function attend({
   }
   let answer = turn.answer;
   if (!answer) {
-    const approvedContext = publication.fields.context.replace(/https?:\/\/\S+/gi, '').trim();
-    const facts = [publication.fields.guardrails, publication.fields.booking]
-      .filter(Boolean)
-      .flatMap((value) => value.replace(/https?:\/\/\S+/g, '').match(/[\s\S]{1,1000}/g) || []);
-    let generated;
-    if (!offer && turn.postReference && genericInfoRequest(raw)) {
-      generated = { reply: '¿Qué promoción has visto?' };
-    } else {
-      const historyRows = await db.Message.findAll({
-        where: {
-          conversation_id: thread.id,
-          direction: 'inbound',
-          id: { [db.Sequelize.Op.lt]: scope.messageId, [db.Sequelize.Op.gte]: lockTurn.originMessageId },
-          'metadata.leadAssistantTurn.templateId': scope.templateId,
-          'metadata.leadAssistantTurn.publicationVersion': scope.version,
-        },
-        attributes: ['metadata'],
-        order: [['id', 'DESC']],
-        limit: 6,
-      });
-      const history = historyRows.reverse().flatMap((row) => {
-        const item = row.metadata?.leadAssistantTurn;
-        return item?.answer?.reply && item?.commercialQuestion
-          ? [
-              { role: 'user', text: item.commercialQuestion },
-              { role: 'assistant', text: item.answer.reply },
-            ]
-          : [];
-      });
-      const request = dialogue.buildDraftRequest({
-        clinicName: clinic.nombre_clinica,
-        timezone: turn.timezone,
-        tone: publication.fields.tone,
-        approvedContext,
-        approvedFacts: facts,
-        matchedPromotion: offer,
-        commercialHistory: history,
-        userText,
-        availableSlots: [],
-      });
-      generated = await analyze({
-        ...request,
-        useCase: 'lead_assistant_reply',
-        clinicId: scope.clinicId,
-        groupId: execution.group_id,
-        beforeDispatch: async () => {
-          if (await stillOwnsTurn()) throw Error('assistant_turn_unavailable');
-        },
-      });
-    }
-    if (
-      typeof generated?.reply !== 'string' ||
-      !generated.reply.trim() ||
-      generated.reply.length > 800 ||
-      !dialogue.supportsQuotedAmounts(generated.reply,[approvedContext,...facts,offer?.description]) ||
-      /https?:\/\//i.test(generated.reply)
-    )
-      return passToTeam('assistant_reply_requires_review');
-    const image = offer?.images.find((item) => item.id === generated.imageId);
-    answer = { reply: generated.reply.trim(), imageId: image?.id || null };
+    answer = await dialogue.generateAnswer({
+      fields: publication.fields, clinicName: clinic.nombre_clinica, timezone: turn.timezone,
+      offer, userText, askPromotion: !offer && turn.postReference && genericInfoRequest(raw),
+      analyze, clinicId: scope.clinicId, groupId: execution.group_id,
+      beforeDispatch: async () => { if (await stillOwnsTurn()) throw Error('assistant_turn_unavailable'); },
+      readHistory: async () => {
+        const historyRows = await db.Message.findAll({
+          where: {
+            conversation_id: thread.id,
+            direction: 'inbound',
+            id: { [db.Sequelize.Op.lt]: scope.messageId, [db.Sequelize.Op.gte]: lockTurn.originMessageId },
+            'metadata.leadAssistantTurn.templateId': scope.templateId,
+            'metadata.leadAssistantTurn.publicationVersion': scope.version,
+          },
+          attributes: ['metadata'],
+          order: [['id', 'DESC']],
+          limit: 6,
+        });
+        return historyRows.reverse().flatMap((row) => {
+          const item = row.metadata?.leadAssistantTurn;
+          return item?.answer?.reply && item?.commercialQuestion
+            ? [
+                { role: 'user', text: item.commercialQuestion },
+                { role: 'assistant', text: item.answer.reply },
+              ]
+            : [];
+        });
+      },
+    });
+    if (!answer) return passToTeam('assistant_reply_requires_review');
     answer = await db.sequelize.transaction(async (transaction) => {
       const message = await db.Message.findByPk(scope.messageId, {
         transaction,

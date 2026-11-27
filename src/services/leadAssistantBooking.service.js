@@ -114,11 +114,12 @@ async function processTurn({
   book = reserve,
   now = new Date(),
   capabilities,
+  preview,
 }) {
   if (entry.type !== 'dm' || explicitOptOut(entry.text)) return null;
   const raw = String(entry.text || '').trim();
   if (scope.originMessageId === scope.messageId && !cal.bookingRequest(raw)) return null;
-  const pending = await previous(db, scope);
+  const pending = preview ? preview.booking : await previous(db, scope);
   const contactTurn = pending?.stage === 'contact' && readContact(raw) && !wantsHumanInput(raw);
   const choice =
     pending?.slots?.length &&
@@ -178,6 +179,11 @@ async function processTurn({
   const timezone = cal.resolveClinicTimezone(clinic);
   const treatment = cal.pickTreatment(choices, raw, offer, pending?.treatment?.id);
   async function materialize(build) {
+    if (preview) {
+      const state = await build({ current:thread });
+      preview.booking = state;
+      return { reply:state.reply };
+    }
     return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
       const current = await db.Conversation.findByPk(thread.id, {
         transaction,
@@ -244,7 +250,7 @@ async function processTurn({
           .join(', ') +
         '.',
     }));
-  const lead =
+  const lead = preview ? { es_paciente:false } :
     thread.lead_id &&
     (await db.LeadIntake.findOne({
       where: { id: thread.lead_id, clinica_id: thread.clinic_id, archived_at: null },
@@ -339,7 +345,7 @@ async function processTurn({
     }));
   }
   if (!currentOffer || (!choice && !contactTurn)) return propose();
-  if (!(await hasDelivered(db, thread, pending))) return { review: true };
+  if (!preview && !(await hasDelivered(db, thread, pending))) return { review: true };
   const index = choice ? choice.index : pending.selected;
   const selected = pending.slots[index];
   if (!selected || +new Date(selected.start) <= +now) return propose({ prefix: 'Ese hueco ya ha pasado. ' });
@@ -396,6 +402,16 @@ async function processTurn({
         (contact.name ? ' a nombre de ' + contact.name : '') +
         '?',
     }));
+  // A test can confirm only a slot offered in its own in-memory conversation.
+  // Re-read availability, then finish the preview before entering the real reservation transaction.
+  if (preview) {
+    const fresh = await findSlots({ db, clinic, treatment, calendar:pending.calendar, patientId:null,
+      pairLead:allowLeadPair ? { id:null } : null, professionalId, now, capabilities });
+    if (!fresh.some(slot => slot.start === selected.start && slot.doctorId === selected.doctorId && slot.receipt === selected.receipt))
+      return propose({range:pending.calendar, prefix:'Ese hueco se acaba de ocupar. ', afterConflict:true});
+    return materialize(async () => ({ ...common, stage:'booked',
+      reply:'Tu cita de prueba ha quedado confirmada para el ' + cal.display(selected, timezone) + '.' }));
+  }
   try {
     return await materialize(async ({ current, transaction }) => {
       if (!(await hasDelivered(db, current, pending, transaction))) return { review: true };
