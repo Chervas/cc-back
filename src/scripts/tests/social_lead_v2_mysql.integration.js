@@ -4,6 +4,7 @@ const D = require('sequelize');
 const { withIsolatedCampaignMysql } = require('./fixtures/isolated_campaign_mysql.fixture');
 const { create: createInbox } = require('../../services/socialInbox.service');
 const { create: createAutomation } = require('../../services/socialLeadAutomation.service');
+const { classifyInterest } = require('../../services/socialLeadInterestClassification.service');
 const { events, eventKey } = require('../../services/socialInboxEvents');
 
 withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
@@ -156,14 +157,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       await queue.enqueueUniqueJobRequest(job);
       executions.push(job.payload.execution_id);
     },
-    classify: async (e, { beforeDispatch }) => {
-      await beforeDispatch();
-      assert.equal(e.source, 'new');
-      return {
-        kind: e.text === 'STOP' ? 'opt_out' : e.text === 'Duda' ? 'review' : 'interest',
-        privateRequested: true,
-      };
-    },
+    classify: classifyInterest,
     checkPatientRestrictions: async () => ({ marketing_opt_out: false }),
     publishLead: ({ lead }) => published.push(lead.id),
     notifyConversation: (clinicId, packet) =>
@@ -244,6 +238,13 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(posts.length, 1);
   const c = await db.Conversation.findByPk(claims[0].threadId);
   assert.equal(c.lead_id, result.lead_id);
+  const sent = await db.Message.findAll({ where: { conversation_id: c.id, direction: 'outbound' } });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].content, rule.text);
+  assert.equal(sent[0].content, posts[0].text);
+  assert.equal(sent[0].metadata.execution_id, first.id);
+  assert.equal(sent[0].metadata.socialAttempt, posts[0].attemptId);
+  assert.equal(sent[0].metadata.outcome, 'sent');
   assert.equal(published.length, 1);
   assert.deepEqual(changedThreads, [
     {
@@ -305,7 +306,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(stopped.reason, 'marketing_opt_out');
   assert.equal((await automation.run(await begin(3))).reason, 'opt_out');
   assert.equal(posts.length, 2);
-  await receive(dm('instagram', '501', 'medical', 'Duda', '773'));
+  await receive(dm('instagram', '501', 'medical', 'Quiero información de la promo y tengo fiebre.', '773'));
   const review = await automation.run(await begin(5));
   assert.equal(review.attention, true);
   assert.equal(review.lead_id, null);
