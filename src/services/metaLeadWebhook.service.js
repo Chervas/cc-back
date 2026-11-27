@@ -1,9 +1,11 @@
 'use strict';
 
 const { enqueueMetaLeadNotifications } = require('./metaLeadReception.service');
+const { reportUnavailable } = require('./metaLeadWebhookDiagnostics');
 const fail = code => { throw Object.assign(Error(code), { code }); };
 function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqueue,
-  socialVerify, socialAccept, receive = enqueueMetaLeadNotifications } = {}) {
+  socialVerify, socialAccept, receive = enqueueMetaLeadNotifications,
+  onUnavailable = record => console.warn(JSON.stringify(record)) } = {}) {
   const dependencies = () => {
     const factory = require('./metaMarketingLeadWebhookReader.service');
     // Disabled/missing ingress configuration closes public aliases before any
@@ -12,11 +14,14 @@ function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqu
     const db = models || require('../../models');
     return { models: db, reader: reader || factory.forWebhookModels(db, { env }) };
   };
-  const errorResponse = (res, error) => {
+  const errorResponse = (res, error, req, stage, body) => {
     const status = error?.code === 'invalid_signature' ? 401
       : ['invalid_request', 'social_invalid_event', 'meta_lead_invalid_notification'].includes(error?.code) ? 400 : 503;
     res.set('Cache-Control', 'no-store');
-    if (status === 503) res.set('Retry-After', '60');
+    if (status === 503) {
+      reportUnavailable({ req, body, stage, error, log: onUnavailable });
+      res.set('Retry-After', '60');
+    }
     return res.status(status).json({ success: false, code: status === 401 ? 'meta_lead_signature_invalid'
       : status === 400 ? 'meta_lead_invalid_notification' : 'meta_lead_receipt_unavailable' });
   };
@@ -29,9 +34,11 @@ function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqu
           token: req.query['hub.verify_token'], challenge: req.query['hub.challenge'] });
         res.set('Cache-Control', 'no-store');
         return res.status(200).type('text/plain').send(result.challenge);
-      } catch (error) { return errorResponse(res, error); }
+      } catch (error) { return errorResponse(res, error, req, 'challenge'); }
     },
     async receive(req, res) {
+      let body;
+      let stage = 'decode';
       try {
         const signature = req.headers?.['x-hub-signature-256'];
         const copies = (req.rawHeaders || []).filter((name, index) => index % 2 === 0 && name.toLowerCase() === 'x-hub-signature-256').length;
@@ -42,8 +49,8 @@ function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqu
           || !['', 'identity'].includes(String(req.headers?.['content-encoding'] || '').toLowerCase())) {
           return res.status(415).json({ success: false, code: 'meta_lead_notification_type_invalid' });
         }
-        let body;
         try { body = JSON.parse(req.rawBody.toString('utf8')); } catch { fail('meta_lead_invalid_notification'); }
+        stage = 'dispatch';
         const hasSocial=body?.object==='instagram'||(body?.object==='page'&&Array.isArray(body.entry)&&body.entry.some(e=>e.messaging!==undefined));
         const hasForms=body?.object==='page'&&Array.isArray(body.entry)&&body.entry.some(e=>e.changes?.length);
         let formFailure;
@@ -53,7 +60,9 @@ function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqu
         }
         if (hasSocial) {
           if (env.META_SOCIAL_INBOX_RECEIVER_ENABLED!=='true') fail('meta_lead_unsupported_notification');
+          stage = 'social_verify';
           const {appId,destinations}=await (socialVerify||require('./socialInboxWebhookVerifier.service').verify)(req.rawBody,signature,env);
+          stage = 'social_intake';
           const accounts=new Map(destinations.map(d=>[d.accountId,d.clinicId]));
           const entry=body.entry.filter(e=>accounts.has(e?.id));
           if(entry.length){
@@ -65,13 +74,17 @@ function createMetaLeadWebhookHandlers({ models, reader, env = process.env, enqu
         if (!hasSocial) {
           if (body?.object!=='page'||!Array.isArray(body.entry)||!body.entry.length
             ||body.entry.some(e=>!Array.isArray(e.changes)||!e.changes.length||e.changes.some(c=>c.field!=='leadgen'))) fail('meta_lead_unsupported_notification');
+          stage = 'lead_receipt';
           const data=dependencies();
           await receive(body,{...data,env,enqueue,raw:req.rawBody,signature});
         }
-        if (formFailure) throw formFailure;
+        if (formFailure) {
+          stage = 'lead_receipt';
+          throw formFailure;
+        }
         res.set('Cache-Control', 'no-store');
         return res.status(200).json({ success: true });
-      } catch (error) { return errorResponse(res, error); }
+      } catch (error) { return errorResponse(res, error, req, stage, body); }
     },
   };
 }
