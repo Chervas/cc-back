@@ -21,10 +21,17 @@ function bookingRequest(text) {
     !/\b(?:no (?:quiero|necesito|puedo)|cancelar|anular|cambiar mi cita|ya tengo (?:una )?cita|no (?:me |nos )?(?:des|deis|desearia|agendes|reserv(?:es|eis))|no me reserves)\b/.test(
       value
     ) &&
-    /\b(?:reservar|agendar|concertar|pedir (?:una )?cita|darme (?:una )?cita|(?:puedes|pueden|podeis) (?:darme|dar) (?:una )?cita|me (?:puedes|pueden|podeis) dar (?:una )?cita|(?:teneis|hay) (?:citas?|sitio)|me gustaria (?:una )?(?:cita|primera visita)|quiero (?:una )?cita|quisiera (?:una )?cita|me (?:das|dais) (?:una )?cita|huecos?|disponibilidad|(?:que |consultar |ver )(?:horarios?|horas?)(?: hay| teneis| tienes| disponibles?)?|(?:quins horaris hi ha|what appointment times are available)|horas? (?:libres?|disponibles?)|cuando (?:puedo ir|pueden atenderme|teneis cita))\b/.test(
+    /\b(?:(?:darme|dame|pedir|reservar|coger) (?:una )?hora|(?:quiero|necesito) hora|dame (?:una )?cita|dadme (?:una )?cita|(?:queria|quiero|necesito|deseo|quisiera) (?:pedir |coger |una )?cita|me ibas a dar (?:una )?cita|(?:las |los )?(?:opciones|horarios|huecos) (?:de|para) (?:la )?cita|reservar|agendar|concertar|pedir (?:una )?cita|darme (?:una )?cita|(?:puedes|pueden|podeis) (?:darme|dar) (?:una )?cita|me (?:puedes|pueden|podeis) dar (?:una )?cita|(?:teneis|hay) (?:citas?|sitio)|me gustaria (?:una )?(?:cita|primera visita)|quiero (?:una )?cita|quisiera (?:una )?cita|me (?:das|dais) (?:una )?cita|huecos?|disponibilidad|(?:que |consultar |ver )(?:horarios?|horas?)(?: hay| teneis| tienes| disponibles?)?|(?:quins horaris hi ha|what appointment times are available)|horas? (?:libres?|disponibles?)|cuando (?:puedo ir|pueden atenderme|teneis cita))\b/.test(
       value
     )
   );
+}
+
+function asksSessionAppointment(text) {
+  const words = normalize(text);
+  return /\b(?:mi (?:cita|reserva)|la cita que (?:me has|hemos)|hemos (?:reservado|confirmado))\b/.test(words) &&
+    /\b(?:cuando|que (?:dia|hora)|confirmad[ao]|reservad[ao]|hemos (?:reservado|confirmado)|ya tengo)\b/.test(words) &&
+    !/\b(?:cambiar|anular|cancelar|otra cita|ayer|anterior|llamar|me llamen)\b/.test(words);
 }
 
 function selection(text, slots, selected) {
@@ -317,6 +324,7 @@ async function available({
 module.exports = {
   normalize,
   bookingRequest,
+  asksSessionAppointment,
   selection,
   requestedCalendar,
   services,

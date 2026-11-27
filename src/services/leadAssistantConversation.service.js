@@ -123,19 +123,23 @@ async function respondToLead({
     kind:'handoff',
     prepare: route => route.recorded ? {
       text:dialogue.formatHandoffReceipt({ ...identity, recorded:true, destination:route.destination,
-        requestedCallback:!!human?.requestedCallback }), reason, attention:false,
+        requestedCallback:!!human?.requestedCallback }) + (human?.requestedCallback &&
+          require('./leadAssistantConversationPolicy.service').sameVisit(raw)
+          ? ' El equipo te podrá confirmar si es posible hacer el tratamiento en la misma visita.' : ''), reason, attention:false,
     } : {
       text:format('Esta consulta necesita atención del equipo. Puedes contactar con la recepción de la clínica.'),
       reason:'assistant_handoff_unassigned', attention:true,
     },
   });
 
+  let recent;
+  const history = () => recent ||= readHistory();
   if (entry.type === 'dm' && !human && !offer?.restriction) {
     let appointment;
     try {
       const bookingEntry = dialogue.acceptsOfferedTimes(raw, previousAnswer)
         ? { ...entry, text:'Quiero consultar horarios' } : entry;
-      appointment = await book(bookingEntry);
+      appointment = await book(bookingEntry,history);
     } catch (error) {
       if (![400,404,409,422].includes(error.status || error.statusCode) ||
           !/^(?:booking_|treatment_|appointment_)/.test(error.code || '')) throw error;
@@ -165,7 +169,7 @@ async function respondToLead({
   let answer = cachedAnswer;
   if (!answer) {
     const generated = await dialogue.generateAnswer({ fields, clinicName, timezone, offer, userText,
-      askPromotion:!!(!offer && post && genericInfoRequest(raw)), analyze, clinicId, groupId, beforeDispatch, readHistory });
+      askPromotion:!!(!offer && post && genericInfoRequest(raw)), analyze, clinicId, groupId, beforeDispatch, readHistory:history });
     if (!generated) return handoff('assistant_reply_requires_review');
     answer = await saveAnswer(generated, userText);
   }

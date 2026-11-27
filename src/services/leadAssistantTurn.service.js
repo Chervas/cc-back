@@ -155,7 +155,7 @@ async function attend({
       await message.update({ metadata: { ...message.metadata, leadAssistantTurn: turn } }, { transaction });
     }
     if (turn.executionId !== execution.id || turn.promotionKey !== (offer?.key || null)) return null;
-    return { turn, offer, previousAnswer: changed ? null : priorTurn?.answer?.reply, originMessageId: turn.contextStartId || contextStartId };
+    return { turn, offer, previousAnswer: changed ? null : priorTurn?.answer?.reply || previous?.metadata?.assistantBooking?.reply, originMessageId: turn.contextStartId || contextStartId };
   });
   if (!lockTurn) return stopped('assistant_turn_unavailable');
   if (lockTurn.receipt) return deliverReceipt(lockTurn.receipt);
@@ -212,11 +212,11 @@ async function attend({
       const window = commentId ? availability.comments[commentId] : availability.dm;
       return window?.available ? null : window?.reason || 'reply_unavailable';
     },
-    book:bookingEntry => {
+    book:(bookingEntry,readHistory) => {
       const previous = initial.metadata?.assistantBooking;
       if (previous?.executionId === execution.id) return {reply:previous.reply};
       return require('./leadAssistantBooking.service').processTurn({
-        db, thread, entry:bookingEntry, execution, fields:publication.fields, offer,
+        db, thread, entry:bookingEntry, readHistory, execution, fields:publication.fields, offer,
         scope:{ ...scope, audience:rule.audience, originMessageId:lockTurn.originMessageId, promotionKey:offer?.key },
         blockReason:stillOwnsTurn, availability:async () => !!(await social.availability(thread, [])).dm?.available,
         ...bookingOptions,
@@ -242,7 +242,7 @@ async function attend({
               { role: 'user', text: item.commercialQuestion },
               { role: 'assistant', text: item.answer.reply },
             ]
-          : [];
+          : require('./leadAssistantBooking.service').bookingHistory(row.metadata?.assistantBooking);
       });
     },
     saveAnswer:(answer, userText) => db.sequelize.transaction(async (transaction) => {

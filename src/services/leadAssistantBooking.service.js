@@ -99,6 +99,16 @@ async function localProfessional(db, clinicId, text) {
   return matches.length === 1 ? { id: matches[0].doctor_id } : { unclear: true };
 }
 
+// Only controlled topic and stage labels leave the booking state for the commercial
+// model. Names, phone numbers, addresses, appointment identifiers and times stay local.
+function bookingHistory(state) {
+  if (!state) return [];
+  const area = require('./leadAssistantConversationPolicy.service').areaIn(state.area || '');
+  const history = area ? [{role:'user',text:'Consulta sobre '+(state.volume ? 'volumen en ' : '')+area.label+'.'}] : [];
+  if (state.stage === 'offered') history.push({role:'assistant',text:'Se ofrecieron horarios. Aún no se ha confirmado la cita.'});
+  return history;
+}
+
 async function processTurn({
   db,
   thread,
@@ -114,11 +124,13 @@ async function processTurn({
   book = reserve,
   now = new Date(),
   capabilities,
+  readHistory = async () => [],
   preview,
 }) {
   if (entry.type !== 'dm' || explicitOptOut(entry.text)) return null;
   const raw = String(entry.text || '').trim();
-  if (scope.originMessageId === scope.messageId && !cal.bookingRequest(raw)) return null;
+  const statusRequest = cal.asksSessionAppointment(raw);
+  if (scope.originMessageId === scope.messageId && !statusRequest && !cal.bookingRequest(raw)) return null;
   const searchSlots = preview?.calendar === 'demo'
     ? params => require('./leadAssistantSampleCalendar.service').sampleSlots(params)
     : findSlots || cal.available;
@@ -129,7 +141,8 @@ async function processTurn({
     (cal.selection(raw, pending.slots, pending.stage === 'confirm' ? pending.selected : null) ||
       (pending.stage === 'offered' && pending.slots.length === 1 && /^(?:sí|si|vale|me viene bien|de acuerdo)[.! ]*$/i.test(raw)
         ? { index: 0, confirmed: false } : null));
-  const requestBooking = !!assistantCommercialText(raw) && cal.bookingRequest(raw);
+  const again = pending?.slots?.length && /^(?:(?:si|vale) )?(?:y las opciones|las opciones|las de cita|las horas|dimel[oa]s|dime las horas)$/.test(cal.normalize(raw));
+  const requestBooking = !!assistantCommercialText(raw) && (cal.bookingRequest(raw) || again);
   if (wantsHumanInput(raw)) return null;
   const revisesDate =
     !!pending &&
@@ -141,12 +154,12 @@ async function processTurn({
   const unspecifiedYes =
     pending?.stage === 'offered' && /^(?:s[ií]|vale|confirmo|de acuerdo)[.! ]*$/i.test(raw.trim());
   if (
-    !requestBooking &&
+    !statusRequest && !requestBooking &&
     !choice &&
     !contactTurn &&
     !revisesDate &&
     !unspecifiedYes &&
-    !(pending?.stage === 'service' && assistantCommercialText(raw))
+    !(pending?.stage === 'service' && assistantCommercialText(raw) && !/[?¿]/.test(raw) && !/\b(?:recomiend|prefiero esperar|mejor no|no lo se|no se)\w*/.test(cal.normalize(raw)))
   )
     return null;
   const blocked = await blockReason();
@@ -159,7 +172,6 @@ async function processTurn({
         clinicId,
         featureKey: 'appointments.manage',
       }));
-  if (!(await allowed(execution.created_by, thread.clinic_id))) return { review: true };
   const clinic = await db.Clinica.findByPk(thread.clinic_id, {
     attributes: [
       'id_clinica',
@@ -170,21 +182,15 @@ async function processTurn({
     ],
     raw: true,
   });
-  const mapped = offer && require('../lib/lead-assistant-tables').tableRows(fields.booking, [
-    /promocion|oferta/, /tratamiento|servicio/, /persona|profesional/,
-  ]).filter(([title]) => cal.normalize(title) === cal.normalize(offer.title));
-  if (mapped?.length > 1) return { review: true };
-  const mapping = mapped?.[0];
-  const catalog = await cal.services(db, clinic, fields, offer);
-  const choices = mapping ? catalog.filter(item => [item.name, item.code].some(name => cal.normalize(name) === cal.normalize(mapping[1]))) : catalog;
-  if (mapping && choices.length !== 1) return { review: true };
-  if (!choices.length) return { review: true };
   const timezone = cal.resolveClinicTimezone(clinic);
-  const treatment = cal.pickTreatment(choices, raw, offer, pending?.treatment?.id);
+  const historical = await readHistory();
+  const { goal } = require('./leadAssistantConversationPolicy.service');
+  const earlier = bookingHistory(pending);
+  const subject = goal([...earlier,...historical],raw);
   async function materialize(build) {
     if (preview) {
       const state = await build({ current:thread });
-      preview.booking = state;
+      preview.booking = {...state, area:subject.area?.name || null, volume:subject.reducing};
       return { reply:state.reply };
     }
     return db.sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, async (transaction) => {
@@ -223,7 +229,7 @@ async function processTurn({
         return { stop: unavailable || 'assistant_turn_unavailable' };
       const state = await build({ current, transaction });
       if (!state || state.review || state.stop) return state;
-      const complete = { ...state, executionId: execution.id, createdAt: now.toISOString() };
+      const complete = { ...state, area:subject.area?.name || null, volume:subject.reducing, executionId: execution.id, createdAt: now.toISOString() };
       const visible =
         complete.stage === 'booked'
           ? {
@@ -242,6 +248,32 @@ async function processTurn({
       return { reply: state.reply };
     });
   }
+  if (statusRequest) {
+    if (pending?.stage === 'booked' && pending.slots?.[pending.selected])
+      return {reply:'La cita que confirmamos en esta conversación era para el '+cal.display(pending.slots[pending.selected],timezone)+'.'};
+    return materialize(async()=>({...pending,stage:pending?.stage || 'status',
+      reply:'En esta conversación todavía no hemos confirmado ninguna cita. ¿Quieres que mire horarios?'}));
+  }
+  if (!(await allowed(execution.created_by, thread.clinic_id))) return { review: true };
+  const mappings = require('../lib/lead-assistant-tables').tableRows(fields.booking, [
+    /promocion|oferta/, /tratamiento|servicio/, /persona|profesional/,
+  ]);
+  const mapped = offer ? mappings.filter(([title]) => cal.normalize(title) === cal.normalize(offer.title)) : [];
+  if (mapped.length > 1) return { review:true };
+  let mapping = mapped[0];
+  if (!mapping && !offer && subject.area) {
+    // Route only a first assessment, based on an unambiguous service AND professional
+    // in the clinic's mappings for this area. This does not attribute a promotion or price.
+    const matching = mappings.filter(([title,service]) => subject.area.words.test(cal.normalize(title)) &&
+      /\b(?:valoracion|primera visita|evaluacion)\b/.test(cal.normalize(service)));
+    const routes = new Set(matching.map(([,service,professional]) => JSON.stringify([cal.normalize(service),cal.normalize(professional)])));
+    if (routes.size === 1 && !/\b(?:servicio de agenda|profesional de agenda)\b/i.test(raw)) mapping = matching[0];
+  }
+  const catalog = await cal.services(db, clinic, fields, offer);
+  const choices = mapping ? catalog.filter(item => [item.name, item.code].some(name => cal.normalize(name) === cal.normalize(mapping[1]))) : catalog;
+  if (mapping && choices.length !== 1) return { review: true };
+  if (!choices.length) return { review: true };
+  const treatment = cal.pickTreatment(choices, raw, offer, pending?.treatment?.id);
   if (!treatment)
     return materialize(async () => ({
       stage: 'service',
@@ -275,7 +307,7 @@ async function processTurn({
     && (lead || thread.channel === 'whatsapp')
     && require('./leadAssistantOverlap.service').allowsLeadPair(fields.booking);
   const currentOffer =
-    pending?.treatment?.id === treatment.id && pending.stage !== 'booked' && pending.slots?.length;
+    pending?.treatment?.id === treatment.id && (!pending.area || !subject.area || pending.area === subject.area.name) && pending.stage !== 'booked' && pending.slots?.length;
   const professional = await localProfessional(db, thread.clinic_id, raw);
   if (professional.unclear) return { review: true };
   const assigned = mapping ? await localProfessional(db, thread.clinic_id, 'Profesional de agenda: ' + mapping[2]) : null;
@@ -347,6 +379,7 @@ async function processTurn({
         'Puedo darte cita ' + cal.displayOptions(pending.slots, timezone) + '. ¿Cuál prefieres?',
     }));
   }
+  if (again && currentOffer) return propose({range:pending.calendar});
   if (!currentOffer || (!choice && !contactTurn)) return propose();
   if (!preview && !(await hasDelivered(db, thread, pending))) return { review: true };
   const index = choice ? choice.index : pending.selected;
@@ -556,4 +589,4 @@ async function excludedPatient(db, rule, thread, messageId, transaction) {
   );
 }
 
-module.exports = { processTurn, previous, readContact, excludedPatient };
+module.exports = { processTurn, previous, readContact, excludedPatient, bookingHistory };

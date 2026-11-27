@@ -92,3 +92,27 @@ test('fictitious slots still require a configured service and the same schedulin
     }
   }
 });
+
+test('a requested assessment follows the clinic’s unique area mapping and never books on a farewell', async () => {
+  const fields={tone:'Breve',context:'Información comercial.',guardrails:'No dar consejo individual.',
+    booking:['| Promoción | Servicio | Profesional |','|---|---|---|',
+      '| Cuidado de cuello | Valoración médica | Alicia |','| Cuidado de abdomen | Valoración corporal | Berta |',
+      'Pide el correo electrónico para el recordatorio.'].join('\n'),promotions:''};
+  const db={Sequelize:require('sequelize').Sequelize,LeadAssistantDraft:{findByPk:async()=>({version:1,fields})},
+    LeadAssistantPublication:{findOne:async()=>null},Clinica:{findByPk:async()=>({id_clinica:1,nombre_clinica:'Ejemplo'})},
+    Tratamiento:{findAll:async()=>[{id_tratamiento:1,nombre:'Valoración médica'},{id_tratamiento:2,nombre:'Valoración corporal'}]},
+    DoctorClinica:{findAll:async()=>[{doctor_id:4,doctor:{nombre:'Alicia'}},{doctor_id:5,doctor:{nombre:'Berta'}}]}};
+  const sim=create({db,recipients:()=>assert.fail('unnecessary handoff'),analyze:()=>assert.fail('no grounded treatment or booking status for the model to invent'),
+    booking:args=>require('../../services/leadAssistantBooking.service').processTurn({...args,mayBook:async()=>true})});
+  const {id}=await sim.start(1,42);
+  const ask=message=>sim.turn(1,42,id,{id:randomUUID(),calendar:'demo',promotion:'',message});
+  assert.match((await ask('Algo para reducir la papada')).reply,/papada/);
+  assert.doesNotMatch((await ask('Vale, nos vemos!')).reply,/reserv|te esperamos/);
+  assert.match((await ask('cuándo era mi cita?')).reply,/todavía no hemos confirmado/);
+  const times=await ask('Sí, por favor');assert.equal(times.slots.length,2);
+  assert.deepEqual((await ask('vale, dímelos')).slots,times.slots);
+  assert(!/¿Para qué tratamiento/.test((await ask('jo qué pesada, sí dame cita')).reply));
+  assert.match((await ask('La segunda')).reply,/recordatorio/);
+  assert.match((await ask('Ana Prueba, +34600000001, ana@example.invalid')).reply,/Confirmas/);
+  assert.equal((await ask('Confirmo')).event,'booked');
+});

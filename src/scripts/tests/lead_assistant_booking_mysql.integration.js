@@ -495,6 +495,16 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const route = await simulator.turn(100,1,handoffTrial.id,{id:randomUUID(),message:handoffText,promotion:''});
   await enter(await thread('instagram','qa-parity-handoff'),handoffText,{version:7});
   assert.equal(route.event,'handoff');assert.equal(route.reply,questions.at(-1));
+  const statusThread = await thread('instagram','qa-no-booking-yet');
+  const beforeStatus = await db.CitaPaciente.count();
+  const noDate = await enter(statusThread,'¿Cuándo has dicho que era mi cita?',{version:7});
+  assert.match(questions.at(-1),/todavía no hemos confirmado/);
+  assert.equal((await noDate.booking()).stage,'status');
+  const choicesAfterStatus = await enter(statusThread,'Sí, por favor',{version:7});
+  assert.equal((await choicesAfterStatus.booking()).stage,'offered');
+  const repeat = await enter(statusThread,'vale dímelos',{version:7});
+  assert.deepEqual((await repeat.booking()).slots,(await choicesAfterStatus.booking()).slots);
+  assert.equal(await db.CitaPaciente.count(),beforeStatus);
   report.assertions = [
     'El simulador y el worker de QuickChat ofrecen los mismos mensajes, imagen, huecos, recogida de contacto, confirmación y traspaso para el mismo lead ficticio.',
     'Una compra fuera de promoción no ofrece la tarifa, la foto ni la cita. El canje de un bono ya adquirido conserva sus propias condiciones.',
