@@ -5,6 +5,8 @@ const { sameRoute, resolveRoute } = require('./socialInboxRoute.service');
 const { invalidation } = require('../lib/socket-view-invalidation');
 const { graphId } = require('../../services/integrations-broker/src/meta-marketing-contract');
 const { JOB, createReceiptIntake } = require('./socialInboxIntake.service');
+const withdrawal = require('./socialInboxWithdrawal.service');
+const { applyWithdrawal } = require('./socialInboxWithdrawalImport.service');
 const isSocial = (c) => ['instagram', 'messenger'].includes(c?.channel);
 const attemptKey = (id) => digest('attempt', id);
 const blocked = (reason) => ({ available: false, reason });
@@ -53,10 +55,10 @@ function create({
     await publish(
       { id: row.event.conversationId, clinic_id: row.route.clinicId },
       { id: row.message_id },
-      'message:created',
+      row.event.source === 'withdrawal' ? 'message:updated' : 'message:created',
       true,
     );
-    await R.update({ state: 'persisted' }, { where: { key: row.key, state: 'notify' } });
+    await R.update({ state: row.event.source === 'withdrawal' ? 'withdrawn' : 'persisted' }, { where: { key: row.key, state: 'notify' } });
   }
   const threadIdentity = (c) => ({ channel: c.channel, accountId: c.social_account_id });
   const accept = createReceiptIntake({ db, resolve, enqueue });
@@ -66,6 +68,13 @@ function create({
     if (!pending || pending.state !== 'pending') return;
     const e = pending.event,
       r = pending.route;
+    if (e.source === 'withdrawal') {
+      await applyWithdrawal(db, pending);
+      const marker = await R.findByPk(key);
+      if (marker?.state === 'notify') await notifyReceipt(marker);
+      return;
+    }
+    if (await withdrawal.markerFor(db, e, r)) return;
     let access;
     try {
       access = await provider.receive(r, e);
@@ -92,6 +101,7 @@ function create({
       const route = await resolve(db, e, t);
       const row = await R.findByPk(key, lock(t));
       if (row.state !== 'pending' || row.event.source !== e.source) return;
+      if (await withdrawal.markerFor(db, row.event, r, lock(t))) return;
       if (!sameRoute(route, r) || !access.available)
         return row.update(
           { state: 'review', reason: !sameRoute(route, r) ? 'account_changed' : access.reason },
@@ -441,18 +451,19 @@ function create({
       ? { ...result, outcome: 'blocked', attemptId: command.attemptId }
       : result;
   }
-  async function readEntry(key, clinicId) {
+  async function readEntry(key, clinicId, transaction) {
     if (!/^[a-f0-9]{64}$/.test(key) || !Number.isSafeInteger(clinicId) || clinicId < 1) return null;
     const receipt = await R.findByPk(key, {
       raw: true,
-      attributes: ['key', 'state', 'event', 'message_id'],
+      attributes: ['key', 'state', 'event', 'route', 'message_id'], transaction,
     });
     if (
-      !receipt ||
+      !receipt || receipt.event.source === 'withdrawal' ||
       !['notify', 'persisted'].includes(receipt.state) ||
       receipt.event.clinicId !== clinicId
     )
       return null;
+    if (await withdrawal.markerFor(db, receipt.event, receipt.route, { transaction })) return null;
     return { ...receipt.event, receiptKey: receipt.key, messageId: receipt.message_id };
   }
   return { accept, importReceipt, availability, reply, readEntry };
