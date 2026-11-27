@@ -359,13 +359,13 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     clinica_id: 41,
     phone: target.contact_id,
   });
-  async function send(policy, at, mid, overrides = {}) {
+  async function send(policy, at, mid, overrides = {}, thread = target, content = 'Campaña ficticia') {
     return db.Message.create({
-      conversation_id: target.id,
+      conversation_id: thread.id,
       direction: 'outbound',
       message_type: 'template',
       status: 'sent',
-      content: 'Campaña ficticia',
+      content,
       createdAt: new Date(at),
       metadata: {
         kind: 'mass_campaign_send',
@@ -410,6 +410,26 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.ok(jobs.size > 2);
   assert.ok(originalStart > Date.parse(since));
   assert.equal(await db.Message.count({ where: { direction: 'outbound', message_type: 'text' } }), 0);
+  const chooser = await contact('whatsapp', '34600000059');
+  const chooserItem = await db.MarketingPatientListItem.create({ list_id:campaign.id, clinica_id:41, phone:chooser.contact_id });
+  const offer = '¿Quieres ver las promos de rostro, cuerpo y escote y cirugía?';
+  const recipient = { item_id:chooserItem.id, recipient:chooser.contact_id };
+  await send('inherit', timestamp - 30000, 'wamid.choices', recipient, chooser, offer);
+  const selected = await inbound(chooser, 'Hola\nDe rostro');
+  const selectedRun = await engine(selected);
+  assert.equal(selectedRun.result.decision.campaignChoice, true);
+  assert.equal(selectedRun.result.decision.privateRequested, false);
+  assert.equal(selectedRun.result.campaignId, campaign.id);
+  assert.ok(selectedRun.result.leadId);
+  assert.equal((await capture.run(selectedRun.execution)).leadId, selectedRun.result.leadId);
+  const brokenContext = await perform(await inbound(chooser, 'De cuerpo'));
+  assert.equal(brokenContext.result.leadId, null);
+  const quotedOption = await perform(await inbound(chooser, 'De cuerpo', {context:{id:'wamid.choices'}}));
+  assert.equal(quotedOption.result.leadId, selectedRun.result.leadId);
+  assert.equal(quotedOption.result.outcome, 'linked');
+  await send('disabled', timestamp - 5000, 'wamid.nochoices', recipient, chooser, offer);
+  assert.equal((await perform(await inbound(chooser, 'De rostro', {context:{id:'wamid.nochoices'}}))).result.leadId, null);
+  assert.equal(await db.Message.count({where:{direction:'outbound', message_type:'text'}}), 0);
   const paused = await config.save(db, 41, 'whatsapp', 11, false);
   assert.equal(paused.active, false);
   const legacy = await db.MarketingPatientList.create({
@@ -452,10 +472,11 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(classicFresh.duplicate, true);
   assert.equal(await attributeClassic({}, 'wamid.disabled'), null);
   assert.equal(await attributeClassic({}, 'wamid.active'), null);
-  assert.equal(await db.LeadIntake.count(), 4);
+  assert.equal(await db.LeadIntake.count(), 5);
   report.capture = {
     queueToEngineToExecutionListing: true,
-    distinctLeads: 4,
+    campaignOptionCapture: true,
+    distinctLeads: 5,
     historicalCampaignStillCapturesWhilePaused: true,
     unconfiguredSocialReplySkipped: true,
     messengerInbox: true,

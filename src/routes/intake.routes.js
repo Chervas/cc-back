@@ -19,6 +19,7 @@ router.post('/whatsapp-origin', intakeController.registerWhatsappOrigin);
 // Rutas protegidas
 router.use(protect);
 router.get('/lead-capture/:clinicId/:channel', intakeController.inboundLeadCaptureConfig);
+router.post('/lead-capture/:clinicId/whatsapp/simulate', intakeController.simulateWhatsappLeadCapture);
 router.put('/lead-capture/:clinicId/:channel', intakeController.inboundLeadCaptureConfig);
 router.get('/config/admin', intakeController.getIntakeConfigAdmin);
 router.get('/verify-snippet', intakeController.verifySnippetInstalled);

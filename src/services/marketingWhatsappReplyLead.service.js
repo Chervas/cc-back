@@ -39,7 +39,7 @@ async function resolveCampaignReply({ db, message, conversation, binding, transa
         ...(quoted ? [metadataEquals('wamid', quoted)] : []),
       ],
     },
-    attributes: ['id', 'status', 'metadata', 'createdAt'], order: [['id', 'DESC']], limit: quoted ? 2 : 25, raw: true, transaction,
+    attributes: ['id', 'status', 'content', 'metadata', 'createdAt'], order: [['id', 'DESC']], limit: quoted ? 2 : 25, raw: true, transaction,
   });
   if (!outbound.length) return null;
   const excluded = { excluded: true, reason: 'campaign_excluded' };
@@ -101,7 +101,29 @@ async function resolveCampaignReply({ db, message, conversation, binding, transa
   const commercial = original.metadata.template_commercial === true || legacyEnabled;
   const isExcluded = !commercial || policy === 'disabled';
   return { excluded: isExcluded, ...(isExcluded ? {reason:'campaign_excluded'} : {}), commercial, legacyEnabled, policy, sentAt: new Date(original.createdAt).getTime(),
-    campaign, recipient, phone, name, campaignId, originalId: original.id, clinicId };
+    campaign, recipient, phone, name, campaignId, originalId: original.id, offerText: original.content, clinicId };
+}
+
+// A short category name can refer to a newer exchange. Only an explicit provider
+// quote can bypass that exchange, after resolveCampaignReply verified the quote.
+async function hasSelectionContext({ db, message, campaign, transaction }) {
+  if (message.metadata?.context?.id) return true;
+  const { fn, col } = db.Sequelize;
+  const logicalTime = fn('COALESCE', col('sent_at'), col('createdAt'));
+  const from = new Date(campaign.sentAt), to = new Date(message.sent_at);
+  const rows = await db.Message.findAll({
+    where: {
+      conversation_id: message.conversation_id,
+      id: { [Op.notIn]: [campaign.originalId, message.id] },
+      message_type: { [Op.notIn]: ['reaction', 'event'] },
+      [Op.and]: [
+        { [Op.or]: [where(logicalTime, { [Op.gt]: from }), { [Op.and]: [where(logicalTime, from), { id: { [Op.gt]: campaign.originalId } }] }] },
+        { [Op.or]: [where(logicalTime, { [Op.lt]: to }), { [Op.and]: [where(logicalTime, to), { id: { [Op.lt]: message.id } }] }] },
+      ],
+    },
+    attributes: ['content', 'direction', 'message_type'], limit: 21, raw: true, transaction,
+  });
+  return rows.length <= 20 && require('./inboundLeadCaptureDecision.service').contextPreserved(rows);
 }
 
 async function attributeCampaignInfoReply({ db, message, conversation, binding, transaction, captureFrom = null, match = null, verifiedInterest = false, freshDispatch = false }) {
@@ -142,4 +164,4 @@ async function attributeCampaignInfoReply({ db, message, conversation, binding, 
   return { lead, duplicate: !created, attribution: { lead_id: lead.id, campaign_id: campaignId, capture_origin: captureOrigin, outcome: created ? 'created' : 'linked' } };
 }
 
-module.exports = { SOURCE, attributeCampaignInfoReply, resolveCampaignReply, isInfoReply };
+module.exports = { SOURCE, attributeCampaignInfoReply, resolveCampaignReply, hasSelectionContext, isInfoReply };

@@ -6723,6 +6723,24 @@ exports.inboundLeadCaptureConfig = asyncHandler(async (req, res) => {
   return res.json(await cfg.save(db,clinicId,channel,Number(req.userData.userId),req.body.active));
 });
 
+exports.simulateWhatsappLeadCapture = asyncHandler(async (req, res) => {
+  const clinicId = Number(req.params.clinicId);
+  if (!/^[1-9]\d*$/.test(req.params.clinicId) || !Number.isSafeInteger(clinicId))
+    return res.status(400).json({ error:'lead_capture_scope_invalid' });
+  if (!(await requireLeadAutomationClinicAccess(req, res, clinicId))) return;
+  res.set('Cache-Control', 'private, no-store');
+  const { campaignText, message, history, optedOut } = req.body || {};
+  const validMessage = value => typeof value === 'string' && !!value.trim() && value.length <= 1600;
+  if (typeof campaignText !== 'string' || campaignText.length > 4096 || !validMessage(message)
+      || !Array.isArray(history) || history.length >= 20 || !history.every(validMessage) || typeof optedOut !== 'boolean')
+    return res.status(400).json({ error:'lead_capture_simulation_invalid' });
+  const clinic = await db.Clinica.findByPk(clinicId, { attributes:['id_clinica','grupoClinicaId'], raw:true });
+  if (!clinic) return res.status(404).json({ error:'clinic_not_found' });
+  const decision = await require('../services/inboundLeadCaptureDecision.service').simulate(
+    { campaignText, message, history, optedOut }, { clinicId, groupId:clinic.grupoClinicaId, reportFailure:true, beforeDispatch:async () => true });
+  return res.json(decision);
+});
+
 exports.getLeadAutoReplyStatus = asyncHandler(async (req, res) => {
   const clinicId = parseInteger(req.query.clinic_id || req.query.clinicId);
   if (clinicId === null) {
