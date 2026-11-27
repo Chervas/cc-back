@@ -39,6 +39,9 @@ const checks = {
     attemptId: { type: 'string', pattern: '^[a-f0-9-]{36}$' },
   }),
 };
+const checkFullStatus = checks[status];
+const checkReplyPreparation = schema({ ...scope, channel: { const: 'instagram' }, prepareReply: { const: true } });
+checks[status] = payload => payload?.prepareReply === undefined ? checkFullStatus(payload) : checkReplyPreparation(payload);
 const historyFields = {
   ...scope,
   start: { type: 'integer', minimum: 1 },
@@ -136,10 +139,16 @@ function historyRetryAfterMs(headers) {
 // Only genuine Graph quota responses may be described as a Meta API limit.
 class GraphReplyLimit extends Error {}
 async function execute(options) {
+  let writeStarted = false;
   try {
-    return await executeSocial(options);
+    return await executeSocial(options, () => { writeStarted = true; });
   } catch (error) {
     if (error instanceof GraphReplyLimit) return { available: false, reason: 'meta_api_rate_limited' };
+    if (options.operation === send && !writeStarted) {
+      const reason = ['scope_denied', 'provider_unauthorized', 'credential_revoked', 'operation_denied',
+        'oauth_flow_busy', 'rate_limited'].includes(error.code) ? error.code : 'provider_unavailable';
+      return { available: false, reason };
+    }
     throw error;
   }
 }
@@ -155,7 +164,7 @@ async function executeSocial({
   authorize: check,
   transport = fetch,
   subscriptionPacer,
-}) {
+}, markWriteStarted) {
   const appToken = metadata.appId + '|' + appSecret.toString();
   async function graph(path, bearer, query = {}, body) {
     if (operation === subscribe) {
@@ -189,6 +198,7 @@ async function executeSocial({
     }).toString();
     let response, raw;
     try {
+      if (operation === send && body) markWriteStarted();
       response = await transport(url, {
         redirect: 'error',
         signal,
@@ -254,6 +264,12 @@ async function executeSocial({
     ),
   );
   if (outsideTarget) return { available: false, reason: 'permission:' + outsideTarget };
+  // Preparing a reservation checks the admitted credential. The immediately following
+  // send still verifies the live page, its tasks and its subscriptions before POST.
+  if (operation === status && p.prepareReply === true) {
+    check();
+    return { available: true };
+  }
   const fields =
     p.channel === 'instagram'
       ? 'id,name,access_token,tasks,instagram_business_account{id,username}'

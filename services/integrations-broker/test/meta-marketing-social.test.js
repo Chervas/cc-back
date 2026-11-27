@@ -110,6 +110,25 @@ test('reports an explicit Graph quota independently of local broker capacity and
   ctx.transport = () => { throw Object.assign(Error(), {code:'rate_limited'}); };
   await assert.rejects(call(social.status, 'instagram', 'dm'), {code:'rate_limited'});
 });
+test('prepares a reply under its current grant without querying Graph twice and keeps live pre-write checks', async () => {
+  const {ctx, commands, call} = fixture();
+  const args = { recipient:'771', text:'Prueba', attemptId:'5d364186-5860-4e3a-bb52-cb89153c65de' };
+  assert.deepEqual(await call(social.status, 'instagram', 'dm', {prepareReply:true}), {available:true});
+  assert.equal(commands.length, 0);
+  assert.equal((await call(social.send, 'instagram', 'dm', args)).available, true);
+  assert.equal(commands.filter(c => c.endpoint === 'debug_token').length, 1);
+  assert.equal(commands.filter(c => c.method === 'POST').length, 1);
+  const real = ctx.transport;
+  ctx.transport = (url, options) => url.pathname.endsWith('/debug_token')
+    ? {ok:false, status:403, json:async () => ({error:{code:190}})} : real(url, options);
+  assert.deepEqual(await call(social.send, 'instagram', 'dm', args), {available:false,reason:'provider_unauthorized'});
+  assert.equal(commands.filter(c => c.method === 'POST').length, 1);
+  ctx.transport = (url, options) => options.method === 'POST' ? Promise.reject(Error('lost acknowledgement')) : real(url,options);
+  await assert.rejects(call(social.send,'instagram','dm',args), /lost acknowledgement/);
+  ctx.metadata.scopes = ctx.metadata.scopes.filter(s => s !== 'instagram_manage_messages');
+  assert.deepEqual(await call(social.status, 'instagram', 'dm', {prepareReply:true}),
+    {available:false, reason:'permission:instagram_manage_messages'});
+});
 test('signed broker persists a scoped Send receipt and reconciles it without a second POST', async (t) => {
   const { randomUUID } = require('node:crypto');
   const enrollment = require('../src/meta-marketing-enrollment-contract');
