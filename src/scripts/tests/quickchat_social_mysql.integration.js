@@ -241,6 +241,21 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   await thread.reload();
   assert(thread.last_inbound_at);
   assert.equal(await db.Message.count({ where: { conversation_id: thread.id } }), 3);
+  assert.equal((await svc.availability(thread)).dm.available, true);
+  const checkAvailability = provider.availability;
+  const receiptsBeforeBlock = await db.SocialInboxReceipt.count();
+  const sendsBeforeBlock = calls.length;
+  for (const [code, reason] of [['oauth_flow_busy', 'oauth_flow_busy'], ['rate_limited', 'rate_limited'],
+    ['unexpected_provider_detail', 'provider_unavailable']]) {
+    provider.availability = async () => { throw Object.assign(new Error('private provider detail'), { code }); };
+    assert.deepEqual((await svc.availability(thread)).dm, { available: false, reason });
+    const attemptId = randomUUID();
+    assert.deepEqual(await reply({ attemptId }), { available: false, reason, outcome: 'blocked', attemptId });
+  }
+  assert.equal(await db.Message.count({ where: { conversation_id: thread.id } }), 3);
+  assert.equal(await db.SocialInboxReceipt.count(), receiptsBeforeBlock);
+  assert.equal(calls.length, sendsBeforeBlock);
+  provider.availability = checkAvailability;
   assert.equal((await reply()).outcome, 'sent');
   assert.equal(calls.at(-1).recipient, '771');
   await webhook(dm('502', 'mid-1'));
