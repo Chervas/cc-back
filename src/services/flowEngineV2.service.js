@@ -6722,13 +6722,16 @@ async function processNode(node, context, runtime = {}) {
   }
 
   switch (nodeType) {
+    case 'action/attend_with_lead_assistant':
     case 'action/social_lead_interest': {
       if (simulation) return {kind: 'success', output: {simulated: true}, next_node_id: readOutputTarget(node, 'on_success')};
-      const result = await require('./socialLeadAutomation.service').run(runtime.execution);
+      const whatsappAssistant = nodeType === 'action/attend_with_lead_assistant' && runtime.execution.context?.trigger?.data?.event_kind === 'whatsapp_dm';
+      const result = whatsappAssistant ? await require('./leadAssistantWhatsapp.service').current().run(runtime.execution)
+        : await require('./socialLeadAutomation.service').run(runtime.execution, nodeType === 'action/attend_with_lead_assistant');
       return {
         kind: 'success', output: result,
         context_patch: result.lead_id ? {lead: {id: result.lead_id, lead_intake_id: result.lead_id}} : {},
-        next_node_id: readOutputTarget(node, result.attention ? 'on_review' : 'on_success'),
+        next_node_id: readOutputTarget(node, result.invoke_assistant ? 'on_assistant' : result.attention ? 'on_review' : 'on_success'),
       };
     }
     case 'action/resolve_program_appointment_details':

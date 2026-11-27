@@ -27,7 +27,7 @@ function buildDraftRequest(turn) {
   const { clinicName, tone, approvedFacts, matchedPromotion, commercialHistory, userText, availableSlots } = turn;
   const context = {
     clinic: text(clinicName, 120),
-    tone: text(tone, 420),
+    tone: text(tone, 12000),
     approvedFacts: list(approvedFacts, 40, fact => text(fact, 1000)),
     promotion: matchedPromotion ? {
       title: text(matchedPromotion.title, 180),
@@ -40,11 +40,19 @@ function buildDraftRequest(turn) {
     userText: text(userText, 1000),
     availableSlots: list(availableSlots, 8, slot => text(slot.label, 200)),
   };
+  const images = matchedPromotion?.images?.length ? list(matchedPromotion.images, 24, image => {
+    if (!/^[a-f0-9]{24}$/.test(image.id)) throw new Error('assistant_commercial_context_invalid');
+    return { id: image.id, label: text(image.label, 160) };
+  }) : [];
+  if (images.length) context.promotion.images = images;
   return {
     systemPrompt,
-    prompt: 'Escribe solo el texto dirigido a la persona en el campo reply.',
+    prompt: 'Escribe solo el texto dirigido a la persona en el campo reply.' + (images.length
+      ? ' Si ver una foto responde a su petición o ayuda a explicar la promoción de este turno, elige una de sus imágenes en imageId. En los demás casos elige none. No inventes enlaces ni anuncies un envío ya realizado.' : ''),
     inputText: JSON.stringify(context),
-    outputFormat: { reply: { type: 'string' } },
+    outputFormat: { reply: { type: 'string' }, ...(images.length ? {
+      imageId: { type: 'string', enum: ['none', ...images.map(image => image.id)] },
+    } : {}) },
     analysisMode: 'assistant', requireBroker: true, coerceOutput: false, maxTokens: 280,
   };
 }

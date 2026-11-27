@@ -3,7 +3,7 @@
 const { randomUUID } = require('node:crypto');
 const { digest, eventKey } = require('./socialInboxEvents');
 const routes = require('./socialInboxRoute.service');
-const { explicitOptOut } = require('./socialLeadInterestClassification.service');
+const { explicitOptOut, assistantCommercialText } = require('./socialLeadInterestClassification.service');
 
 const source = 'quickchat_social';
 const allowed = new Set(['instagram_dm', 'instagram_comment', 'messenger_dm']);
@@ -26,6 +26,7 @@ function create({
   publishLead,
   notifyConversation,
   checkPatientRestrictions,
+  analyzeAssistant = args => require('./aiOrchestrator.service').analyzeStructured(args),
   resolve = routes.resolveRoute,
 }) {
   async function plan(clinicId, entry, transaction) {
@@ -55,6 +56,8 @@ function create({
       return null;
     if (
       rule.action !== 'notify' &&
+      !(rule.action === 'assistant' && entry.channel === 'instagram' && Number.isSafeInteger(rule.version) && rule.version > 0 &&
+        ['leads','all'].includes(rule.audience)) &&
       !(
         rule.action === 'message' &&
         entry.channel === 'instagram' &&
@@ -103,23 +106,9 @@ function create({
       return { reason: 'social_entry_disabled' };
     const { flow } = eligible;
     const idempotencyKey = 'social_lead:' + key;
-    const find = () => db.FlowExecutionV2.findOne({ where: { idempotency_key: idempotencyKey } });
-    let execution = await find();
-    if (!execution) {
-      try {
-        execution = await createExecution({
-          idempotency_key: idempotencyKey,
-          template_version_id: flow.id,
-          engine_version: 'v2',
-          status: 'running',
-          clinic_id: conversation.clinic_id,
-          group_id: flow.group_id,
-          created_by: flow.published_by || flow.created_by,
-          current_node_id: flow.entry_node_id,
-          trigger_type: 'mensaje_recibido',
-          trigger_entity_type: 'message',
-          trigger_entity_id: message.id,
-          context: {
+    return require('./leadAssistantExecution.service').enqueueInboundExecution({db,createExecution,enqueueJob,
+      flow, clinicId:conversation.clinic_id, messageId:message.id, idempotencyKey, entryNodeId:flow.entry_node_id,
+      origin:'social_lead_interest', context:{
             trigger: {
               type: 'mensaje_recibido',
               data: {
@@ -132,29 +121,10 @@ function create({
             },
             conversation: { id: conversation.id, channel: entry.channel },
             outputs: {},
-          },
-        });
-      } catch (error) {
-        if (require('../lib/automation-runtime-stop').isStop(error))
-          return { reason: 'social_entry_disabled' };
-        if (error.name !== 'SequelizeUniqueConstraintError' || !(execution = await find())) throw error;
-      }
-    }
-    if (execution.status === 'running' || execution.status === 'waiting') {
-      await enqueueJob({
-        type: 'automations_v2_execute',
-        priority: 'critical',
-        origin: 'social_lead_interest',
-        dedupeScope: 'flow_execution:' + execution.id,
-        payload: { execution_id: execution.id },
-        requestedBy: execution.created_by,
-        requestedByRole: 'system',
-      });
-    }
-    return { execution_id: execution.id };
+          } });
   }
 
-  async function run(execution) {
+  async function run(execution, assistantNode = false) {
     const data = execution?.context?.trigger?.data;
     const key = data?.social_receipt_key;
     if (
@@ -200,11 +170,18 @@ function create({
       const route = await resolve(db, entry, transaction);
       return route?.clinicId === clinicId && routes.sameRoute(receipt?.route, route) ? eligible : null;
     };
-    if (!(await current())) return { reason: 'social_entry_disabled' };
+    const selected = await current();
+    if (!selected) return { reason: 'social_entry_disabled' };
+    if (selected.rule.action === 'assistant' && !assistantNode) return {invoke_assistant:true};
+    if (assistantNode && selected.rule.action !== 'assistant') return {reason:'assistant_rule_unavailable'};
     const initial = await db.Message.findByPk(entry.messageId);
     if (!initial || initial.conversation_id !== thread.id || initial.direction !== 'inbound')
       throw Error('social_lead_message_scope');
     let decision = initial.metadata?.socialLead?.decision;
+    if (!decision && assistantNode && entry.type === 'dm' && assistantCommercialText(entry.text) &&
+        /(?:foto|imagen|cartel|creatividad)\s+(?:de (?:la |esta |esa |la oferta )?(?:promo(?:ción)?|oferta)|de\s+[a-z]{1,8}\d+-\d+)/i.test(entry.text)) {
+      decision = {kind:'interest',privateRequested:true};
+    }
     if (!decision) {
       decision = await classify(entry, {
         clinicId,
@@ -291,16 +268,18 @@ function create({
     });
     if (saved.reason === 'social_entry_disabled') return { reason: saved.reason };
     const output = { lead_id: saved.leadId || null, reason: saved.reason || saved.decision.kind };
+    if (assistantNode && (saved.reason || saved.decision.kind === 'opt_out' || (selected.rule.audience === 'leads' && thread.patient_id))) return output;
     if (saved.decision.kind === 'ignore') return output;
-    if (saved.reason || saved.decision.kind !== 'interest') return { ...output, attention: true };
+    if (!assistantNode && (saved.reason || saved.decision.kind !== 'interest')) return { ...output, attention: true };
     const active = await current();
     if (!active) return { ...output, reason: 'social_entry_disabled' };
-    if (active.rule.action === 'notify' || !saved.decision.privateRequested)
+    if (active.rule.action === 'notify' || (!saved.decision.privateRequested && !(assistantNode && entry.type === 'dm')))
       return { ...output, attention: true };
     async function blockReason(transaction) {
       if (!(await current(transaction))) return 'automation_inactive';
       const c = await db.Conversation.findByPk(thread.id, { transaction });
-      if (!c || c.clinic_id !== clinicId || !owned(entry, c) || c.lead_id !== saved.leadId)
+      if (!c || c.clinic_id !== clinicId || !owned(entry, c) || ((!assistantNode || saved.leadId) && c.lead_id !== saved.leadId) ||
+          (assistantNode && active.rule.audience === 'leads' && c.patient_id))
         return 'account_changed';
       if (
         c.patient_id &&
@@ -324,6 +303,18 @@ function create({
         return superseded.metadata?.socialContactOptOut || superseded.metadata?.socialLead?.decision?.kind === 'opt_out'
           ? 'marketing_opt_out'
           : 'newer_inbound';
+      if (assistantNode) {
+        const jsonText = path => db.sequelize.fn('COALESCE', db.sequelize.fn('JSON_UNQUOTE',
+          db.sequelize.fn('JSON_EXTRACT', db.sequelize.col('metadata'), db.sequelize.literal(db.sequelize.escape(path)))), '');
+        const otherReply = await db.Message.findOne({where:{
+          conversation_id:c.id, direction:'outbound', id:{[db.Sequelize.Op.gt]:entry.messageId},
+          status:{[db.Sequelize.Op.ne]:'failed'}, [db.Sequelize.Op.or]:[
+            db.sequelize.where(jsonText('$.execution_id'),{[db.Sequelize.Op.ne]:String(execution.id)}),
+            db.sequelize.where(jsonText('$.source'),{[db.Sequelize.Op.ne]:'automations_v2'}),
+          ],
+        }, attributes:['id'],transaction});
+        return otherReply ? 'already_replied' : null;
+      }
       const prior = await db.Message.findOne({
         where: {
           conversation_id: c.id,
@@ -336,6 +327,12 @@ function create({
         transaction,
       });
       return prior && prior.metadata?.socialAttempt !== saved.attemptId ? 'already_replied' : null;
+    }
+    if (assistantNode) {
+      const result = await require('./leadAssistantTurn.service').attend({
+        db, social, execution, entry, thread, saved, rule:active.rule, initial, blockReason, analyze:analyzeAssistant,
+      });
+      return { ...output, ...result };
     }
     const commentId = entry.type === 'comment' ? entry.messageId : null;
     const available = await social.availability(thread, commentId ? [initial] : []);
@@ -387,5 +384,5 @@ module.exports = {
   create,
   enqueue: (e) => service().enqueue(e),
   start: (e) => service().start(e),
-  run: (e) => service().run(e),
+  run: (e, assistantNode) => service().run(e, assistantNode),
 };

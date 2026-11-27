@@ -39,6 +39,18 @@ const checks = {
     attemptId: { type: 'string', pattern: '^[a-f0-9-]{36}$' },
   }),
 };
+const { promotionImageUrl } = require('./promotion-image-url');
+const checkTextSend = checks[send];
+const checkImageSend = schema({
+  ...scope, channel: { const: 'instagram' }, kind: { const: 'dm' }, recipient: id,
+  imageUrl: { type: 'string', maxLength: 2048 }, attemptId: { type: 'string', pattern: '^[a-f0-9-]{36}$' },
+});
+checks[send] = payload => {
+  if (!Object.hasOwn(payload || {}, 'imageUrl')) return checkTextSend(payload);
+  checkImageSend(payload);
+  if (promotionImageUrl(payload.imageUrl) !== payload.imageUrl) fail('invalid_request');
+  return payload;
+};
 const checkFullStatus = checks[status];
 const checkReplyPreparation = schema({ ...scope, channel: { const: 'instagram' }, prepareReply: { const: true } });
 checks[status] = payload => payload?.prepareReply === undefined ? checkFullStatus(payload) : checkReplyPreparation(payload);
@@ -423,7 +435,10 @@ async function executeSocial({
       asset.id + '/messages',
       page.access_token,
       {},
-      { recipient, message: { text: p.text, metadata: 'cc-social:' + p.attemptId } },
+      { recipient, message: {
+        ...(p.imageUrl ? { attachment: { type: 'image', payload: { url: p.imageUrl } } } : { text: p.text }),
+        metadata: 'cc-social:' + p.attemptId,
+      } },
     );
   } catch (error) {
     if (error.code === 'provider_unauthorized') return blocked(error.code);

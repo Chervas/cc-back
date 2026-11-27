@@ -34,7 +34,7 @@ function definitionComponents(raw) {
   return components;
 }
 function templateDigest(raw) { return createHash('sha256').update(canonical(definitionComponents(raw))).digest('hex'); }
-function validateMessage(message, { provider = false } = {}) {
+function validateMessage(message, { provider = false, assistantReply = false } = {}) {
   const byUser=typeof message?.recipient==='string' && /^[A-Z]{2}\.[A-Za-z0-9]{1,128}$/.test(message.recipient);
   const destination=byUser?'recipient':'to';
   requireValue(keys(message, ['messaging_product',destination,'type', message?.type], ['recipient_type']) && message.messaging_product === 'whatsapp'
@@ -42,7 +42,10 @@ function validateMessage(message, { provider = false } = {}) {
   if (message.type === 'text') requireValue(keys(message.text, ['body'], ['preview_url']) && text(message.text.body)
     && (!Object.hasOwn(message.text, 'preview_url') || typeof message.text.preview_url === 'boolean'));
   else if (message.type === 'image') {
-    if (provider) requireValue(keys(message.image, ['id'], ['caption']) && E.id(message.image.id)
+    if ((provider || assistantReply) && message.image?.link) {
+      requireValue(keys(message.image, ['link'], ['caption']) && require('./promotion-image-url').promotionImageUrl(message.image.link) === message.image.link
+        && (message.image.caption === undefined || typeof message.image.caption === 'string' && [...message.image.caption].length <= 1024));
+    } else if (provider) requireValue(keys(message.image, ['id'], ['caption']) && E.id(message.image.id)
       && (message.image.caption === undefined || typeof message.image.caption === 'string' && [...message.image.caption].length <= 1024));
     else require('./whatsapp-image').validate(message.image);
   } else if (message.type === 'interactive') {
@@ -76,9 +79,14 @@ function validateMessage(message, { provider = false } = {}) {
   requireValue(Buffer.byteLength(JSON.stringify(message)) <= (message.type === 'image' && !provider ? require('./whatsapp-image').MAX_REQUEST_BYTES - 16384 : 24576)); return message;
 }
 function validateSend(payload) {
-  requireValue(keys(payload, ['authorizationId','phoneId','message'], ['dispatchLane']) && E.uuid(payload.authorizationId) && E.id(payload.phoneId)
+  requireValue(keys(payload, ['authorizationId','phoneId','message'], ['dispatchLane','replyWindowEndsAt']) && E.uuid(payload.authorizationId) && E.id(payload.phoneId)
     && (!Object.hasOwn(payload, 'dispatchLane') || ['clinical', 'commercial'].includes(payload.dispatchLane)));
-  validateMessage(payload.message); return payload;
+  const assistantReply = Object.hasOwn(payload, 'replyWindowEndsAt');
+  if (assistantReply) requireValue(typeof payload.replyWindowEndsAt === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(payload.replyWindowEndsAt)
+    && Number.isFinite(Date.parse(payload.replyWindowEndsAt))
+    && (payload.message?.type === 'text' || (payload.message?.type === 'image' && !!payload.message.image?.link)));
+  validateMessage(payload.message, { assistantReply }); return payload;
 }
 function parameterCount(value) {
   const all = [...value.matchAll(/{{([1-9][0-9]*)}}/g)].map(m => Number(m[1])); const unique = [...new Set(all)].sort((a,b) => a-b);
