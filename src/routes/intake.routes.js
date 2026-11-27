@@ -28,6 +28,7 @@ router.get('/leads', intakeController.listLeads);
 router.get('/leads/stats', intakeController.getLeadStats);
 router.post('/leads/import/preview', intakeController.previewLeadImport);
 router.post('/leads/import/execute', intakeController.executeLeadImport);
+router.post('/leads/assistant-draft/:clinicId/approve', intakeController.leadAssistantDraft);
 router.route('/leads/assistant-draft/:clinicId')
   .get(intakeController.leadAssistantDraft)
   .put(intakeController.leadAssistantDraft);
