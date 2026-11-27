@@ -8,9 +8,11 @@ function configuredQuickChat() {
   catch { return []; }
 }
 
-function normalConsentScopes(scopes, clinicIds) {
-  const targets = configuredQuickChat().filter(account => clinicIds.includes(account.clinicId));
-  return SocialConsent.scopesFor(scopes, targets);
+// The authenticated owner chooses the channels in its single environment setting.
+// CRM independently constrains the returned consent URL to the known scope sets.
+function permittedConsentScopes(scopes, targets, scopeKey, clinicIds) {
+  const choices = SocialConsent.singleChannels(['messenger','instagram'], scopeKey, clinicIds);
+  return [[], ...choices.map(channel => [channel]), choices].map(channels => SocialConsent.scopesFor(scopes, targets, channels));
 }
 
-module.exports = { configuredQuickChat, normalConsentScopes };
+module.exports = { configuredQuickChat, permittedConsentScopes };

@@ -57,7 +57,9 @@ function validateResponse(operation, value, payload, binding) {
       || url.searchParams.get('state') !== payload.state || url.searchParams.get('client_id') !== C.bindingFor(binding).appId) fail('invalid_request');
     return value;
   }
-  if (!C.exact(value, 'renewalId,flowId,enrollmentId,status,grantDigest,assetSetDigest,effectiveCredential,candidate,activationApplied')
+  const announced = value && Object.hasOwn(value,'quickChatSubscriptionPages');
+  if (announced && (!value.activationApplied || !require('./meta-marketing-social-consent').validSubscriptionPages(value.quickChatSubscriptionPages,C.bindingFor(binding).scopeKey,C.bindingFor(binding).clinicIds))) fail('invalid_request');
+  if (!C.exact(value, 'renewalId,flowId,enrollmentId,status,grantDigest,assetSetDigest,effectiveCredential,candidate,activationApplied'+(announced?',quickChatSubscriptionPages':''))
     || value.renewalId !== payload.renewalId || value.flowId !== payload.renewalId || !STATES.includes(value.status)
     || typeof value.activationApplied !== 'boolean') fail('invalid_request');
   if (value.status === 'not_found') {
