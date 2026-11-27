@@ -58,9 +58,11 @@ function journal(store) {
     candidate_digest TEXT, metadata TEXT
   )`);
   const find = id => db.prepare('SELECT * FROM meta_marketing_social_consents WHERE renewal=?').get(id);
-  function active(enrollment, credential) {
+  function active(enrollment, credential, originalFlow) {
     const row = find(credential.versionId);
-    if (!row || row.enrollment !== enrollment || row.candidate_digest !== credential.digest || !row.metadata) return null;
+    if (!row || row.candidate_digest !== credential.digest || !row.metadata) return null;
+    const initial = originalFlow === credential.versionId && row.enrollment === 'initial:' + originalFlow;
+    if (!initial && row.enrollment !== enrollment) return null;
     return row;
   }
   return {
@@ -96,4 +98,17 @@ function inspect(raw, binding, original, accounts, now) {
   return { ...checked, granularScopes: checked.granularScopes.map(g => ({ ...g, targetIds: g.targetIds.filter(id => targets.has(id)) })) };
 }
 
-module.exports = { config, targetsFor, targetDigest, sameTarget, scopesFor, journal, inspect };
+// Marketing keeps the scopes pinned to its binding. For the normal Meta login,
+// record only the additional scope/asset evidence actually returned by Meta.
+function inspectInitial(raw, binding, accounts, now) {
+  const base = C.bindingFor(binding);
+  const granted = Array.isArray(raw?.data?.scopes) ? raw.data.scopes : [];
+  const scopes = scopesFor(base.scopes, accounts).filter(scope => base.scopes.includes(scope) || granted.includes(scope));
+  const proof = C.inspected(raw, { ...binding, metaMarketingOAuth: { ...base, scopes } }, now);
+  const ids = new Set(accounts.flatMap(account => [account.pageId, account.accountId]));
+  return { ...proof, granularScopes: proof.granularScopes.map(entry => ({
+    scope: entry.scope, targetIds: entry.targetIds.filter(id => ids.has(id)),
+  })) };
+}
+
+module.exports = { config, targetsFor, targetDigest, sameTarget, scopesFor, journal, inspect, inspectInitial };
