@@ -9,7 +9,7 @@ const C = require('../../services/metaMarketingCredentialRenewal.contract');
 const ORDER = require('../../services/metaMarketingTransactionOrder.service');
 const barrier = () => { let release; const promise = new Promise(done => { release = done; }); return { promise, release }; };
 
-function fixture({ quickChat = false } = {}) {
+function fixture({ quickChat = false, beforeRpc } = {}) {
   let clock = +new Date('2030-01-01T12:00:00Z'), enabled = true;
   const now = () => new Date(clock), HASH = 'a'.repeat(64), initialVersion = randomUUID(), enrollmentId = randomUUID();
   const scopes = ['ads_read', 'public_profile'];
@@ -74,13 +74,14 @@ function fixture({ quickChat = false } = {}) {
     return originalRequire(name);
   };
   loaded._compile(fs.readFileSync(source, 'utf8'), source);
-  const receipt = id => ({ renewalId: id, flowId: id, enrollmentId,
+  const receipt = id => ({ renewalId: id, flowId: id, enrollmentId: state.owner ? enrollmentId : null,
     status: state.owner?.status ?? 'not_found', grantDigest: state.owner ? 'b'.repeat(64) : null,
     assetSetDigest: state.owner ? C.F.assetSetDigest(selected) : null,
     effectiveCredential: state.owner ? { epoch: 0, versionId: initialVersion, digest: HASH, metadata } : null,
     candidate: null, activationApplied: false });
   const client = { execute: async command => {
     const name = C.U.validate(command.operation, command.payload); state.calls.push(name);
+    if(beforeRpc)await beforeRpc(name,state,command);
     if (name === 'begin') {
       state.owner = { status: 'awaiting' }; entered.release(); await resume.promise;
       const query = new URLSearchParams({ client_id: slot.app_id, redirect_uri: slot.redirect_uri,
@@ -149,4 +150,59 @@ test('explicit cancellation and closed admission can abort an in-flight begin wi
     f.resume.release(); const result = await pending;
     assert(result.error); assert.equal(f.state.row.state, 'cancelled'); f.assertOriginal();
   }
+});
+
+test('a refused begin reconciles a scoped, fresh not_found without issuing an abort', async () => {
+  const f=fixture({beforeRpc(name,state,command){
+    if(name==='begin')throw Object.assign(Error('busy'),{code:'oauth_flow_busy'});
+    assert.equal(name,'status');assert.equal(command.payload.renewalId,state.row.renewal_id);
+    assert.equal(command.tenantRef,'clinic:66');assert.equal(command.assetRef,'meta-enroll:group:29');
+    assert.equal(command.connectionRef,state.row.connection_ref);
+  }});
+  await assert.rejects(f.service.begin(f.input),{code:'meta_renewal_busy',httpStatus:409});
+  assert.equal(f.state.row.state,'cancel_pending');
+  const closed=await f.service.reconcileId(f.state.row.renewal_id);
+  assert.equal(closed.state,'cancelled');assert.equal(closed.pending_enrollment_id,null);
+  assert.equal(JSON.parse(closed.owner_receipt).status,'not_found');
+  assert.deepEqual(f.state.calls,['begin','status']);f.assertOriginal();
+});
+
+test('absence after an uncertain begin stays pending until the authorization window expires', async () => {
+  const f=fixture({beforeRpc(name){
+    if(name==='begin')throw Object.assign(Error('connection timeout'),{code:'broker_timeout'});
+    assert.equal(name,'status');
+  }});
+  await assert.rejects(f.service.begin(f.input),{code:'broker_timeout'});
+  const id=f.state.row.renewal_id;
+  assert.equal((await f.service.reconcileId(id)).state,'cancel_pending');
+  assert.notEqual(f.state.row.pending_enrollment_id,null);
+  assert.equal(+f.state.row.next_attempt_at,+f.state.row.expires_at);assert.equal((await f.service.run()).processed,0);
+  f.advance(600001);assert.equal((await f.service.reconcileId(id)).state,'cancelled');f.assertOriginal();
+});
+
+test('an interrupted owner keeps exclusion until its exact abort receipt is obtained', async () => {
+  let deny=true;
+  const f=fixture({beforeRpc(name,row,command){
+    if(name==='abort'){
+      assert.equal(command.requestId,row.row.abort_request_id);assert.equal(command.payload.renewalId,row.row.renewal_id);
+      if(deny)throw Object.assign(Error('permission denied'),{code:'scope_denied'});
+    }
+  }});
+  const request=f.service.begin(f.input);await f.entered.promise;f.resume.release();await request;
+  f.state.owner.status='interrupted';
+  const id=f.state.row.renewal_id;
+  await assert.rejects(f.service.reconcileId(id),{code:'scope_denied'});assert.equal(f.state.row.state,'awaiting');
+  assert.notEqual(f.state.row.pending_enrollment_id,null);
+  deny=false;const closed=await f.service.reconcileId(id);
+  assert.equal(closed.state,'rejected');assert.equal(closed.pending_enrollment_id,null);
+  assert.equal(JSON.parse(closed.owner_receipt).status,'aborted');
+  assert.deepEqual(f.state.calls,['begin','status','abort','status','abort']);f.assertOriginal();
+});
+
+test('an unexpected disappearance after an acknowledged begin fails closed', async () => {
+  const f=fixture(), request=f.service.begin(f.input);
+  await f.entered.promise;f.resume.release();await request;f.state.owner=null;
+  await assert.rejects(f.service.reconcileId(f.state.row.renewal_id),{code:'broker_response_invalid'});
+  assert.equal(f.state.row.state,'awaiting');assert.notEqual(f.state.row.pending_enrollment_id,null);
+  assert.deepEqual(f.state.calls,['begin','status']);f.assertOriginal();
 });
