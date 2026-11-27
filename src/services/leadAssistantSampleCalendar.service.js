@@ -1,11 +1,12 @@
 'use strict';
 
-const { localDateTimeToUtc } = require('../lib/availability-calendar');
+const { localDateTimeToUtc, resolveClinicTimezone } = require('../lib/availability-calendar');
 const { addDays } = require('../lib/personal-schedule-recurring');
 
-// A virtual diary, independent of the clinic's patients, staff and appointments.
+// Supply only free times. Both calendars use the same authorised services and professional selection.
 // Rechecking the same date/time produces the same receipt during confirmation.
-function sampleSlots({ calendar, now, timezone }) {
+function sampleSlots({ clinic, treatment, calendar, now, professionalId }) {
+  const timezone = resolveClinicTimezone(clinic);
   const slots = [];
   for (let day = 0; day < calendar.days && slots.length < 2; day++) {
     const date = addDays(calendar.date, day);
@@ -19,7 +20,7 @@ function sampleSlots({ calendar, now, timezone }) {
       const start = localDateTimeToUtc(date,time+':00',timezone);
       if (!start || +start <= +now) continue;
       const local = date+'T'+time+':00';
-      slots.push({start:start.toISOString(), local, receipt:'sample:'+local, doctorId:null});
+      slots.push({start:start.toISOString(), local, receipt:['sample',treatment.id,professionalId,local].join(':'), doctorId:professionalId ?? null});
       if (slots.length === 2) break;
     }
   }
