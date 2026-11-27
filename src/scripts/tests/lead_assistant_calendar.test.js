@@ -64,3 +64,13 @@ test('offers agenda times in spoken order and collects email and phone together'
   assert.deepEqual(readContact('Mi móvil es 600123453 y mi correo es prueba@example.org'),
     { name: null, phone: '+34600123453', email: 'prueba@example.org' });
 });
+
+test('appointment requests in ordinary Spanish, scoped status and informational questions stay distinct',()=>{
+ const {bookingRequest,asksSessionAppointment}=require('../../services/leadAssistantCalendar.service');
+ for(const text of ['jo qué pesada, sí dame cita','me ibas a dar cita','hola quería cita para algo para el cuello',
+   '¿Podéis darme hora para una primera valoración?']) assert(bookingRequest(text),text);
+ for(const text of ['¿Qué tal es la valoración?','No quiero reservar','¿Qué hace la radiofrecuencia?'])
+   assert(!bookingRequest(text),text);
+ assert(asksSessionAppointment('cuando has idcho que era mi cita?'));
+ assert(!asksSessionAppointment('Quiero cancelar mi cita'));
+});

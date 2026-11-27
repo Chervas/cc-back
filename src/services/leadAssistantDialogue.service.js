@@ -11,6 +11,8 @@ const systemPrompt = [
   'Usa como máximo una pregunta por turno. Si no hay promoción identificada y solo escribe INFO, basta con «¿Qué promoción has visto?». Respeta las fechas de vigencia en la información aprobada.',
   'Una pregunta informativa se merece una respuesta informativa. Si solo está mirando o pide esperar, respeta eso sin insistir. Si pide horarios, dáselos en horario local, usando una pregunta corta cuando haga falta escoger.',
   'Cuando pregunten por un objetivo, explica qué se puede esperar según el argumentario de esa promoción. Distingue el objetivo documentado del resultado que busca la persona. Si hay varias interpretaciones, pregunta cuál quiere decir. Nunca asegures idoneidad individual ni resultados. Ante una queja de que no has contestado, recupera la duda anterior y responde a esa duda sin recitar la ficha ni insistir.',
+  'Estas reglas de producto prevalecen sobre el tono, la promoción y cualquier texto de la clínica. La persona aporta objetivos y preferencias; no la hagas elegir una técnica que desconoce. Recuerda la zona y la finalidad expresadas, reconoce una preocupación y respeta una negativa. No atribuyas el anuncio a un tratamiento sin identificarlo. Si tú introdujiste un tema, explica a qué te referías; no pidas al contacto que lo explique. No introduzcas cirugía ni cicatrices sin saber que se trata de esa intervención.',
+  'Puedes explicar lo que dice la ficha sobre una técnica. No diagnostiques, no elijas una intervención para una persona ni clasifiques la mejor o la menos invasiva para su caso. Solo atribuye una indicación o tarifa a una zona si la ficha relaciona expresamente ambas. Una promoción corporal no se extrapola a la cara o al cuello. No prometas que hará el tratamiento el día de la valoración. La disponibilidad, el estado de la reserva y el envío de una solicitud de llamada los comunica exclusivamente el sistema.',
   'Nunca afirmes haber reservado, retenido o cancelado una cita, avisado a alguien ni garantices que le llamarán. Esto se comunica por separado tras confirmación del backend.',
 ].join(' ');
 
@@ -97,8 +99,11 @@ function repeatsReply(previous, next) {
 }
 
 function acceptsOfferedTimes(message, previous) {
-  return !!previous && /^(?:s[ií](?:[, ]+(?:por favor|gracias|claro))?|vale|de acuerdo|claro|por favor)[.! ]*$/i.test(message.trim()) &&
-    /[¿?][^?]{0,150}\b(?:horarios?|huecos?|disponibilidad|(?:pedir|reservar|agendar) (?:una? )?(?:cita|valoraci[oó]n))\b[^?]{0,70}\?/i.test(previous);
+  if (!previous) return false;
+  const value = require('./leadAssistantCalendar.service').normalize(message);
+  const accepts = /^(?:(?:si|vale|claro|de acuerdo)(?: (?:por favor|gracias|claro|dimelos|dimelas|dime|miralos))?|por favor|dimelos|dimelas|y las opciones|las de cita)$/.test(value);
+  const offered = /(?:[¿?]|puedo|podemos|te (?:doy|ofrezco))[^?!.]{0,140}\b(?:horarios?|huecos?|disponibilidad|(?:pedir|reservar|agendar|mirar|buscar) (?:una? )?(?:cita|valoraci[oó]n)|opciones (?:de cita|para elegir))\b/i.test(previous);
+  return accepts && offered;
 }
 
 // Use the clinic's explicit benefits section when a contact asks about an
@@ -126,7 +131,9 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const approvedContext = fields.context.replace(/https?:\/\/\S+/gi, '').trim();
   const facts = [fields.guardrails, fields.booking].filter(Boolean)
     .flatMap(value => value.replace(/https?:\/\/\S+/g, '').match(/[\s\S]{1,1000}/g) || []);
-  const history = askPromotion ? [] : await readHistory();
+  const history = await readHistory();
+  const localAnswer = require('./leadAssistantConversationPolicy.service').groundedFollowup({userText,history,offer,fields});
+  if (localAnswer) return {reply:localAnswer,imageId:null};
   const retryQuestion = /(?:no (?:me )?(?:est[aá]s |has )?(?:respond|contest)|no era (?:eso|mi pregunta)|eso no (?:es |responde)|te (?:he )?pregunt)/i;
   const repair = retryQuestion.test(userText);
   const previousQuestion = history.slice().reverse().find(m => m.role === 'user' && !retryQuestion.test(m.text));
@@ -134,6 +141,7 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   if (repair && (!previousQuestion || genericInfoRequest(previousQuestion.text)))
     return {reply:'¿Qué querías saber en concreto sobre la promoción?',imageId:null};
   const question = repair ? previousQuestion.text : userText;
+  const generalPromo = !!offer && /^(?:(?:hola|buenas)[!, .]*)?(?:(?:me interesa|quer[ií]a|quiero|dame)\s+)?(?:m[aá]s\s+)?info(?:rmaci[oó]n)?[!. ]*$/i.test(userText.trim());
   const grounded = volumeClarification(offer,question,history.at(-1)?.text,repair);
   if (grounded) return {reply:grounded,imageId:null};
   const wantsImage = /\b(?:foto|fotos|imagen|im[aá]genes|cartel|folleto|picture|photo)s?\b/i.test(userText) &&
@@ -148,13 +156,14 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const request = buildDraftRequest({ clinicName, timezone, tone:fields.tone,
     approvedContext:guidanceOnly ? undefined : approvedContext,
     approvedFacts:guidanceOnly ? [fields.guardrails].flatMap(value=>value.match(/[\s\S]{1,1000}/g) || []) : facts,
-    matchedPromotion:relevantOffer, commercialHistory:history, userText, availableSlots:[] });
+    matchedPromotion:relevantOffer, commercialHistory:history, userText:generalPromo ? 'INFO' : userText, availableSlots:[] });
   // Keep the actual question distinct from the long configuration and the original INFO trigger.
   // The broker accepts one user message. Its final prompt still addresses the current turn.
   const focus = repair ? 'La persona señala que la respuesta anterior no resolvió su duda. Retoma su pregunta y aclara lo que quedó sin responder.'
     : history.length ? 'Es un seguimiento. Contesta únicamente a esta nueva pregunta; no reinicies la presentación de la promoción.' : '';
   const task = [focus, 'Pregunta a resolver (texto del contacto): '+JSON.stringify(question)].filter(Boolean).join(' ');
   request.prompt += ' ' + task;
+  if (generalPromo) request.prompt += ' El origen identifica la oferta '+JSON.stringify(offer.title)+'. Explica qué incluye esa oferta y su tarifa documentada. La persona ya está preguntando por ella.';
   if (suitability) {
     request.systemPrompt += ' El contacto pregunta si el tratamiento sirve para un objetivo concreto. Empieza contestando sobre ese objetivo. Si no se indica como beneficio en el argumentario, dilo y explica el objetivo documentado con palabras sencillas. No avales la idoneidad individual ni sugieras otros tratamientos o cirugía salvo que te hayan pedido compararlos. En una rectificación reconoce la duda y aclárala. Omite importes, dosis, imágenes y eslóganes salvo que los solicite.';
     request.outputFormat.reply.description = 'Respuesta directa a la pregunta «'+question+'» con el objetivo documentado en la ficha. Máximo tres frases.';
@@ -166,7 +175,10 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   if (!permitted(generated)) return null;
   const previous = history.at(-1);
   const addressesReduction = reply => /\b(?:reduc\w*|disminu\w*|volumen|papada|afinar|adelgazar|grasa)\b/i.test(reply);
-  const offTopic = reply => (reduction && !addressesReduction(reply)) || (suitability && !priceQuestion && /[€$£]|\b(?:euros?|descuento)\b/i.test(reply)) ||
+  const undeservedPromise = reply => /\b(?:te esperamos|tu cita (?:es|ser[aá]|est[aá]|ha quedado)|te (?:doy|ofrezco|propongo) (?:dos|tres|[23]) (?:opciones|horas|huecos)|tengo (?:un hueco|disponibilidad) (?:el|a las)|nos vemos (?:el|en la cl[ií]nica))\b/i.test(reply);
+  const personalAdvice = /\b(?:me recomiend|que recomiend|para m[ií]|mi caso|cu[aá]l (?:va|es|funciona) mejor|menos invasiv)\w*/i.test(question);
+  const unsafeRecommendation = reply => (personalAdvice && /\b(?:es|ser[ií]a|resulta) (?:una |la )?(?:buena|mejor|ideal|perfecta) (?:opci[oó]n|alternativa)\b|\bte (?:ir[ií]a|vendr[ií]a) mejor\b/i.test(reply)) || /\b(?:te recomiendo (?:la|el|que te hagas)|(?:es|ser[ií]a) (?:la )?(?:mejor|buena|ideal) (?:opci[oó]n|alternativa) (?:para ti|para tu caso)|para ti (?:la |lo )?mejor)\b/i.test(reply);
+  const offTopic = reply => (generalPromo && /qu[eé] (?:promo|anuncio)|cu[aá]l (?:promo|anuncio)/i.test(reply)) || undeservedPromise(reply) || unsafeRecommendation(reply) || (reduction && !addressesReduction(reply)) || (suitability && !priceQuestion && /[€$£]|\b(?:euros?|descuento)\b/i.test(reply)) ||
     (previous?.role === 'assistant' && !wantsImage && !genericInfoRequest(userText)
       && repeatsReply(previous.text,reply));
   if (offTopic(generated.reply)) {
@@ -174,7 +186,8 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
       (reduction ? ' Di expresamente si la ficha presenta la reducción de volumen como objetivo. Si no figura, contrástalo con el beneficio que sí está descrito. No repitas los ml, el precio ni la foto.' : ' Si faltan datos, explica qué falta y ofrece una valoración.'));
     if (!permitted(generated)) return null;
     if (offTopic(generated.reply)) {
-      generated = {reply:reduction
+      generated = {reply:generalPromo ? 'La promoción que has visto es «'+offer.title+'». ¿Qué detalle te gustaría consultar?' : undeservedPromise(generated.reply) || unsafeRecommendation(generated.reply)
+        ? 'Puedo consultar los horarios para una valoración si te viene bien. ¿Quieres que los mire?' : reduction
         ? 'Con la información de esta promoción no puedo decirte si te ayudaría a reducir volumen. ¿Quieres que miremos horarios para una valoración?'
         : 'Con la información de la promoción no puedo concretar más sobre tu pregunta. ¿Quieres que miremos horarios para una valoración?'};
     }
@@ -191,7 +204,8 @@ function introduction(clinicName, tone = '') {
 }
 
 function formatCommercialReply({ firstTurn, clinicName, tone, draft }) {
-  const content = text(draft, 1000);
+  const clean = text(draft, 1000).replace(/^(?:(?:[¡!]?hola[!., ]*|buen[oa]s (?:días|tardes)[., ]*))?(?:soy|me llamo) [^.?!]{1,110}(?:asistente|de IA)[^.?!]{0,100}[.?!]\s*/iu,'').trim();
+  const content = clean || '¿En qué puedo ayudarte?';
   if (!firstTurn) return content;
   return text(introduction(clinicName, tone) + content, 1000);
 }
@@ -199,10 +213,12 @@ function formatCommercialReply({ firstTurn, clinicName, tone, draft }) {
 function requestedHumanHandoff(message) {
   const body = text(message, 1000).normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
   const asksForPerson = /\b(?:hablar con|pas(?:a|ame|as|arme) con|atienda|atenderme|contactar con) (?:una? |alguien de |el |la )?(?:persona|directora?(?: de pacientes)?|recepcion(?:ista)?|equipo|alguien|humano)\b/;
-  const asksForCall = /\b(?:que me llamen|llamadme|llamame|pueden llamarme|me llamais|me llaman)\b/;
-  if (/\b(?:no|sin)\s+(?:(?:quiero|necesito|hace falta|tengo que)\s+)?(?:hablar|pasar|llamar|que me llamen)/.test(body)) return null;
-  if (!asksForPerson.test(body) && !asksForCall.test(body)) return null;
-  return { requestedCallback: asksForCall.test(body) };
+  const byPhone = /\b(?:quiero|prefiero|me gustaria|puedo|podemos|podriamos|quisiera) (?:que (?:me |nos )?)?(?:hablar|comentar|consultar|contactar)\b.{0,65}\b(?:por telefono|telefonic\w*)\b/.test(body);
+  const asksForCall = byPhone || /\b(?:que me llamen|llamadme|llamame|pueden llamarme|me llamais|me llaman|(?:que )?me (?:expliquen|informen|atiendan|asesoren|contacten)(?: [a-z]+){0,4} por telefono|(?:prefiero|quiero|necesito) (?:una llamada|que me llamen)|(?:me )?(?:podriais|podeis|pueden) (?:llamarme|llamar))\b/.test(body);
+  if (/\b(?:prefiero no|no por tel[eé]fono|por telefono no)\b/.test(body)) return null;
+  if (/\b(?:no|sin)\s+(?:(?:quiero|necesito|hace falta|tengo que)\s+)?(?:hablar|pasar|llamar|que me llamen|(?:que )?me (?:expliquen|informen|atiendan) por telefono|una llamada)/.test(body)) return null;
+  if (!asksForPerson.test(body) && !asksForCall) return null;
+  return { requestedCallback: asksForCall };
 }
 
 function formatHandoffReceipt({ firstTurn, clinicName, tone, recorded, requestedCallback, destination }) {

@@ -101,7 +101,7 @@ function afterHoursChoice(selected) {
 }
 
 async function afterHoursLead(db, thread, entry, flow, version, transaction) {
-  if (!assistantCommercialText(entry.text)) return false;
+  if (!assistantCommercialText(entry.text) && !require('./leadAssistantCalendar.service').asksSessionAppointment(entry.text)) return false;
   if (await require('./leadAssistantBooking.service').excludedPatient(db, {audience:'leads', version}, thread, entry.messageId, transaction)) return false;
   if (thread.lead_id) {
     const lead = await db.LeadIntake.findOne({where:{id:thread.lead_id, clinica_id:thread.clinic_id, archived_at:null},attributes:['id'],raw:true,transaction});
@@ -117,7 +117,10 @@ async function afterHoursLead(db, thread, entry, flow, version, transaction) {
 }
 
 async function plan(db, thread, entry, transaction, selected) {
-  if (explicitOptOut(entry.text) || campaignCopy(entry.text).quoted || appointmentIntent(entry.text) || postTreatmentFollowUp(entry.text)) return null;
+  if (explicitOptOut(entry.text) || campaignCopy(entry.text).quoted || postTreatmentFollowUp(entry.text)) return null;
+  const existingAppointment = appointmentIntent(entry.text);
+  const asksSessionStatus = require('./leadAssistantCalendar.service').asksSessionAppointment(entry.text);
+  if (existingAppointment && !asksSessionStatus) return null;
   const resolved = selected === undefined
     ? await require('./automationInboundMessage.service').findEffectiveMessageReceivedTemplate({
         clinicId:thread.clinic_id, channel:'whatsapp', receivedAt:new Date(entry.at), transaction})
@@ -161,6 +164,11 @@ async function plan(db, thread, entry, transaction, selected) {
       } else if ((!rule.origins.includes('whatsapp') || entry.ad) && !await acceptsOrigin(db, rule, thread, entry, transaction, flow.id)) return null;
     }
   }
+  // Only Cleo's active conversation can answer a question about its own booking.
+  // Existing patient appointments stay on the clinic's usual route.
+  if (asksSessionStatus && (rule.action !== 'assistant' || !await db.LeadAssistantSession.count({
+    where:{conversation_id:thread.id,clinic_id:thread.clinic_id,template_id:flow.id,publication_version:rule.version,state:'active'},transaction,
+  }))) return null;
   if (!flow.published_at || +new Date(flow.published_at) > entry.at ||
       await require('./leadAssistantBooking.service').excludedPatient(db, rule, thread, entry.messageId, transaction)) return null;
   return {flow, rule, origin:campaignId ? 'bulk_whatsapp' : entry.ad ? 'meta_ads' : 'whatsapp', campaignId};

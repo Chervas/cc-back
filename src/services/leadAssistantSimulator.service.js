@@ -58,7 +58,7 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
     let exchange = [];
     const plan = await respondToLead({
       entry, fields, clinicName:s.clinicName, timezone:s.timezone, offer, firstTurn, post,
-      previousAnswer:s.history.at(-1)?.at(-1)?.text, analyze, clinicId:s.clinicId, groupId:s.groupId,
+      previousAnswer:changed ? null : s.lastReply, analyze, clinicId:s.clinicId, groupId:s.groupId,
       beforeDispatch:async () => { if (s.until <= now()) throw fail(410,'assistant_simulator_expired'); },
       checkWindow:async () => null,
       readHistory:async () => s.history.flat(),
@@ -66,14 +66,16 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
         exchange = [{role:'user',text:userText}, {role:'assistant',text:answer.reply}];
         return answer;
       },
-      book:bookingEntry => booking({
+      book:(bookingEntry,readHistory) => booking({
         db, thread:{clinic_id:s.clinicId,channel:s.channel,patient_id:null,
-          contact_id:s.channel === 'whatsapp' ? '+447700900123' : null}, entry:bookingEntry,
+          contact_id:s.channel === 'whatsapp' ? '+447700900123' : null}, entry:bookingEntry, readHistory,
         scope:{originMessageId:s.contextStartId,messageId:index,version:s.version,promotionKey:offer?.key},
         execution:{created_by:s.actorId}, fields, offer, preview:s,
         blockReason:async () => null, availability:async () => true,
       }),
     });
+    if (plan.kind === 'booking') exchange = require('./leadAssistantBooking.service').bookingHistory(s.booking);
+    s.lastReply = plan.kind === 'booking' ? plan.text : exchange.at(-1)?.text;
     s.history = [...s.history,exchange].slice(-6);
     if (plan.kind === 'silent') {
       if (plan.reason === 'opt_out') return { reply:'', event:'opt_out' };
@@ -117,7 +119,7 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
       // Commit only completed turns, so a failed model/availability call leaves the conversation retryable.
       const next = {...s,calendar,channel};
       const result = await respond(next, draft.fields, message.trim(), promotion, s.count+1);
-      Object.assign(s, {history:next.history,booking:next.booking,context:next.context,contextStartId:next.contextStartId,origin:promotion,calendar,channel,
+      Object.assign(s, {history:next.history,lastReply:next.lastReply,booking:next.booking,context:next.context,contextStartId:next.contextStartId,origin:promotion,calendar,channel,
         count:s.count+1,closed:result.event!=='reply',until:now()+ttl});
       s.receipts.set(id,{fingerprint,result});
       return result;

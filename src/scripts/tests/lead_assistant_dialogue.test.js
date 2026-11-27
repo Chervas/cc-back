@@ -99,3 +99,34 @@ test('the approved benefits answer a volume question and its repair without inve
   assert.notEqual(response.reply,repair.reply);assert(acceptsOfferedTimes('sí',repair.reply));
   assert.doesNotMatch(repair.reply,/260|cirug|hialur/i);
 });
+
+test('an unidentified advert, a treatment goal and a declined offer keep their meaning over several turns', async () => {
+  const {generateAnswer}=require('../../services/leadAssistantDialogue.service');
+  const history=[];
+  async function ask(userText) {
+    const answer=await generateAnswer({fields:{context:'Programa corporal de ejemplo para abdomen por 129 €.',tone:'Cercano',
+      guardrails:'Usa solo datos aprobados.',booking:'Valoración en consulta.'},clinicName:'Clínica ficticia',
+      readHistory:async()=>history,userText,analyze:()=>assert.fail('no commercial source for this claim')});
+    history.push({role:'user',text:userText},{role:'assistant',text:answer.reply});return answer.reply;
+  }
+  assert.match(await ask('hola, info'),/promoción has visto/);
+  assert.match(await ask('la del anuncio'),/qué zona/);
+  const goal=await ask('Quiero reducir la papada');assert.match(goal,/papada/);
+  const alternatives=await ask('Sí, tenéis otra cosa?');assert.match(alternatives,/papada/);
+  const compare=await ask('¿Cuál va mejor y es menos invasiva?');assert.match(compare,/comparativa/);
+  assert.notEqual(compare,alternatives);assert.doesNotMatch(await ask('¿Y cuánto vale para esa zona?'),/129|€/);
+  assert.doesNotMatch(await ask('no mejor no, me acabas de aterrar'),/\?|valoración|cita/);
+});
+
+test('callback consent, greeting and acceptance of real scheduling work independently of clinic tone', () => {
+  const {requestedHumanHandoff,formatCommercialReply,acceptsOfferedTimes}=require('../../services/leadAssistantDialogue.service');
+  for (const text of ['Para que me expliquen por teléfono','¿Puedo comentar las opciones con alguien por teléfono?','Prefiero hablar por teléfono'])
+    assert.deepEqual(requestedHumanHandoff(text),{requestedCallback:true});
+  for (const text of ['¿La consulta es por teléfono?','No quiero que me llamen','Prefiero no hablar por teléfono'])
+    assert.equal(requestedHumanHandoff(text),null);
+  const hello=formatCommercialReply({firstTurn:true,clinicName:'Clínica ficticia',tone:'Identifícate como «Cleo».',
+    draft:'Hola, soy Cleo, tu asistente de Clínica ficticia. ¿En qué puedo ayudarte?'});
+  assert.equal((hello.match(/soy Cleo/g)||[]).length,1);
+  assert(acceptsOfferedTimes('vale dímelos','¿Quieres que mire horarios?'));
+  assert(!acceptsOfferedTimes('sí','¿Lo que te preocupa es el volumen?'));
+});
