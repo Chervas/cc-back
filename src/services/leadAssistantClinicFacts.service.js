@@ -44,7 +44,7 @@ function switchesPricedService(question, previousTitle) {
   return significant.length > 0 && !significant.some(word=>mentions(previousTitle,word));
 }
 
-const mentions = (text, term) => (' ' + normalize(text) + ' ').includes(' ' + normalize(term) + ' ');
+const mentions = (text, term) => (' ' + normalize(text).replace(/:/g,' ') + ' ').includes(' ' + normalize(term).replace(/:/g,' ') + ' ');
 const label = {
   hours: /^(?:horarios?(?: de (?:la )?(?:clinica|sede|recepcion|apertura|atencion))?|apertura)$/,
   address: /^(?:direccion(?: de (?:la )?(?:sede|clinica))?|ubicacion)$/,
@@ -91,17 +91,26 @@ function regularPriceLines(fields, offer, question, history) {
     const last = history.filter(m=>m.role === 'user').at(-1);
     if (last) subjects.push(normalize(last.text));
   }
-  const stop = /^(?:para|tiene|cual|cuesta|cuanto|precio|cuestan|tarifa|habitual|normal|oferta|promocion|fuera|clinica|sede|tratamiento|cuello|rostro)$/;
+  const target = namedTariff(question);
+  const stop = /^(?:para|tiene|cual|cuesta|cuanto|precio|cuestan|tarifa|habitual|normal|oferta|promocion|fuera|clinica|sede|tratamiento)$/;
   const relevantWords = subjects.flatMap(text=>text.split(' ').filter(w=>w.length >= 4 && !stop.test(w)));
-  for (const section of [fields.booking, offer?.description, fields.context].filter(Boolean)) {
+  const sections = [offer?.description, fields.booking, fields.context].filter(Boolean);
+  for (const section of sections) {
     const lines = section.split('\n').filter(line=>{
-    const normalized = normalize(line);
-    return currency.test(line) && regular.test(normalized) && !/\b(?:antes|ahorro)\b/.test(normalized) &&
-      relevantWords.some(word=>mentions(normalized,word));
+      const text = normalize(line);
+      if (!currency.test(line) || !regular.test(text) || /\b(?:antes|ahorro)\b/.test(text)) return false;
+      if (section === offer?.description && (!target || !switchesPricedService(question,offer.title))) return true;
+      return target ? mentions(text,target) : relevantWords.some(word=>mentions(text,word));
     });
     if (lines.length) return lines;
   }
   return [];
+}
+
+function labelledRegularPrice(lines,question) {
+  if (lines.length !== 1) return null;
+  const match = lines[0].replace(/\*\*/g,'').trim().match(/^(?:[-*]\s*)?(?:precio|tarifa) (?:habitual|normal|ordinari[oa]) (?:de |del )(.{2,100}?):\s*((?:desde\s+)?\d+(?:[.,]\d{1,2})?\s*(?:€|euros?)(?: (?:por (?:sesi[oó]n|zona|unidad)|en total))?)\.?$/iu);
+  return match && mentions(question,match[1]) ? 'El precio habitual de «'+match[1]+'» es '+match[2]+'.' : null;
 }
 
 function formatHours(hours, question) {
@@ -169,4 +178,4 @@ async function read(db, clinicId, kind, question, history, fields, offer) {
   return null;
 }
 
-module.exports = {intent, regular, namedTariff, switchesPricedService, regularPriceLines, writtenAnswer, relevantManual, read};
+module.exports = {intent, regular, namedTariff, switchesPricedService, regularPriceLines, labelledRegularPrice, writtenAnswer, relevantManual, read};
