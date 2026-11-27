@@ -55,7 +55,10 @@ test('HTTP strips client booking snapshots even with gates off or historical reg
 test('HTTP forwards force only to the authoritative transaction and uses its safe error payload', () => {
   assert.match(controller, /force: parseBool\(force\)/);
   assert.match(controller, /force: wantsForce/);
-  assert.match(controller, /json\(bookingErrorPayload\(err\)\)/);
+  // When the booking requires an incident acknowledgement the HTTP response carries
+  // that published reason beside the same filtered conflict fields.
+  assert.match(controller, /const bookingIncident = err\?\.bookingIncident \? \{ booking_incident: err\.bookingIncident \} : \{\};/);
+  assert.match(controller, /json\(\{ \.\.\.bookingErrorPayload\(err\), \.\.\.bookingIncident \}\)/);
 });
 test('HTTP has no adapter for operator-only documentary machinery assignment', () => {
   assert.doesNotMatch(controller, /importEquipmentAssignment|importedEquipmentProfile/);

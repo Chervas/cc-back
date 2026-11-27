@@ -37,7 +37,7 @@ test('patient direction paused or mismatched binding stops before Message creati
     assert.equal(result.queued || result.sent || false, false); assert.equal(f.calls.queue.length, 0); assert.equal(f.calls.messages.length, 0);
   }
 });
-function conversationFixture(clinicConfig, { access = true } = {}) {
+function conversationFixture(clinicConfig, { access = true, unwanted = false } = {}) {
   const calls = { queue: [], messages: [], saves: 0, commits: 0, rollbacks: 0 };
   const conversation = { id: 71, clinic_id: 123, channel: 'whatsapp', contact_id: '34000000123', save: async () => { calls.saves++; } };
   const msg = { id: 77, conversation_id: 71, direction: 'outbound', message_type: 'text', status: 'pending', content: 'Synthetic QA',
@@ -50,15 +50,19 @@ function conversationFixture(clinicConfig, { access = true } = {}) {
     findCanonicalWhatsappConversation: async () => null,
     getUserClinics: async () => ({ clinicIds: [123], isAggregateAllowed: false }), ensureAccess: () => access,
     ensureQuickChatConversationReadAccess: async () => {}, getIO: () => null,
-    require: name => { if (name === '../services/temporaryPatientDirection.service') return { observeConversation: async () => {} }; throw new Error('Unexpected module: ' + name); },
+    require: name => {
+      if (name === '../lib/whatsapp-contact-identity') return require('../../lib/whatsapp-contact-identity');
+      if (name === '../services/patientIncidents.service') return { unwantedRecipient: async () => unwanted };
+      if (name === '../services/temporaryPatientDirection.service') return { observeConversation: async () => {} }; throw new Error('Unexpected module: ' + name); },
     whatsappService: { getClinicConfig: async () => clinicConfig, normalizePhoneNumber: value => value, assertRecipientCanReceive: async () => {},
       checkOutboundLimit: async () => ({ limitReached: false, limitedMode: false }) },
     patientDirectionService: { resolveOutboundPolicy: async () => ({ clinicConfig, requiresTakeConfirmation: false }) },
-    resolveWhatsappServiceWindow: async () => ({ open: true }),
+    resolveWhatsappReplySender: async ({ clinicConfig }) => ({ clinicConfig, serviceWindow: { open: true } }),
     queues: { outboundWhatsApp: { add: async (...args) => { calls.queue.push(args); } } },
     markBufferedResponseExecutionsForHumanReply: async () => {}, resolveAutomationAttentionForConversation: async () => ({ updated: 0 }),
     completeAutomationStateAfterHumanReplyForConversation: async () => ({ completed: false }), process: { env: {} } };
   const whole = source('../../controllers/conversation.controller.js');
+  vm.runInNewContext(whole.slice(whole.indexOf('async function resolveConversationWhatsappRoute('), whole.indexOf('async function enrichConversationUnreadForUser(')), context);
   // Execute the actual complete public handlers with synthetic collaborators.
   vm.runInNewContext(whole.slice(whole.indexOf('exports.postMessage ='), whole.indexOf('exports.createInternalMessage =')), context);
   const req = { userData: { userId: 1 }, params: { id: '71', messageId: '77' }, body: { message: 'Synthetic QA' } };
@@ -79,6 +83,13 @@ test('QuickChat pause and forged sender stop before mutation, commit or queue', 
     assert.equal(f.res.statusCode, 500); assert.equal(f.res.body.error, 'whatsapp_config_missing');
     assert.equal(f.calls.queue.length, 0); assert.equal(f.calls.messages.length, 0); assert.equal(f.calls.commits, 0); assert.equal(f.calls.saves, 0);
   }
+});
+test('QuickChat checks existing commercial restrictions before queuing a reply', async () => {
+  const f = conversationFixture(config(), { unwanted: true });
+  await f.controller.postMessage(f.req, f.res);
+  assert.equal(f.res.statusCode, 409);
+  assert.equal(f.calls.messages.length, 0);
+  assert.equal(f.calls.queue.length, 0);
 });
 test('QuickChat clinic access control still precedes routing and send', async () => {
   for (const method of ['postMessage', 'sendScheduledMessageNow']) {

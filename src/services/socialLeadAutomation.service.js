@@ -178,6 +178,12 @@ function create({
     if (!initial || initial.conversation_id !== thread.id || initial.direction !== 'inbound')
       throw Error('social_lead_message_scope');
     let decision = initial.metadata?.socialLead?.decision;
+    if (!decision && assistantNode && entry.type==='dm') {
+      const calendar=require('./leadAssistantCalendar.service');
+      if ((assistantCommercialText(entry.text) && calendar.bookingRequest(entry.text)) ||
+        (await db.LeadAssistantSession.count({where:{conversation_id:thread.id,state:'active',template_id:execution.template_version_id}}) &&
+          !explicitOptOut(entry.text))) decision={kind:'interest',privateRequested:true};
+    }
     if (!decision && assistantNode && entry.type === 'dm' && assistantCommercialText(entry.text) &&
         /(?:foto|imagen|cartel|creatividad)\s+(?:de (?:la |esta |esa |la oferta )?(?:promo(?:ción)?|oferta)|de\s+[a-z]{1,8}\d+-\d+)/i.test(entry.text)) {
       decision = {kind:'interest',privateRequested:true};
@@ -268,7 +274,7 @@ function create({
     });
     if (saved.reason === 'social_entry_disabled') return { reason: saved.reason };
     const output = { lead_id: saved.leadId || null, reason: saved.reason || saved.decision.kind };
-    if (assistantNode && (saved.reason || saved.decision.kind === 'opt_out' || (selected.rule.audience === 'leads' && thread.patient_id))) return output;
+    if (assistantNode && (saved.reason || saved.decision.kind === 'opt_out' || (await require('./leadAssistantBooking.service').excludedPatient(db,selected.rule,thread,entry.messageId)))) return output;
     if (saved.decision.kind === 'ignore') return output;
     if (!assistantNode && (saved.reason || saved.decision.kind !== 'interest')) return { ...output, attention: true };
     const active = await current();
@@ -279,7 +285,7 @@ function create({
       if (!(await current(transaction))) return 'automation_inactive';
       const c = await db.Conversation.findByPk(thread.id, { transaction });
       if (!c || c.clinic_id !== clinicId || !owned(entry, c) || ((!assistantNode || saved.leadId) && c.lead_id !== saved.leadId) ||
-          (assistantNode && active.rule.audience === 'leads' && c.patient_id))
+          (assistantNode && await require('./leadAssistantBooking.service').excludedPatient(db,active.rule,c,entry.messageId,transaction)))
         return 'account_changed';
       if (
         c.patient_id &&

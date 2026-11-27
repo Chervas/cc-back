@@ -605,6 +605,7 @@ const JOB_HANDLERS = {
   appointment_visit_dispatch: async (payload = {}, job, claim) => require('./appointmentVisitManaged.service').current().runDispatch(payload, job, claim),
   automation_whatsapp_quiet_send: async (payload = {}) => flowEngineV2Service.runScheduledWhatsappSendJob(payload),
   whatsapp_authorized_dispatch_retry: async (payload, job, claim) => require('./whatsappDispatchWait.service').run(payload, job, claim),
+  lead_assistant_appointment_created: async payload => require('./leadAssistantAppointmentEvents.service').dispatch(require('../../models'), payload),
   appointment_same_day_catchup: async payload => require('./appointmentSameDayCatchup.service').run(payload),
   whatsapp_manual_template_resend: async (payload = {}) => require('./whatsappTemplateResend.service').dispatch(payload),
   appointment_manual_notice: async payload => require('./appointmentManualNotice.service').current().dispatch(payload),

@@ -48,14 +48,17 @@ async function follower(db, id, transaction) {
   if (!link) throw new Error('patient_link_owner_missing');
   return Number(link.owner_appointment_id) !== Number(id);
 }
-async function choiceRequired(db, values, clinic, choice, transaction) {
+async function choiceRequired(db, values, clinic, choice, transaction, {summaryOnly=false}={}) {
   if (!values.paciente_id || hasAttendedAppointment(values)) return;
   const zone = resolveClinicTimezone(clinic), day = formatDateLocal(new Date(values.inicio), zone);
   const rows = await db.CitaPaciente.findAll({ where: { clinica_id: values.clinica_id, paciente_id: values.paciente_id,
     inicio: { [db.Sequelize.Op.between]: [new Date(+new Date(values.inicio) - 86400000), new Date(+new Date(values.inicio) + 86400000)] } },
-    transaction, include: [{ model: db.Tratamiento, as: 'tratamiento', required: false, attributes: ['nombre'] }] });
+    transaction, ...(summaryOnly ? {attributes:['id_cita','estado','inicio']} : {
+      include:[{model:db.Tratamiento,as:'tratamiento',required:false,attributes:['nombre']}]
+    }) });
   const matches = rows.filter(row => !closed(row) && !hasAttendedAppointment(row) && formatDateLocal(new Date(row.inicio), zone) === day);
   if (!matches.length || choice?.mode === 'separate' || choice?.mode === 'link') return;
+  if(summaryOnly) fail('appointment_same_day_choice_required','El equipo debe revisar la coincidencia de agenda.');
   const canLinkNew = !combinada(values) && !values.voucher_id && !values.patient_link_combined;
   fail('appointment_same_day_choice_required', 'Este paciente ya tiene una cita hoy. ¿Quieres enviarle también aviso de esta cita o vincularla a la primera?', {
     appointments: matches.map(row => ({ id: row.id_cita, start_at: row.inicio, end_at: row.fin,

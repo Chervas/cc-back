@@ -2,13 +2,13 @@
 
 const { randomUUID } = require('node:crypto');
 const dialogue = require('./leadAssistantDialogue.service');
-const { catalog, offerSections } = require('./leadAssistantPromotionImages.service');
+const { catalog, offerSections, isOfferActive } = require('./leadAssistantPromotionImages.service');
 const { assistantCommercialText } = require('./socialLeadInterestClassification.service');
 const { handoff } = require('./leadAssistantHandoff.service');
 
-function commercialOffer(fields, entry, priorKey) {
-  const images = catalog(fields.promotions);
+function commercialOffer(fields, entry, priorKey, options) {
   const sections = offerSections(fields.promotions);
+  const images = catalog(fields.promotions, options, sections);
   const explicit = String(entry.text || '').toUpperCase();
   const origin = [entry.post?.caption, entry.ad?.title, entry.postId].filter(Boolean).join(' ').toUpperCase();
   const matched = (text) =>
@@ -60,19 +60,17 @@ function commercialOffer(fields, entry, priorKey) {
       .map(([code]) => code);
   }
   const key = matches.length === 1 ? matches[0] : !matches.length && sections.has(priorKey) ? priorKey : null;
-  if (!key) return null;
-  const body = sections
-    .get(key)
-    .lines.filter((line) => !line.includes('://'))
-    .join(' ')
-    .trim();
-  if (!body || /en revisi[oó]n|no aprobad[ao]|pendiente de aproba|caducad[ao]|retirad[ao]/i.test(body))
-    return null;
+  if (!key || !isOfferActive(sections.get(key), options)) return null;
+  const stripLinks = (line) =>
+    line.replace(/!?\[([^\]\n]*)\]\(https?:\/\/[^\s()]+\)/gi, '$1').replace(/https?:\/\/\S+/gi, '');
+  const section = sections.get(key);
+  const body = [section.preamble, ...section.lines].filter(Boolean).map(stripLinks).join('\n').trim();
+  if (!body) return null;
   return {
     key,
     title: sections.get(key).title.split(/[.\n]/)[0].slice(0, 180),
-    description: body.slice(0, 1200),
-    images: images.get(key) || [],
+    description: body,
+    images: (images.get(key) || []).slice(0, 24),
   };
 }
 
@@ -87,6 +85,7 @@ async function attend({
   initial,
   blockReason,
   analyze,
+  bookingOptions,
   recordHandoff = (scope) => handoff(db, scope),
 }) {
   const scope = {
@@ -97,14 +96,18 @@ async function attend({
     version: rule.version,
   };
   const stopped = (reason) => ({ reason, attention: false });
-  if (rule.audience === 'leads' && thread.patient_id) return stopped('assistant_audience_excluded');
+  const { excludedPatient } = require('./leadAssistantBooking.service');
+  if (await excludedPatient(db, rule, thread, entry.messageId)) return stopped('assistant_audience_excluded');
   const publication = await db.LeadAssistantPublication.findOne({
     where: { clinic_id: scope.clinicId, version: scope.version },
     attributes: ['fields'],
     raw: true,
   });
   if (!publication) return stopped('assistant_version_unavailable');
-  const clinic = await db.Clinica.findByPk(scope.clinicId, { attributes: ['nombre_clinica'], raw: true });
+  const clinic = await db.Clinica.findByPk(scope.clinicId, {
+    attributes: ['nombre_clinica', 'configuracion'],
+    raw: true,
+  });
   const invalid = await blockReason();
   if (invalid) return stopped(invalid);
   const lockTurn = await db.sequelize.transaction(async (transaction) => {
@@ -116,7 +119,7 @@ async function attend({
       c.contact_id !== entry.senderId ||
       (entry.channel !== 'whatsapp' && c.social_account_id !== entry.accountId) ||
       c.channel !== entry.channel ||
-      (rule.audience === 'leads' && c.patient_id) ||
+      (await excludedPatient(db, rule, c, entry.messageId, transaction)) ||
       (await blockReason(transaction))
     )
       return null;
@@ -194,10 +197,12 @@ async function attend({
       order: [['id', 'DESC']],
       transaction,
     });
+    const timezone = require('../lib/availability-calendar').resolveClinicTimezone(clinic);
     const offer = commercialOffer(
       publication.fields,
       entry,
-      previous?.metadata?.leadAssistantTurn?.promotionKey
+      previous?.metadata?.leadAssistantTurn?.promotionKey,
+      { timezone }
     );
     let turn = message.metadata.leadAssistantTurn;
     if (!turn) {
@@ -206,6 +211,7 @@ async function attend({
         publicationVersion: scope.version,
         executionId: execution.id,
         promotionKey: offer?.key || null,
+        timezone,
         imageAttemptId: randomUUID(),
         firstTurn: session.origin_message_id === message.id,
       };
@@ -219,15 +225,68 @@ async function attend({
   const raw = String(entry.text || '').trim();
   const human = raw.length <= 1000 && raw ? dialogue.requestedHumanHandoff(raw) : null;
   const userText = assistantCommercialText(raw);
-  if (!userText || human || saved.decision.kind === 'review') {
+  let appointment;
+  if (entry.type === 'dm' && !human) {
+    const previousResult = initial.metadata?.assistantBooking;
+    if (previousResult?.executionId === execution.id) appointment = { reply: previousResult.reply };
+    else {
+      try {
+        appointment = await require('./leadAssistantBooking.service').processTurn({
+          db,
+          thread,
+          entry,
+          scope: {
+            ...scope,
+            audience: rule.audience,
+            originMessageId: lockTurn.originMessageId,
+            promotionKey: offer?.key,
+          },
+          execution,
+          fields: publication.fields,
+          offer,
+          blockReason: stillOwnsTurn,
+          availability: async () => !!(await social.availability(thread, [])).dm?.available,
+          ...bookingOptions,
+        });
+      } catch (error) {
+        if (
+          !(
+            [400, 404, 409, 422].includes(error.status || error.statusCode) &&
+            /^(?:booking_|treatment_|appointment_)/.test(error.code || '')
+          )
+        )
+          throw error;
+        appointment = { review: true };
+      }
+    }
+    if (appointment?.stop) return stopped(appointment.stop);
+    if (appointment?.reply) {
+      const text = dialogue.formatCommercialReply({
+        firstTurn: turn.firstTurn,
+        clinicName: clinic.nombre_clinica,
+        draft: appointment.reply,
+      });
+      const result = await social.reply(
+        thread,
+        { actorId: execution.created_by, attemptId: saved.attemptId, text, commentMessageId: null },
+        { executionId: execution.id, blockReason: stillOwnsTurn }
+      );
+      return {
+        outcome: result.outcome,
+        reason: result.reason || 'assistant_booking',
+        attention: result.outcome !== 'sent',
+      };
+    }
+  }
+  if (appointment?.review || !userText || human || saved.decision.kind === 'review') {
     const destination = await recordHandoff(scope);
-    if (destination.recorded && human) {
+    if (destination.recorded && (human || appointment?.review)) {
       const text = dialogue.formatHandoffReceipt({
         firstTurn: turn.firstTurn,
         clinicName: clinic.nombre_clinica,
         recorded: true,
         destination: destination.destination,
-        requestedCallback: human.requestedCallback,
+        requestedCallback: !!human?.requestedCallback,
       });
       await social.reply(
         thread,

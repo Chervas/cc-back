@@ -22,6 +22,9 @@ function offerSections(value) {
   const sections = new Map();
   const lines = String(value || '').split(/\r?\n/);
   let key;
+  const preamble = [];
+  let headingLevel = 0;
+  let introduction;
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index].trim();
     const code = line.match(promoCode);
@@ -32,19 +35,61 @@ function offerSections(value) {
       !line.includes('://') &&
       (!index || !lines[index - 1].trim()) &&
       /^\s*(?:imagen|image|imatge|foto|photo|creatividad|cartel)\s*:/i.test(lines[index + 1] || '');
-    if (code || heading || plainTitle) {
+    if (!key && /^#{1,6}\s+(?:promociones(?: activas)?|promotions|promocions(?: actives)?)\s*$/i.test(line)) continue;
+    const level = line.match(/^\s*(#{1,6})\s/)?.[1].length || 0;
+    const sectionHeading = heading && (!level || !key || level <= headingLevel);
+    if (code || sectionHeading || plainTitle) {
+      headingLevel = level || 1;
       const title = code ? line.slice(code[0].length).replace(/^[\s·:–—*-]+/, '') : heading?.[1] || line;
       key = code ? code[1].toUpperCase() : slug(title).slice(0, 96);
-      if (key && !sections.has(key)) sections.set(key, { title: title || key, lines: [] });
+      if (key && !sections.has(key)) {
+        introduction ??= preamble.join('\n');
+        sections.set(key, { title: title || key, preamble: introduction, lines: [] });
+      }
     }
     if (key && line) sections.get(key).lines.push(line);
+    else if (!key && line) preamble.push(line);
   }
   return sections;
 }
 
-function catalog(text) {
+function isOfferActive(section, { now = new Date(), timezone = 'Europe/Madrid' } = {}) {
+  const text = [section.preamble || '', ...section.lines].join('\n');
+  if (
+    /\b(?:en revisi[oó]n|pendiente de aproba(?:ci[oó]n|r)|no aprobad[ao]|retirad[ao]|caducad[ao]|sin vigencia|under review|not approved)\b/i.test(
+      text
+    )
+  )
+    return false;
+  if (!/^\s*(?:vigencia|vigència|validity)\s*:/im.test(text)) return true;
+  const today = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+  for (const line of text.split('\n')) {
+    const validity = line.match(/^\s*(?:vigencia|vigència|validity)\s*:\s*(.+)$/i);
+    if (!validity) continue;
+    const period = validity[1].match(
+      /^(\d{4}-\d{2}-\d{2})\s+(?:a|al|hasta|to|–|—|-)\s+(\d{4}-\d{2}-\d{2})\s*\.?$/i
+    );
+    if (
+      !period ||
+      !period.slice(1).every((date) => {
+        const ms = Date.parse(date + 'T12:00:00Z');
+        return Number.isFinite(ms) && new Date(ms).toISOString().startsWith(date);
+      }) ||
+      today < period[1] ||
+      today > period[2]
+    )
+      return false;
+  }
+  return true;
+}
+
+function catalog(text, options, sections = offerSections(text)) {
   const result = new Map();
-  const held = new Set();
   const add = (key, raw, label) => {
     const url = promotionImageUrl(raw);
     if (!key || !url) return;
@@ -54,14 +99,9 @@ function catalog(text) {
       images.push({ id, url, label: (label || 'Imagen de ' + key).trim().slice(0, 160) });
     result.set(key, images);
   };
-  for (const [key, section] of offerSections(text)) {
+  for (const [key, section] of sections) {
+    if (!isOfferActive(section, options)) continue;
     for (const line of section.lines) {
-      if (
-        /\b(?:en revisi[oó]n|pendiente de aproba(?:ci[oó]n|r)|no aprobada?|retirada|caducada|sin vigencia|under review|not approved)\b/i.test(
-          line
-        )
-      )
-        held.add(key);
       const markdown = /(!?)\[([^\]\n]*)\]\((https:\/\/[^\s<>()]+)\)/gi;
       let match;
       while ((match = markdown.exec(line))) {
@@ -78,7 +118,6 @@ function catalog(text) {
       }
     }
   }
-  for (const heldKey of held) result.delete(heldKey);
   return result;
 }
 
@@ -130,8 +169,8 @@ async function resolveForTurn(db, thread, scope, transaction) {
     transaction,
     raw: true,
   });
-  const images = catalog(publication?.fields?.promotions).get(scope.key) || [];
+  const images = catalog(publication?.fields?.promotions, { timezone: turn.timezone }).get(scope.key) || [];
   return images.find((image) => image.id === scope.id) || null;
 }
 
-module.exports = { offerSections, catalog, resolveForTurn };
+module.exports = { offerSections, catalog, isOfferActive, resolveForTurn };

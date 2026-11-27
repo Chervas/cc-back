@@ -45,7 +45,7 @@ const { bookingSegments } = require('../lib/appointment-booking-segments');
 const { attachAppointmentProgramContexts } = require('../services/appointmentProgramRead.service');
 const { appointmentImportReview } = require('../lib/appointment-import-review');
 const { CITA_STATUS_VALUES } = require('../lib/status-catalog');
-const { getIO } = require('../services/socket.service');
+const emitAppointmentSocketEvent = (...args) => require('../services/appointmentCreatedEvents.service').emitAppointmentSocketEvent(...args);
 const { normalizePhoneDigits, getPhoneLookupCandidates } = require('../lib/phone');
 const { normalizeHumanName } = require('../lib/name');
 const { normalizeAppointmentClinicId, withAppointmentPatientIdentity } = require('../lib/appointment-patient-identity');
@@ -484,30 +484,12 @@ async function actorCanReadPatientSensitive(req, paciente) {
 }
 
 async function ensureConsentPackageAndAutomation(cita, req, triggerSource = 'appointment') {
-    if (!cita?.id_cita) return null;
     try {
-        const result = await consentimientosService.ensurePackageForAppointment(cita.id_cita, {
-            createdBy: req.userData?.userId || null,
-            triggerSource,
-        });
-        const packagePlain = result?.package?.toJSON ? result.package.toJSON() : result?.package;
-        if (packagePlain?.id) {
-            await appointmentAutomationV2Runtime.enqueueExecutionForCita(cita, {
-                event_name: 'consent_required',
-                window_identifier: `consent:${packagePlain.public_id || packagePlain.id}`,
-                trigger_data: {
-                    consent_package_id: packagePlain.id,
-                    consent_package_public_id: packagePlain.public_id || null,
-                    consent_required_count: result?.summary?.required_total || packagePlain.required_count || 0,
-                    consent_pending_required: result?.summary?.pending_required || 0,
-                    consent_public_url_pending: true,
-                },
-                user_id: req.userData?.userId || null,
-                user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
-                user_role: req.userData?.role || req.userData?.rol || 'admin',
-            });
-        }
-        return result;
+        return await require('../services/appointmentCreatedEvents.service').prepareConsent(cita, {
+            user_id: req.userData?.userId || null,
+            user_name: req.userData?.name || req.userData?.nombre || req.userData?.email || null,
+            user_role: req.userData?.role || req.userData?.rol || 'admin',
+        }, triggerSource);
     } catch (error) {
         console.warn('⚠️ [Citas] No se pudo preparar paquete de consentimientos:', error.message || error);
         return null;
@@ -530,34 +512,6 @@ const LEAD_SOURCE_DETAIL_LABELS = {
     tel_modal: 'Popup de llamada web',
     tel_modal_call: 'Popup de llamada web',
 };
-
-function emitAppointmentSocketEvent(eventName, citaLike) {
-    const io = getIO();
-    if (!io || !citaLike) return;
-
-    const clinicId = Number(citaLike.clinica_id || citaLike.clinic_id || 0);
-    const appointmentId = Number(citaLike.id_cita || citaLike.id || 0);
-    if (!Number.isFinite(clinicId) || clinicId <= 0 || !Number.isFinite(appointmentId) || appointmentId <= 0) {
-        return;
-    }
-
-    const payload = {
-        appointment_id: appointmentId,
-        clinic_id: clinicId,
-        patient_id: Number(citaLike.paciente_id || citaLike.patient_id || 0) || null,
-        lead_intake_id: Number(citaLike.lead_intake_id || 0) || null,
-        doctor_id: Number(citaLike.doctor_id || 0) || null,
-        instalacion_id: Number(citaLike.instalacion_id || 0) || null,
-        tratamiento_id: Number(citaLike.tratamiento_id || 0) || null,
-        estado: citaLike.estado || null,
-        inicio: citaLike.inicio || null,
-        fin: citaLike.fin || null,
-        updated_at: citaLike.updated_at || citaLike.updatedAt || new Date().toISOString(),
-        created_at: citaLike.created_at || citaLike.createdAt || new Date().toISOString(),
-    };
-
-    io.to(`clinic:${clinicId}`).emit(eventName, payload);
-}
 
 function mapEstadoToAutomationV2Event(estado) {
     if (estado === 'pendiente') return 'appointment_created';
