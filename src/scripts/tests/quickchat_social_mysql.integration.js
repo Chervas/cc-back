@@ -249,12 +249,21 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     ['unexpected_provider_detail', 'provider_unavailable']]) {
     provider.availability = async () => { throw Object.assign(new Error('private provider detail'), { code }); };
     assert.deepEqual((await svc.availability(thread)).dm, { available: false, reason });
+    assert.deepEqual((await svc.availability(thread, [], {historyView:true})).dm, { available:true, reason:null });
     const attemptId = randomUUID();
     assert.deepEqual(await reply({ attemptId }), { available: false, reason, outcome: 'blocked', attemptId });
   }
   assert.equal(await db.Message.count({ where: { conversation_id: thread.id } }), 3);
   assert.equal(await db.SocialInboxReceipt.count(), receiptsBeforeBlock);
   assert.equal(calls.length, sendsBeforeBlock);
+  let calledDuringRead = 0;
+  provider.availability = () => { calledDuringRead++; throw Error('remote check during history response'); };
+  await svc.availability(thread, [], {historyView:true});
+  assert.equal(calledDuringRead, 0);
+  assert.equal((await svc.availability({...thread.get({plain:true}), clinic_id:42}, [], {historyView:true})).dm.reason, 'account_unassigned');
+  provider.isEnabled = () => false;
+  assert.equal((await svc.availability(thread, [], {historyView:true})).dm.reason, 'social_disabled');
+  delete provider.isEnabled;
   provider.availability = checkAvailability;
   assert.equal((await reply()).outcome, 'sent');
   assert.equal(calls.at(-1).recipient, '771');

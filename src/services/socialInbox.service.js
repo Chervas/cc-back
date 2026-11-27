@@ -186,13 +186,32 @@ function create({
     const notification = await R.findByPk(key);
     if (notification?.state === 'notify') await notifyReceipt(notification);
   }
+  // A pending provider acknowledgement is reconciled separately from rendering history.
+  // Give an in-flight send time to finish. A later read may retry an unresolved outcome.
+  const pendingChecks = new Set();
+  function scheduleReconciliation(c, m) {
+    if (!m.metadata?.socialAttempt || pendingChecks.has(m.id)) return;
+    pendingChecks.add(m.id);
+    const created = timestamp(m.createdAt);
+    const delay = Number.isFinite(created) ? Math.max(0, Math.min(30000, created + 30000 - now())) : 0;
+    const timer = setTimeout(async () => {
+      try { await reconcile(c, m); }
+      catch (error) { console.warn('quickchat_social_reconcile_read_failed', { messageId: m.id }); }
+      finally { pendingChecks.delete(m.id); }
+    }, delay);
+    timer.unref();
+  }
+  async function localContext(c) {
+    if (provider.isEnabled && !provider.isEnabled()) return blocked('social_disabled');
+    const route = await db.sequelize.transaction((t) => resolve(db, threadIdentity(c), t));
+    return route && route.clinicId === c.clinic_id ? { ...success, route } : blocked('account_unassigned');
+  }
   async function context(c, kind) {
     if (!isSocial(c)) return blocked('channel_unsupported');
     if (c.channel === 'messenger') return blocked('messenger_receive_only');
     try {
-      const route = await db.sequelize.transaction((t) => resolve(db, threadIdentity(c), t));
-      if (!route || route.clinicId !== c.clinic_id) return blocked('account_unassigned');
-      return { ...(await provider.availability(route, kind)), route };
+      const local = await localContext(c);
+      return local.available ? { ...(await provider.availability(local.route, kind)), route: local.route } : local;
     } catch (err) {
       return blocked(
         ['provider_unauthorized', 'credential_revoked', 'scope_denied', 'operation_denied',
@@ -202,18 +221,23 @@ function create({
       );
     }
   }
-  async function availability(c, messages = []) {
+  async function availability(c, messages = [], { historyView = false } = {}) {
+    // The inbox can offer composition under the current local route and window.
+    // The send command always rechecks the live grant and page subscription.
+    let local;
+    const accessFor = kind => historyView ? (local ??= localContext(c)) : context(c, kind);
     const pagePending = messages.find((m) => m.status === 'sending' && m.metadata?.socialAttempt);
     const unresolved =
       pagePending ||
       (await M.findOne({ where: { conversation_id: c.id, status: 'sending', direction: 'outbound' } }));
     let releasedAttempt;
-    if (unresolved) {
+    if (unresolved && historyView) scheduleReconciliation(c, unresolved);
+    else if (unresolved) {
       const result = await reconcile(c, unresolved);
       if (result?.message && pagePending) Object.assign(pagePending, result.message.toJSON());
       if (result?.outcome === 'failed') releasedAttempt = result.attemptId;
     }
-    const waiting = await M.findOne({
+    const waiting = historyView ? unresolved : await M.findOne({
       where: { conversation_id: c.id, status: 'sending', direction: 'outbound' },
       attributes: ['id'],
       raw: true,
@@ -243,13 +267,13 @@ function create({
       }
       if (waiting) a = blocked('reconciliation_required');
       if (a.available) {
-        commentAccess ??= await context(c, 'comment');
+        commentAccess ??= await accessFor('comment');
         a = commentAccess;
       }
       comments[m.id] = { available: a.available, reason: a.reason || null };
     }
     let dm = waiting ? blocked('reconciliation_required') : windowCheck(c, null, now());
-    if (dm.available) dm = await context(c, 'dm');
+    if (dm.available) dm = await accessFor('dm');
     return { dm: { available: dm.available, reason: dm.reason || null }, comments };
   }
   async function reserveAndSend(c, { attemptId, text, commentMessageId = null, actorId }, automation) {
