@@ -463,7 +463,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const sample = await simulator.start(100,1);
   assert.equal(sample.approved,true);
   const promotion = sample.promotions[0].key;
-  const steps = ['INFO','me va bien para reducir cuello?','no me estás contestando','ok','ok','La segunda',
+  const steps = ['INFO','me va bien para reducir cuello?','no me estás contestando','ok','ok','La segunda','ok','ok','ok',
     'Ana Prueba, +34600223996, ana@example.invalid','Confirmo'];
   const inspect = () => Promise.all([db.CitaPaciente,db.Paciente,db.LeadIntake,db.Conversation,db.Message,
     db.JobRequest,db.LeadAssistantSession].map(m=>m.count()));
@@ -487,6 +487,11 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   for (const [index, message] of steps.entries()) {
     const delivered = await enter(liveThread,message,{version:7,analyze:parityModel,ad:index === 0 ? {title:promotion} : null,
       imageDelivery:async (_,command) => {photos.push(command.selection);return {outcome:'sent'};}});
+    if (index === 8) {
+      assert.notEqual(delivered.result.outcome,'sent');
+      assert.equal(trial[index].reply,'');
+      continue;
+    }
     assert.equal(delivered.result.outcome,'sent',message);
     assert.equal(questions.at(-1),trial[index].reply,'QuickChat differs from the simulator at: ' + message);
     if (index === 3) assert.equal(trial[index].slots.length,(await delivered.booking()).slots.length);

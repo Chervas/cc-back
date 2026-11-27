@@ -86,6 +86,8 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
     s.history = [...s.history,exchange].slice(-6);
     trace.source = ({booking:'calendar',handoff:'handoff',silent:'opt_out'})[plan.kind] || plan.source || 'rules';
     if (plan.kind === 'silent') {
+      if (plan.reason === 'assistant_waiting_for_contact')
+        return {reply:'',event:'reply',trace:{...trace,source:'calendar'}};
       if (plan.reason === 'opt_out') return { reply:'', event:'opt_out',trace };
       throw fail(409,'assistant_simulator_unavailable');
     }
