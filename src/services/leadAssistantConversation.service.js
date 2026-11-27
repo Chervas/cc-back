@@ -2,6 +2,7 @@
 
 const dialogue = require('./leadAssistantDialogue.service');
 const discovery = require('./leadAssistantOfferDiscovery.service');
+const clinicFacts = require('./leadAssistantClinicFacts.service');
 const { areaIn } = require('./leadAssistantConversationPolicy.service');
 const { catalog, offerSections, isOfferActive, clinicDate } = require('./leadAssistantPromotionImages.service');
 const { assistantCommercialText, genericInfoRequest, explicitOptOut } = require('./socialLeadInterestClassification.service');
@@ -122,7 +123,7 @@ function exchangeContext(fields, entry, previous, timezone) {
 // version, its recent messages and its calendar. Delivery and recording a handoff happen afterwards.
 async function respondToLead({
   entry, fields, clinicName, timezone, offer, firstTurn, previousAnswer, post, decisionKind,
-  analyze, clinicId, groupId, beforeDispatch, readHistory, book, checkWindow, cachedAnswer, saveAnswer,
+  analyze, clinicId, groupId, beforeDispatch, readHistory, readClinicFact, book, checkWindow, cachedAnswer, saveAnswer,
 }) {
   const raw = String(entry.text || '').trim();
   if (explicitOptOut(raw)) return { kind:'silent', reason:'opt_out' };
@@ -145,7 +146,7 @@ async function respondToLead({
 
   let recent;
   const history = () => recent ||= readHistory();
-  if (entry.type === 'dm' && !human && !offer?.restriction) {
+  if (entry.type === 'dm' && !human && !offer?.restriction && clinicFacts.intent(raw) !== 'hours') {
     let appointment;
     try {
       const bookingEntry = dialogue.acceptsOfferedTimes(raw, previousAnswer)
@@ -180,7 +181,7 @@ async function respondToLead({
   let answer = cachedAnswer;
   if (!answer) {
     const generated = await dialogue.generateAnswer({ fields, clinicName, timezone, offer, userText,
-      askPromotion:!!(!offer && post && genericInfoRequest(raw)), analyze, clinicId, groupId, beforeDispatch, readHistory:history });
+      askPromotion:!!(!offer && post && genericInfoRequest(raw)), analyze, clinicId, groupId, beforeDispatch, readHistory:history, readClinicFact });
     if (!generated) return handoff('assistant_reply_requires_review');
     answer = await saveAnswer(generated, userText);
   }

@@ -7,7 +7,8 @@ const fail = (status, code) => Object.assign(new Error(code), { status, code });
 function validate(input) {
   const { version, fields } = input || {};
   if (!Number.isSafeInteger(version) || version < 0 || !fields || typeof fields !== 'object' ||
-      Array.isArray(fields) || Object.keys(fields).length !== keys.length ||
+      Array.isArray(fields) || Object.keys(fields).some(key => !keys.includes(key) && key !== 'useClinicData') ||
+      (Object.hasOwn(fields, 'useClinicData') && typeof fields.useClinicData !== 'boolean') ||
       !keys.every(key => typeof fields[key] === 'string' && (['context', 'promotions'].includes(key)
         ? Array.from(fields[key]).length <= longTextLimit : fields[key].length <= 12000)) ||
       Object.keys(input).some(key => !['version', 'fields'].includes(key))) {
@@ -40,7 +41,9 @@ function create(db) {
       const clinic = await clinicFor(clinicId, transaction);
       const current = await db.LeadAssistantDraft.findByPk(clinicId, { transaction, lock: transaction.LOCK.UPDATE });
       if (input.version !== (current?.version || 0)) throw fail(409, 'assistant_draft_changed');
-      const update = { version: input.version + 1, fields: input.fields, updated_by: actorId, updated_at: new Date() };
+      const fields = { ...input.fields };
+      if (!Object.hasOwn(fields, 'useClinicData') && current?.fields?.useClinicData === true) fields.useClinicData = true;
+      const update = { version: input.version + 1, fields, updated_by: actorId, updated_at: new Date() };
       const row = current ? await current.update(update, { transaction })
         : await db.LeadAssistantDraft.create({ clinic_id: clinicId, ...update }, { transaction });
       return present(clinic, row);

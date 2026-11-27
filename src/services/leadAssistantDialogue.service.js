@@ -2,6 +2,8 @@
 
 // The caller supplies an approved commercial projection for one clinic and
 // thread. Identity, channel addresses, tools and booking records stay outside it.
+const clinicFacts = require('./leadAssistantClinicFacts.service');
+
 const baseInstructions = [
   'Escribe la parte comercial de una respuesta de chat de una clínica española. La aplicación se encarga de presentarte como IA, del traspaso al equipo y de comunicar sus operaciones.',
   'Responde directamente al último mensaje con el tono indicado. No saludes de nuevo ni menciones que eres IA. Ofrece hablar con el equipo solo si la persona lo pide o si necesitas su ayuda para responder. No uses coletillas, no repitas lo que la persona ya entendió y evita las palabras venta, lead, captación y derivación.',
@@ -15,12 +17,14 @@ const baseInstructions = [
   'Puedes explicar lo que dice la ficha sobre una técnica. No diagnostiques, no elijas una intervención para una persona ni clasifiques la mejor o la menos invasiva para su caso. Solo atribuye una indicación o tarifa a una zona si la ficha relaciona expresamente ambas. Una promoción corporal no se extrapola a la cara o al cuello. No prometas que hará el tratamiento el día de la valoración. La disponibilidad, el estado de la reserva y el envío de una solicitud de llamada los comunica exclusivamente el sistema.',
   'Nunca afirmes haber reservado, retenido o cancelado una cita, avisado a alguien ni garantices que le llamarán. Esto se comunica por separado tras confirmación del backend.',
   'Cuando el contacto pregunta qué ofertas hay, busca en el catálogo vigente de su clínica, incluso si llegó sin anuncio. Mantén la promoción de los turnos previos, separa el coste de la evaluación del tratamiento y usa el argumentario de ese producto para distinguirlo de otras técnicas. Respeta una petición de dejarlo para otro día. Solo el flujo de agenda pide datos para el recordatorio después de elegir un hueco.',
+  'Para condiciones de una oferta, utiliza primero la promoción activa identificada. Para cómo y dónde dar una cita, sigue primero las instrucciones de cita de esta clínica. El contexto general complementa esos datos. El precio habitual del catálogo es distinto del precio promocional. La aplicación comprueba horarios y disponibilidad real.',
 ];
 const systemPrompt = baseInstructions.join(' ');
-const policyVersion = '2026.11.27.1';
+const policyVersion = '2026.11.27.2';
 function platformPolicy() {
   return {version:policyVersion, model:require('./aiOrchestrator.service').routeFor({useCase:'lead_assistant_reply'}).primary,
     instructions:[...baseInstructions], changes:[
+      'Prioridad de las instrucciones de cita y de la promoción. Los horarios se consultan siempre que hacen falta. La clínica puede habilitar su ficha y las tarifas habituales como complemento.',
       'Búsqueda por zona en las promociones vigentes, también en mensajes directos sin anuncio.',
       'Continuidad de la oferta al preguntar por el precio, compararla con otra técnica o consultar la agenda.',
       'Reconocimiento de respuestas breves a la propuesta de ver horarios y de la petición de dejar la reserva para otro día.',
@@ -45,6 +49,7 @@ function buildDraftRequest(turn) {
     clinic: text(clinicName, 120),
     dateInClinic: new Intl.DateTimeFormat('sv-SE', { timeZone: turn.timezone || 'Europe/Madrid' }).format(new Date()),
     tone: text(tone, 12000),
+    ...(turn.bookingInstructions ? {bookingInstructions:text(turn.bookingInstructions,12000)} : {}),
     ...(turn.approvedContext ? { approvedContext: text(turn.approvedContext, 120000) } : {}),
     approvedFacts: list(approvedFacts, 40, fact => text(fact, 1000)),
     promotion: matchedPromotion ? {
@@ -138,18 +143,40 @@ function volumeClarification(offer, question, previous, repair) {
 }
 
 async function generateAnswer({ fields, clinicName, timezone, offer, userText, askPromotion, readHistory,
-  analyze, clinicId, groupId, beforeDispatch }) {
+  analyze, clinicId, groupId, beforeDispatch, readClinicFact }) {
   const approvedContext = fields.context.replace(/https?:\/\/\S+/gi, '').trim();
   const facts = [fields.guardrails, fields.booking].filter(Boolean)
     .flatMap(value => value.replace(/https?:\/\/\S+/g, '').match(/[\s\S]{1,1000}/g) || []);
   const history = await readHistory();
+  const kind = clinicFacts.intent(userText);
+  const ordinaryPrice = kind === 'price' && clinicFacts.regular.test(require('./leadAssistantCalendar.service').normalize(userText));
+  if (kind && kind !== 'price') {
+    const written = clinicFacts.writtenAnswer(kind,fields,offer);
+    if (written) return {reply:written,imageId:null,source:'rules'};
+    if ((kind === 'hours' || fields.useClinicData === true) && readClinicFact &&
+        !clinicFacts.relevantManual(kind,fields,offer,userText)) {
+      const fact = await readClinicFact(kind,userText,history,fields,offer);
+      if (fact) return {reply:fact,imageId:null,source:'clinic_data'};
+    }
+    if (kind === 'address' && !clinicFacts.relevantManual(kind,fields,offer,userText))
+      return {reply:'No tengo una dirección confirmada para esta sede.',imageId:null,source:'rules'};
+  }
   const localAnswer = require('./leadAssistantConversationPolicy.service').groundedFollowup({userText,history,offer,fields,timezone});
   if (localAnswer) return {reply:localAnswer,imageId:null};
   const discovery = require('./leadAssistantOfferDiscovery.service');
   const consultationFee = discovery.consultationFee(fields, userText);
   if (consultationFee) return {reply:consultationFee,imageId:null};
-  const catalogued = discovery.catalogueReply({fields,offer,history,userText,timezone});
+  const catalogued = !ordinaryPrice && discovery.catalogueReply({fields,offer,history,userText,timezone});
+  const missingOfferPrice = catalogued && /^No encuentro un precio promocional/.test(catalogued);
+  if (catalogued && !missingOfferPrice) return {reply:catalogued,imageId:null,source:'catalog'};
+  const regularLines = ordinaryPrice ? clinicFacts.regularPriceLines(fields,offer,userText,history) : [];
+  if (!regularLines.length && kind === 'price' && (ordinaryPrice || !offer || missingOfferPrice) && fields.useClinicData === true && readClinicFact &&
+      !clinicFacts.relevantManual(kind,fields,offer,userText)) {
+    const fact = await readClinicFact(kind,userText,history,fields,offer);
+    if (fact) return {reply:fact,imageId:null,source:'clinic_data'};
+  }
   if (catalogued) return {reply:catalogued,imageId:null,source:'catalog'};
+  if (ordinaryPrice && !regularLines.length) return {reply:'No tengo un precio habitual confirmado para ese servicio.',imageId:null,source:'rules'};
   if (/^(?:ok(?:ay|ey)?|vale|de acuerdo|entendido|perfecto)[!. ]*$/i.test(userText.trim()))
     return {reply:'De acuerdo.',imageId:null};
   if (/^(?:(?:p+f+|bueno)[, .]*)?(?:mejor (?:para )?otro d[ií]a|lo dejamos para otro d[ií]a|lo pensar[eé]|me lo (?:pienso|pensar[eé])|prefiero pensarlo)(?:,? gracias)?(?:[.! ]*)$/i.test(userText.trim()))
@@ -173,7 +200,7 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const guidanceOnly = suitability && !priceQuestion && !!offer.guide;
   const relevantOffer = offer && {...offer, images:withImage && !guidanceOnly ? offer.images : [],
     ...(guidanceOnly ? {description:offer.guide,guide:undefined} : {})};
-  const request = buildDraftRequest({ clinicName, timezone, tone:fields.tone,
+  const request = buildDraftRequest({ clinicName, timezone, tone:fields.tone, bookingInstructions:fields.booking.replace(/https?:\/\/\S+/gi, '').trim(),
     approvedContext:guidanceOnly ? undefined : approvedContext,
     approvedFacts:guidanceOnly ? [fields.guardrails].flatMap(value=>value.match(/[\s\S]{1,1000}/g) || []) : facts,
     matchedPromotion:relevantOffer, commercialHistory:history, userText:generalPromo ? 'INFO' : userText, availableSlots:[] });
@@ -183,13 +210,14 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
     : history.length ? 'Es un seguimiento. Contesta únicamente a esta nueva pregunta; no reinicies la presentación de la promoción.' : '';
   const task = [focus, 'Pregunta a resolver (texto del contacto): '+JSON.stringify(question)].filter(Boolean).join(' ');
   request.prompt += ' ' + task;
+  if (ordinaryPrice) request.prompt += ' Preguntan por la tarifa habitual. Solo cita importes identificados expresamente como habituales para ese servicio. Un importe de oferta o un precio anterior no prueba la tarifa habitual.';
   if (generalPromo) request.prompt += ' El origen identifica la oferta '+JSON.stringify(offer.title)+'. Explica qué incluye esa oferta y su tarifa documentada. La persona ya está preguntando por ella.';
   if (suitability) {
     request.systemPrompt += ' El contacto pregunta si el tratamiento sirve para un objetivo concreto. Empieza contestando sobre ese objetivo. Si no se indica como beneficio en el argumentario, dilo y explica el objetivo documentado con palabras sencillas. No avales la idoneidad individual ni sugieras otros tratamientos o cirugía salvo que te hayan pedido compararlos. En una rectificación reconoce la duda y aclárala. Omite importes, dosis, imágenes y eslóganes salvo que los solicite.';
     request.outputFormat.reply.description = 'Respuesta directa a la pregunta «'+question+'» con el objetivo documentado en la ficha. Máximo tres frases.';
   }
   const permitted = quote => typeof quote?.reply === 'string' && !!quote.reply.trim() && quote.reply.length <= 800 &&
-    supportsQuotedAmounts(quote.reply,[approvedContext,...facts,offer?.description]) && !/https?:\/\//i.test(quote.reply);
+    supportsQuotedAmounts(quote.reply,ordinaryPrice ? regularLines : [approvedContext,...facts,offer?.description]) && !/https?:\/\//i.test(quote.reply);
   const invoke = prompt => analyze({...request,prompt,useCase:'lead_assistant_reply',clinicId,groupId,beforeDispatch});
   let generatedFromModel = !askPromotion;
   let generated = askPromotion ? {reply:'¿Qué promoción has visto?'} : await invoke(request.prompt);
