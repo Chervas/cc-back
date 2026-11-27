@@ -47,6 +47,7 @@ const { maybeUploadCampaignGoogleConversion: maybeUploadGoogleConversion } = req
 const webEventsService = require('../services/webEvents.service');
 const { getIO } = require('../services/socket.service');
 const jobRequestsService = require('../services/jobRequests.service');
+const leadAssistantDrafts = require('../services/leadAssistantDraft.service').create(db);
 const leadAutoReplyService = require('../services/leadAutoReply.service');
 const patientDirectionService = require('../services/patientDirection.service');
 const { persistLeadWithCrmSignals } = require('../services/leadCrmSignalPersistence.service');
@@ -6717,6 +6718,25 @@ exports.getLeadAutoReplyStatus = asyncHandler(async (req, res) => {
   if (!(await requireLeadAutomationClinicAccess(req, res, clinicId))) return;
   const status = await leadAutoReplyService.getStatus(clinicId);
   return res.status(200).json({ success: true, data: status });
+});
+
+exports.leadAssistantDraft = asyncHandler(async (req, res) => {
+  const id = req.params.clinicId;
+  if (!/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) {
+    return res.status(400).json({ error: 'clinic_id_required' });
+  }
+  const clinicId = Number(id);
+  if (!(await requireLeadAutomationClinicAccess(req, res, clinicId))) return;
+  res.set('Cache-Control', 'private, no-store');
+  try {
+    const draft = req.method === 'PUT'
+      ? await leadAssistantDrafts.save(clinicId, Number(req.userData.userId), req.body)
+      : await leadAssistantDrafts.read(clinicId);
+    return res.json(draft);
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.code });
+    throw error;
+  }
 });
 
 exports.getLeadAutoReplyPendingPreview = asyncHandler(async (req, res) => {
