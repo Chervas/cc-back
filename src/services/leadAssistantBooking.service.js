@@ -27,6 +27,7 @@ function readContact(text) {
     .trim();
   const name =
     raw &&
+    !/^(?:ok(?:ay|ey)?|vale|si|que si(?: cone)?|de acuerdo|so|la que hemos dicho)$/.test(cal.normalize(raw)) &&
     !/\b(?:confirmo|prefiero|gracias|quiero|tengo|tarde|manana|ninguno|no|dolor|equipo|recepcion)\b/.test(
       cal.normalize(raw)
     ) &&
@@ -135,11 +136,18 @@ async function processTurn({
     ? params => require('./leadAssistantSampleCalendar.service').sampleSlots(params)
     : findSlots || cal.available;
   const pending = preview ? preview.booking : await previous(db, scope);
-  const contactTurn = pending?.stage === 'contact' && readContact(raw) && !wantsHumanInput(raw);
+  const replyWords = cal.normalize(raw);
+  const postponed = pending && !['booked','deferred'].includes(pending.stage) &&
+    /^(?:(?:p+f+|bueno|gracias) )?(?:mejor (?:para )?otro dia|lo dejamos para otro dia|ahora no|lo pensare)$/.test(replyWords);
+  const affirmative = /^(?:si|ok(?:ay|ey)?|vale|de acuerdo|me viene bien|que si(?: cone)?)$/.test(replyWords);
+  const unclear = affirmative || /^(?:so|la que hemos dicho)$/.test(replyWords) ||
+    (replyWords.split(' ').length === 1 && offer && require('./leadAssistantConversationPolicy.service').areaIn(raw)?.words.test(cal.normalize(offer.title)));
+  const contactTurn = !postponed && pending?.stage === 'contact' && !wantsHumanInput(raw) &&
+    (unclear || readContact(raw));
   const choice =
     pending?.slots?.length &&
     (cal.selection(raw, pending.slots, pending.stage === 'confirm' ? pending.selected : null) ||
-      (pending.stage === 'offered' && pending.slots.length === 1 && /^(?:sí|si|vale|me viene bien|de acuerdo)[.! ]*$/i.test(raw)
+      (pending.stage === 'offered' && (pending.slots.length === 1 || pending.askedAboutFirst) && affirmative
         ? { index: 0, confirmed: false } : null));
   const again = pending?.slots?.length && /^(?:(?:si|vale) )?(?:y las opciones|las opciones|las de cita|las horas|dimel[oa]s|dime las horas)$/.test(cal.normalize(raw));
   const requestBooking = !!assistantCommercialText(raw) && (cal.bookingRequest(raw) || again);
@@ -152,9 +160,9 @@ async function processTurn({
       raw
     );
   const unspecifiedYes =
-    pending?.stage === 'offered' && /^(?:s[ií]|vale|confirmo|de acuerdo)[.! ]*$/i.test(raw.trim());
+    pending?.stage === 'offered' && (unclear || replyWords === 'confirmo');
   if (
-    !statusRequest && !requestBooking &&
+    !postponed && !statusRequest && !requestBooking &&
     !choice &&
     !contactTurn &&
     !revisesDate &&
@@ -248,6 +256,7 @@ async function processTurn({
       return { reply: state.reply };
     });
   }
+  if (postponed) return materialize(async () => ({stage:'deferred', reply:'Claro, lo dejamos para otro día. No hemos reservado ninguna hora.'}));
   if (statusRequest) {
     if (pending?.stage === 'booked' && pending.slots?.[pending.selected])
       return {reply:'La cita que confirmamos en esta conversación era para el '+cal.display(pending.slots[pending.selected],timezone)+'.'};
@@ -375,8 +384,9 @@ async function processTurn({
   if (unspecifiedYes && currentOffer && !choice) {
     return materialize(async () => ({
       ...pending,
-      reply:
-        'Puedo darte cita ' + cal.displayOptions(pending.slots, timezone) + '. ¿Cuál prefieres?',
+      askedAboutFirst: true,
+      reply: 'Te propongo la primera hora, el ' + cal.display(pending.slots[0], timezone) +
+        '. ¿Te viene bien esa? Si prefieres otra, dime cuál.',
     }));
   }
   if (again && currentOffer) return propose({range:pending.calendar});
@@ -395,7 +405,7 @@ async function processTurn({
     selected: index,
   };
   const knownPhone = thread.channel === 'whatsapp' ? normalizePhoneE164(thread.contact_id) : null;
-  const entered = contactTurn ? readContact(raw) : null;
+  const entered = contactTurn && !unclear ? readContact(raw) : null;
   const name =
     lead?.external_source === 'quickchat_social' && lead.nombre === thread.social_alias ? null : lead?.nombre;
   const contact = {

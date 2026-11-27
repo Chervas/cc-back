@@ -7,6 +7,7 @@ const { offerSections } = require('./leadAssistantPromotionImages.service');
 const { processTurn } = require('./leadAssistantBooking.service');
 const { resolveClinicTimezone } = require('../lib/availability-calendar');
 
+const dialogue = require('./leadAssistantDialogue.service');
 const ttl = 30 * 60 * 1000;
 const fail = (status, error) => Object.assign(new Error(error), { status, code:error });
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
@@ -56,9 +57,15 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
     }
     s.context = { promotionKey:offer?.key || null, postReference:post };
     let exchange = [];
+    const trace = {version:dialogue.policyVersion,draft:s.version,promotion:offer?.title || null,calls:[]};
     const plan = await respondToLead({
       entry, fields, clinicName:s.clinicName, timezone:s.timezone, offer, firstTurn, post,
-      previousAnswer:changed ? null : s.lastReply, analyze, clinicId:s.clinicId, groupId:s.groupId,
+      previousAnswer:changed ? null : s.lastReply, analyze:async request => {
+        const result = await analyze(request);
+        trace.calls.push({model:result?._ai_model || require('./aiOrchestrator.service').routeFor({useCase:request.useCase}).primary,
+          prompt:request.prompt, extra:request.systemPrompt.slice(dialogue.systemPrompt.length).trim()});
+        return result;
+      }, clinicId:s.clinicId, groupId:s.groupId,
       beforeDispatch:async () => { if (s.until <= now()) throw fail(410,'assistant_simulator_expired'); },
       checkWindow:async () => null,
       readHistory:async () => s.history.flat(),
@@ -77,21 +84,22 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
     if (plan.kind === 'booking') exchange = require('./leadAssistantBooking.service').bookingHistory(s.booking);
     s.lastReply = plan.kind === 'booking' ? plan.text : exchange.at(-1)?.text;
     s.history = [...s.history,exchange].slice(-6);
+    trace.source = ({booking:'calendar',handoff:'handoff',silent:'opt_out'})[plan.kind] || plan.source || 'rules';
     if (plan.kind === 'silent') {
-      if (plan.reason === 'opt_out') return { reply:'', event:'opt_out' };
+      if (plan.reason === 'opt_out') return { reply:'', event:'opt_out',trace };
       throw fail(409,'assistant_simulator_unavailable');
     }
     if (plan.kind === 'handoff') {
       const { destination } = await recipients(db, s.clinicId);
-      return {reply:plan.prepare({destination,recorded:destination !== 'unassigned'}).text,event:'handoff'};
+      return {trace,reply:plan.prepare({destination,recorded:destination !== 'unassigned'}).text,event:'handoff'};
     }
     if (plan.kind === 'booking') {
       const options = s.booking?.stage === 'offered' ? s.booking.slots.map((slot,i)=>({
         label:display(slot,s.timezone), message:['La primera','La segunda','La tercera'][i],
       })) : [];
-      return {reply:plan.text,event:s.booking?.stage==='booked' ? 'booked' : 'reply', ...(options.length ? {slots:options} : {})};
+      return {trace,reply:plan.text,event:s.booking?.stage==='booked' ? 'booked' : 'reply', ...(options.length ? {slots:options} : {})};
     }
-    return {reply:plan.text,event:'reply', ...(plan.image ? {image:{label:plan.image.label,url:plan.image.url}} : {})};
+    return {trace,reply:plan.text,event:'reply', ...(plan.image ? {image:{label:plan.image.label,url:plan.image.url}} : {})};
   }
 
   async function turn(clinicId, actorId, sessionId, input) {

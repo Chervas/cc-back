@@ -1,6 +1,8 @@
 'use strict';
 
 const dialogue = require('./leadAssistantDialogue.service');
+const discovery = require('./leadAssistantOfferDiscovery.service');
+const { areaIn } = require('./leadAssistantConversationPolicy.service');
 const { catalog, offerSections, isOfferActive, clinicDate } = require('./leadAssistantPromotionImages.service');
 const { assistantCommercialText, genericInfoRequest, explicitOptOut } = require('./socialLeadInterestClassification.service');
 const { restrictionReply } = require('../lib/lead-assistant-promotion-validity');
@@ -77,7 +79,15 @@ function commercialOffer(fields, entry, priorKey, options) {
       })
       .map(([code]) => code);
   }
-  const key = matches.length === 1 ? matches[0] : !matches.length && (!postReference(entry) || options?.samePublication) && sections.has(priorKey) ? priorKey : null;
+  const area = areaIn(entry.text);
+  if (!postReference(entry) && discovery.browsesWholeArea(entry.text, area)) return null;
+  const priorSection = sections.get(priorKey);
+  const carry = priorSection && (!area || discovery.matchesArea(priorSection,area));
+  if (!matches.length && (!postReference(entry) || options?.samePublication)) {
+    const picked = discovery.areaSelection(sections,entry,options);
+    if (picked) matches = [picked];
+  }
+  const key = matches.length === 1 ? matches[0] : !matches.length && (!postReference(entry) || options?.samePublication) && carry ? priorKey : null;
   if (!key) return null;
   if (!isOfferActive(sections.get(key), options)) {
     const restriction = require('../lib/lead-assistant-promotion-validity').salesRestriction(sections.get(key).saleTerms,options.today);
@@ -93,6 +103,7 @@ function commercialOffer(fields, entry, priorKey, options) {
     key,
     title: sections.get(key).title.split(/[.\n]/)[0].slice(0, 180),
     description: body,
+    terms: section.lines,
     ...(section.guide ? { guide: stripLinks(section.guide) } : {}),
     images: (images.get(key) || []).slice(0, 24),
   };
@@ -103,7 +114,7 @@ function exchangeContext(fields, entry, previous, timezone) {
   const samePublication = !!currentPost && currentPost === previous?.postReference;
   const offer = commercialOffer(fields, entry, previous?.promotionKey, { timezone, samePublication, includeUnavailable:true });
   const changed = !!((currentPost && !samePublication) ||
-    (offer && previous?.promotionKey && offer.key !== previous.promotionKey));
+    (previous?.promotionKey && offer?.key !== previous.promotionKey));
   return { offer, changed, post:currentPost || previous?.postReference };
 }
 
@@ -176,7 +187,7 @@ async function respondToLead({
   const image = offer?.images.find(item => item.id === answer.imageId);
   let text = format(answer.reply);
   if (entry.type === 'comment' && image && text.length + image.url.length + 1 <= 1000) text += '\n' + image.url;
-  return {kind:'reply', text, image, reason:'assistant_reply'};
+  return {kind:'reply', text, image, source:answer.source, reason:'assistant_reply'};
 }
 
 module.exports = { commercialOffer, exchangeContext, postReference, respondToLead };

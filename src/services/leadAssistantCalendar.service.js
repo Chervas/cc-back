@@ -73,7 +73,7 @@ function selection(text, slots, selected) {
   if (
     Number.isInteger(selected) &&
     slots[selected] &&
-    /^(?:si|confirmo|confirmado|de acuerdo|si confirmo|si por favor|si gracias|si confirmo la cita)$/.test(
+    /^(?:si|ok(?:ay|ey)?|confirmo|confirmado|de acuerdo|si confirmo|si por favor|si gracias|si confirmo la cita)$/.test(
       value
     )
   ) {
