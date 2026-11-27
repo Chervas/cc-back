@@ -24,7 +24,7 @@ test('only explicitly projected commercial fields are included in a model reques
 
 test('the channel introduces the assistant once and handoff needs a recorded result', () => {
   const params = { clinicName:'Clínica Nube', draft:'La visita incluye 25 minutos.' };
-  assert.match(formatCommercialReply({ ...params, firstTurn:true }), /asistente de IA de Clínica Nube.*25 minutos.*persona del equipo/);
+  assert.equal(formatCommercialReply({ ...params, firstTurn:true }), 'Hola, soy el asistente de IA de Clínica Nube. La visita incluye 25 minutos.');
   assert.equal(formatCommercialReply({ ...params, firstTurn:false }), params.draft);
   assert.throws(() => formatHandoffReceipt({recorded:false}), /not_recorded/);
   assert.match(formatHandoffReceipt({recorded:true,requestedCallback:true,destination:'reception'}), /plazo confirmado/);

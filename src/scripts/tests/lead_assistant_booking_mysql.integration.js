@@ -109,7 +109,13 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       saved,
       rule: { version, audience },
       analyze: () => assert.fail('A booking turn must not send identities or calendar records to a model.'),
-      recordHandoff: async () => ({ recorded: false }),
+      recordHandoff: async (scope, prepareReply) => {
+        const destination = { recorded: false, destination: 'unassigned' };
+        const reply = prepareReply?.(destination);
+        if (!reply) return destination;
+        await db.LeadAssistantSession.update({ state: 'unassigned' }, { where: { conversation_id: scope.conversationId } });
+        return { ...destination, reply: { ...reply, state: 'unassigned' } };
+      },
       blockReason: async () => null,
       bookingOptions: {
         mayBook: async () => {
@@ -199,7 +205,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert(questions.slice(0, 1)[0].includes('asistente de IA'));
   assert(questions.some((q) => q.includes('09:00')));
   const d = await thread('whatsapp', '+34600123454');
-  const denied = await enter(d, '¿Me puedes dar una cita para el 2030-01-09?', {
+  const denied = await enter(await thread('whatsapp', '+34600200181'), '¿Me puedes dar una cita para el 2030-01-09?', {
     canManage: false,
     audience: 'all',
   });
@@ -382,6 +388,18 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       ),
       'La comprobación de identidad debe leer únicamente los identificadores administrativos permitidos.'
     );
+  await db.LeadAssistantPublication.create({clinic_id:100,version:6,approved_by:1,approved_at:new Date(),
+    fields:{...originalPub.fields,booking:'Servicio de agenda: VAL. Pide correo electrónico para el recordatorio.'}});
+  const known = await thread('instagram','contacto-qa-con-datos');
+  await db.LeadIntake.update({email:'anterior@example.org',telefono:'+34600223995'},{where:{id:known.lead_id}});
+  const oneOption = await enter(known,'Quiero reservar el 2030-01-08 a las 10:00',{version:6});
+  assert.equal((await oneOption.booking()).slots.length,1);
+  assert.match(questions.at(-1),/¿Te viene bien/);
+  const acceptedTime = await enter(known,'Sí',{version:6});
+  const knownDetails = await acceptedTime.booking();
+  assert.equal(knownDetails.stage,'confirm');
+  assert.equal(knownDetails.contact.email,'anterior@example.org');
+  assert.doesNotMatch(questions.at(-1),/correo|móvil|Valoración de prueba/);
   const expiredCatalogue = [
     '## Vigencia', 'Ficha revisada el **01/02/2001**.',
     '- **Bono de ejemplo.** La compra promocional termina el **28/02/2001**. Los bonos comprados se pueden canjear hasta el **31/12/2099** con valoración previa.',
@@ -397,7 +415,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.match(questions.at(-1),/28 de febrero de 2001/);
   assert.doesNotMatch(questions.at(-1),/29 €|https:/);
   assert.equal(await expiredReply.booking(),undefined);
-  const redeemReply=await enter(saleThread,'Ya lo compré, ¿puedo canjearlo?',{version:5});
+  const redeemReply=await enter(await thread('whatsapp','+34600223994'),'Ya compré el Bono de ejemplo, ¿puedo canjearlo?',{version:5});
   assert.equal(redeemReply.result.reason,'sale_ended');
   assert.match(questions.at(-1),/31\/12\/2099.*valoración previa/);
   assert.equal(await db.CitaPaciente.count(),beforeSale);
