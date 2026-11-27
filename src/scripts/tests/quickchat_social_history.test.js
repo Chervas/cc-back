@@ -74,3 +74,45 @@ test('a changed assignment aborts before processing the next page', async () => 
   assert.equal(report.kinds.dm.reason, 'social_history_route_changed');
   assert.equal(report.kinds.comment, undefined);
 });
+
+test('single thread history takes its participant from the exact clinic, channel and account', async () => {
+  const input = options([...args, '--apply', '--conversation', '80']);
+  assert.throws(() => options([...args, '--apply', '--conversation', '0']));
+  const deps = {
+    routeFor: async () => route,
+    participantFor: async (id, scope) => {
+      assert.equal(id, 80);
+      assert.deepEqual(scope, { clinicId: 72, channel: 'instagram', accountId: '501' });
+      return '771';
+    },
+    provider: { history: async (_r, kind, _s, _end, _cursor, participant) => {
+      assert.equal(kind, 'dm');
+      assert.equal(participant, '771');
+      return result;
+    }},
+  };
+  const report = await run(input, deps);
+  assert.equal(report.conversationId, 80);
+  assert.ok(report.kinds.dm.complete);
+  assert.equal(report.kinds.comment, undefined);
+  await assert.rejects(run(input, { ...deps, participantFor: async () => null }), /conversation_unassigned/);
+  const unrelated = { id: '501', messaging: [{ sender: { id: '775' }, recipient: { id: '501' }, timestamp: input.start, message: { mid: 'x', text: 'fixture' } }] };
+  const refused = await run(input, { ...deps, provider: { history: async () => ({ ...result, entries: [unrelated] }) }, accept: () => assert.fail() });
+  assert.equal(refused.kinds.dm.reason, 'social_history_response_invalid');
+});
+
+test('only a timed-out ordinary Instagram DM read switches its subsequent pages to smaller discovery', async () => {
+  const input = options([...args, '--scan']);
+  const sizes = [], next = 'A'.repeat(64);
+  const report = await run(input, { routeFor: async () => route, provider: {
+    history: async (_, kind, start, end, cursor, participant, smallPages) => {
+      if (kind === 'comment') return result;
+      sizes.push(smallPages);
+      if (!smallPages) throw Object.assign(Error('timeout'), { code: 'provider_timeout' });
+      return { ...result, next: cursor ? null : next };
+    },
+  } });
+  assert.deepEqual(sizes, [false, true, true]);
+  assert.equal(report.kinds.dm.complete, true);
+  assert.equal(report.kinds.dm.pages, 2);
+});

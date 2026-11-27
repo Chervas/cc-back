@@ -7,10 +7,11 @@ const { events } = require('../services/socialInboxEvents');
 const { resolveRoute, sameRoute } = require('../services/socialInboxRoute.service');
 
 function options(argv) {
-  const [runtime, id, channel, accountId, inputEnd, mode] = argv;
+  const [runtime, id, channel, accountId, inputEnd, mode, filter, conversation] = argv;
   const end = Date.parse(inputEnd);
   if (
-    argv.length !== 6 ||
+    (argv.length !== 6 && (argv.length !== 8 || filter !== '--conversation' || channel !== 'instagram' ||
+      !/^[1-9]\d*$/.test(conversation) || !Number.isSafeInteger(Number(conversation)))) ||
     !['dev', 'staging', 'prod'].includes(runtime) ||
     !/^[1-9]\d*$/.test(id) ||
     !Number.isSafeInteger(Number(id)) ||
@@ -30,23 +31,31 @@ function options(argv) {
     start: end - HOURS_72,
     end,
     apply: mode === '--apply',
+    ...(conversation ? { conversationId: Number(conversation) } : {}),
   };
 }
 
-async function run(input, { routeFor, provider, accept }) {
-  const { clinicId, channel, accountId, runtime, start, end, apply } = input;
+async function run(input, { routeFor, provider, accept, participantFor }) {
+  const { clinicId, channel, accountId, runtime, start, end, apply, conversationId } = input;
   const account = { channel, accountId };
   const route = await routeFor(account);
   if (!route || route.clinicId !== clinicId) throw Error('social_history_account_unassigned');
+  let participantId;
+  if (conversationId) {
+    participantId = await participantFor(conversationId, { clinicId, channel, accountId });
+    if (typeof participantId !== 'string' || !/^[1-9]\d{0,29}$/.test(participantId) || participantId === accountId)
+      throw Error('social_history_conversation_unassigned');
+  }
   const report = {
     clinicId,
     channel,
     start: new Date(start).toISOString(),
     end: new Date(end).toISOString(),
     apply,
+    ...(conversationId ? { conversationId } : {}),
     kinds: {},
   };
-  for (const kind of channel === 'instagram' ? ['dm', 'comment'] : ['dm']) {
+  for (const kind of channel === 'instagram' && !conversationId ? ['dm', 'comment'] : ['dm']) {
     const result = (report.kinds[kind] = {
       complete: false,
       pages: 0,
@@ -57,11 +66,20 @@ async function run(input, { routeFor, provider, accept }) {
       limitedThreads: 0,
     });
     const stack = [null];
+    let smallPages = false;
     try {
       while (stack.length) {
         if (!sameRoute(route, await routeFor(account))) throw Error('social_history_route_changed');
         const cursor = stack.pop();
-        const page = await provider.history(route, kind, start, end, cursor);
+        let page;
+        try {
+          page = await provider.history(route, kind, start, end, cursor, participantId, smallPages);
+        } catch (error) {
+          if (error.code !== 'provider_timeout' || channel !== 'instagram' || kind !== 'dm' || participantId || smallPages) throw error;
+          if (!sameRoute(route, await routeFor(account))) throw Error('social_history_route_changed');
+          smallPages = true;
+          page = await provider.history(route, kind, start, end, cursor, undefined, true);
+        }
         if (!page.available) {
           result.reason = page.reason;
           break;
@@ -92,6 +110,7 @@ async function run(input, { routeFor, provider, accept }) {
                 e.channel !== channel ||
                 e.accountId !== accountId ||
                 e.type !== kind ||
+                (participantId && e.senderId !== participantId) ||
                 Date.parse(e.at) < start ||
                 Date.parse(e.at) >= end,
             )
@@ -139,6 +158,14 @@ async function main(argv) {
     const report = await run(input, {
       routeFor: (account) => db.sequelize.transaction((t) => resolveRoute(db, account, t)),
       provider: require('../services/socialInboxProvider.service').provider(),
+      participantFor: async (id, { clinicId, channel, accountId }) => {
+        const row = await db.Conversation.findOne({
+          where: { id, clinic_id: clinicId, channel, social_account_id: accountId },
+          attributes: ['contact_id'],
+          raw: true,
+        });
+        return row?.contact_id;
+      },
       accept: require('../services/socialInboxIntake.service').accept,
     });
     return report;
