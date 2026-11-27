@@ -58,6 +58,12 @@ function events(body, { history = false } = {}) {
       if (!m) continue; // delivery/read receipts do not start conversations
       const echo = m.is_echo === true || item.sender?.id === e.id;
       if ((echo ? item.sender?.id : item.recipient?.id) !== e.id) invalid();
+      if (channel === 'instagram' && m.is_deleted === true) {
+        if (!history && !echo) add('dm', m.mid, item.sender?.id, item.timestamp, '', { echo: false, source: 'withdrawal' });
+        continue;
+      }
+      if (channel === 'instagram' && typeof m.admin_text === 'string' &&
+          (!m.mid || !(m.text || m.attachments?.length || m.is_unsupported || m.quick_reply || m.reply_to || m.referral))) continue;
       add('dm', m.mid, echo ? item.recipient?.id : item.sender?.id, item.timestamp, m.text ?? '', {
         echo,
         alias: null,
