@@ -59,6 +59,7 @@ function create({ db, analyze, recipients, booking = processTurn, now = Date.now
     let exchange = [];
     const trace = {version:dialogue.policyVersion,draft:s.version,promotion:offer?.title || null,calls:[]};
     const plan = await respondToLead({
+      readClinicFact:(kind,question,history,fields,offer) => require('./leadAssistantClinicFacts.service').read(db,s.clinicId,kind,question,history,fields,offer),
       entry, fields, clinicName:s.clinicName, timezone:s.timezone, offer, firstTurn, post,
       previousAnswer:changed ? null : s.lastReply, analyze:async request => {
         const result = await analyze(request);

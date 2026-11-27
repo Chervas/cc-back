@@ -202,3 +202,44 @@ test('indirect requests for an in-person assessment go to the calendar and secti
   assert.match(reply,/1 sesión, 1 ml total por 170 €/);
   assert.doesNotMatch(reply,/valoración|220/);
 });
+
+test('clinic data is opt-in, opening hours are always available and the appointment guide wins',async()=>{
+  const {generateAnswer} = require('../../services/leadAssistantDialogue.service');
+  const {intent} = require('../../services/leadAssistantClinicFacts.service');
+  const calls=[];
+  const fields={tone:'Tono breve.',context:'Información de la clínica.',booking:'Pide confirmación.',guardrails:'Sin diagnósticos.',promotions:''};
+  const ask=(text, changes={})=>generateAnswer({fields:{...fields,...changes},userText:text,clinicName:'Sede de prueba',readHistory:async()=>[],
+    readClinicFact:async kind=>{calls.push(kind);return kind==='hours'?'lunes 09:00–12:00':'Dirección de la sede';},
+    analyze:async()=>assert.fail('unexpected model call')});
+  assert.equal((await ask('¿A qué hora abrís?')).source,'clinic_data');
+  assert.equal((await ask('¿Dónde estáis?')).source,'rules');
+  assert.equal((await ask('¿Dónde estáis?',{useClinicData:true})).source,'clinic_data');
+  assert.equal((await ask('¿Dónde estáis?',{useClinicData:true,booking:'Dirección: Calle Ficticia 15.'})).reply,'La sede está en Calle Ficticia 15.');
+  assert.equal((await ask('¿Qué horario tenéis?',{booking:'Horario de apertura: lunes de 16:00 a 18:00.'})).source,'rules');
+  assert.deepEqual(calls,['hours','address']);
+  assert.equal(intent('¿Qué horarios tenéis para una cita?'),null);
+});
+
+test('only an active standalone service can contribute its regular tariff, a promotion wins for offer questions', async()=>{
+  const facts=require('../../services/leadAssistantClinicFacts.service');
+  const {generateAnswer}=require('../../services/leadAssistantDialogue.service');
+  const rows=[
+    {nombre:'Drenaje suave',precio_base:56,activo:true},
+    {nombre:'Uso interno prueba',precio_base:99,activo:true},
+    {nombre:'Oculto',precio_base:75,activo:true,eliminado_por_clinica:[72]},
+    {nombre:'Revisión',precio_base:84,activo:true,clinical_config:{booking_visibility:'continuation_only'}},
+    {nombre:'Sin revisar',precio_base:70,activo:true,clinical_config:{fiscal_mapping_pending:true}},
+  ];
+  const db={Tratamiento:{findAll:async args=>{assert.deepEqual(args.where,{clinica_id:72,origen:'clinica',activo:true});return rows;}}};
+  const fields={useClinicData:true,booking:'Pide confirmación',guardrails:'Sin diagnóstico',context:'',promotions:'',tone:'Breve'};
+  const read=(kind,q,h,f,o)=>facts.read(db,72,kind,q,h,f,o);
+  const ask=(message,offer=null,overrides={})=>generateAnswer({fields:{...fields,...overrides},userText:message,
+    clinicName:'Sede',offer,readHistory:async()=>[],readClinicFact:read,analyze:async()=>assert.fail('unexpected model call')});
+  const offer={title:'Drenaje suave',description:'39 € por sesión.',terms:['39 € por sesión.']};
+  assert.match((await ask('¿Cuánto cuesta?',offer)).reply,/39 €/);
+  assert.match((await ask('¿Cuál es el precio habitual del drenaje suave?',offer)).reply,/habitual.*56/);
+  const unavailable=await ask('precio habitual del drenaje suave',offer,{useClinicData:false});
+  assert.doesNotMatch(unavailable.reply,/39|56/);
+  for(const name of ['Oculto','Sin revisar','Revisión']) assert.equal(await read('price','precio de '+name,[],fields,null),null);
+  assert.doesNotMatch(await read('services','qué servicios tenéis',[],fields,null),/uso interno|oculto|revisión/i);
+});

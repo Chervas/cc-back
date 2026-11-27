@@ -41,12 +41,16 @@ withIsolatedCampaignMysql(async ({ sql, report }) => {
   await location.update({is_suspended:true});
   assert.deepEqual((await service.read(1)).openingHours, {source:null,hours:[]});
   await assert.rejects(service.approve(1, 81, 1), {status:409});
-  const fields = {tone:'Cercano',context:'Primera visita 35 €',guardrails:'Consultar a recepción',booking:'Pide confirmación',promotions:''};
+  await assert.rejects(service.save(1,81,{version:1,fields:{...next.fields,useClinicData:'sí'}}),{status:400});
+  const fields = {useClinicData:true,tone:'Cercano',context:'Primera visita 35 €',guardrails:'Consultar a recepción',booking:'Pide confirmación',promotions:''};
   await service.save(1, 81, {version:1, fields});
   await Promise.all([service.approve(1, 81, 2), service.approve(1, 82, 2)]);
   assert.equal(await LeadAssistantPublication.count(), 1);
   assert.equal(await service.approvedVersion(2), null);
-  await service.save(1, 83, {version:2, fields:{...fields, context:'Cambio en revisión'}});
+  const legacy = {...fields, context:'Cambio en revisión'}; delete legacy.useClinicData;
+  await service.save(1, 83, {version:2, fields:legacy});
+  assert.equal((await service.read(1)).fields.useClinicData,true);
+  assert.equal((await LeadAssistantPublication.findOne({where:{clinic_id:1,version:2}})).fields.useClinicData,true);
   await assert.rejects(service.approve(1, 81, 2), {status:409});
   assert.equal((await LeadAssistantPublication.findOne({where:{clinic_id:1,version:2}})).fields.context, fields.context);
   report.checks.push('Aprobación explícita e inmutable, repetición concurrente, fichas locales aisladas y horario de agenda alternativo.');

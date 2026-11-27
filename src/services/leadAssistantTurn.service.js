@@ -202,6 +202,7 @@ async function attend({
     return active ? null : 'assistant_turn_unavailable';
   }
   const plan = await respondToLead({
+      readClinicFact:(kind,question,history,fields,offer) => require('./leadAssistantClinicFacts.service').read(db,scope.clinicId,kind,question,history,fields,offer),
     entry, fields:publication.fields, clinicName:clinic.nombre_clinica, timezone:turn.timezone,
     offer, firstTurn:turn.firstTurn, previousAnswer:lockTurn.previousAnswer, post:turn.postReference,
     decisionKind:saved.decision.kind, analyze, clinicId:scope.clinicId, groupId:execution.group_id,
