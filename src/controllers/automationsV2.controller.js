@@ -1299,6 +1299,11 @@ const NODE_TYPES_V2 = [
     ],
   },
   {
+    type: 'action/social_lead_interest', category: 'action', label: 'Detectar interés en redes',
+    description: 'Procesa la entrada de QuickChat de la automatización de leads de la clínica.',
+    output_keys: ['on_success', 'on_review', 'on_fail'], runtime_status: 'real', default_config: {}, config_schema: [],
+  },
+  {
     type: 'action/send_system_notification',
     category: 'action',
     label: 'Notificación del sistema',

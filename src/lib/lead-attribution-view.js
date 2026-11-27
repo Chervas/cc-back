@@ -24,11 +24,15 @@ const MARKETING_ORIGIN_LABELS = Object.freeze({
   seo: 'SEO',
   direct: 'Directo',
   social_organic: 'Redes sociales',
+  social_inbox: 'Bandeja de redes',
   meta_form: 'Formulario de Meta',
   local_services: 'Local Services',
   unknown: 'Desconocido',
 });
 const CONTACT_METHOD_LABELS = Object.freeze({
+  instagram_comment: 'Comentario de Instagram',
+  instagram_dm: 'Mensaje de Instagram',
+  messenger_dm: 'Mensaje de Messenger',
   web_phone: 'Teléfono de la web',
   web_chat: 'Chat web',
   web_form: 'Formulario web',
@@ -55,6 +59,7 @@ const resolveLeadMarketingOrigin = (lead = {}) => {
   const source = clean(lead.source);
   const utmMedium = clean(lead.utm_medium);
   const utmSource = clean(lead.utm_source);
+  if (lead.external_source === 'quickchat_social') return 'social_inbox';
   if (source === 'whatsapp' && lead.external_source === 'bulk_whatsapp_reply') return 'bulk_whatsapp';
   if (EMAIL_CONTACT_SOURCES.includes(source) && utmMedium === 'email') {
     return utmSource === BULK_EMAIL_UTM_SOURCE ? 'bulk_email' : 'email';
@@ -78,6 +83,7 @@ const resolveLeadMarketingOrigin = (lead = {}) => {
 const resolveLeadContactMethod = (lead = {}) => {
   const detail = clean(lead.source_detail);
   const source = clean(lead.source);
+  if (lead.external_source === 'quickchat_social' && ['instagram_comment','instagram_dm','messenger_dm'].includes(detail)) return detail;
 
   if (['tel_modal', 'tel_modal_call', 'web_phone', 'phone_modal'].includes(detail)) return 'web_phone';
   if (detail.includes('chat')) return 'web_chat';
@@ -96,6 +102,7 @@ const normalizedColumn = (name) => fn('LOWER', fn('TRIM', fn('COALESCE', col(`Le
 const buildMarketingOriginWhere = (source, Op) => {
   const normalized = clean(source);
   if (!normalized || !Op) return null;
+  if (normalized === 'social_inbox') return { external_source: 'quickchat_social' };
 
   if (normalized === 'google_ads') {
     return {

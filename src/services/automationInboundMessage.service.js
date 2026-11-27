@@ -65,7 +65,7 @@ function parseDate(value, fallback = null) {
 
 function normalizeChannel(value) {
   const channel = cleanString(value)?.toLowerCase();
-  return ['whatsapp', 'instagram'].includes(channel) ? channel : null;
+  return ['whatsapp', 'instagram', 'messenger'].includes(channel) ? channel : null;
 }
 
 function normalizeMessageReceivedTriggerConfig(value = {}) {
@@ -193,7 +193,7 @@ function triggerDispatchJobAfterCommit(jobId) {
 }
 
 async function enqueueInboundDispatch(
-  { inboundMessage, conversation, clinicId, channel, providerMessageId },
+  { inboundMessage, conversation, clinicId, channel, providerMessageId, socialTemplateId },
   options = {},
 ) {
   const externalTransaction = options.transaction || null;
@@ -260,7 +260,7 @@ async function enqueueInboundDispatch(
       owner_reference_id: job.id,
       status: 'queued',
       processed_at: null,
-    }, { dispatch_job_id: job.id }, { transaction });
+    }, { dispatch_job_id: job.id, ...(socialTemplateId ? {social_template_id: socialTemplateId} : {}) }, { transaction });
     outcome = { claim: acquired.claim, job, created, already_processed: false };
   };
 
@@ -598,6 +598,11 @@ async function runInboundDispatchJob(payload = {}, jobRequest = null) {
   try {
     const clinicId = positiveInt(conversation.clinic_id || claim.clinic_id);
     const channel = normalizeChannel(conversation.channel || claim.channel);
+    if ((channel === 'instagram' || channel === 'messenger') && message.metadata?.social) {
+      const result = await require('./socialLeadAutomation.service').start({claim, message, conversation});
+      await markClaimCompleted(claim, 'social_lead_interest', result.execution_id, {reason: result.reason || null});
+      return {status: 'completed', result};
+    }
     if (channel === 'whatsapp') {
       const bulkOptOut = await marketingOptOutService.applyBulkWhatsappOptOut({ clinicId, conversation, inboundMessage: message });
       if (bulkOptOut?.handled) {

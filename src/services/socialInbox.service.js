@@ -44,6 +44,7 @@ function create({
   resolve = resolveRoute,
   provider,
   enqueue,
+  dispatchInbound,
   publish = defaultPublish,
   now = Date.now,
 }) {
@@ -178,6 +179,9 @@ function create({
         },
         { transaction: t },
       );
+      if (dispatchInbound && e.source === 'new' && !e.echo) {
+        await dispatchInbound({entry: e, receiptKey: key, conversation: c, message: m, transaction: t});
+      }
     });
     const notification = await R.findByPk(key);
     if (notification?.state === 'notify') await notifyReceipt(notification);
@@ -248,7 +252,7 @@ function create({
     if (dm.available) dm = await context(c, 'dm');
     return { dm: { available: dm.available, reason: dm.reason || null }, comments };
   }
-  async function reserveAndSend(c, { attemptId, text, commentMessageId = null, actorId }) {
+  async function reserveAndSend(c, { attemptId, text, commentMessageId = null, actorId }, automation) {
     if (
       !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(attemptId) ||
       !Number.isSafeInteger(Number(actorId)) ||
@@ -288,6 +292,8 @@ function create({
       const thread = await C.findByPk(c.id, lock(t));
       const previous = await R.findByPk(key, lock(t));
       if (previous) return replay(previous);
+      const blockedByAutomation = automation && await automation.blockReason(t);
+      if (blockedByAutomation) return blocked(blockedByAutomation);
       // Includes a committed reservation whose process died before observing Graph.
       const pending = await M.findOne({
         where: {
@@ -315,6 +321,7 @@ function create({
           status: 'sending',
           metadata: {
             socialAttempt: attemptId,
+              ...(automation ? {source: 'automations_v2', execution_id: automation.executionId} : {}),
             outcome: 'sending',
             ...(origin
               ? { commentId: origin.commentId, postId: origin.postId, permalink: origin.permalink }
@@ -347,6 +354,10 @@ function create({
       reason = 'reconciliation_required',
       sent;
     try {
+      const blockedByAutomation = automation && await automation.blockReason();
+      if (blockedByAutomation) {
+        return settle(c, key, attemptId, commentMessageId, 'failed', blockedByAutomation);
+      }
       sent = await provider.send(reservation.route, kind, reservation.recipient, text, attemptId);
       if (!sent.available) {
         state = 'failed';
@@ -444,8 +455,8 @@ function create({
       return settle(c, row.key, id, row.event.commentMessageId, 'failed', proof.reason, proof);
     }
   }
-  async function reply(c, command) {
-    const result = await reserveAndSend(c, command);
+  async function reply(c, command, automation) {
+    const result = await reserveAndSend(c, command, automation);
     return result.available === false
       ? { ...result, outcome: 'blocked', attemptId: command.attemptId }
       : result;
@@ -473,6 +484,7 @@ function service() {
     db: require('../../models'),
     provider: require('./socialInboxProvider.service').provider(),
     enqueue: require('./jobRequests.service').enqueueUniqueJobRequest,
+    dispatchInbound: event => require('./socialLeadAutomation.service').enqueue(event),
   }));
 }
 module.exports = { create, service, isSocial, windowCheck, JOB };
