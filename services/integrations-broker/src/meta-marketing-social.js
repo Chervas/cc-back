@@ -1,7 +1,7 @@
 'use strict';
 
 const { createHmac } = require('node:crypto');
-const { fail } = require('./errors');
+const { fail, BrokerError } = require('./errors');
 const { pageFields, ensureField, subscriptionForm } = require('./meta-page-subscription');
 const { usage } = require('./meta-marketing-ads-http');
 const { graphId, GRAPH_VERSION } = require('./meta-marketing-contract');
@@ -107,6 +107,32 @@ const permissions = (channel, kind, operation) =>
         ...(kind === 'comment' ? ['instagram_manage_comments', 'pages_read_engagement'] : []),
       ];
 
+function historyRetryAfterMs(headers) {
+  if (!headers || typeof headers.get !== 'function') return 0;
+  const retry = headers.get('retry-after');
+  let delay = 0;
+  if (typeof retry === 'string' && retry.length <= 40) {
+    if (/^\d{1,8}$/.test(retry)) delay = Number(retry) * 1000;
+    else if (/^[A-Z][a-z]{2}, /.test(retry)) {
+      const target = Date.parse(retry);
+      if (Number.isFinite(target)) delay = Math.max(0, target - Date.now());
+    }
+  }
+  const usage = headers.get('x-business-use-case-usage');
+  if (typeof usage === 'string' && usage.length <= 16384) {
+    try {
+      for (const entries of Object.values(JSON.parse(usage) || {})) {
+        if (!Array.isArray(entries)) continue;
+        for (const entry of entries) {
+          const minutes = entry?.estimated_time_to_regain_access;
+          if (Number.isSafeInteger(minutes) && minutes > 0 && minutes <= 44640)
+            delay = Math.max(delay, minutes * 60000);
+        }
+      }
+    } catch { /* Meta can omit the business usage object. */ }
+  }
+  return delay;
+}
 async function execute({
   operation,
   payload: p,
@@ -130,13 +156,14 @@ async function execute({
     return graphRequest(path, bearer, query, body);
   }
   const deadline = Date.now() + 24000;
-  function historyFailure(path, reason, status, code) {
+  function historyFailure(path, reason, status, code, retryAfterMs) {
     if (operation !== history) return;
     const edge = path.split('/').at(-1);
     if (!['accounts', 'debug_token', 'conversations', 'messages', 'media', 'comments', 'replies'].includes(edge)) return;
     const event = { event: 'meta_social_history_failed', channel: p.channel, kind: p.kind, edge, reason };
     if (Number.isInteger(status) && status >= 100 && status <= 599) event.status = status;
     if (Number.isSafeInteger(code) && code >= 0 && code <= 9999999) event.code = code;
+    if (Number.isSafeInteger(retryAfterMs) && retryAfterMs > 0) event.retryAfterMs = retryAfterMs;
     process.stderr.write(JSON.stringify(event) + '\n');
   }
   async function graphRequest(path, bearer, query = {}, body) {
@@ -173,8 +200,11 @@ async function execute({
     if (operation === subscribe && response.headers)
       subscriptionPacer.observe('meta-ads-app:' + metadata.appId, usage(Object.fromEntries(response.headers)));
     if ([subscribe, history].includes(operation) && (response.status === 429 || [4, 17, 32, 613, 80006].includes(raw.error?.code))) {
-      historyFailure(path, 'rate_limited', response.status, raw.error?.code);
-      fail('rate_limited');
+      const delay = operation === history ? historyRetryAfterMs(response.headers) : 0;
+      historyFailure(path, 'rate_limited', response.status, raw.error?.code, delay);
+      const limited = new BrokerError('rate_limited');
+      if (delay > 0 && delay <= 86400000) limited.retryAfterMs = delay;
+      throw limited;
     }
     if (raw.error || !response.ok) {
       historyFailure(path, 'graph_error', response.status, Number.isInteger(raw.error?.code) ? raw.error.code : undefined);

@@ -1,7 +1,7 @@
 'use strict';
 
 const { createHmac } = require('node:crypto');
-const { cursorCodec } = require('./provider-cursor');
+const { socialHistoryCursorCodec } = require('./provider-cursor');
 const { graphId } = require('./meta-marketing-contract');
 const { fail } = require('./errors');
 
@@ -38,7 +38,7 @@ async function read({ payload, asset, context, appSecret, graph, pageToken }) {
   const key = createHmac('sha256', appSecret)
     .update('clinicaclick/social-history/cursor/v1')
     .digest();
-  const codec = cursorCodec(key);
+  const codec = socialHistoryCursorCodec(key);
   try {
     const root =
       kind === 'dm' ? { edge: 'conversations', id: asset.id } : { edge: 'media', id: accountId };

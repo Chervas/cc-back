@@ -524,5 +524,17 @@ test('history reports the timed-out Graph stage and preserves a real Page rate l
   };
   await assert.rejects(call(social.history, 'instagram', 'dm', args), { code: 'rate_limited' });
   assert.deepEqual(diagnostics, [{ event: 'meta_social_history_failed', channel: 'instagram', kind: 'dm', edge: 'conversations', reason: 'rate_limited', status: 429 }]);
+  ctx.transport = async (url, options) => {
+    if (!url.pathname.endsWith('/conversations')) return original(url, options);
+    const headers = new Headers({
+      'retry-after': '20',
+      'x-business-use-case-usage': '{"private-business":[{"estimated_time_to_regain_access":3}]}',
+    });
+    return { ok: false, status: 403, headers, json: async () => ({ error: { code: 4 } }) };
+  };
+  await assert.rejects(call(social.history, 'instagram', 'dm', args), { code: 'rate_limited', retryAfterMs: 180000 });
+  assert.equal(diagnostics.at(-1).retryAfterMs, 180000);
+  assert.ok(!JSON.stringify(diagnostics).includes('private-business'));
+
 
 });

@@ -188,3 +188,26 @@ test('regular Instagram conversation discovery keeps ten per page', async () => 
   const root = await read(null);
   assert.equal(root.next, null);
 });
+
+test('only new scoped history cursors survive a quota pause, old cursors keep their encrypted expiry', () => {
+  const { cursorCodec, socialHistoryCursorCodec } = require('../src/provider-cursor');
+  const key = Buffer.alloc(32, 7);
+  let clock = 1000;
+  const normal = cursorCodec(key, () => clock), history = socialHistoryCursorCodec(key, () => clock);
+  const scope = { principalId: 'worker', tenantRef: 'clinic:72', binding: { connectionRef: 'authority' },
+    assetRef: 'page', operation: 'meta.marketing.social.history.v1', policyVersion: 'credential+clinic+window' };
+  const other = { ...scope, operation: 'meta.marketing.ads.actions.v1' };
+  const old = normal.seal('older', scope), unrelated = normal.seal('other-op', other), resumed = history.seal('next', scope);
+  assert.equal(history.open(old, scope), 'older');
+  assert.throws(() => history.seal('invalid', other), { code: 'invalid_request' });
+  assert.throws(() => history.open(unrelated, other), { code: 'invalid_request' });
+  clock += 11 * 60000;
+  assert.throws(() => normal.open(unrelated, other), { code: 'invalid_request' });
+  assert.throws(() => history.open(old, scope), { code: 'invalid_request' });
+  clock += 6 * 3600000;
+  assert.equal(history.open(resumed, scope), 'next');
+  for (const changed of [{ assetRef: 'other-page' }, { tenantRef: 'clinic:66' }, { policyVersion: 'other-credential+window' }])
+    assert.throws(() => history.open(resumed, { ...scope, ...changed }), { code: 'invalid_request' });
+  clock = 1000 + 24 * 3600000;
+  assert.throws(() => history.open(resumed, scope), { code: 'invalid_request' });
+});

@@ -72,6 +72,7 @@ test('the actual maintenance transport preserves only bounded closed429 cooldown
     await assert.rejects(client.execute(command),error=>error.code==='rate_limited'&&error.retryAfterMs===7200000);
     await assert.rejects(client.execute({...command,operation:'meta.marketing.credential.maintenance.health.v1'}),error=>error.code==='rate_limited'&&error.retryAfterMs===7200000);
     await assert.rejects(client.execute({...command,operation:'meta.marketing.social.subscribe.v1'}),error=>error.code==='rate_limited'&&error.retryAfterMs===7200000);
+    await assert.rejects(client.execute({...command,operation:'meta.marketing.social.history.v1'}),error=>error.code==='rate_limited'&&error.retryAfterMs===7200000);
     await assert.rejects(client.execute({...command,operation:'meta.marketing.asset.read.v1'}),error=>error.code==='rate_limited'&&error.retryAfterMs===undefined);
     body={error:{code:'rate_limited'}};await assert.rejects(client.execute(command),error=>error.code==='rate_limited'&&error.retryAfterMs===undefined);
   }finally{H.request=original;}
