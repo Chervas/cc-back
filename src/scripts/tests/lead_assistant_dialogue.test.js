@@ -256,3 +256,13 @@ test('a named service does not inherit the price or the booking context of anoth
   for(const question of ['¿Cuánto vale la sesión?','¿Y el precio?','¿Cuánto cuesta el contorno de ojos?'])
     assert.equal(commercialOffer(fields,{type:'dm',text:question},previous.key,{}).key,previous.key);
 });
+
+test('an explicitly configured ordinary price beats the general context and the optional catalogue',async()=>{
+  const fields={tone:'Breve',booking:'Precio habitual de Drenaje suave: 42 €.',context:'Precio habitual de Drenaje suave: 95 €.',guardrails:'Sin diagnósticos.',promotions:''};
+  for(const useClinicData of [true,false]){
+    const answer=await require('../../services/leadAssistantDialogue.service').generateAnswer({
+      fields:{...fields,useClinicData},clinicName:'Sede',userText:'¿Cuál es el precio habitual del Drenaje suave?',
+      readHistory:async()=>[],readClinicFact:async()=>assert.fail('read the secondary catalogue'),analyze:async()=>assert.fail('unnecessary generation'),
+    });assert.match(answer.reply,/42 €/);assert.doesNotMatch(answer.reply,/95/);
+  }
+});

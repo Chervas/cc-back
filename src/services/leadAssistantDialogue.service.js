@@ -169,7 +169,9 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const catalogued = !ordinaryPrice && discovery.catalogueReply({fields,offer,history,userText,timezone});
   const missingOfferPrice = catalogued && /^No encuentro un precio promocional/.test(catalogued);
   if (catalogued && !missingOfferPrice) return {reply:catalogued,imageId:null,source:'catalog'};
-  const regularLines = ordinaryPrice ? clinicFacts.regularPriceLines(fields,offer,userText,history) : [];
+  const regularLines = kind === 'price' ? clinicFacts.regularPriceLines(fields,offer,userText,history) : [];
+  const writtenTariff = clinicFacts.labelledRegularPrice(regularLines,userText);
+  if (writtenTariff) return {reply:writtenTariff,imageId:null,source:'rules'};
   if (!regularLines.length && kind === 'price' && (ordinaryPrice || !offer || missingOfferPrice) && fields.useClinicData === true && readClinicFact &&
       !clinicFacts.relevantManual(kind,fields,offer,userText)) {
     const fact = await readClinicFact(kind,userText,history,fields,offer);
@@ -204,7 +206,7 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const relevantOffer = offer && {...offer, images:withImage && !guidanceOnly ? offer.images : [],
     ...(guidanceOnly ? {description:offer.guide,guide:undefined} : {})};
   const request = buildDraftRequest({ clinicName, timezone, tone:fields.tone, bookingInstructions:fields.booking.replace(/https?:\/\/\S+/gi, '').trim(),
-    approvedContext:guidanceOnly ? undefined : approvedContext,
+    approvedContext:ordinaryPrice && regularLines.length ? regularLines.join('\n') : guidanceOnly ? undefined : approvedContext,
     approvedFacts:guidanceOnly ? [fields.guardrails].flatMap(value=>value.match(/[\s\S]{1,1000}/g) || []) : facts,
     matchedPromotion:relevantOffer, commercialHistory:history, userText:generalPromo ? 'INFO' : userText, availableSlots:[] });
   // Keep the actual question distinct from the long configuration and the original INFO trigger.
