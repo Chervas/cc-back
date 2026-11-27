@@ -70,7 +70,7 @@ function create({
       )
     )
       return null;
-    if (rule.action === 'assistant' && !await acceptsOrigin(db, rule, conversation, entry, transaction)) return null;
+    if (rule.action === 'assistant' && !await acceptsOrigin(db, rule, conversation, entry, transaction, flow.id)) return null;
     return { flow, rule };
   }
 
@@ -79,7 +79,7 @@ function create({
     if (explicitOptOut(entry.text)) {
       await message.update({ metadata: { ...message.metadata, socialContactOptOut: true } }, { transaction });
     }
-    const eligible = await plan(conversation, entry, transaction);
+    const eligible = await plan(conversation, { ...entry, messageId: message.id }, transaction);
     if (!eligible) return;
     return dispatch(
       {
