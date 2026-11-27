@@ -404,9 +404,31 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     const event = await social.readEntry(key,41);
     return { message:await db.Message.findByPk(event.messageId), execution, result };
   }
+  const earlierLead = await db.LeadIntake.create({clinica_id:41,source:'web',status_lead:'nuevo'});
+  const returningThread = await db.Conversation.create({clinic_id:41,channel:'instagram',social_account_id:'501',contact_id:'780',lead_id:earlierLead.id});
   const fromKnown = await answerAd(adComment('9951','980','88101','C02-03'));
   assert.equal(fromKnown.message.metadata.leadAssistantTurn.promotionKey,'C02-03');
   assert.equal(assistantContexts.at(-1).promotion.title,'Oferta ficticia');
+  const dmRule = activeAssistant.trigger_config.social_entries.instagram_dm;
+  const laterDm = {channel:'instagram',type:'dm',accountId:'501',senderId:'780',messageId:fromKnown.message.id+10000};
+  const follows = (rule=dmRule, entry=laterDm, flow=activeAssistant.id) =>
+    sourceCheck.acceptsOrigin(db,rule,returningThread,entry,undefined,flow);
+  assert(await follows());
+  assert.equal(await follows(dmRule,laterDm,activeAssistant.id+1),false);
+  assert.equal(await follows({...dmRule,version:dmRule.version+1}),false);
+  assert.equal(await follows({...dmRule,origins:['google_ads']}),false);
+  assert.equal(await follows(dmRule,{...laterDm,senderId:'999'}),false);
+  const privateReply = await db.Message.findOne({where:{conversation_id:returningThread.id,direction:'outbound',
+    'metadata.socialAttempt':fromKnown.message.metadata.privateAttempt}});
+  assert(await follows(dmRule,{...laterDm,replyTo:privateReply.metadata.providerId}));
+  assert.equal(await follows(dmRule,{...laterDm,replyTo:'quoted-other-thread'}),false);
+  const activeSession = await db.LeadAssistantSession.findByPk(returningThread.id);
+  await activeSession.update({state:'operator'});
+  assert.equal(await follows(),false);
+  await activeSession.update({state:'active'});
+  await privateReply.update({status:'sending'});
+  assert.equal(await follows(),false);
+  await privateReply.update({status:'sent'});
   const seenBefore = assistantContexts.length;
   const unknown = await answerAd(adComment('9952','981','88102',null));
   assert.equal(unknown.message.metadata.leadAssistantTurn.promotionKey,null,'An unidentified new ad must not inherit the old price or photo');
@@ -415,7 +437,10 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal(clarification.recipient,'9952');
   assert.match(clarification.text,/qu[ée] (?:promoci[oó]n|tratamiento)/i);
   assert.doesNotMatch(clarification.text,/https:|C02-03/);
-  await answerAd(dm('instagram','501','topic-reply-980','¿Qué incluye?','780'));
+  const dmTurn = await answerAd(dm('instagram','501','topic-reply-980','¿Qué incluye?','780'));
+  const dmReply = await db.Message.findOne({where:{conversation_id:returningThread.id,direction:'outbound',
+    'metadata.execution_id':dmTurn.execution.id}});
+  assert(await follows(dmRule,{...laterDm,replyTo:dmReply.metadata.providerId}));
   assert.equal(assistantContexts.at(-1).promotion,null);
   assert(!assistantContexts.at(-1).commercialHistory.some(turn=>turn.text.includes('visita informativa')));
   const clarified = await answerAd(dm('instagram','501','topic-clarified-980','Es la C02-03','780'));
@@ -425,6 +450,16 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   const deliveries = posts.length;
   await automation.run(samePost.execution,true);
   assert.equal(posts.length,deliveries);
+  assert.equal((await returningThread.reload()).lead_id,earlierLead.id);
+  assert.equal((await earlierLead.reload()).source,'web');
+  const organic = adComment('9975','982',null,null);
+  delete organic.entry[0].changes[0].value.media.ad_id;
+  const beforeOrganic = claims.length;
+  await receive(organic);
+  const organicDm = dm('instagram','501','separate-organic-dm','INFO','780');
+  organicDm.entry[0].messaging[0].timestamp = Math.max(Date.now(),activeAssistant.published_at.getTime());
+  await receive(organicDm);
+  assert.equal(claims.length,beforeOrganic,'A newer organic comment ends the earlier paid context.');
   const whatsappApi = require('../../services/leadAssistantWhatsapp.service');
   const inboundWhatsapp = await db.Conversation.create({clinic_id:41,channel:'whatsapp',contact_id:'+34600000041'});
   const waMessage = await db.Message.create({conversation_id:inboundWhatsapp.id,direction:'inbound',message_type:'text',
@@ -470,6 +505,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.equal((await waAssistant.run(waExecution)).reason,'whatsapp_entry_unavailable');
   assert.equal(waPosts.length,1);
   report.assertions = [
+    'Un lead previo sigue por DM tras el privado acreditado del anuncio y conserva su origen. Una publicación posterior, otra regla o un privado pendiente impiden heredar ese origen.',
     'Un segundo anuncio sin tratamiento solicita aclaración, separa los datos de la oferta anterior y conserva la aclaración del DM en el mismo anuncio.',
     'Filtro de origen por canal aplicado antes de ejecutar y enviar, con atribución de Leads o de anuncio Meta y reglas anteriores sin filtro.',
     'WhatsApp atiende una entrada con una foto y pie sin plantilla. Misma ejecución, conversación, número, foto aprobada y plazo de 24 h.',
