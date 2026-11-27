@@ -83,6 +83,23 @@ function supportsQuotedAmounts(reply, approved) {
   return quotes.every(quote=>known.has(quote));
 }
 
+async function generateAnswer({ fields, clinicName, timezone, offer, userText, askPromotion, readHistory,
+  analyze, clinicId, groupId, beforeDispatch }) {
+  const approvedContext = fields.context.replace(/https?:\/\/\S+/gi, '').trim();
+  const facts = [fields.guardrails, fields.booking].filter(Boolean)
+    .flatMap(value => value.replace(/https?:\/\/\S+/g, '').match(/[\s\S]{1,1000}/g) || []);
+  const generated = askPromotion ? { reply:'¿Qué promoción has visto?' } : await analyze({
+    ...buildDraftRequest({ clinicName, timezone, tone:fields.tone, approvedContext, approvedFacts:facts,
+      matchedPromotion:offer, commercialHistory:await readHistory(), userText, availableSlots:[] }),
+    useCase:'lead_assistant_reply', clinicId, groupId, beforeDispatch,
+  });
+  if (typeof generated?.reply !== 'string' || !generated.reply.trim() || generated.reply.length > 800 ||
+      !supportsQuotedAmounts(generated.reply, [approvedContext, ...facts, offer?.description]) || /https?:\/\//i.test(generated.reply))
+    return null;
+  const image = offer?.images.find(item => item.id === generated.imageId);
+  return { reply:generated.reply.trim(), imageId:image?.id || null };
+}
+
 function introduction(clinicName, tone = '') {
   const name = tone.match(/\b(?:identif[ií]cate|pres[eé]ntate)\s+como\s+["«“]([\p{L}][\p{L} -]{0,30})["»”]/iu)?.[1];
   return 'Hola, soy ' + (name ? name + ', asistente' : 'el asistente') + ' de IA de ' + text(clinicName, 120) + '. ';
@@ -113,4 +130,4 @@ function formatHandoffReceipt({ firstTurn, clinicName, tone, recorded, requested
     : 'He pasado tu mensaje a ' + team + '. Podéis seguir hablando por aquí.');
 }
 
-module.exports = { supportsQuotedAmounts, buildDraftRequest, formatCommercialReply, requestedHumanHandoff, formatHandoffReceipt };
+module.exports = { generateAnswer, supportsQuotedAmounts, buildDraftRequest, formatCommercialReply, requestedHumanHandoff, formatHandoffReceipt };

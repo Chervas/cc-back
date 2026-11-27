@@ -158,6 +158,23 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     const result = await run();
     return { result, initial, run, booking: async () => (await initial.reload()).metadata.assistantBooking };
   }
+  const previewState = {};
+  const balances = () => Promise.all([db.CitaPaciente, db.Paciente, db.LeadIntake, db.Conversation, db.Message, db.JobRequest].map(model => model.count()));
+  const beforePreview = await balances();
+  const previewFields = {booking:'Servicio de agenda: VAL\nPide el correo electrónico.', promotions:'', context:'Valoraciones', guardrails:'',tone:'Cercano'};
+  async function previewBooking(text, messageId) {
+    return require('../../services/leadAssistantBooking.service').processTurn({
+      db,thread:{clinic_id:100,channel:'instagram'},scope:{originMessageId:1,messageId,version:3},entry:{type:'dm',text,messageId},
+      fields:previewFields,offer:null,execution:{created_by:1},preview:previewState,availability:async()=>true,
+      mayBook:async()=>true,blockReason:async()=>null,capabilities:f.capabilities,now:new Date('2030-01-06T12:00:00Z'),
+      book:()=>assert.fail('preview must not enter reservation'),
+    });
+  }
+  await previewBooking('Quiero reservar para el 2030-01-07',1);assert.equal(previewState.booking.stage,'offered');
+  await previewBooking('La primera',2);assert.equal(previewState.booking.stage,'contact');
+  await previewBooking('Ana Prueba, +34600000001, ana@example.invalid',3);assert.equal(previewState.booking.stage,'confirm');
+  const simulated=await previewBooking('Confirmo',4);assert.match(simulated.reply,/prueba.*confirmada/);
+  assert.equal(previewState.booking.stage,'booked');assert.deepEqual(await balances(),beforePreview);
   const a = await thread('whatsapp', '+34600123451'),
     b = await thread('whatsapp', '+34600123452');
   const first = await enter(a, 'Quiero reservar para el 2030-01-07');

@@ -6751,6 +6751,25 @@ exports.getLeadAutoReplyStatus = asyncHandler(async (req, res) => {
   return res.status(200).json({ success: true, data: status });
 });
 
+exports.leadAssistantSimulator = asyncHandler(async (req, res) => {
+  const clinicId = Number(req.params.clinicId);
+  if (!/^[1-9]\d*$/.test(req.params.clinicId) || !Number.isSafeInteger(clinicId))
+    return res.status(400).json({error:'clinic_id_required'});
+  if (!(await requireLeadAutomationClinicAccess(req,res,clinicId))) return;
+  res.set('Cache-Control','private, no-store');
+  const simulator = require('../services/leadAssistantSimulator.service').current();
+  const actorId = Number(req.userData.userId);
+  try {
+    const result = req.params.sessionId ? await simulator.turn(clinicId, actorId, req.params.sessionId, req.body)
+      : await simulator.start(clinicId, actorId);
+    return res.json(result);
+  } catch (error) {
+    if (error.status && /^assistant_simulator_|^clinic_not_found$/.test(error.code || ''))
+      return res.status(error.status).json({error:error.code});
+    return res.status(503).json({error:'assistant_simulator_unavailable'});
+  }
+});
+
 exports.leadAssistantDraft = asyncHandler(async (req, res) => {
   const id = req.params.clinicId;
   if (!/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) {
