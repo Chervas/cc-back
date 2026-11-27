@@ -17,6 +17,30 @@ const contactFor = (businessId, bsuid) => {
 };
 const key = (clinicId, businessId, type, value) => createHash('sha256').update(JSON.stringify([Number(clinicId), businessId, type, value])).digest('hex');
 const cleanDisplay = v => typeof v === 'string' ? v.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 160) : null;
+function phoneSenderProfile(message, contacts) {
+    const number = phone(message?.from);
+    if (!number || !Array.isArray(contacts)) return null;
+    const matches = contacts.filter(c => phone(c?.wa_id) === number);
+    if (matches.length !== 1) return null;
+    const [card] = matches;
+    if (message.from_user_id && card.user_id !== message.from_user_id) return null;
+    const displayName = cleanDisplay(card.profile?.name);
+    const username = cleanDisplay(card.profile?.username || card.username);
+    return displayName || username ? { phone: number, displayName, username } : null;
+}
+
+function inboundProfileLabel(metadata, contactId) {
+    const id = metadata?.whatsapp_identity;
+    const opaque = parseContact(contactId);
+    const number = phone(contactId);
+    const matched = id?.profileObserved === true && BSUID.test(id.bsuid || '') &&
+        (opaque ? opaque.bsuid === id.bsuid && opaque.businessId === id.businessId : number && number === phone(id.phone));
+    const card = metadata?.whatsapp_sender_profile;
+    const profile = matched ? id : number && card && number === phone(card.phone) ? card : null;
+    const name = cleanDisplay(profile?.displayName), username = cleanDisplay(profile?.username);
+    return name || (username ? '@' + username.replace(/^@+/, '') : null);
+}
+
 function providerIdentity(message, contacts, direction = 'inbound') {
     const bsuid = message?.[direction === 'inbound' ? 'from_user_id' : 'to_user_id'];
     const number = message?.[direction === 'inbound' ? 'from' : 'to'];
@@ -171,4 +195,4 @@ async function resolveInbound(query, scope, identity) {
     await bind(query, { clinicId: scope.clinicId, businessId, type: 'bsuid', value: identity.bsuid, conversationId: id, wabaId: scope.wabaId, phoneId: scope.phoneId, displayName: identity.displayName, username: identity.username, usernameObserved: identity.profileObserved === true });
     return { id: Number(id), businessId };
 }
-module.exports = { BSUID, providerId, phone, parseContact, contactFor, providerIdentity, key, assertUnion, available, lockClinic, members, unite, bind, businessForScope, resolveInbound };
+module.exports = { BSUID, phoneSenderProfile, inboundProfileLabel, providerId, phone, parseContact, contactFor, providerIdentity, key, assertUnion, available, lockClinic, members, unite, bind, businessForScope, resolveInbound };

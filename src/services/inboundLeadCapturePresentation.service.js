@@ -1,5 +1,7 @@
 'use strict';
 
+const { postTreatmentFollowUp } = require('../lib/inbound-commercial-language');
+
 const privateKeys = [
   'inboundLeadCapture',
   'inboundLeadCaptureClassification',
@@ -32,6 +34,9 @@ function resultFor(message, clinicId, execution) {
       return null;
     const mark = meta.inboundLeadCapture;
     if (mark?.key === key && mark.executionId === execution.id && typeof mark.reason === 'string') {
+      if (!mark.leadId && ['review', 'intent_ambiguous'].includes(mark.reason) && postTreatmentFollowUp(message.content)) {
+        return { clinicId, source: 'v2', outcome: 'discarded', reason: 'post_treatment_follow_up' };
+      }
       const success = positive(mark.leadId) && mark.reason === 'interest';
       const outcome = outcomes.has(mark.outcome)
         ? mark.outcome

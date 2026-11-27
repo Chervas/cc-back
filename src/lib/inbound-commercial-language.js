@@ -28,4 +28,12 @@ function appointmentIntent(text) {
   return mixed.test(value) ? 'mixed_appointment_interest' : 'appointment_management';
 }
 
-module.exports = {campaignCopy, appointmentIntent, withdrawalText};
+function postTreatmentFollowUp(text) {
+  const value = normalize(text);
+  // First-person reports about a result that has already occurred. Prospective questions about efficacy stay eligible.
+  return /\b(?:no|apenas)\s+me\s+(?:ha\s+hecho|hizo|hace)\s+(?:ningun\s+|mucho\s+|apenas\s+)?efecto\b/.test(value)
+    || /\b(?:no he notado|no noto|no he visto|sigo sin (?:notar|ver))\s+(?:ningun(?:a)?\s+)?(?:efecto|resultados?|mejoria|cambios?)\b/.test(value)
+    || /\b(?:despues de|tras|desde)\s+(?:mi |el |la |la ultima |mi ultima )(?:tratamiento|sesion|inyeccion|intervencion)\b.{0,90}\b(?:me duele|me ha salido|tengo dolor|sigo con|me ha quedado)\b/.test(value);
+}
+
+module.exports = {campaignCopy, appointmentIntent, withdrawalText, postTreatmentFollowUp};

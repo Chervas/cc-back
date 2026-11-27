@@ -70,3 +70,16 @@ test('invalid classifier results and service failures are retryable for capture;
   assert.deepEqual(await classifyInterest(entry,{...options,beforeDispatch:()=>false,analyze:async()=>{throw Error('must not run');}}),
     {kind:'review',privateRequested:false});
 });
+
+test('a first-person post-treatment concern stays with the team; a prospective efficacy question remains eligible', async () => {
+  const { postTreatmentFollowUp } = require('../../lib/inbound-commercial-language');
+  for (const text of ['El tratamiento no me ha hecho efecto apenas, ¿puedo pasar?', 'No he notado ningún cambio después de mi sesión.']) {
+    assert.equal(postTreatmentFollowUp(text), true);
+    assert.equal(asksForCommercialInformation(text), false);
+    assert.equal(assistantCommercialText(text), null);
+    const result = await classifyInterest({ text, type:'dm' }, { beforeDispatch: () => { throw Error('unexpected inference'); } });
+    assert.equal(result.kind, 'ignore');
+    assert.equal(result.privateRequested, false);
+  }
+  assert.equal(postTreatmentFollowUp('¿Cuánto cuesta y en cuánto tiempo hace efecto?'), false);
+});

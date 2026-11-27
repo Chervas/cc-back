@@ -47,7 +47,12 @@ function normalize(raw, scope, now = Date.now()) {
     if (typeof content !== 'string' || Buffer.byteLength(content) > 50000) held();
     const key = hash(JSON.stringify([scope.wabaId,scope.phoneId,m.id]));
     const digest = hash(JSON.stringify([peer,direction,m.type,content,at]));
-    messages.push({ key,digest,peer,direction,at,content,type,wamid:m.id,providerType:m.type,historical,sourceEvent,identity:identity?.bsuid?identity:null,details:D.details(m) });
+    const details = D.details(m);
+    if (direction === 'inbound' && !identity?.bsuid) {
+      const profile = Identity.phoneSenderProfile(m, contacts);
+      if (profile) details.whatsapp_sender_profile = profile;
+    }
+    messages.push({ key,digest,peer,direction,at,content,type,wamid:m.id,providerType:m.type,historical,sourceEvent,identity:identity?.bsuid?identity:null,details });
     if (messages.length > 2000) held();
   };
   for (const entry of body.entry) {

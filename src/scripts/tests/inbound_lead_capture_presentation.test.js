@@ -121,3 +121,14 @@ test('campaign opt-in and manual repairs do not impersonate clinical V2 executio
   [row] = await presentMessages([message], options);
   assert.equal(row.capture_result, undefined);
 });
+
+test('an old undecided receipt for a treatment result is displayed as follow-up while its original audit is preserved', async () => {
+  const {message,record,options}=sample();
+  Object.assign(record,{reason:'review',leadId:null});
+  delete record.outcome;
+  message.content='El tratamiento no me ha hecho efecto apenas.';
+  const [shown]=await presentMessages([message],options);
+  assert.equal(shown.capture_result.reason,'post_treatment_follow_up');
+  assert.equal(shown.capture_result.outcome,'discarded');
+  assert.equal(record.reason,'review');
+});

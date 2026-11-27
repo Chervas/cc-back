@@ -41,3 +41,18 @@ test('an automated sender cannot use a different phone history as its target cha
  await assert.rejects(f.run({patientId:4,contactId:'+34665519703',requireExactContact:true}),e=>e.code==='whatsapp_contact_identity_conflict');
  assert.equal(f.changes.length,0);assert.equal(f.deletions.length,0);
 });
+
+test('a capture label belongs to the signed sender and never to another inbound contact or shared vCard', () => {
+ const { phoneSenderProfile, inboundProfileLabel } = require('../../lib/whatsapp-contact-identity');
+ const card={wa_id:'34600000041',profile:{name:'Remitente ficticio', username:'usuario'}};
+ const msg={from:'34600000041',contacts:[card]};
+ assert.equal(phoneSenderProfile(msg,[]),null);
+ assert.equal(phoneSenderProfile(msg,[card,card]),null);
+ assert.equal(phoneSenderProfile({...msg,from_user_id:'ES.X'},[card]),null);
+ const profile=phoneSenderProfile(msg,[card,{wa_id:'34600000042',profile:{name:'Otro'}}]);
+ assert.equal(inboundProfileLabel({whatsapp_sender_profile:profile},'+34600000041'),'Remitente ficticio');
+ assert.equal(inboundProfileLabel({whatsapp_sender_profile:profile},'34600000042'),null);
+ const identity={businessId:'901',bsuid:'ES.X',phone:'34600000041',profileObserved:true,username:'user'};
+ assert.equal(inboundProfileLabel({whatsapp_identity:identity},'bsuid:901:ES.X'),'@user');
+ assert.equal(inboundProfileLabel({whatsapp_identity:identity},'bsuid:902:ES.X'),null);
+});

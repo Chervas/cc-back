@@ -1815,6 +1815,7 @@ createWorker('webhook_whatsapp', async (job) => {
             });
         }
 
+        const senderProfile = require('../lib/whatsapp-contact-identity').phoneSenderProfile(msg, value.contacts);
         let inboundMsg = null;
         await db.sequelize.transaction(async (transaction) => {
             inboundMsg = await Message.create({
@@ -1829,6 +1830,7 @@ createWorker('webhook_whatsapp', async (job) => {
                     phoneId,
                     provider_sent_at: parseWhatsappTimestamp(msg.timestamp, null)?.toISOString() || null,
                     provider_type: rawType,
+                    ...(senderProfile ? { whatsapp_sender_profile: senderProfile } : {}),
                     ...(entry?.id ? { wabaId: String(entry.id) } : {}),
                     ...(msg.context?.id ? { context: { id: msg.context.id } } : {}),
                     ...(msg.referral?.source_type === 'ad' && (msg.referral.source_id || msg.referral.ctwa_clid) ? {
