@@ -15,6 +15,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     at = Date.now(),
     jobs = [],
     packets = [],
+    dispatched = [],
     calls = [];
   await q.createTable('Clinicas', { id_clinica: { type: D.INTEGER, primaryKey: true } });
   await q.createTable('Pacientes', { id_paciente: { type: D.INTEGER, primaryKey: true } });
@@ -104,9 +105,10 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     provider,
     resolve,
     now: () => at,
-    publish: (c, m) => {
+    dispatchInbound: ({ entry }) => dispatched.push(entry.eventId),
+    publish: (c, m, event) => {
       if (redisUnavailable) throw Error('realtime_bus_unavailable');
-      packets.push([c.id, m.id]);
+      packets.push([c.id, m.id, event]);
     },
     enqueue: async (job) => jobs.push(job),
   });
@@ -165,7 +167,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
     },
     socialAccept: svc.accept,
   });
-  async function webhook(body, bad = false) {
+  async function webhook(body, bad = false, drain = true) {
     const raw = Buffer.from(JSON.stringify(body)),
       sig =
         'sha256=' +
@@ -193,7 +195,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
       response,
     );
     assert.equal(response.code, bad ? 401 : 200);
-    while (jobs.length) await svc.importReceipt(jobs.shift().payload.receiptKey);
+    while (drain && jobs.length) await svc.importReceipt(jobs.shift().payload.receiptKey);
   }
   await webhook(comment('991'), true);
   assert.equal(await db.SocialInboxReceipt.count(), 0);
@@ -372,6 +374,8 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   assert.deepEqual((await svc.availability(thread, [pendingComment])).comments[pendingComment.id], {
     available: true, reason: null,
   });
+  await require('./fixtures/quickchat_instagram_withdrawal.fixture')({ db, svc, at, dm, webhook, resolve, jobs, dispatched, packets, accounts,
+    setDenied: value => { denied = value; }, setRedisDown: value => { redisUnavailable = value; } });
   assert(packets.length >= 8);
   report.checks.push(
     'Firma, migración repetible, duplicados, privado concurrente, DM y continuidad, dos sedes, Messenger, revisión, ventanas, revocación, conciliación sin reenvío, eco, histórico y recuperación concurrente de un webhook retenido por permisos.',

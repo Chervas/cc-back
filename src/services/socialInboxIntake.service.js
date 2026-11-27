@@ -3,6 +3,7 @@
 const { randomUUID } = require('node:crypto');
 const { events, eventKey } = require('./socialInboxEvents');
 const { resolveRoute, sameRoute } = require('./socialInboxRoute.service');
+const withdrawal = require('./socialInboxWithdrawal.service');
 const JOB = 'quickchat_social_receive';
 
 const recoverableReasons = new Set([
@@ -50,6 +51,10 @@ function createReceiptIntake({ db, resolve = resolveRoute, enqueue }) {
     const counts = { queued: 0, duplicate: 0, review: 0 };
     for (const e of events(body, { history })) {
       const result = await db.sequelize.transaction(async (t) => {
+        if (e.source === 'withdrawal') {
+          return withdrawal.queueWithdrawal(db, e, { appId, accounts }, resolve,
+            key => queueReceipt(db, enqueue, key, namespace, 'meta_social_webhook', key, t), t);
+        }
         const historyRoute = history && expectedRoute ? await resolve(db, e, t) : null;
         if (expectedRoute && !sameRoute(historyRoute, expectedRoute))
           throw Error('social_history_route_changed');
@@ -85,11 +90,21 @@ function createReceiptIntake({ db, resolve = resolveRoute, enqueue }) {
         if (!fresh && (!sameRoute(route, receipt.route) || route.appId !== appId))
           return 'duplicate';
         if (!route || route.appId !== appId || (accounts && accounts.get(e.accountId) !== route.clinicId)) {
+          const clinicId = accounts?.get(e.accountId);
+          if (!route && !receipt.message_id && await withdrawal.signedMarker(db, e, appId, clinicId, t)) {
+            await receipt.update({ state: 'withdrawn', event: withdrawal.withdrawnEvent(e), reason: null }, { transaction: t });
+            return 'duplicate';
+          }
           await receipt.update(
-            { state: 'review', reason: 'account_unassigned' },
+            { state: 'review', reason: 'account_unassigned',
+              ...(withdrawal.incomingDm(e) && clinicId ? { event: { ...e, verifiedClinicId: clinicId, verifiedAppId: appId } } : {}) },
             { transaction: t },
           );
           return 'review';
+        }
+        if (withdrawal.incomingDm(e) && !receipt.message_id && await withdrawal.markerFor(db, e, route, { transaction: t, lock: t.LOCK.UPDATE })) {
+          await receipt.update({ state: 'withdrawn', route, event: withdrawal.withdrawnEvent(e), reason: null }, { transaction: t });
+          return 'duplicate';
         }
         await receipt.update(fresh ? { route } : { event: e, state: 'pending', reason: null }, {
           transaction: t,
