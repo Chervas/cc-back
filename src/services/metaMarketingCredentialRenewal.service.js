@@ -149,7 +149,11 @@ function createService({models,sessions,client,now=()=>new Date(),enabled=()=>pr
     // abort it while the Owner is still preparing the authorization response.
     if(row.state==='begin_pending'&&+row.expires_at>+now())return row;
     // Status/abort never need an old login to resolve an already-authorized CAS.
-    let remote=await call(row,'status',{renewalId:id});
+    // Once a callback was accepted, the owner has acknowledged this renewal.
+    // Cancelling it needs no read of a candidate that may never have reached the vault.
+    const abortExchange = row.state==='cancel_pending' && C.HASH.test(row.code_digest) && !row.activate_sent_at;
+    let remote=await call(row,abortExchange?'abort':'status',{renewalId:id});
+    if(abortExchange && !remote.activationApplied && remote.status!=='aborted')C.fail('broker_response_invalid');
     const cancelling=row.state==='cancel_pending'||row.state==='begin_pending';
     if(remote.status==='not_found'){
       // An active begin may reach the owner after our status read. Only a

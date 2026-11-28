@@ -206,3 +206,22 @@ test('an unexpected disappearance after an acknowledged begin fails closed', asy
   assert.equal(f.state.row.state,'awaiting');assert.notEqual(f.state.row.pending_enrollment_id,null);
   assert.deepEqual(f.state.calls,['begin','status']);f.assertOriginal();
 });
+
+
+test('cancelling an acknowledged exchange does not need its missing candidate version', async () => {
+  const f = fixture({beforeRpc: async name => {
+    if (name === 'status') throw Object.assign(Error('candidate absent'), {code:'secret_unavailable'});
+  }});
+  const begin = f.service.begin(f.input);
+  await f.entered.promise;
+  f.resume.release();
+  await begin;
+  f.state.row.state = 'processing';
+  f.state.row.code_digest = 'c'.repeat(64);
+  f.state.owner.status = 'processing';
+  await f.service.cancel(f.input, f.state.row.renewal_id);
+  assert.equal(f.state.row.state, 'cancelled');
+  assert.equal(f.state.row.pending_enrollment_id, null);
+  assert.deepEqual(f.state.calls, ['begin','abort']);
+  f.assertOriginal();
+});
