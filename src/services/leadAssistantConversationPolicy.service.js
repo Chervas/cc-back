@@ -97,6 +97,10 @@ function groundedFollowup({userText,history,offer,fields,timezone}) {
 
   const {area,reducing} = goal(history,userText);
   if (!area || !reducing) return null;
+  if (!offer && /\b(?:como es|en que consiste|que (?:se hace|haceis|hara el equipo|pasa))\b/.test(words) &&
+      /\b(?:valoracion|primera (?:consulta|visita))\b/.test(words)) {
+    return 'En la valoración puedes contar qué te gustaría cambiar y el equipo revisará contigo qué opciones encajan. Antes de decidir podrás preguntar en qué consisten y cuánto cuestan.';
+  }
   const seekingAdvice = alternative.test(words) || volume.test(words) || promoPrice.test(words);
   if (!seekingAdvice) return null;
   // General body promotions may have prices in the same document. They cannot
