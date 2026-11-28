@@ -313,3 +313,12 @@ test('a change from a facial cleaning resolves the actual filler technique and o
   assert.doesNotMatch(get('¿Tenéis ofertas de relleno de ojeras?'),/230|95/);
   assert.match(get('¿Tenéis ofertas de relleno de ojeras?'),/hundimiento/i);
 });
+
+test('a price quoted in the commercial projection does not carry over to a different treatment', async () => {
+  const {generateAnswer} = require('../../services/leadAssistantDialogue.service');
+  const fields={context:'| Tratamiento | Descripción |\n| --- | --- |\n| Rinomodelación | Perfil de la nariz mediante relleno. |',guardrails:'Solo información aprobada',booking:'',promotions:''};
+  const result=await generateAnswer({fields,clinicName:'Sede',userText:'¿Esos € son de la nariz?',offer:null,
+    readHistory:async()=>[{role:'user',text:'¿Tenéis ofertas de rinomodelación?'}],
+    analyze:()=>assert.fail('a different campaign price cannot justify this quote')});
+  assert.match(result.reply,/importe no está confirmado para rinomodelación/);
+});
