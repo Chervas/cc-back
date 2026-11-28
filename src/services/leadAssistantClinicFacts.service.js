@@ -32,7 +32,7 @@ function namedTariff(text) {
   if (!match) return null;
   const name = match[1].replace(/^(?:para |de |del )?(?:la |el |las |los |un |una )?/, '')
     .replace(/ (?:sin (?:la )?(?:promo\w*|oferta)|normalmente|por favor|en total).*$/, '').trim();
-  if (!name || /^(?:esto|eso|esta|este|esa|ese|cada|ambos|todo|en |por |para |aproximadamente|normalmente|total|gratis|dinero)\b/.test(name) ||
+  if (!name || /^(?:y|o|cuanto|como|cuando)\b/.test(name) || /^(?:esto|eso|esta|este|esa|ese|cada|ambos|todo|en |por |para |aproximadamente|normalmente|total|gratis|dinero)\b/.test(name) ||
       /^(?:(?:primera|otra|misma) )?(?:valoracion|consulta|visita|cita|sesion(?:es)?|promo(?:cion)?|tratamiento|oferta|zona|relleno)(?: (?:de |para )?(?:ojeras|ojos))?$/.test(name)) return null;
   return name;
 }

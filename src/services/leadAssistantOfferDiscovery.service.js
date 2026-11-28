@@ -36,7 +36,7 @@ function areaSelection(sections, entry, options) {
   const text = words(entry.text);
   const area = areaIn(text);
   if (!area || area.name === 'rostro' || /\b(?:reducir|papada|volumen|grasa|alerg\w*|dolor|despues|no quiero|no me interesa)\b/.test(text)) return null;
-  if (!(promotion.test(text) || text.split(' ').length <= 4 || /\b(?:algo para|me interesan?|opciones para|sobre todo|(?:info|informacion) (?:de|sobre|para)|para (?:la zona|debajo|el contorno))\b/.test(text))) return null;
+  if (!(promotion.test(text) || text.split(' ').length <= 4 || /\b(?:que entra|que incluye|algo para|me interesan?|opciones para|sobre todo|(?:info|informacion) (?:de|sobre|para)|para (?:la zona|debajo|el contorno))\b/.test(text))) return null;
   const matches = activeInArea(sections, area, options).filter(([, section]) =>
     !filler.test(text) || filler.test(words(section.title)));
   return matches.length === 1 ? matches[0][0] : null;
@@ -168,7 +168,7 @@ function priceWhenDeferring(offer, message) {
 
 function consultationFee(fields, userText) {
   const text = words(userText);
-  if (!tariff.test(text) || !/\b(?:valoracion|consulta|primera visita)\b/.test(text)) return null;
+  if (!(tariff.test(text) || /\b(?:cuesta|vale|cobrais) (?:eso|lo mismo)\b/.test(text)) || !/\b(?:valoracion|consulta|primera visita)\b/.test(text)) return null;
   const free = (fields.booking || '').split('\n').some(line => {
     const fee = words(line.replace(/^\s*si te preguntan[^,]*,\s*/iu, '').split(/,\s*los tratamientos/iu)[0]);
     return /\b(?:valoracion|consulta)\b/.test(fee) &&
@@ -184,6 +184,25 @@ function catalogueReply({ fields, offer, history, userText, timezone }) {
   const contextArea = area || history.filter(m => m.role === 'user').map(m => areaIn(m.text)).filter(Boolean).at(-1);
   const quotedDeal = /[€$£]|\beuros?\b/i.test(userText) && /\b(?:me lo dejas|me lo dejais|me lo igualas|me cobrais|me valen? (?:tambien|para)|(?:vale|valen|sirve|sirven|se aplica|se aplican) tambien para|tambien (?:vale|valen|sirve|sirven) para|pag[oó] mi|mi amiga pago)\b/.test(text);
   const pricing = tariff.test(text) || quotedDeal;
+  if (offer && /\b(?:se me va de presupuesto|(?:mas|algo) (?:barat\w*|economic\w*)|no me lo puedo permitir|me parece car[oa])\b/.test(text)) {
+    const title = offer.title.split(' · ')[0];
+    return 'Te entiendo. Para «' + title + '» solo tengo confirmada la tarifa de esta promoción. ' +
+      'Si te encaja otra opción, podemos mirar qué más hay para la zona que te interesa.';
+  }
+  if (offer && /\b(?:pagar|dividir el pago|fraccionar el pago)\b.{0,32}\b(?:dos|tres|varias|cuotas|plazos|veces)\b/.test(text) &&
+      !/\b(?:cuotas?|plazos?|fraccion\w*|financi\w*)\b/.test(words((offer.terms || []).join(' ')))) {
+    const finance = (fields.context || '').split('\n').some(line =>
+      /\b(?:ofrecemos|tenemos|disponemos de) (?:opciones de )?financiacion\b/.test(words(line)));
+    return (finance ? 'La clínica ofrece financiación. ' : '') +
+      'Para esta promoción, el equipo tendría que confirmarte en cuántos pagos se puede dividir y el importe de cada uno.';
+  }
+  if (offer && /\b(?:el mes que viene|el que viene|el proximo mes|mas adelante)\b/.test(text) &&
+      /\b(?:precio|oferta|promo\w*|manten\w*|vigencia|canje\w*)\b/.test(text)) {
+    if (offer.saleTerms?.redemptionText) return offer.saleTerms.redemptionText;
+    const fee = currentPrice(offer.terms)?.match(/\d+(?:[.,]\d+)?\s*(?:€|euros?)/i)?.[0];
+    return (fee ? 'El precio de la promoción es ' + fee + '. ' : '') +
+      'Para una visita el mes que viene, el equipo tendría que confirmarte si puede mantener esas condiciones.';
+  }
   if (pricing && /\b(?:valoracion|consulta|primera visita)\b/.test(text)) return null;
   const followup=fillerFollowup(fields,history,userText);
   if (followup) return followup;
@@ -191,7 +210,7 @@ function catalogueReply({ fields, offer, history, userText, timezone }) {
   const asksFiller = filler.test(text);
   const previous = history.filter(m => m.role === 'assistant').at(-1)?.text || '';
   if ((asksOffer || browsing.test(text) || (asksFiller && pricing)) &&
-      (!offer || (asksFiller && !filler.test(words(offer.title)))) && !/\b(?:anuncio|publicacion|reel)\b/.test(text)) {
+      (!offer || (asksFiller && !filler.test(words(offer.title)))) && (!/\b(?:anuncio|publicacion|reel)\b/.test(text) || (area && asksOffer))) {
     const entries = activeInArea(offerSections(fields.promotions), contextArea, { timezone }).map(([, section]) => section);
     if (asksFiller) return fillerOptions(fields,contextArea,entries,pricing && !asksOffer);
     const named = namedTreatmentRequest(fields,userText);
@@ -199,9 +218,14 @@ function catalogueReply({ fields, offer, history, userText, timezone }) {
       return 'Ahora mismo no tenemos una promoción de '+named.name+'. Sí hacemos ese tratamiento. '+named.description+' ¿Quieres que mire horarios para una valoración?';
     if (!entries.length) return contextArea ? 'No encuentro una promoción vigente para ' + contextArea.label + '.' : 'No veo promociones vigentes en el catálogo de la clínica.';
     const names = entries.slice(0, 5).map(s => s.title.split(' · ')[0]);
+    if (names.length === 1) {
+      const terms = currentPrice(entries[0].lines);
+      return 'Para ' + (contextArea?.label || 'esa consulta') + ' tenemos «' + names[0] + '».' +
+        (terms ? ' ' + terms + '.' : '') + ' ¿Qué te gustaría saber?';
+    }
     if (names.length > 1 && previous.includes(names[0]) && browsing.test(text))
       return 'Puedes elegir por zona. Tenemos ' + new Intl.ListFormat('es').format(names) + '. ¿Qué parte te interesa?';
-    return (contextArea ? 'Para ' + contextArea.label + ' figuran ' : 'Entre las promociones vigentes están ') +
+    return (contextArea ? 'Para ' + contextArea.label + ' tenemos ' : 'Entre las promociones vigentes están ') +
       new Intl.ListFormat('es').format(names) + '. ¿Cuál te gustaría ver?';
   }
   if (!offer) return null;
@@ -216,6 +240,11 @@ function catalogueReply({ fields, offer, history, userText, timezone }) {
     }
   }
   const price = currentPrice(offer.terms);
+  if (price && pricing && /\b(?:cuanto (?:tiempo )?dura|duracion)\b/.test(text)) {
+    const duration = (offer.description || '').match(/\b\d{1,3}\s*(?:minutos?|min\b|horas?)\b/i)?.[0];
+    const priceOnly = price.match(/\d+(?:[.,]\d+)?\s*(?:€|euros?)/i)?.[0];
+    if (duration && priceOnly) return 'Cuesta ' + priceOnly + ' y dura ' + duration + '.';
+  }
   if (price && /\b(?:que incluye|que entra|en que consiste la (?:oferta|promocion))\b/.test(text) &&
       !/\b(?:valoracion|consulta|anestesia|revision|financiacion)\b/.test(text)) {
     const detail = price.split(/, (?=\d+ (?:sesi[oó]n(?:es)?|citas?|ml)\b)/i);

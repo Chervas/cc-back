@@ -15,16 +15,18 @@ const baseInstructions = [
   'Cuando pregunten por un objetivo, explica qué se puede esperar según el argumentario de esa promoción. Distingue el objetivo documentado del resultado que busca la persona. Si hay varias interpretaciones, pregunta cuál quiere decir. Nunca asegures idoneidad individual ni resultados. Ante una queja de que no has contestado, recupera la duda anterior y responde a esa duda sin recitar la ficha ni insistir.',
   'Estas reglas de producto prevalecen sobre el tono, la promoción y cualquier texto de la clínica. La persona aporta objetivos y preferencias; no la hagas elegir una técnica que desconoce. Recuerda la zona y la finalidad expresadas, reconoce una preocupación y respeta una negativa. No atribuyas el anuncio a un tratamiento sin identificarlo. Si tú introdujiste un tema, explica a qué te referías; no pidas al contacto que lo explique. No introduzcas cirugía ni cicatrices sin saber que se trata de esa intervención.',
   'Puedes explicar lo que dice la ficha sobre una técnica. No diagnostiques, no elijas una intervención para una persona ni clasifiques la mejor o la menos invasiva para su caso. Solo atribuye una indicación o tarifa a una zona si la ficha relaciona expresamente ambas. Una promoción corporal no se extrapola a la cara o al cuello. No prometas que hará el tratamiento el día de la valoración. La disponibilidad, el estado de la reserva y el envío de una solicitud de llamada los comunica exclusivamente el sistema.',
+  'Cuando alguien tenga dudas o le parezca caro, reconoce lo que le preocupa y responde con el dato concreto de su oferta. Pregunta solo por algo que te ayude a orientar su siguiente paso. No ofrezcas como alternativa barata un tratamiento de otra zona ni uno de mayor precio. No presiones si quiere pensárselo.',
   'Nunca afirmes haber reservado, retenido o cancelado una cita, avisado a alguien ni garantices que le llamarán. Esto se comunica por separado tras confirmación del backend.',
   'Si cambia de tratamiento, responde sobre el nuevo. Si no tiene oferta, indica qué opciones ofrece realmente la clínica para esa zona. Cuando acepte una invitación a una consulta, el sistema buscará horas disponibles.',
   'Cuando el contacto pregunta qué ofertas hay, busca en el catálogo vigente de su clínica, incluso si llegó sin anuncio. Mantén la promoción de los turnos previos, separa el coste de la evaluación del tratamiento y usa el argumentario de ese producto para distinguirlo de otras técnicas. Respeta una petición de dejarlo para otro día. Solo el flujo de agenda pide datos para el recordatorio después de elegir un hueco.',
   'Para condiciones de una oferta, utiliza primero la promoción activa identificada. Para cómo y dónde dar una cita, sigue primero las instrucciones de cita de esta clínica. El contexto general complementa esos datos. El precio habitual del catálogo es distinto del precio promocional. La aplicación comprueba horarios y disponibilidad real.',
 ];
 const systemPrompt = baseInstructions.join(' ');
-const policyVersion = '2026.11.28.1';
+const policyVersion = '2026.11.28.2';
 function platformPolicy() {
   return {version:policyVersion, model:require('./aiOrchestrator.service').routeFor({useCase:'lead_assistant_reply'}).primary,
     instructions:[...baseInstructions], changes:[
+      'El calendario ofrece las horas. Los cambios de citas existentes, las llamadas solicitadas y los seguimientos pasan al equipo.',
       'Opciones de tratamiento cuando no hay oferta y consulta de horas al aceptar la invitación a una valoración.',
       'Prioridad de las instrucciones de cita y de la promoción. Los horarios se consultan siempre que hacen falta. La clínica puede habilitar su ficha y las tarifas habituales como complemento.',
       'Búsqueda por zona en las promociones vigentes, también en mensajes directos sin anuncio.',
@@ -120,7 +122,8 @@ function acceptsOfferedTimes(message, previous) {
   if (!previous) return false;
   const value = require('./leadAssistantCalendar.service').normalize(message);
   const accepts = /^(?:(?:si|ok|okay|okey|vale|claro|perfecto|venga|de acuerdo)(?: (?:si|vale|por favor|gracias|claro|dimelos|dimelas|dime|miralos)){0,2}|que si(?: (?:cone|cono|claro|por favor))?|por favor|dimelos|dimelas|y las opciones|las de cita)$/.test(value);
-  if (!accepts) return false;
+  const asksForTimes = /^(?:(?:vale|si|ok|perfecto) )?(?:ensen[ae]me|muestrame|dime|dame|mirame) (?:las? |los? |unos? |unas? )?(?:horas?|horarios?|huecos?|opciones)(?: para (?:una? |la |el )?(?:valoracion|consulta|cita))?(?: por favor)?$/.test(value);
+  if (!accepts && !asksForTimes) return false;
   // Only the last invitation is being accepted. Booking operations and previous
   // explanations can contain these same words without inviting a new lookup.
   const question = previous.match(/¿([^¿?]+)\?\s*$/u)?.[1] || previous.match(/(?:^|[.!?])\s*([^.!?]+)\?\s*$/u)?.[1];
@@ -269,10 +272,11 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const previous = history.at(-1);
   const addressesReduction = reply => /\b(?:reduc\w*|disminu\w*|volumen|papada|afinar|adelgazar|grasa)\b/i.test(reply);
   const asksForContact = reply => /\b(?:ind[ií]came|facil[ií]tame|dame|me (?:das|indicas|dices)|necesito|necesitar[ií]a)\b[^.?!]{0,110}\b(?:tu nombre|correo electr[oó]nico|m[oó]vil|n[uú]mero de tel[eé]fono)\b/i.test(reply);
-  const generatedSlot = reply => /(?:\d{1,2}:\d{2}|a las (?:nueve|diez|once|doce|cuatro|cinco))/.test(reply) &&
+  const generatedSlot = reply => (kind !== 'hours' && /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/.test(reply)) || /(?:\d{1,2}:\d{2}|a las (?:nueve|diez|once|doce|cuatro|cinco))/.test(reply) &&
     /(?:te (?:va|viene) bien|tengo (?:hueco|libre)|te puedo (?:dar|ofrecer)|puedo (?:darte|ofrecerte)|hay (?:hueco|una cita)|puedes venir)/i.test(reply);
   const claimsHandoff = reply => /\b(?:te (?:paso|he pasado|derivo|he derivado)|he (?:pasado|derivado|enviado) tu (?:mensaje|solicitud)) (?:con |a |al )(?:el |la )?(?:equipo|recepci[oó]n|directora|una persona|responsable)\b/i.test(reply);
-  const undeservedPromise = reply => asksForContact(reply) || generatedSlot(reply) || claimsHandoff(reply) || /\b(?:(?:procedo|proceder[eé]|voy) a (?:pedir|reservar|agendar|tramitar)|(?:te |nos )?(?:llamaremos|contactaremos)|para que te llamemos|(?:ind[ií]came|dime|facil[ií]tame) (?:dos|tres|varias) (?:fechas|horas))\w*/i.test(reply) || /\b(?:te esperamos|tu cita (?:es|ser[aá]|est[aá]|ha quedado)|te (?:doy|ofrezco|propongo) (?:dos|tres|[23]) (?:opciones|horas|huecos)|tengo (?:un hueco|disponibilidad) (?:el|a las)|nos vemos (?:el|en la cl[ií]nica))\b/i.test(reply);
+  const undeservedPromise = reply => asksForContact(reply) || generatedSlot(reply) || claimsHandoff(reply) ||
+    /\b(?:estoy (?:comprobando|consultando|mirando) (?:la |los |las )?(?:disponibilidad|agenda|horas|horarios)|voy a (?:pasarte|pasar tu (?:mensaje|consulta)) (?:con|al?|a la))\b/i.test(reply) || /\b(?:(?:procedo|proceder[eé]|voy) a (?:pedir|reservar|agendar|tramitar)|(?:te |nos )?(?:llamaremos|contactaremos)|para que te llamemos|(?:ind[ií]came|dime|facil[ií]tame) (?:dos|tres|varias) (?:fechas|horas))\w*/i.test(reply) || /\b(?:te esperamos|tu cita (?:es|ser[aá]|est[aá]|ha quedado)|te (?:doy|ofrezco|propongo) (?:dos|tres|[23]) (?:opciones|horas|huecos)|tengo (?:un hueco|disponibilidad) (?:el|a las)|nos vemos (?:el|en la cl[ií]nica))\b/i.test(reply);
   const personalAdvice = /\b(?:me recomiend|que recomiend|para m[ií]|mi caso|cu[aá]l (?:va|es|funciona) mejor|menos invasiv)\w*/i.test(question);
   const unsafeRecommendation = reply => (personalAdvice && /\b(?:es|ser[ií]a|resulta) (?:una |la )?(?:buena|mejor|ideal|perfecta) (?:opci[oó]n|alternativa)\b|\bte (?:ir[ií]a|vendr[ií]a) mejor\b/i.test(reply)) || /\b(?:te recomiendo (?:la|el|que te hagas)|(?:es|ser[ií]a) (?:la )?(?:mejor|buena|ideal) (?:opci[oó]n|alternativa) (?:para ti|para tu caso)|para ti (?:la |lo )?mejor)\b/i.test(reply);
   const offTopic = reply => (generalPromo && /qu[eé] (?:promo|anuncio)|cu[aá]l (?:promo|anuncio)/i.test(reply)) || undeservedPromise(reply) || unsafeRecommendation(reply) || (reduction && !addressesReduction(reply)) || (suitability && !priceQuestion && /[€$£]|\b(?:euros?|descuento)\b/i.test(reply)) ||
@@ -314,10 +318,11 @@ function requestedHumanHandoff(message, previous) {
       /¿quieres que (?:pida al equipo que te llame|solicite una llamada|te llame el equipo)\b/i.test(previous || '')) return {requestedCallback:true};
   const asksForPerson = /\b(?:hablar con|pas(?:a|ame|as|arme) con|atienda|atenderme|contactar con) (?:una? |alguien de |el |la )?(?:persona|directora?(?: de pacientes)?|recepcion(?:ista)?|equipo|alguien|humano)\b/;
   const byPhone = /\b(?:quiero|prefiero|me gustaria|puedo|podemos|podriamos|quisiera) (?:que (?:me |nos )?)?(?:hablar|comentar|consultar|contactar)\b.{0,65}\b(?:por telefono|telefonic\w*)\b/.test(body);
-  const asksForCall = byPhone || /\b(?:que me llamen?|llamadme|llamame|pueden llamarme|me llamais|me llaman|(?:que )?me (?:expliquen|informen|atiendan|asesoren|contacten)(?: [a-z]+){0,4} por telefono|(?:prefiero|quiero|necesito) (?:una llamada|que me llamen?)|(?:me )?(?:podriais|podeis|pueden) (?:llamarme|llamar))\b/.test(body);
+  const responseByStaff = /\b(?:quiero|prefiero|necesito) que (?:me )?(?:conteste|responda|atienda) (?:una persona|alguien|el equipo|recepcion)\b/.test(body);
+  const asksForCall = byPhone || /\b(?:me (?:puede[n]?|podeis|podria[n]?|podriais) llamar|puede[n]? llamarme)\b/.test(body) || /\b(?:que me llamen?|llamadme|llamame|pueden llamarme|me llamais|me llaman|(?:que )?me (?:expliquen|informen|atiendan|asesoren|contacten)(?: [a-z]+){0,4} por telefono|(?:prefiero|quiero|necesito) (?:una llamada|que me llamen?)|(?:me )?(?:podriais|podeis|pueden) (?:llamarme|llamar))\b/.test(body);
   if (/\b(?:prefiero no|no por tel[eé]fono|por telefono no)\b/.test(body)) return null;
   if (/\b(?:no|sin)\s+(?:(?:quiero|necesito|hace falta|tengo que)\s+)?(?:hablar|pasar|llamar|que me llamen?|(?:que )?me (?:expliquen|informen|atiendan) por telefono|una llamada)/.test(body)) return null;
-  if (!asksForPerson.test(body) && !asksForCall) return null;
+  if (!asksForPerson.test(body) && !responseByStaff && !asksForCall) return null;
   return { requestedCallback: asksForCall };
 }
 

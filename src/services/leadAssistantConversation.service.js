@@ -34,6 +34,12 @@ function commercialOffer(fields, entry, priorKey, options) {
       return title && (' ' + normalize(value).replace(/[^a-z0-9]+/g, ' ') + ' ').includes(' ' + title.replace(/[^a-z0-9]+/g, ' ') + ' ');
     }).map(([key]) => key);
     matches = titlesIn(explicit);
+    if (!matches.length) {
+      // A short catalogue name such as "BS 28" identifies the same offer as its full title.
+      const codes = explicit.match(/\b[A-Z]{1,4}\s+\d{1,3}\b/g) || [];
+      matches = [...sections].filter(([, item]) => codes.some(code =>
+        (' ' + normalize(item.title).replace(/[^a-z0-9]+/g, ' ') + ' ').includes(' ' + normalize(code) + ' '))).map(([key]) => key);
+    }
     if (!matches.length) matches = titlesIn(origin);
   }
   if (!matches.length) {
@@ -124,6 +130,7 @@ function commercialOffer(fields, entry, priorKey, options) {
     title: sections.get(key).title.split(/[.\n]/)[0].slice(0, 180),
     description: body,
     terms: section.lines,
+    saleTerms: section.saleTerms,
     ...(section.guide ? { guide: stripLinks(section.guide) } : {}),
     images: (images.get(key) || []).slice(0, 24),
   };
@@ -162,6 +169,26 @@ async function respondToLead({
       reason:'assistant_handoff_unassigned', attention:true,
     },
   });
+
+  const patientRequest = require('../lib/inbound-commercial-language');
+  const requestWords = require('./leadAssistantCalendar.service').normalize(raw);
+  const existingChange = patientRequest.appointmentIntent(raw) === 'appointment_management' &&
+    /\b(?:cambiar\w*|cancelar\w*|anular\w*|reprogramar\w*|mover\w*|posponer\w*)\b/.test(requestWords) &&
+    /\b(?:(?:ya )?(?:tengo|tenia|tenemos) (?:una |la )?cita|mi cita (?:de|del|en|con|para))\b/.test(requestWords);
+  const recordsRequest = /\b(?:mi|mis) (?:historia(?:l)?(?: clinica| medico)?|informes? medicos?|expediente clinico)\b/.test(requestWords);
+  if (recordsRequest) {
+    const transfer = handoff('assistant_handoff_recorded');
+    return { ...transfer, prepare:route => {
+      const result = transfer.prepare(route);
+      return { ...result, text:format('No puedo consultar tu historial. ' +
+        (route.recorded ? dialogue.formatHandoffReceipt({ firstTurn:false, recorded:true, destination:route.destination })
+          : 'Recepción puede ayudarte con esa consulta.')) };
+    } };
+  }
+  const billingRequest = /\b(?:factura|recibo|justificante de (?:pago|asistencia))\b/.test(requestWords) &&
+    /\b(?:mi|necesito|quiero|envi\w*|manda\w*|pedir|solicit\w*|abon\w*|pague|cobr\w*|duplicado)\b/.test(requestWords);
+  if (billingRequest) return handoff('assistant_handoff_recorded');
+  if (existingChange || patientRequest.postTreatmentFollowUp(raw)) return handoff('assistant_handoff_recorded');
 
   let recent;
   const history = () => recent ||= readHistory();

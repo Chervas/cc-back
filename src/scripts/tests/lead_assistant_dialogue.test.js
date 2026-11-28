@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { buildDraftRequest, formatCommercialReply, requestedHumanHandoff, formatHandoffReceipt } = require('../../services/leadAssistantDialogue.service');
+const { acceptsOfferedTimes, buildDraftRequest, formatCommercialReply, requestedHumanHandoff, formatHandoffReceipt } = require('../../services/leadAssistantDialogue.service');
 
 const fixture = () => ({
   clinicName: 'Clínica Nube', tone: 'Breve y cercano', approvedFacts: ['Visita informativa: 35 €.'],
@@ -321,4 +321,15 @@ test('a price quoted in the commercial projection does not carry over to a diffe
     readHistory:async()=>[{role:'user',text:'¿Tenéis ofertas de rinomodelación?'}],
     analyze:()=>assert.fail('a different campaign price cannot justify this quote')});
   assert.match(result.reply,/importe no está confirmado para rinomodelación/);
+});
+
+test('an explicit request for hours following a valuation offer goes to the calendar',()=>{
+  const invitation='¿Quieres que mire horarios para una valoración?';
+  assert.equal(acceptsOfferedTimes('Vale, enséñame horas para la valoración',invitation),true);
+  assert.equal(acceptsOfferedTimes('No me enseñes horas',invitation),false);
+});
+
+test('ordinary callback and staff requests are real handoffs even after a commercial question',()=>{
+  assert.deepEqual(requestedHumanHandoff('Quería información. ¿Me puede llamar una persona?'), {requestedCallback:true});
+  assert.deepEqual(requestedHumanHandoff('Prefiero que conteste alguien de la clínica.'), {requestedCallback:false});
 });

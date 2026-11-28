@@ -64,7 +64,11 @@ test('the sample calendar completes a booking with the authorised catalogue and 
   assert.deepEqual(offered.slots.map(slot=>slot.message),['La primera','La segunda']);
   assert.match(offered.slots[0].label,/16:00/);assert.match(offered.slots[1].label,/17:30/);
   await assert.rejects(sim.turn(1,42,s.id,{id:randomUUID(),message:'La primera',promotion:'',calendar:'clinic'}),{code:'assistant_simulator_invalid'});
-  assert.match((await ask(offered.slots[1].message)).reply,/recordatorio/);
+  assert.match((await ask('La primera')).reply,/recordatorio/);
+  const correction = await ask('No, espera, mejor la segunda');
+  assert.match(correction.reply,/nueva hora/);
+  assert.match(correction.reply,/recordatorio/);
+  assert.equal(correction.event,'reply');
   assert.match((await ask('Ana Prueba, +34600000001, ana@example.invalid')).reply,/17:30/);
   assert.equal((await ask('Confirmo')).event,'booked');
 });

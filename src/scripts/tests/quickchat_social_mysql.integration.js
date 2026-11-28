@@ -402,7 +402,7 @@ withIsolatedCampaignMysql(async ({ sql, models: db, report }) => {
   });
   proof = { available: false, reason: 'provider_rejected' };
   assert.deepEqual((await svc.availability(thread, [pendingComment])).comments[pendingComment.id], {
-    available: true, reason: null,
+    available: true, reason: null, expiresAt: new Date(Date.parse(pendingComment.metadata.social.at) + 7 * 86400000).toISOString(),
   });
   await require('./fixtures/quickchat_instagram_withdrawal.fixture')({ db, svc, at, dm, webhook, resolve, jobs, dispatched, packets, accounts,
     setDenied: value => { denied = value; }, setRedisDown: value => { redisUnavailable = value; } });

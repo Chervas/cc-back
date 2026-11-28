@@ -28,6 +28,18 @@ const WHATSAPP_PROVIDER_STATUSES = new Set(['sent', 'delivered', 'read', 'failed
 
 const SYSTEM_NOTIFICATION_EVENTS = Object.freeze([
   {
+    key: 'instagram.comment_processing_delayed', category: 'system', severity: 'warning',
+    label: 'Instagram · Comentarios pendientes de procesar',
+    description: 'Un comentario recibido sigue pendiente de incorporar al chat tras quince minutos.',
+    minimumThrottleMinutes: 360, defaults: { panel: true, email: false, whatsapp: false },
+  },
+  {
+    key: 'instagram.ad_comments_unmatched', category: 'system', severity: 'warning',
+    label: 'Instagram · Comentarios de anuncios por cotejar',
+    description: 'Las estadísticas de anuncios registran comentarios que el CRM no ha podido asociar al anuncio.',
+    minimumThrottleMinutes: 1440, defaults: { panel: true, email: false, whatsapp: false },
+  },
+  {
     key: 'meta.credentials_expiring', category: 'system', severity: 'warning',
     label: 'Meta: renovación no confirmada en el margen de seguridad',
     description: 'Quedan tres días de validez real y el mantenimiento automático no ha confirmado la sustitución.',
@@ -1521,6 +1533,13 @@ async function runActiveChecks({ force = false } = {}) {
   const overview = await emailMonitoring.getOverview();
   const alerts = Array.isArray(overview?.alerts) ? overview.alerts : [];
   const queued = [];
+  let socialChecks = [];
+  if (process.env.META_SOCIAL_INBOX_ENABLED === 'true') {
+    try {
+      socialChecks = await require('./socialCommentMonitoring.service').check(db, queueNotification);
+      queued.push(...socialChecks);
+    } catch { console.warn('[instagram-comments] Comprobación de recepción no disponible'); }
+  }
   let credentialAlertCount = 0;
   try {
     const checked = await require('./metaMarketingCredentialNotifications.service').runChecks({ models: db,
@@ -1599,7 +1618,7 @@ async function runActiveChecks({ force = false } = {}) {
   return {
     status: 'completed',
     checkedAt: new Date().toISOString(),
-    alertCount: alerts.length + receptionAlerts.length + credentialAlertCount,
+    alertCount: alerts.length + receptionAlerts.length + credentialAlertCount + socialChecks.length,
     queued,
   };
 }

@@ -28,7 +28,7 @@ test('understands booking requests, a preferred local date and morning versus to
 });
 test('needs unambiguous consent to one offered option', () => {
   const slots = ['09:00', '09:15', '09:30'].map((t) => ({ local: '2030-01-07T' + t }));
-  for (const q of ['La segunda', 'Sí, la segunda me viene bien', 'A las 9:15'])
+  for (const q of ['La segunda', 'Sí, la segunda me viene bien', 'No, espera, mejor la segunda', 'A las 9:15'])
     assert.deepEqual(selection(q, slots), { index: 1, confirmed: false });
   assert.deepEqual(selection('Sí, confirmo la segunda', slots), { index: 1, confirmed: true });
   assert.deepEqual(selection('Sí', slots, 1), { index: 1, confirmed: true });

@@ -12,6 +12,9 @@ const attemptKey = (id) => digest('attempt', id);
 const blocked = (reason) => ({ available: false, reason });
 const success = { available: true, reason: null };
 const timestamp = (v) => new Date(v).getTime();
+function commentExpiry(comment) {
+  return timestamp(comment.metadata.social.at) + 7 * 86400000;
+}
 function windowCheck(c, comment, now) {
   if (!isSocial(c)) return blocked('channel_unsupported');
   if (c.channel === 'messenger') return blocked('messenger_receive_only');
@@ -28,7 +31,7 @@ function windowCheck(c, comment, now) {
     )
       return blocked('comment_unavailable');
     if (comment.metadata.privateAttempt) return blocked('private_reply_reserved');
-    if (!(timestamp(e.at) + 7 * 86400000 > now)) return blocked('comment_window_closed');
+    if (!(commentExpiry(comment) > now)) return blocked('comment_window_closed');
   } else if (!c.last_inbound_at || !(timestamp(c.last_inbound_at) + 86400000 > now))
     return blocked('dm_window_closed');
   return success;
@@ -271,7 +274,20 @@ function create({
         commentAccess ??= await accessFor('comment');
         a = commentAccess;
       }
-      comments[m.id] = { available: a.available, reason: a.reason || null };
+      comments[m.id] = { available: a.available, reason: a.reason || null,
+        ...(a.available ? { expiresAt: new Date(commentExpiry(comment)).toISOString() } : {}) };
+    }
+    if (historyView && commentRows.some(m => m.metadata.social.ad?.id) && (await accessFor('comment')).available) {
+      try {
+        const ads = await require('./socialCommentAd.service').forComments(db, c.clinic_id, commentRows, new Date(now()));
+        for (const message of commentRows) {
+          const adPreview = ads.get(message.metadata.social.ad?.id);
+          if (adPreview) comments[message.id].adPreview = adPreview;
+        }
+      } catch {
+        // The optional local preview must never prevent reading or replying to a comment.
+        console.warn('quickchat_social_ad_preview_unavailable', { clinicId: c.clinic_id });
+      }
     }
     let dm = waiting ? blocked('reconciliation_required') : windowCheck(c, null, now());
     if (dm.available) dm = await accessFor('dm');

@@ -439,7 +439,7 @@ async function processTurn({
     selected: index,
   };
   const knownPhone = thread.channel === 'whatsapp' ? normalizePhoneE164(thread.contact_id) : null;
-  const entered = contactTurn && !unclear ? readContact(raw) : null;
+  const entered = contactTurn && !unclear && !choice ? readContact(raw) : null;
   const name =
     lead?.external_source === 'quickchat_social' && lead.nombre === thread.social_alias ? null : lead?.nombre;
   const contact = {
@@ -467,6 +467,8 @@ async function processTurn({
     const clarification = contactTurn && unclear;
     const waitingForDetails = clarification && !!pending.askedForOneDetail;
     let reply = question.trim();
+    if (choice && pending.stage === 'contact' && index !== pending.selected)
+      reply = 'De acuerdo, la nueva hora es el ' + cal.display(selected, timezone) + '. ' + reply;
     if (waitingForDetails)
       reply = 'La cita sigue sin confirmar. Cuando quieras retomarla, puedes escribirme ' + missing[0] + '.';
     else if (clarification)

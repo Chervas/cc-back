@@ -18,7 +18,7 @@ const contains = (phrase, name) => !!name && (' ' + phrase + ' ').includes(' ' +
 function defersBooking(text) {
   const words = normalize(text);
   if (/^(?:que pasa |y )?si no confirmo/.test(words)) return false;
-  return /\b(?:no (?:confirmo|(?:me )?reserves|(?:me )?agendes)|no quiero (?:una )?cita|mejor no reservar|me lo (?:pienso|pensare)|prefiero pensarlo)\b/.test(words);
+  return /\b(?:no (?:confirmo|confirmes|(?:me )?(?:la |lo )?(?:reserves|agendes|reserv[eé]is))|no quiero (?:una )?cita|mejor no reservar|me lo (?:pienso|pensare)|prefiero pensarlo)\b/.test(words);
 }
 
 function bookingRequest(text) {
@@ -46,7 +46,8 @@ function asksSessionAppointment(text) {
 }
 
 function selection(text, slots, selected) {
-  const value = normalize(text);
+  // An explicit correction selects an offered slot. It never confirms the booking.
+  const value = normalize(text).replace(/^(?:(?:no )?espera |no )?(?:mejor|cambio a) (la (?:primera|segunda|tercera))$/, '$1');
   if (
     !value ||
     /\b(?:no|ni|quizas|tal vez|espera|luego|otro|otra|mejor|cancelar|cambiar|pero|aunque|si hay|si fuera)\b/.test(

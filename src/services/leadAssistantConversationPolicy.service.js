@@ -41,28 +41,36 @@ function goal(history, current) {
 function unresolvedAd(userText) {
   const words = normalize(userText);
   if (/\b(?:anuncio|reel|publicacion|video|historia|instagram|facebook)\b/.test(words) &&
-      /\b(?:no (?:me acuerdo|recuerdo|se cual)|(?:esa|la|el) que (?:me salio|vi|he visto)|(?:solo|solamente) vi (?:un|el|la))\b/.test(words)) return true;
+      /\b(?:no (?:me acuerdo|recuerdo|se cual)|perdi (?:el |la )?(?:anuncio|publicacion)|(?:esa|la|el) que (?:me salio|vi|he visto)|(?:solo|solamente) vi (?:un|el|la))\b/.test(words)) return true;
   return /^(?:(?:si |pues )?(?:la|el|lo|esa|ese|eso) (?:de |del |de la |que (?:vi|he visto) (?:en )?))?(?:(?:el|la) )?(?:anuncio|publicacion|redes|instagram|facebook|historia|reel|video)(?: que (?:vi|me (?:salio|aparecio)))?$/.test(words);
 }
 
 function declines(userText) {
-  return /\b(?:no mejor no|mejor no|no me interesa|dej(?:alo|emoslo)|prefiero dejarlo|no quiero seguir|me (?:acabas de )?(?:aterrar|asusta\w*|da miedo))\b/.test(normalize(userText));
+  return /\b(?:no mejor no|mejor no|no me interesa|dej(?:alo|emoslo)|prefiero dejarlo|no quiero seguir|me (?:acabas de )?aterrar)\b/.test(normalize(userText));
 }
 
 function sameVisit(text) {
   const words = normalize(text);
   return /\b(?:cuando (?:vaya|venga|venga a la clinica)|(?:el |ese |ese mismo |el mismo )dia|(?:la |esa )misma visita|en esa visita)\b/.test(words) &&
-    /\b(?:hacerme|empezar|hacer el|hacerme el|realizarme)\b.{0,36}\b(?:tratamiento|tratmiento|sesion)\b/.test(words);
+    (/\b(?:hacerme|empezar|hacer el|hacerme el|realizarme)\b.{0,36}\b(?:tratamiento|tratmiento|sesion)\b/.test(words) ||
+      /\b(?:me (?:lo|los|la|las) (?:puedo|podria) hacer|podria hacermel[oa]s?)\b/.test(words));
 }
 
 function groundedFollowup({userText,history,offer,fields,timezone}) {
   const words = normalize(userText);
   if (/^(?:no (?:quiero|necesito) (?:reservar|una cita)(?: (?:ahora|aun|todavia))?(?: solo (?:estoy mirando|queria informacion))?|solo (?:estoy mirando|queria informacion))$/.test(words))
     return 'De acuerdo, seguimos por aquí si quieres información.';
+  if (/\b(?:prometes|prometeis|garantizas|garantizais|es seguro)\b/.test(words) &&
+      history.some(m => m.role === 'user' && sameVisit(m.text)))
+    return 'Lo que podemos reservar es la valoración. Para hacer el tratamiento ese mismo día, el equipo tendría que confirmarte que es adecuado y que hay tiempo.';
   if (sameVisit(userText)) return 'Podemos organizar la valoración. El equipo tendría que confirmar si es posible hacerte el tratamiento en esa misma visita.';
+  if (/^(?:(?:vale|bueno|gracias) )?me lo (?:pienso|pensare)(?: gracias)?$/.test(words))
+    return 'Claro, piénsatelo con calma.';
   if (declines(userText)) return 'Entiendo. Lo dejamos aquí. Gracias por decírmelo.';
-  if (!offer && unresolvedAd(userText))
+  if (!offer && unresolvedAd(userText) && !(areaIn(words) && /\b(?:promos?|promocion\w*|ofertas?|descuentos?)\b/.test(words)))
     return '¿Recuerdas qué tratamiento o qué zona aparecía en el anuncio? Con ese detalle puedo identificar la promoción.';
+  if (offer && /\b(?:miedo|me asusta|me preocupa)\b/.test(words) && /\bcicatriz\b/.test(words))
+    return 'Entiendo que te preocupe la cicatriz. En la valoración puedes hablar con el cirujano de dónde quedaría en tu caso y qué esperar antes de decidir.';
   const mentionedScar = history.some(m=>m.role==='assistant' && /\bcicatriz\b/i.test(m.text));
   if (mentionedScar && /\b(?:cicatriz|a (?:cual|que) te referias|lo dijiste tu)\b/.test(words)) {
     if (offer && /\bcicatriz\b/i.test([offer.description,offer.guide].join(' ')))
