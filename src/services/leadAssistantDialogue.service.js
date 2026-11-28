@@ -174,12 +174,15 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const localAnswer = require('./leadAssistantConversationPolicy.service').groundedFollowup({userText,history,offer,fields,timezone});
   if (localAnswer) return {reply:localAnswer,imageId:null};
   const discovery = require('./leadAssistantOfferDiscovery.service');
-  if (!offer && /\b(?:cuesta[n]?|vale[n]?|precio es) (?:lo mismo|igual|el mismo) (?:que|para)\b/.test(require('./leadAssistantCalendar.service').normalize(userText))) {
+  if (/\b(?:cuesta[n]?|vale[n]?|precio es) (?:lo mismo|igual|el mismo) (?:que|para)\b/.test(require('./leadAssistantCalendar.service').normalize(userText))) {
     const previous = [...history].reverse().find(m=>m.role === 'user' && discovery.asksFillerOffer(m.text));
     const priorArea=previous && discovery.fillerArea(previous.text);
     const compared=discovery.fillerArea(userText);
-    if (priorArea && compared && priorArea.name !== compared.name)
-      return {reply:'Para '+priorArea.label+' el equipo puede confirmarte el presupuesto. La oferta de otra zona no establece ese precio.',imageId:null,source:'rules'};
+    if (compared && (!priorArea || priorArea.name !== compared.name)) {
+      const known = offer && discovery.matchesArea(offer,compared) && discovery.catalogueReply({fields,offer,history:[],userText:'¿Cuánto cuesta?',timezone});
+      const other = priorArea ? 'Para '+priorArea.label+' el equipo puede confirmarte el presupuesto.' : '¿Con qué tratamiento quieres comparar ese precio?';
+      return {reply:known ? known+' '+other : (priorArea ? other : 'Necesito saber qué dos tratamientos quieres comparar.'),imageId:null,source:known?'catalog':'rules'};
+    }
   }
   // The commercial projection removes digits from an incoming message. A currency
   // marker and a reference to the other treatment suffice; never need the raw value.
