@@ -174,7 +174,9 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const localAnswer = require('./leadAssistantConversationPolicy.service').groundedFollowup({userText,history,offer,fields,timezone});
   if (localAnswer) return {reply:localAnswer,imageId:null};
   const discovery = require('./leadAssistantOfferDiscovery.service');
-  if (!offer && /\d[\d,.]*\s*(?:€|euros?)/i.test(userText) &&
+  // The commercial projection removes digits from an incoming message. A currency
+  // marker and a reference to the other treatment suffice; never need the raw value.
+  if (!offer && /[€$£]|\beuros?\b/i.test(userText) &&
       /\b(?:son|eran|es|vale[n]?|sirve[n]?|se aplica[n]?)\s+(?:tambien\s+)?(?:para|de|del|por)\b/.test(require('./leadAssistantCalendar.service').normalize(userText))) {
     const target = [...history].reverse().filter(m=>m.role === 'user').map(m=>discovery.namedTreatmentRequest(fields,m.text)).find(Boolean);
     const area = discovery.fillerArea(userText);
