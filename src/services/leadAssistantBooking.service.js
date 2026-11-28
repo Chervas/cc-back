@@ -278,6 +278,17 @@ async function processTurn({
   const mapped = offer ? mappings.filter(([title]) => cal.normalize(title) === cal.normalize(offer.title)) : [];
   if (mapped.length > 1) return { review:true };
   let mapping = mapped[0];
+  // A named non-promotional service may have its own booking instructions.
+  // If the clinic has several agendas but no route for that known service, the
+  // team can resolve it without asking the contact to repeat the treatment.
+  const discovery = require('./leadAssistantOfferDiscovery.service');
+  const lastRequest = !offer && [...historical].reverse().filter(m=>m.role === 'user')
+    .map(m=>discovery.namedTreatmentRequest(fields,m.text)).find(Boolean);
+  if (!mapping && lastRequest) {
+    const matches = mappings.filter(([title])=>cal.normalize(title) === cal.normalize(lastRequest.name));
+    if (matches.length > 1) return {review:true};
+    mapping = matches[0];
+  }
   if (!mapping && !offer && subject.area) {
     // Route only a first assessment, based on an unambiguous service AND professional
     // in the clinic's mappings for this area. This does not attribute a promotion or price.
@@ -287,7 +298,6 @@ async function processTurn({
     if (routes.size === 1 && !/\b(?:servicio de agenda|profesional de agenda)\b/i.test(raw)) mapping = matching[0];
   }
   if (!mapping && !offer && (!subject.area || subject.area.name === 'rostro')) {
-    const discovery = require('./leadAssistantOfferDiscovery.service');
     const lastSubject = [...historical.filter(m => m.role === 'user').map(m => m.text),raw]
       .filter(text => discovery.asksFillerOffer(text) || discovery.fillerArea(text)).at(-1);
     const area = lastSubject && discovery.fillerArea(lastSubject);
@@ -306,6 +316,7 @@ async function processTurn({
   if (mapping && choices.length !== 1) return { review: true };
   if (!choices.length) return { review: true };
   const treatment = cal.pickTreatment(choices, raw, offer, pending?.treatment?.id);
+  if (!treatment && lastRequest) return {review:true, routeFor:lastRequest.name};
   if (!treatment && pending?.stage === 'service' && !requestBooking && !subject.area) return null;
   if (!treatment)
     return materialize(async () => ({

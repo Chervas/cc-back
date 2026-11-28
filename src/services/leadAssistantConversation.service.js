@@ -150,11 +150,11 @@ async function respondToLead({
   const userText = assistantCommercialText(raw);
   const identity = { firstTurn, clinicName, tone:fields.tone };
   const format = draft => dialogue.formatCommercialReply({ ...identity, draft });
-  const handoff = reason => ({
+  const handoff = (reason,routeFor) => ({
     kind:'handoff',
     prepare: route => route.recorded ? {
       text:dialogue.formatHandoffReceipt({ ...identity, recorded:true, destination:route.destination,
-        requestedCallback:!!human?.requestedCallback }) + (human?.requestedCallback &&
+        requestedCallback:!!human?.requestedCallback }) + (routeFor ? ' El equipo te confirmará qué agenda corresponde a '+routeFor.toLocaleLowerCase('es')+'.' : '') + (human?.requestedCallback &&
           require('./leadAssistantConversationPolicy.service').sameVisit(raw)
           ? ' El equipo te podrá confirmar si es posible hacer el tratamiento en la misma visita.' : ''), reason, attention:false,
     } : {
@@ -185,7 +185,7 @@ async function respondToLead({
     }
     if (appointment?.stop) return { kind:'silent', reason:appointment.stop };
     if (appointment?.reply) return { kind:'booking', text:format(appointment.reply), reason:'assistant_booking' };
-    if (appointment?.review) return handoff('assistant_handoff_recorded');
+    if (appointment?.review) return handoff('assistant_handoff_recorded',appointment.routeFor);
   }
   if (human || !userText || decisionKind === 'review') return handoff('assistant_handoff_recorded');
   if (!cachedAnswer) {
