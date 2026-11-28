@@ -42,6 +42,101 @@ function areaSelection(sections, entry, options) {
   return matches.length === 1 ? matches[0][0] : null;
 }
 
+// A comparison with a filler or the presence of hyaluronic acid in another
+// technique doesn't make that offer a dermal filler. Use positive descriptions
+// of the actual treatment, independently of the campaign that opened the thread.
+function describesFiller(text) {
+  const value = words(text);
+  return /\brellenos?\b/.test(value) &&
+    !/\b(?:no|sin|alternativa|diferencia|diferente|comparacion|frente|sustituye|versus)\b/.test(value);
+}
+
+function isFillerOffer(section) {
+  if (!section) return false;
+  if (describesFiller(section.title)) return true;
+  const detail = (section.guide || '').split('\n').filter(line =>
+    /^(?:[-*]\s+)?(?:\*\*)?(?:qu[eé] se hace|en qu[eé] consiste|t[eé]cnica|tratamiento)\b/i.test(line));
+  return [...(section.lines || []), ...detail].some(line =>
+    line.replace(/https?:\/\/\S+/gi,'').split(/[.!?;]/u).some(part =>
+      describesFiller(part) && /\b(?:mediante|con|aplica\w*|tecnica|incluye|perfilado|inyec\w*|consiste|realiza\w*)\b/.test(words(part))));
+}
+
+function asksFillerOffer(text) {
+  return filler.test(words(text)) && (promotion.test(words(text)) || tariff.test(words(text)));
+}
+
+function configuredTreatments(fields) {
+  return require('../lib/lead-assistant-tables').tableRows(fields.context || '',
+    [/^(?:tratamiento|servicio)s?$/, /explicar|descripci[oó]n|en que consiste/], {includeHeading:true})
+    .map(({heading,values:[name,description]})=>({heading,name,description}))
+    .filter(row=>row.name.length <= 100 && row.description.length <= 420 && !/https?:\/\//i.test(row.name+row.description));
+}
+
+function namedTreatmentRequest(fields, message) {
+  const text = words(message);
+  if (!promotion.test(text)) return null;
+  return configuredTreatments(fields).find(({name}) => (' '+text+' ').includes(' '+words(name)+' '));
+}
+
+function fillerArea(message) {
+  const text = words(message);
+  if (/\b(?:surcos?|nasogenian\w*|comisuras?)\b/.test(text)) return {name:'surcos',words:/\b(?:surcos?|nasogenian\w*|comisuras?)\b/, label:'los surcos'};
+  if (/\b(?:nariz|rinomodelacion)\b/.test(text)) return {name:'nariz',words:/\b(?:nariz|rinomodelacion)\b/,label:'la nariz'};
+  if (/\b(?:gluteos?|nalgas?)\b/.test(text)) return {name:'gluteos',words:/\b(?:gluteos?|nalgas?)\b/,label:'los glúteos'};
+  if (/\bescote\b/.test(text)) return {name:'escote',words:/\bescote\b/,label:'el escote'};
+  if (/\b(?:pomulos?|mejillas?)\b/.test(text)) return {name:'pomulos',words:/\b(?:pomulos?|mejillas?)\b/,label:'los pómulos'};
+  if (/\b(?:menton|barbilla)\b/.test(text)) return {name:'menton',words:/\b(?:menton|barbilla)\b/,label:'el mentón'};
+  return areaIn(message);
+}
+
+function fillerTreatments(fields, area) {
+  return configuredTreatments(fields).filter(row=>{
+    if (!describesFiller(row.name) && !describesFiller(row.description)) return false;
+    if (area && area.name !== 'rostro') return area.words.test(words(row.name + ' ' + row.description));
+    return facial.test(words(row.heading+' '+row.name)) || /\b(?:rinomodelacion|surcos)\b/.test(words(row.name));
+  });
+}
+
+function fillerOptions(fields,area,entries,priceOnly) {
+  const deals = entries.filter(s => isFillerOffer(s) && (!area || matchesArea(s,area)));
+  const treatments = fillerTreatments(fields,area);
+  const names = treatments.filter(t => !deals.some(s=>words(s.title)===words(t.name))).slice(0,3).map(t=>t.name);
+  const offers = deals.slice(0,3).map(s=>{
+    const price=currentPrice(s.lines);
+    return '«'+s.title+'»'+(price?' por '+price:'');
+  });
+  const target=area ? ' para '+area.label : '';
+  const offerText=offers.length ? 'Ahora tenemos en promoción '+new Intl.ListFormat('es').format(offers)+'.'
+    : 'Ahora mismo no tenemos una promoción de relleno'+target+'.';
+  if (priceOnly && !deals.length) {
+    const treatment=treatments[0];
+    return 'El precio'+target+' se tendría que confirmar con la clínica.'+(treatment ? ' Hacemos '+treatment.name[0].toLocaleLowerCase('es')+treatment.name.slice(1)+'.' : '');
+  }
+  if (!names.length) return offerText + (deals.length ? ' ¿Qué te gustaría saber?' : ' ¿Quieres que mire horarios para una valoración?');
+  const examples = names.map(n=>n[0].toLocaleLowerCase('es')+n.slice(1));
+  return offerText+' '+(deals.length?'También hacemos ':'En la clínica hacemos ')+new Intl.ListFormat('es').format(examples)+'.'+
+    (area && treatments.length===1?' '+treatments[0].description:' ¿Qué zona te interesa?');
+}
+
+function fillerFollowup(fields, history, question) {
+  const q=words(question);
+  const explain=/\b(?:explicar\w*|explicas|cuentame|en que consist\w*|para que sirve)\b/.test(q);
+  if (!explain && !/\b(?:haceis|ofreceis|teneis|realizais) (?:ese|este|el) tratamiento\b/.test(q)) return null;
+  const lastSubject=history.filter(m=>m.role==='user' && (filler.test(words(m.text)) || fillerArea(m.text))).at(-1);
+  if (!lastSubject || !filler.test(words(lastSubject.text))) return null;
+  const treatments=fillerTreatments(fields,fillerArea(lastSubject.text)).slice(0,3);
+  if (!treatments.length) return null;
+  if (!explain) return 'Sí. Hacemos '+new Intl.ListFormat('es').format(treatments.map(t=>t.name[0].toLocaleLowerCase('es')+t.name.slice(1)))+'. ¿Qué te gustaría saber?';
+  const details=treatments.slice(0,2).map(t=>{
+    if (/^valoración y posible relleno cuando lo que se quiere tratar es /i.test(t.description))
+      return t.description.replace(/^valoración y posible relleno cuando lo que se quiere tratar es /i,'El equipo valora el relleno cuando hay ').replace(/cuando hay el /,'cuando hay ');
+    if (/^remodelación estética del perfil de la nariz mediante relleno/i.test(t.description))
+      return 'La '+t.name.toLocaleLowerCase('es')+' permite trabajar el perfil de la nariz con relleno cuando está indicado.';
+    return t.name+'. '+t.description;
+  });
+  return details.join(' ')+' ¿Quieres que mire horarios para una valoración?';
+}
+
 function currentPrice(lines) {
   const priced = (lines || []).map(line => line.replace(/\*\*/g, '').trim()).find(line =>
     /\d\s*(?:€|euros?|\$|£)/i.test(line) && !line.includes('http') &&
@@ -85,30 +180,23 @@ function consultationFee(fields, userText) {
 
 function catalogueReply({ fields, offer, history, userText, timezone }) {
   const text = words(userText);
-  const area = areaIn(text);
+  const area = fillerArea(text);
   const contextArea = area || history.filter(m => m.role === 'user').map(m => areaIn(m.text)).filter(Boolean).at(-1);
   const quotedDeal = /[€$£]|\beuros?\b/i.test(userText) && /\b(?:me lo dejas|me lo dejais|me lo igualas|me cobrais|me valen? (?:tambien|para)|(?:vale|valen|sirve|sirven|se aplica|se aplican) tambien para|tambien (?:vale|valen|sirve|sirven) para|pag[oó] mi|mi amiga pago)\b/.test(text);
   const pricing = tariff.test(text) || quotedDeal;
   if (pricing && /\b(?:valoracion|consulta|primera visita)\b/.test(text)) return null;
+  const followup=fillerFollowup(fields,history,userText);
+  if (followup) return followup;
   const asksOffer = promotion.test(text);
   const asksFiller = filler.test(text);
   const previous = history.filter(m => m.role === 'assistant').at(-1)?.text || '';
   if ((asksOffer || browsing.test(text) || (asksFiller && pricing)) &&
       (!offer || (asksFiller && !filler.test(words(offer.title)))) && !/\b(?:anuncio|publicacion|reel)\b/.test(text)) {
     const entries = activeInArea(offerSections(fields.promotions), contextArea, { timezone }).map(([, section]) => section);
-    if (asksFiller) {
-      const fillers = entries.filter(section => filler.test(words(section.title)));
-      if (fillers.length === 1) {
-        const price = currentPrice(fillers[0].lines);
-        return 'En el catálogo figura «' + fillers[0].title + '»' + (price ? ' por ' + price : ', sin precio publicado') + '.';
-      }
-      if (!fillers.length) {
-        const alternative = entries.length === 1 ? entries[0] : null;
-        return 'No encuentro un precio promocional de relleno' + (contextArea ? ' para ' + contextArea.label : '') +
-          '.' + (alternative ? ' La promoción de esta zona es «' + alternative.title + '».' : '');
-      }
-      return 'Hay varias promociones de relleno. ¿Cuál te interesa? ' + fillers.map(s => s.title).join(', ') + '.';
-    }
+    if (asksFiller) return fillerOptions(fields,contextArea,entries,pricing && !asksOffer);
+    const named = namedTreatmentRequest(fields,userText);
+    if (named && !entries.some(s => words(s.title) === words(named.name)))
+      return 'Ahora mismo no tenemos una promoción de '+named.name+'. Sí hacemos ese tratamiento. '+named.description+' ¿Quieres que mire horarios para una valoración?';
     if (!entries.length) return contextArea ? 'No encuentro una promoción vigente para ' + contextArea.label + '.' : 'No veo promociones vigentes en el catálogo de la clínica.';
     const names = entries.slice(0, 5).map(s => s.title.split(' · ')[0]);
     if (names.length > 1 && previous.includes(names[0]) && browsing.test(text))
@@ -145,4 +233,4 @@ function catalogueReply({ fields, offer, history, userText, timezone }) {
   return 'Para esa zona está la promoción «' + offer.title + '». ' + price + '.' + (asksOffer ? appointmentInvitation : '');
 }
 
-module.exports = { areaSelection, browsesWholeArea, catalogueReply, consultationFee, matchesArea, priceWhenDeferring };
+module.exports = { areaSelection, asksFillerOffer, isFillerOffer, namedTreatmentRequest, fillerArea, browsesWholeArea, catalogueReply, consultationFee, matchesArea, priceWhenDeferring };
