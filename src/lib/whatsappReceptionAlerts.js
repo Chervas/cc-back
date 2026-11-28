@@ -170,8 +170,15 @@ async function collect({ snapshot, bindings, query, now = Date.now(),
     const enginePending = waiting.filter(row => Number(row.clinic_id) === Number(clinicId))
       .reduce((total, row) => total + Number(row.pending || 1), 0);
     const retained = Number(clinic?.blockingReview) || 0;
-    const reviewDates = (health.summaryOf({ blockingReview: retained, reviewSummary: clinic?.reviewSummary }) || [])
-      .map(item => item.oldestAt).filter(Number.isFinite);
+    const summary = health.summaryOf({ blockingReview: retained, reviewSummary: clinic?.reviewSummary }) || [];
+    const mobileCopiesOnly = retained > 0 && summary.every(item => item.category === 'mobile_echoes') && summary.length > 0
+      && issue?.type === 'whatsapp_inbox_contact_review' && !enginePending && clinic.oldestPendingAt === null
+      && clinic.unscopedBlockingReview === 0 && clinic.blockingContactKeys?.length > 0;
+    const contactCount = mobileCopiesOnly ? new Set(clinic.blockingContactKeys).size : 0;
+    const contacts = contactCount === 1 ? '1 contacto' : contactCount + ' contactos';
+    const affectedContacts = contactCount === 1 ? 'ese contacto' : 'esos contactos';
+    const copies = retained === 1 ? '1 copia de un mensaje' : retained + ' copias de mensajes';
+    const reviewDates = summary.map(item => item.oldestAt).filter(Number.isFinite);
     const oldest = Number.isFinite(clinic?.oldestPendingAt) ? clinic.oldestPendingAt
       : reviewDates.length ? Math.min(...reviewDates) : null;
     const brief = !clinic ? 'No hay una señal de recepción válida para esta clínica; cantidad de eventos pendientes desconocida.'
@@ -187,16 +194,17 @@ async function collect({ snapshot, bindings, query, now = Date.now(),
     const issueTypes = [issue?.type, enginePending ? 'engine_pending' : null].filter(Boolean);
     return { eventKey: 'whatsapp.reception_attention', payload: {
       severity: issue?.severity || 'warning',
-      title: `${names[index]}: ${retained ? `${retained} ${retained === 1 ? 'evento retenido' : 'eventos retenidos'}` : enginePending ? `${enginePending} respuestas pendientes` : 'recepción pendiente de revisión'}`,
-      detail: `${brief}${age}${waits} ${impact}`,
-      action: 'El equipo técnico debe revisar estos eventos; recepción no debe confirmar ni cancelar citas por este aviso. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp',
+      title: mobileCopiesOnly ? `${names[index]}: ${retained === 1 ? '1 copia del móvil pendiente en QuickChat' : retained + ' copias del móvil pendientes en QuickChat'}` : `${names[index]}: ${retained ? `${retained} ${retained === 1 ? 'evento retenido' : 'eventos retenidos'}` : enginePending ? `${enginePending} respuestas pendientes` : 'recepción pendiente de revisión'}`,
+      detail: mobileCopiesOnly
+        ? `La clínica ya envió los mensajes desde WhatsApp Business. QuickChat tiene pendientes de incorporar ${copies} al historial de ${contacts}. La revisión puede retrasar las automatizaciones de ${affectedContacts} que dependen de una respuesta.${age} El resto de conversaciones sigue operativo.`
+        : `${brief}${age}${waits} ${impact}`,
+      action: mobileCopiesOnly ? 'Recepción puede seguir atendiendo. El equipo técnico debe revisar la asociación de las copias con el chat en Monitorización de WhatsApp. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp' : 'El equipo técnico debe revisar estos eventos; recepción no debe confirmar ni cancelar citas por este aviso. https://crm.clinicaclick.com/ajustes?panel=jobs-monitoring&tab=whatsapp',
       occurredAt: Number.isFinite(oldest) ? new Date(oldest).toISOString() : null,
     }, metadata: { source: 'whatsapp_reception', incident_scope: `clinic:${clinicId}`, clinic_ids: [clinicId],
       clinic_name: names[index], review_scope_keys: clinic?.blockingReviewScopeKeys,
       engine_pending: enginePending, blocking_review: retained, incident_impact: [...issueTypes,
-        ...[...new Set((health.summaryOf({ blockingReview: retained, reviewSummary: clinic?.reviewSummary }) || [])
-          .map(item => item.category))]],
-      issue_types: issueTypes, operational_summary: brief } };
+        ...[...new Set(summary.map(item => item.category))]],
+      issue_types: issueTypes, operational_summary: mobileCopiesOnly ? `Historial de WhatsApp pendiente de revisión para ${contacts}.` : brief } };
   }))];
 }
 function unavailable(error) {

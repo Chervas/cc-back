@@ -110,7 +110,10 @@ function validateConfig(config) {
         || JSON.stringify([...grant.operations].sort())!==JSON.stringify(operations.sort())) fail('invalid_request');
     }
   }
-  for(const scope of config.userCredentialHealth?.scopeKeys||[])if(policy.connections.filter(binding=>C.bindingFor(binding).scopeKey===scope).length!==1)fail('invalid_request');
+  for(const scope of config.userCredentialHealth?.scopeKeys||[]){
+    const admitted=config.admission?.enabled===true&&config.admission.enrollmentScopeKeys?.includes(scope);
+    if(!scopes.has(scope)&&!admitted)fail('invalid_request');
+  }
   for(const scope of config.enrolledAssetAccess?.scopeKeys||[]){
     const bindings=policy.connections.filter(binding=>C.bindingFor(binding).scopeKey===scope);
     if(!bindings.length&&config.admission?.enabled===true&&config.admission.enrollmentScopeKeys?.includes(scope)){
@@ -159,7 +162,7 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     }
     const agencyBootstrap=config.agencySystemUser?require('./meta-marketing-agency-bootstrap').createAgencyBootstrap({store,policy:config.policy,now:adsNow}):undefined;
     http??=createMetaMarketingOAuthHttp({pacer,agencyBootstrap,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
-    const admission=createMetaMarketingAdmission({store,policy:config.policy,settings:config.admission,client:aws.secrets,
+    const admission=createMetaMarketingAdmission({store,policy:config.policy,settings:config.admission,client:aws.secrets,credentialRenewal:config.credentialRenewal===true,userHealthScopeKeys:config.userCredentialHealth?.scopeKeys,
       ...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{})});
     oauth=createMetaMarketingOAuth({store,policy:config.policy,secrets,http,socialInbox:config.socialInbox,socialInboxAdvancedChannels:config.socialInboxAdvancedChannels,
       assertConsentAvailable: pacer && (appId => pacer.checkPause('meta-ads-app:' + appId)),assetDiscovery:config.assetDiscovery===true,onAbort:id=>enrollment?.abortFlow(id),
@@ -174,7 +177,8 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     if(config.assetEnrollment)enrollment=createMetaMarketingEnrollment({store,secrets,http,subscriptionPacer:pacer,socialInbox:config.socialInbox,socialInboxAdvancedChannels:config.socialInboxAdvancedChannels,environment:config.environment,...(businessConfigs(config).length?{businessConfig:businessRegistry(config)}:{}),...(credentialEpochs?{credentialEpochs}:{}),...(config.adsRead?{adsRead:config.adsRead}:{}),...(adsHttp?{adsHttp}:{}),...(config.leadAds?{leadAds:config.leadAds,leadsHttp}:{}),...(config.leadRecovery?{leadRecovery:config.leadRecovery}:{}),...(config.enrolledAssetAccess?{enrolledAssetAccess:config.enrolledAssetAccess}:{}),
       ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base),
         ...(config.admission.adsReadScopeKeys?{admissionAdsReadScopeKeys:config.admission.adsReadScopeKeys}:{})}:{})});
-    if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,socialInbox:config.socialInbox,socialInboxAdvancedChannels:config.socialInboxAdvancedChannels});
+    if(config.credentialRenewal)renewal=createMetaMarketingCredentialRenewal({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,socialInbox:config.socialInbox,socialInboxAdvancedChannels:config.socialInboxAdvancedChannels,
+      ...(admission?{resolvePolicy:(request,principal,base)=>admission.resolve(request,principal,base)}:{})});
     const resolveInstagramBinding=ref=>config.policy.connections.find(value=>value.connectionRef===ref)||admission?.resolveBinding(ref);
     const instagramTargets=config.instagramExtension?Instagram.targets(config.instagramExtension,config.environment,ACCOUNT):[];
     const resolveInstagramPolicy=(request,principal,base)=>{
@@ -198,7 +202,8 @@ async function main(filename,{awsFactory=connectAws,http,oauthRequest,adsRequest
     if(businessConfigs(config).length||config.userCredentialHealth){const businessHttp=businessConfigs(config).length?require('./meta-marketing-business-issuer-http').createIssuerHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})}):null;
       if(businessConfigs(config).length)business=require('./meta-marketing-business').createMetaMarketingBusiness({store,epochs:credentialEpochs,enrollment,oauth,secrets,http,environment:config.environment,config:businessRegistry(config)});
       const userHealthHttp=require('./meta-marketing-user-health-http').createUserHealthHttp({pacer,now:adsNow,...(oauthRequest?{request:oauthRequest}:{})});
-      maintenance=require('./meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({store,epochs:credentialEpochs,enrollment,secrets,http,businessHttp,userHealthHttp,environment:config.environment,...(businessConfigs(config).length?{config:businessRegistry(config)}:{})});}
+      maintenance=require('./meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({store,epochs:credentialEpochs,enrollment,secrets,http,businessHttp,userHealthHttp,environment:config.environment,
+        ...(admission?{resolveHealthPolicy:(request,principal,base)=>admission.resolve(request,principal,base)}:{}),...(businessConfigs(config).length?{config:businessRegistry(config)}:{})});}
     if(businessConfigs(config).length)store.setConnectionAuthorityResolver(ref=>enrollment.connectionAuthority(ref,config.policy));
     // Discovery is separately scoped and derives no enrollment/reader grant.
     // Existing static sources retain their original authority and guards.

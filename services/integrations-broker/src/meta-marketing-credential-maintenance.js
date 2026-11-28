@@ -2,7 +2,7 @@
 const {fail}=require('./errors'),{eventFor}=require('./audit'),{canonical}=require('./canonical');
 const C=require('./meta-marketing-oauth-contract'),B=require('./meta-marketing-business-issuer'),K=require('./meta-marketing-credential-shape');
 const T=require('./meta-marketing-credential-maintenance-contract'),E=require('./meta-marketing-enrollment-contract'),D=require('./meta-marketing-discovery-contract'),R=require('./meta-marketing-credential-renewal-contract');
-function createMetaMarketingCredentialMaintenance({store,epochs,enrollment,secrets,http,businessHttp,userHealthHttp,environment,config,now=Date.now}){
+function createMetaMarketingCredentialMaintenance({store,epochs,enrollment,secrets,http,businessHttp,userHealthHttp,environment,config,resolveHealthPolicy,now=Date.now}){
  if(config)B.config(config);const roles=E.roles(environment),running=new Map();let closed=false;
  store.db.exec(`CREATE TABLE IF NOT EXISTS meta_marketing_credential_maintenance(
   id TEXT PRIMARY KEY,enrollment TEXT NOT NULL,principal TEXT NOT NULL,tenant TEXT NOT NULL,connection TEXT NOT NULL,scope TEXT NOT NULL,
@@ -24,8 +24,9 @@ function createMetaMarketingCredentialMaintenance({store,epochs,enrollment,secre
  async function health({request,principal,binding:base,policy}){
   const p=request.payload,b=C.bindingFor(base);if(principal.id!==roles.control||request.tenantRef!=='clinic:'+b.clinicIds[0]||request.assetRef!=='meta-enroll:'+b.scopeKey)fail('scope_denied');
   const authPin=C.hash(JSON.stringify([principal.id,principal.keyId,principal.publicKey])),basePin=C.fingerprint(base),controller=new AbortController(),signal=controller.signal,timer=setTimeout(()=>controller.abort(),25000);timer.unref?.();
-  function check(){if(closed||signal.aborted)fail('provider_timeout');const key=policy.principals.find(v=>v.id===principal.id),live=policy.connections.find(v=>v.connectionRef===base.connectionRef);
-   if(!key?.enabled||C.hash(JSON.stringify([key.id,key.keyId,key.publicKey]))!==authPin||C.fingerprint(live)!==basePin)fail('scope_denied');require('./auth').authorize(key,request,policy);store.connection(base.connectionRef,now());store.assertAssetActive(request);
+  function check(){if(closed||signal.aborted)fail('provider_timeout');const currentPolicy=resolveHealthPolicy?resolveHealthPolicy(request,principal,policy):policy;
+   const key=currentPolicy.principals.find(v=>v.id===principal.id),live=currentPolicy.connections.find(v=>v.connectionRef===base.connectionRef);
+   if(!key?.enabled||C.hash(JSON.stringify([key.id,key.keyId,key.publicKey]))!==authPin||!live||C.fingerprint(live)!==basePin)fail('scope_denied');require('./auth').authorize(key,request,currentPolicy);store.connection(base.connectionRef,now());store.assertAssetActive(request);
    const v=enrollment.renewalAuthority(p.enrollmentId,base);if(!K.business(v.binding)&&v.credential.metadata.tokenType!=='USER')fail('operation_denied');epochs.expected(v.credential,p);return v;
   }
   function auditHealth(result,reason){if(store.backlog().pending>=policy.maxBacklog)fail('audit_unavailable');store.appendAudit(eventFor(request,principal,policy,'integration.completed',result,reason,now()));}

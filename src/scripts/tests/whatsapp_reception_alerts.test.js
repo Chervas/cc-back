@@ -43,6 +43,19 @@ test('brief separates inbound messages, mobile echoes and delivery failures with
  assert.match(alerts[0].payload.detail,/automatizaciones afectadas se mantienen en espera/);
  assert.doesNotMatch(JSON.stringify(alerts),/a{64}|contact_id|wamid|body/);
 });
+test('a scoped group of mobile echoes explains the affected contact and what reception should do',async()=>{
+ const clinic={clinicId:2,blockingReview:13,unscopedBlockingReview:0,blockingContactKeys:['a'.repeat(64)],oldestPendingAt:null,
+  reviewSummary:[{category:'mobile_echoes',count:13,oldestAt:now-86400000,newestAt:now-5000,errorCodes:[]}]};
+ const query=async sql=>[sql.includes('FROM Clinicas')?[{id_clinica:2,nombre_clinica:'Ficticia'}]:[]];
+ const [alert]=await collect({snapshot:{...snapshot,clinics:[clinic]},bindings,now,query});
+ assert.match(alert.payload.title,/13 copias del móvil pendientes en QuickChat/);
+ assert.match(alert.payload.detail,/historial de 1 contacto/);
+ assert.match(alert.payload.action,/Recepción puede seguir atendiendo/);
+ const [mixed]=await collect({snapshot:{...snapshot,clinics:[clinic]},bindings,now,
+  query:async sql=>sql.includes('FlowExecutionsV2')?[[{clinic_id:2,pending:1}]]:query(sql)});
+ assert.doesNotMatch(mixed.payload.title,/copias del móvil pendientes/);
+ assert.match(mixed.payload.detail,/esperan al motor/);
+});
 test('missing scope is an unknown reception signal, never a claim of zero patient replies',async()=>{
  const alerts=await collect({snapshot:{...snapshot,clinics:[]},bindings,now,query:async()=>[[]]});
  assert.match(alerts[0].metadata.operational_summary,/cantidad de eventos pendientes desconocida/);

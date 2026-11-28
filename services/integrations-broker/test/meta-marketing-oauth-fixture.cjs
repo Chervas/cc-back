@@ -71,7 +71,7 @@ function fixture(t, { discovery = false, enrollment = false, renewal = false, le
       if (state.losePut) { state.losePut = false; throw Error('FICTITIOUS_ACK_LOST'); }
       result = { ARN: input.SecretId, VersionId: input.ClientRequestToken, VersionStages: [...versions.get(input.ClientRequestToken).stages] };
     } else if(name==='UpdateSecretVersionStageCommand'){
-      assert.equal(input.SecretId,binding.secretArn);assert.match(input.VersionStage,/^CC_META_CREDENTIAL_[a-f0-9]{32}$/);assert.equal(input.RemoveFromVersionId,undefined);
+      assert(input.SecretId===binding.secretArn || state.admittedSlotArns?.has(input.SecretId));assert.match(input.VersionStage,/^CC_META_CREDENTIAL_[a-f0-9]{32}$/);assert.equal(input.RemoveFromVersionId,undefined);
       assert(versions.has(input.MoveToVersionId));assert(![...versions].some(([id,v])=>id!==input.MoveToVersionId&&v.stages.includes(input.VersionStage)));
       const stages=versions.get(input.MoveToVersionId).stages;if(!stages.includes(input.VersionStage))stages.push(input.VersionStage);
       result={ARN:input.SecretId};

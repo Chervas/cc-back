@@ -10,7 +10,7 @@ const C=require('../src/meta-marketing-oauth-contract');
 const {ACCOUNT,SECRET_KEY}=require('../src/google-main');
 
 function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false,enrollmentScopeKeys,adsReadScopeKeys,adsHttp,credentialEpochs=false,
-  leads=false,leadAds,leadsHttp,enrolledAssetAccess,leadIngress=false,socialInboxAdvancedChannels}={}){
+  credentialRenewal=false,userHealthScopeKeys=[],leads=false,leadAds,leadsHttp,enrolledAssetAccess,leadIngress=false,socialInboxAdvancedChannels}={}){
   const hasDiscovery=discovery||enrollment;
   const f=fixture(t,{discovery:hasDiscovery,enrollment,leads,adsManagement:leads}),P=require('../src/meta-marketing-admission-contract');
   if(socialInboxAdvancedChannels && leads) {
@@ -48,6 +48,7 @@ function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false
   if(adsReadScopeKeys!==undefined)settings.adsReadScopeKeys=[...adsReadScopeKeys];
   const originalPolicy=JSON.stringify(f.policy),metadata=new Map();
   const state={creates:0,loseCreate:false,denied:false,before:null,after:null,calls:[]};
+  f.state.admittedSlotArns=new Set();
   const aws={async send(command,options){
     state.calls.push(command);await state.before?.(command,options);
     if(state.denied)throw Error('FICTITIOUS_PRIVATE_IAM_DETAIL');
@@ -56,6 +57,7 @@ function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false
       if(metadata.has(input.Name))throw Object.assign(Error('FICTITIOUS_ALREADY_EXISTS'),{name:'ResourceExistsException'});
       state.creates++;assert.equal(input.KmsKeyId,SECRET_KEY);assert(C.uuid(input.ClientRequestToken));
       const ARN=P.ARN_PREFIX+input.Name+'-abcdef';
+      f.state.admittedSlotArns.add(ARN);
       metadata.set(input.Name,{ARN,Name:input.Name,KmsKeyId:input.KmsKeyId,Tags:input.Tags});
       f.records.set(ARN,new Map([[input.ClientRequestToken,{body:input.SecretString,stages:['AWSCURRENT']}]]));
       if(state.loseCreate){state.loseCreate=false;throw Error('FICTITIOUS_LOST_CREATE_ACK');}
@@ -73,7 +75,7 @@ function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false
   }};
   const handles=[],filename=f.dir+'/admission.sqlite';
   function make(store=new BrokerStore(filename),chosenSettings=settings){
-    const admission=createMetaMarketingAdmission({store,policy:f.policy,settings:chosenSettings,client:aws,now:f.now,
+    const admission=createMetaMarketingAdmission({store,policy:f.policy,settings:chosenSettings,client:aws,now:f.now,credentialRenewal,userHealthScopeKeys,
       ...(enrolledAssetAccess?{enrolledAssetAccess}:{})});
     const secrets=createMetaMarketingOAuthSecrets({client:aws,accountId:ACCOUNT,
       prefix:'/clinicaclick/integrations/prod/meta-marketing/staging/',kmsKeyArn:SECRET_KEY});
@@ -88,13 +90,18 @@ function admissionFixture(t,{discovery=false,discoveryScopeKeys,enrollment=false
       ...(leadAds?{leadAds,leadsHttp}:{}),...(enrolledAssetAccess?{enrolledAssetAccess}:{}),
       ...(epochs?{credentialEpochs:epochs}:{}),
       ...(resolvePolicy?{resolvePolicy}:{})});
+    const renewal=credentialRenewal?require('../src/meta-marketing-credential-renewal').createMetaMarketingCredentialRenewal({
+      store,epochs,enrollment:resourceEnrollment,oauth:engine,secrets,http:f.http,environment:'staging',now:f.now,resolvePolicy}):null;
+    const health=userHealthScopeKeys.length?require('../src/meta-marketing-credential-maintenance').createMetaMarketingCredentialMaintenance({
+      store,epochs,enrollment:resourceEnrollment,secrets,http:f.http,environment:'staging',now:f.now,resolveHealthPolicy:resolvePolicy,
+      userHealthHttp:require('../src/meta-marketing-user-health-http').createUserHealthHttp({request:f.request,now:f.now})}):null;
     const policyResolver=admission&&resourceEnrollment?{resolve(request,principal,base){
       return resourceEnrollment.resolve(request,principal,admission.resolve(request,principal,base));
     }}:admission||resourceEnrollment;
     const broker=new Broker({store,policy:f.policy,secrets,policyResolver,
       ...(leadAds?{transportProfile:'meta-marketing'}:{}),
-      operations:{...createMetaMarketingOAuthOperations(engine,{assetDiscovery:hasDiscovery}),...resourceEnrollment?.operations},now:f.now});
-    const handle={store,admission,engine,enrollment:resourceEnrollment,broker,epochs,close(){resourceEnrollment?.close();engine.close();try{store.close();}catch{}}};
+      operations:{...createMetaMarketingOAuthOperations(engine,{assetDiscovery:hasDiscovery}),...resourceEnrollment?.operations,...renewal?.operations,...health?.operations},now:f.now});
+    const handle={store,admission,engine,enrollment:resourceEnrollment,broker,epochs,close(){health?.close();renewal?.close();resourceEnrollment?.close();engine.close();try{store.close();}catch{}}};
     handles.push(handle);return handle;
   }
   const current=make();t.after(()=>handles.forEach(handle=>handle.close()));

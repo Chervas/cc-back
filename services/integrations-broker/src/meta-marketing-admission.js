@@ -6,6 +6,8 @@ const C=require('./meta-marketing-oauth-contract'),P=require('./meta-marketing-a
 const D=require('./meta-marketing-discovery-contract');
 const E=require('./meta-marketing-enrollment-contract');
 const A=require('./meta-marketing-ads-contract');
+const R=require('./meta-marketing-credential-renewal-contract');
+const T=require('./meta-marketing-credential-maintenance-contract');
 const L=require('./meta-marketing-leads-contract'),X=require('./meta-marketing-enrolled-asset-access-contract');
 const enrollmentOperations=[E.OPERATIONS.prepare,E.OPERATIONS.activate,E.OPERATIONS.status,E.OPERATIONS.revoke,E.OPERATIONS.assets];
 const {authenticate}=require('./auth'),{request:validateRequest}=require('./contracts');
@@ -24,7 +26,7 @@ function validateAdmissionPolicy(policy,settings){
     ||config.scopeKeys.some(scope=>binding.connectionRef===P.connectionRef(scope))))fail('invalid_request');
   return {config,base,gateway,control};
 }
-function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date.now(),enrolledAssetAccess}){
+function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date.now(),enrolledAssetAccess,credentialRenewal=false,userHealthScopeKeys=[]}){
   const approved=validateAdmissionPolicy(policy,settings);if(!approved)return null;
   const {config,base,gateway,control}=approved,digest=P.settingsDigest(config);
   if(enrolledAssetAccess!==undefined)X.config(enrolledAssetAccess);
@@ -65,6 +67,22 @@ function createMetaMarketingAdmission({store,policy,settings,client,now=()=>Date
     // Never rewrite or shadow a static binding, grant, history or fingerprint.
     if(liveBase.connections.some(binding=>binding.connectionRef===request.connectionRef))return liveBase;
     const binding=resolveBinding(request.connectionRef);if(!binding)return liveBase;
+    const health = request.operation === T.OPERATIONS.health;
+    if (health || Object.values(R.OPERATIONS).includes(request.operation)) {
+      const b = C.bindingFor(binding);
+      if (!credentialRenewal || !config.enrollmentScopeKeys?.includes(b.scopeKey)) fail('scope_denied');
+      if (health) {
+        if (!userHealthScopeKeys.includes(b.scopeKey) || principal.id !== control ||
+            request.tenantRef !== 'clinic:'+b.clinicIds[0] || request.assetRef !== 'meta-enroll:'+b.scopeKey) fail('scope_denied');
+      } else {
+        R.authorize({request, principal, binding}, config.environment);
+      }
+      checkBlocks(b.scopeKey, b.clinicIds);
+      checkFootprint(b.scopeKey, b.clinicIds);
+      const grant = {principalId: principal.id, tenantRef: request.tenantRef, connectionRef: binding.connectionRef,
+        assetRef: request.assetRef, operations: [request.operation]};
+      return {...liveBase, connections: [...liveBase.connections, binding], grants: [...liveBase.grants, grant]};
+    }
     const social=require('./meta-marketing-social');
     if(social.ops.includes(request.operation)){
       const b=C.bindingFor(binding);

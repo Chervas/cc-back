@@ -1,0 +1,28 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RetainAdmittedMetaMarketingCredentialVersion",
+      "Effect": "Allow",
+      "Action": "secretsmanager:UpdateSecretVersionStage",
+      "Resource": [
+        "arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/meta-marketing/staging/automatic/clinic-*/candidate-??????",
+        "arn:aws:secretsmanager:eu-west-3:137819318729:secret:/clinicaclick/integrations/prod/meta-marketing/staging/automatic/group-*/candidate-??????"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "eu-west-3",
+          "aws:ResourceTag/ManagedBy": "clinicaclick-meta-marketing-admission",
+          "aws:ResourceTag/Purpose": "candidate"
+        },
+        "StringLike": {
+          "aws:ResourceTag/ClinicaclickScope": [
+            "clinic:*",
+            "group:*"
+          ],
+          "secretsmanager:VersionStage": "CC_META_CREDENTIAL_????????????????????????????????"
+        }
+      }
+    }
+  ]
+}

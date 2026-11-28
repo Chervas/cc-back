@@ -9,13 +9,13 @@ const E = require('../src/meta-marketing-enrollment-contract');
 const R = require('../src/meta-marketing-credential-renewal-contract');
 const { admissionFixture } = require('./meta-marketing-admission-fixture.cjs');
 
-async function candidate(t, { permitEnrollment = true, credentialEpochs = false } = {}) {
+async function candidate(t, { permitEnrollment = true, credentialEpochs = false, credentialRenewal = false, userHealthScopeKeys = [] } = {}) {
   const fixture = admissionFixture(t, {
     discovery: true,
     discoveryScopeKeys: ['clinic:123'],
     enrollment: true,
     enrollmentScopeKeys: permitEnrollment ? ['clinic:123'] : [],
-    credentialEpochs,
+    credentialEpochs, credentialRenewal, userHealthScopeKeys,
   });
   const prepared = fixture.command();
   await fixture.prepare(prepared);
@@ -73,6 +73,61 @@ test('opted-in first authorization can prepare and confirm exactly its selected 
   const revoked = (await send(E.OPERATIONS.revoke, { enrollmentId: selection.enrollmentId }, afterRestart, true)).data;
   assert.equal(revoked.status, 'revoked');
   assert.equal((await send(E.OPERATIONS.status, { enrollmentId: selection.enrollmentId }, afterRestart, true)).data.status, 'revoked');
+});
+
+test('a confirmed self-service clinic can cancel and renew its own credential with its existing assets', async t => {
+  const {fixture, prepared, send, selection} = await candidate(t, {credentialEpochs: true, credentialRenewal: true});
+  const staged = (await send(E.OPERATIONS.prepare, selection)).data;
+  const active = (await send(E.OPERATIONS.activate, {enrollmentId: selection.enrollmentId,
+    scopeDigest: selection.scopeDigest, selectionDigest: staged.selectionDigest})).data;
+  const {store, epochs, admission} = fixture.current;
+  const row = store.db.prepare('SELECT * FROM meta_marketing_enrollments WHERE id=?').get(active.enrollmentId);
+  const credential = epochs.current(row, admission.resolveBinding(prepared.connectionRef));
+  const expected = {expectedEpoch: credential.epoch, expectedVersionId: credential.versionId, expectedCandidateDigest: credential.digest};
+  const request = () => {
+    const id = randomUUID();
+    return {renewalId: id, flowId: id, enrollmentId: active.enrollmentId, ...expected, scopeDigest: active.scopeDigest,
+      assetSetDigest: R.assetSetDigest(active.assets), clinicSetDigest: active.clinicSetDigest,
+      state: fixture.beginCommand(prepared).payload.state, expiresAt: fixture.f.now()+600000};
+  };
+  const first = request();
+  await assert.rejects(send(R.OPERATIONS.begin, first, fixture.current, true), {code:'scope_denied'});
+  const other = fixture.command('clinic:124', [124]); await fixture.prepare(other);
+  await assert.rejects(fixture.execute({...other, requestId:randomUUID(), operation:R.OPERATIONS.begin, payload:first}), {code:'scope_denied'});
+  await assert.rejects(fixture.execute({...prepared, tenantRef:'clinic:124', requestId:randomUUID(), operation:R.OPERATIONS.begin, payload:first}), {code:'scope_denied'});
+  await send(R.OPERATIONS.begin, first);
+  assert.equal((await send(R.OPERATIONS.abort, {renewalId:first.renewalId}, fixture.current, true)).data.status, 'aborted');
+  assert.equal(epochs.current(row, admission.resolveBinding(prepared.connectionRef)).versionId, credential.versionId);
+
+  const next = request();
+  const begin = await send(R.OPERATIONS.begin, next);
+  assert.equal(new URL(begin.data.authUrl).hostname, 'www.facebook.com');
+  const id = next.renewalId;
+  const renewedCredential = (await send(R.OPERATIONS.finish, {renewalId:id, flowId:id, state:next.state, code:'FICTITIOUS_RENEWAL'})).data.candidate;
+  assert.equal((await send(R.OPERATIONS.status, {renewalId:id}, fixture.current, true)).data.status, 'staged');
+  const activated = await send(R.OPERATIONS.activate, {renewalId:id, enrollmentId:active.enrollmentId, ...expected,
+    candidateVersionId:id, candidateDigest:renewedCredential.digest});
+  assert.equal(activated.data.effectiveCredential.epoch, credential.epoch+1);
+  assert.deepEqual((await send(E.OPERATIONS.status, {enrollmentId:active.enrollmentId})).data.assets, active.assets);
+});
+
+test('a dynamic USER health check needs the named control grant and preserves the current epoch', async t => {
+  const T = require('../src/meta-marketing-credential-maintenance-contract');
+  const {fixture, send, prepared, selection} = await candidate(t, {credentialEpochs:true, credentialRenewal:true, userHealthScopeKeys:['clinic:123']});
+  const staged = (await send(E.OPERATIONS.prepare, selection)).data;
+  await send(E.OPERATIONS.activate, {enrollmentId:selection.enrollmentId, scopeDigest:selection.scopeDigest, selectionDigest:staged.selectionDigest});
+  const {store, epochs, admission} = fixture.current;
+  const row = store.db.prepare('SELECT * FROM meta_marketing_enrollments WHERE id=?').get(selection.enrollmentId);
+  const current = () => epochs.current(row, admission.resolveBinding(prepared.connectionRef));
+  const {epoch, versionId, digest} = current();
+  const payload = {enrollmentId:row.id, expectedEpoch:epoch, expectedVersionId:versionId, expectedCandidateDigest:digest};
+  await assert.rejects(send(T.OPERATIONS.health, payload), {code:'scope_denied'});
+  const other = fixture.command('clinic:124',[124]); await fixture.prepare(other);
+  await assert.rejects(fixture.execute({...other,requestId:randomUUID(),operation:T.OPERATIONS.health,payload},fixture.current,true), {code:'scope_denied'});
+  const checked = await send(T.OPERATIONS.health, payload, fixture.current, true);
+  assert.equal(checked.data.healthy, true);
+  assert.equal(current().epoch, epoch);
+  assert.equal(current().versionId, versionId);
 });
 
 test('an admitted gateway can read the selected inventory only for its confirmed clinic', async t => {

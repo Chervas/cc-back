@@ -3,7 +3,7 @@ const { BrokerError, fail } = require('./errors'), { eventFor } = require('./aud
 const C = require('./meta-marketing-oauth-contract'), E = require('./meta-marketing-enrollment-contract');
 const D = require('./meta-marketing-discovery-contract'), R = require('./meta-marketing-credential-renewal-contract');
 const SocialConsent = require('./meta-marketing-social-consent');
-function createMetaMarketingCredentialRenewal({ store, epochs, enrollment, oauth, secrets, http, environment, socialInbox, socialInboxAdvancedChannels = [], now = Date.now }) {
+function createMetaMarketingCredentialRenewal({ store, epochs, enrollment, oauth, secrets, http, environment, socialInbox, socialInboxAdvancedChannels = [], resolvePolicy, now = Date.now }) {
   const roles = E.roles(environment), running = new Map(); let closed = false;
   const hasSocialJournal = store.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='meta_marketing_social_consents'").get();
   const single = require('./meta-marketing-social-single').createSingleClinicSocial({ store, channels: socialInboxAdvancedChannels, now });
@@ -60,10 +60,11 @@ function createMetaMarketingCredentialRenewal({ store, epochs, enrollment, oauth
     const principalFingerprint = C.hash(JSON.stringify([principal.id, principal.keyId, principal.publicKey]));
     const check = ({ allowTerminal = false } = {}) => {
       if (signal.aborted) fail('provider_timeout');
-      const currentPrincipal = policy.principals.find(value => value.id === principal.id);
+      const currentPolicy = resolvePolicy ? resolvePolicy(request, principal, policy) : policy;
+      const currentPrincipal = currentPolicy.principals.find(value => value.id === principal.id);
       if (!currentPrincipal?.enabled || C.hash(JSON.stringify([currentPrincipal.id, currentPrincipal.keyId, currentPrincipal.publicKey])) !== principalFingerprint) fail('scope_denied');
-      require('./auth').authorize(currentPrincipal, request, policy);
-      const currentBinding = policy.connections.find(value => value.connectionRef === binding.connectionRef);
+      require('./auth').authorize(currentPrincipal, request, currentPolicy);
+      const currentBinding = currentPolicy.connections.find(value => value.connectionRef === binding.connectionRef);
       if (C.fingerprint(currentBinding) !== C.fingerprint(binding)) fail('scope_denied');
       row = owned(request, principal, binding, rowFor(id));
       if (!row || !allowTerminal && ['aborted', 'rejected', 'active'].includes(row.state)) fail('oauth_flow_interrupted');
