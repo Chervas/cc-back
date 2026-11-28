@@ -235,7 +235,7 @@ function catalogueReply({ fields, offer, history, userText, timezone }) {
     if (comparison) {
       if (/recomiend|de los dos|para mi/.test(text)) return comparison + appointmentInvitation;
       if (/me dijeron|creia|no (?:es|eran|son)|me has dicho/.test(text))
-        return 'La clínica los distingue. Lo que está en promoción es «' + offer.title + '».';
+        return 'Son tratamientos distintos. La promoción es de «' + offer.title + '». El relleno se valora aparte.';
       return 'La promoción es de ' + offer.title + '. La ficha habla del relleno como otra opción que se valora por separado.';
     }
   }

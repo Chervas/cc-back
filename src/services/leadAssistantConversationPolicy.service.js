@@ -150,7 +150,7 @@ function groundedFollowup({userText,history,offer,fields,timezone}) {
     return 'Todavía no hemos identificado una técnica concreta para '+target+'. La información disponible no me permite presentarte varias como si todas sirvieran para ese objetivo.';
   if (alternative.test(words))
     return 'Para '+target+' no tengo una alternativa confirmada que pueda recomendarte por chat.'+propose;
-  return 'Para reducir '+target+' no tengo una técnica indicada expresamente en la información de la clínica.'+propose;
+  return 'Para reducir '+target+', el equipo tendría que valorar qué opción encaja contigo antes de recomendarte un tratamiento.'+propose;
 }
 
 module.exports = { areaIn, goal, groundedFollowup, unresolvedAd, declines, sameVisit };
