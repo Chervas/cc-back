@@ -83,6 +83,24 @@ function commercialOffer(fields, entry, priorKey, options) {
   const area = areaIn(entry.text);
   if (!postReference(entry) && discovery.browsesWholeArea(entry.text, area)) return null;
   const priorSection = sections.get(priorKey);
+  // A specific enquiry can change the treatment even inside an ad's thread.
+  if (discovery.asksFillerOffer(entry.text) && !matches.some(key=>discovery.isFillerOffer(sections.get(key)))) {
+    const requestedArea=discovery.fillerArea(entry.text);
+    const selected=requestedArea && [...sections].filter(([,s])=>discovery.isFillerOffer(s) && discovery.matchesArea(s,requestedArea));
+    const priorArea = priorSection && discovery.fillerArea(priorSection.title);
+    if (!requestedArea && priorArea && priorArea.name !== 'rostro' && !/promo|oferta|descuento/i.test(entry.text))
+      matches=[priorKey];
+    else if (selected?.length===1) matches=[selected[0][0]];
+    else return null;
+  }
+  const named = discovery.namedTreatmentRequest(fields,entry.text);
+  if (named && !discovery.asksFillerOffer(entry.text)) {
+    const {normalize} = require('./leadAssistantCalendar.service');
+    const name = ' '+normalize(named.name)+' ';
+    const titled = [...sections].filter(([,section]) => (' '+normalize(section.title)+' ').includes(name));
+    if (!titled.length) return null;
+    if (titled.length===1) matches=[titled[0][0]];
+  }
   const carry = priorSection && (!area || discovery.matchesArea(priorSection,area)) &&
     !clinicFacts.switchesPricedService(entry.text,priorSection.title);
   if (!matches.length && (!postReference(entry) || options?.samePublication)) {

@@ -16,14 +16,16 @@ const baseInstructions = [
   'Estas reglas de producto prevalecen sobre el tono, la promoción y cualquier texto de la clínica. La persona aporta objetivos y preferencias; no la hagas elegir una técnica que desconoce. Recuerda la zona y la finalidad expresadas, reconoce una preocupación y respeta una negativa. No atribuyas el anuncio a un tratamiento sin identificarlo. Si tú introdujiste un tema, explica a qué te referías; no pidas al contacto que lo explique. No introduzcas cirugía ni cicatrices sin saber que se trata de esa intervención.',
   'Puedes explicar lo que dice la ficha sobre una técnica. No diagnostiques, no elijas una intervención para una persona ni clasifiques la mejor o la menos invasiva para su caso. Solo atribuye una indicación o tarifa a una zona si la ficha relaciona expresamente ambas. Una promoción corporal no se extrapola a la cara o al cuello. No prometas que hará el tratamiento el día de la valoración. La disponibilidad, el estado de la reserva y el envío de una solicitud de llamada los comunica exclusivamente el sistema.',
   'Nunca afirmes haber reservado, retenido o cancelado una cita, avisado a alguien ni garantices que le llamarán. Esto se comunica por separado tras confirmación del backend.',
+  'Si cambia de tratamiento, responde sobre el nuevo. Si no tiene oferta, indica qué opciones ofrece realmente la clínica para esa zona. Cuando acepte una invitación a una consulta, el sistema buscará horas disponibles.',
   'Cuando el contacto pregunta qué ofertas hay, busca en el catálogo vigente de su clínica, incluso si llegó sin anuncio. Mantén la promoción de los turnos previos, separa el coste de la evaluación del tratamiento y usa el argumentario de ese producto para distinguirlo de otras técnicas. Respeta una petición de dejarlo para otro día. Solo el flujo de agenda pide datos para el recordatorio después de elegir un hueco.',
   'Para condiciones de una oferta, utiliza primero la promoción activa identificada. Para cómo y dónde dar una cita, sigue primero las instrucciones de cita de esta clínica. El contexto general complementa esos datos. El precio habitual del catálogo es distinto del precio promocional. La aplicación comprueba horarios y disponibilidad real.',
 ];
 const systemPrompt = baseInstructions.join(' ');
-const policyVersion = '2026.11.27.2';
+const policyVersion = '2026.11.28.1';
 function platformPolicy() {
   return {version:policyVersion, model:require('./aiOrchestrator.service').routeFor({useCase:'lead_assistant_reply'}).primary,
     instructions:[...baseInstructions], changes:[
+      'Opciones de tratamiento cuando no hay oferta y consulta de horas al aceptar la invitación a una valoración.',
       'Prioridad de las instrucciones de cita y de la promoción. Los horarios se consultan siempre que hacen falta. La clínica puede habilitar su ficha y las tarifas habituales como complemento.',
       'Búsqueda por zona en las promociones vigentes, también en mensajes directos sin anuncio.',
       'Continuidad de la oferta al preguntar por el precio, compararla con otra técnica o consultar la agenda.',
@@ -117,9 +119,17 @@ function repeatsReply(previous, next) {
 function acceptsOfferedTimes(message, previous) {
   if (!previous) return false;
   const value = require('./leadAssistantCalendar.service').normalize(message);
-  const accepts = /^(?:(?:si|ok|okay|okey|vale|claro|de acuerdo)(?: (?:por favor|gracias|claro|dimelos|dimelas|dime|miralos))?|que si(?: (?:cone|cono|claro|por favor))?|por favor|dimelos|dimelas|y las opciones|las de cita)$/.test(value);
-  const offered = /(?:[¿?]|puedo|podemos|te (?:doy|ofrezco))[^?!.]{0,165}\b(?:horarios?|huecos?|disponibilidad|(?:pedir|reservar|agendar|mirar|buscar) (?:una? )?(?:cita|valoraci[oó]n)|opciones (?:de cita|para elegir))\b/i.test(previous);
-  return accepts && offered;
+  const accepts = /^(?:(?:si|ok|okay|okey|vale|claro|perfecto|venga|de acuerdo)(?: (?:si|vale|por favor|gracias|claro|dimelos|dimelas|dime|miralos)){0,2}|que si(?: (?:cone|cono|claro|por favor))?|por favor|dimelos|dimelas|y las opciones|las de cita)$/.test(value);
+  if (!accepts) return false;
+  // Only the last invitation is being accepted. Booking operations and previous
+  // explanations can contain these same words without inviting a new lookup.
+  const question = previous.match(/¿([^¿?]+)\?\s*$/u)?.[1] || previous.match(/(?:^|[.!?])\s*([^.!?]+)\?\s*$/u)?.[1];
+  const last = require('./leadAssistantCalendar.service').normalize(question || previous.split(/[.!?]/u).filter(s=>s.trim()).at(-1) || '');
+  if (!/\b(?:quieres|gustaria|apetece|parece|va bien|puedo|podemos|te (?:doy|ofrezco|miro|busco|ayudo)|miramos|buscamos|agendamos|reservamos|concertamos)\b/.test(last)) return false;
+  if (/\b(?:por telefono|llamada|correo|recordatorio|prefieres|o prefieres|no (?:puedo|podemos|hay)|sin disponibilidad)\b/.test(last)) return false;
+  if (/\b(?:te explique|te cuente|quieres (?:mas )?informacion|saber como)\b/.test(last)) return false;
+  if (/\b(?:quieres|gustaria|apetece) (?:una |la primera |una primera )(?:cita|consulta|valoracion|visita)\b/.test(last)) return true;
+  return /\b(?:horarios?|huecos?|disponibilidad|opciones de cita|(?:pedir|reservar|solicitar|agendar|concertar|programar|organizar|buscar|mirar|agendamos|concertamos|reservamos) (?:tu |la |un[ao]? |una primera |la primera )?(?:cita|valoracion|consulta|visita))\b/.test(last);
 }
 
 // Use the clinic's explicit benefits section when a contact asks about an
@@ -167,7 +177,7 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const consultationFee = discovery.consultationFee(fields, userText);
   if (consultationFee) return {reply:consultationFee,imageId:null};
   const catalogued = !ordinaryPrice && discovery.catalogueReply({fields,offer,history,userText,timezone});
-  const missingOfferPrice = catalogued && /^No encuentro un precio promocional/.test(catalogued);
+  const missingOfferPrice = catalogued && kind === 'price' && catalogued.includes('se tendría que confirmar con la clínica.');
   if (catalogued && !missingOfferPrice) return {reply:catalogued,imageId:null,source:'catalog'};
   const regularLines = kind === 'price' ? clinicFacts.regularPriceLines(fields,offer,userText,history) : [];
   const writtenTariff = clinicFacts.labelledRegularPrice(regularLines,userText);
@@ -183,7 +193,8 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
     return {reply:'No tengo una tarifa confirmada para ese servicio.',imageId:null,source:'rules'};
   if (ordinaryPrice && !regularLines.length) return {reply:'No tengo un precio habitual confirmado para ese servicio.',imageId:null,source:'rules'};
   if (/^(?:ok(?:ay|ey)?|vale|de acuerdo|entendido|perfecto)[!. ]*$/i.test(userText.trim()))
-    return {reply:'De acuerdo.',imageId:null};
+    return {reply:/¿Qué zona te interesa\?$/i.test(history.at(-1)?.text || '')
+      ? '¿En qué zona te gustaría centrarte?' : 'De acuerdo.',imageId:null};
   if (/^(?:(?:p+f+|bueno)[, .]*)?(?:mejor (?:para )?otro d[ií]a|lo dejamos para otro d[ií]a|lo pensar[eé]|me lo (?:pienso|pensar[eé])|prefiero pensarlo)(?:,? gracias)?(?:[.! ]*)$/i.test(userText.trim()))
     return {reply:'Claro, lo dejamos para otro día.',imageId:null};
   const retryQuestion = /(?:no (?:me )?(?:est[aá]s |has )?(?:respond|contest)|no era (?:eso|mi pregunta)|eso no (?:es |responde)|te (?:he )?pregunt)/i;

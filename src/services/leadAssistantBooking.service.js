@@ -286,6 +286,21 @@ async function processTurn({
     const routes = new Set(matching.map(([,service,professional]) => JSON.stringify([cal.normalize(service),cal.normalize(professional)])));
     if (routes.size === 1 && !/\b(?:servicio de agenda|profesional de agenda)\b/i.test(raw)) mapping = matching[0];
   }
+  if (!mapping && !offer && (!subject.area || subject.area.name === 'rostro')) {
+    const discovery = require('./leadAssistantOfferDiscovery.service');
+    const lastSubject = [...historical.filter(m => m.role === 'user').map(m => m.text),raw]
+      .filter(text => discovery.asksFillerOffer(text) || discovery.fillerArea(text)).at(-1);
+    const area = lastSubject && discovery.fillerArea(lastSubject);
+    if (lastSubject && (!area || area.name === 'rostro') && discovery.asksFillerOffer(lastSubject)) {
+      const {offerSections, isOfferActive} = require('./leadAssistantPromotionImages.service');
+      const family = [...offerSections(fields.promotions).values()].filter(s =>
+        isOfferActive(s,{timezone}) && discovery.isFillerOffer(s));
+      const routes = mappings.filter(([title,service]) => family.some(s => cal.normalize(s.title) === cal.normalize(title)) &&
+        /\b(?:valoracion|primera visita|evaluacion)\b/.test(cal.normalize(service)));
+      const unique = new Set(routes.map(([,service,person]) => JSON.stringify([cal.normalize(service),cal.normalize(person)])));
+      if (unique.size === 1) mapping = routes[0];
+    }
+  }
   const catalog = await cal.services(db, clinic, fields, offer);
   const choices = mapping ? catalog.filter(item => [item.name, item.code].some(name => cal.normalize(name) === cal.normalize(mapping[1]))) : catalog;
   if (mapping && choices.length !== 1) return { review: true };

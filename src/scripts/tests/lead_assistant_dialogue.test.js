@@ -286,3 +286,30 @@ test('a request for the offer price can be answered while deferring the booking'
   assert.equal(priceWhenDeferring(offer,'¿Cuál es el precio habitual? No reserves.'),'');
   assert.equal(priceWhenDeferring(offer,'No reserves.'),'');
 });
+
+test('an assent takes the latest offer of a consultation to the calendar, including natural invitations', () => {
+  const {acceptsOfferedTimes} = require('../../services/leadAssistantDialogue.service');
+  for (const invitation of ['¿Te gustaría solicitar una consulta para más información?', '¿Quieres que te ayude a concertar una primera visita?', '¿Te va bien que miremos horarios?', '¿Te gustaría una consulta?'])
+    for (const yes of ['vale','perfecto, gracias','sí, por favor'])
+      assert(acceptsOfferedTimes(yes, invitation), invitation);
+  for (const previous of ['¿Quieres que te explique cómo solicitar una consulta?', '¿Quieres más información sobre la consulta?', 'Puedo buscar horarios. ¿Qué zona te interesa?', 'No hay disponibilidad.', '¿Quieres que te llame el equipo?'])
+    assert(!acceptsOfferedTimes('vale', previous), previous);
+  assert(!acceptsOfferedTimes('vale, pero no reserves', '¿Te gustaría solicitar una consulta?'));
+});
+
+test('a change from a facial cleaning resolves the actual filler technique and only the requested area', () => {
+  const {exchangeContext}=require('../../services/leadAssistantConversation.service');
+  const {catalogueReply,isFillerOffer}=require('../../services/leadAssistantOfferDiscovery.service');
+  const fields={context:'## Medicina facial\n| Tratamiento | Descripción |\n| --- | --- |\n| Relleno de ojeras | Valoración del hundimiento bajo el ojo. |',
+    promotions:'H01-01 · Higiene facial\n95 €\nL01-01 · Relleno de labios\n230 €\nE01-01 · Mesoterapia de escote\n120 €'};
+  assert(isFillerOffer({title:'Perfilado',guide:'- **Qué se hace.** Se aplica un relleno.'}));
+  assert(!isFillerOffer({title:'Mesoterapia',lines:['Mesoterapia con ácido hialurónico.'],guide:'- **Qué se hace.** No se aplica un relleno.'}));
+  assert(!isFillerOffer({title:'Polinucleótidos',guide:'¿Es igual que el relleno?'}));
+  const ask=(message,prior)=>exchangeContext(fields,{type:'dm',text:message},prior,'Europe/Madrid');
+  const {offer,changed}=ask('¿Tenéis ofertas de rellenos dérmicos?',{promotionKey:'H01-01'});
+  assert.equal(offer,null);assert(changed);
+  const get=userText=>catalogueReply({fields,offer,history:[],userText,timezone:'Europe/Madrid'});
+  assert.match(get('¿Tenéis ofertas de rellenos dérmicos?'),/labios.*230.*ojeras/i);
+  assert.doesNotMatch(get('¿Tenéis ofertas de relleno de ojeras?'),/230|95/);
+  assert.match(get('¿Tenéis ofertas de relleno de ojeras?'),/hundimiento/i);
+});
