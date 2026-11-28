@@ -174,6 +174,22 @@ async function generateAnswer({ fields, clinicName, timezone, offer, userText, a
   const localAnswer = require('./leadAssistantConversationPolicy.service').groundedFollowup({userText,history,offer,fields,timezone});
   if (localAnswer) return {reply:localAnswer,imageId:null};
   const discovery = require('./leadAssistantOfferDiscovery.service');
+  if (!offer && /\d[\d,.]*\s*(?:€|euros?)/i.test(userText) &&
+      /\b(?:son|eran|es|vale[n]?|sirve[n]?|se aplica[n]?)\s+(?:tambien\s+)?(?:para|de|del|por)\b/.test(require('./leadAssistantCalendar.service').normalize(userText))) {
+    const target = [...history].reverse().filter(m=>m.role === 'user').map(m=>discovery.namedTreatmentRequest(fields,m.text)).find(Boolean);
+    const area = discovery.fillerArea(userText);
+    if (target && (!area || area.words.test(require('./leadAssistantCalendar.service').normalize(target.name+' '+target.description)))) {
+      const priceQuestion='¿Cuál es el precio habitual de '+target.name+'?';
+      const lines=clinicFacts.regularPriceLines(fields,null,priceQuestion,history);
+      const manual=clinicFacts.labelledRegularPrice(lines,priceQuestion);
+      if (manual) return {reply:manual,imageId:null,source:'rules'};
+      if (!lines.length && fields.useClinicData === true && readClinicFact) {
+        const fact=await readClinicFact('price',priceQuestion,history,fields,null);
+        if (fact) return {reply:fact,imageId:null,source:'clinic_data'};
+      }
+      return {reply:'Ese importe no está confirmado para '+target.name.toLocaleLowerCase('es')+'. El equipo puede darte un presupuesto en la valoración.',imageId:null,source:'rules'};
+    }
+  }
   const consultationFee = discovery.consultationFee(fields, userText);
   if (consultationFee) return {reply:consultationFee,imageId:null};
   const catalogued = !ordinaryPrice && discovery.catalogueReply({fields,offer,history,userText,timezone});
